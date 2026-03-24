@@ -4,7 +4,7 @@
 
 ### *Code that thinks the way you do.*
 
-**The first programming language where AI reasoning is a native primitive — not a library, not an API call.**
+**The first programming language where AI reasoning and compliance are native primitives — not libraries, not API calls.**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-teal.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-design%20phase-orange.svg)]()
