@@ -11,7 +11,7 @@
 [![CLI](https://img.shields.io/badge/CLI-mio-teal.svg)]()
 [![Extension](https://img.shields.io/badge/files-.mho-teal.svg)]()
 
-[mohio.io](https://mohio.io) · [Language Design Document](#language-design-document) · [Join the Waitlist](https://mohio.io#waitlist)
+[mohio.io](https://mohio.io) · [Language Design Document](docs/LDD.md) · [Join the Waitlist](https://mohio.io#waitlist)
 
 </div>
 
@@ -19,59 +19,69 @@
 
 ## What is Mohio?
 
-Mohio *(Māori: "to know, to understand")* is an AI-native programming language where AI reasoning is a first-class primitive. Every major language was designed for the constraints of its era. Mohio is designed for right now.
+Mohio *(Māori: "to know, to understand")* is an AI-native programming language where AI reasoning and compliance are first-class primitives. Every major language was designed for the constraints of its era. Mohio is designed for right now.
 
-In every existing language, AI is bolted on — you import a library, call an API, parse a string, and hope the output matches what you expected. Mohio changes that at the architectural level. A `decide` block is syntax. A confidence score is a type. A fallback is mandatory. The audit trail is automatic.
+In every existing language, AI is bolted on — you import a library, call an API, parse a string, and hope the output matches what you expected. Compliance is bolted on too — install a framework, configure encryption, wire audit logging, read 200 pages of documentation. Mohio changes both at the architectural level. `ai.decide` is syntax. A confidence score is a type. A fallback is mandatory. `compliance: HIPAA` is one line. The audit trail is automatic.
 
 ```mohio
-compliance: PCI_DSS
+sector: financial
 
-connect postgres as db
+connect db    as postgres from env.DATABASE_URL
+connect cache as redis    from env.REDIS_URL
 
-route POST /transaction {
-  receive body as tx
+route POST "/transaction/screen"
+    require role "screener"
+    validate request.body requires transaction_id, amount, member_id
 
-  set recent = fetch transactions
-             where user_id = tx.user_id
-             and   created_at > now() - 24h
+    set transaction = fetch one from transactions
+        where id = request.transaction_id
 
-  decide isFraudulent returns bool confidence 0.85 {
-    consider "Amount: ${{tx.amount}} — typical: ${{recent.avg_amount}}"
-    consider "Transactions in last 24h: {{recent.count}}"
-    consider "Location match: {{tx.location_known}}"
-    explain reasoning
-    audit "Fraud check for transaction {{tx.id}}"
-    fallback { result false }
-  }
+    set member = fetch one from members
+        where id = transaction.member_id
+        cache for 5 minutes
 
-  if isFraudulent {
-    update account set status = "frozen" where id = tx.account_id
-    miomail.send(
-      to:      tx.user_email,
-      subject: "Suspicious activity detected",
-      body:    "We have frozen your account. Reply to verify.",
-    )
-    give back { status: 403, body: "Transaction blocked" }
-  }
+    ai.decide is_fraudulent(transaction) returns boolean
+        confidence above 0.85
+        weigh
+            transaction.amount,
+            transaction.location,
+            member.transaction_history,
+            member.typical_spend_pattern,
+            transaction.device_fingerprint,
+            transaction.velocity_score
+        fallback
+            give back pending "Referred to manual review"
+            miolog.warn "Fraud check below threshold — manual review queued"
+        ai.audit to fraud_audit_log
 
-  save tx to db
-  give back { status: 200, body: "Transaction approved" }
-}
+    consider is_fraudulent.result
+        when true
+            update transactions set status = "blocked" where id = transaction.id
+            miomail.send
+                to member.email
+                subject "Transaction blocked"
+                body fraud_alert_template with { transaction = transaction }
+            give back 200 "Transaction blocked"
+
+        when false
+            update transactions set status = "approved" where id = transaction.id
+            give back 200 "Transaction approved"
 ```
 
-No prompt engineering. No API wiring. No parsing JSON responses. No try/catch around model calls. The language handles all of that — because it understands what `decide` means natively.
+No prompt engineering. No API wiring. No parsing JSON responses. No try/catch around model calls. No compliance library to install. The language handles all of that — because it understands what `ai.decide` and `sector: financial` mean natively.
 
 ---
 
-## The Five Problems Mohio Solves
+## The Six Problems Mohio Solves
 
 | Problem | Every other language | Mohio |
 |---|---|---|
 | AI integration | Library or API call — bolted on | Native language primitive — built in |
 | AI output types | Untyped string — you parse it | Declared return type enforced by runtime |
 | AI failure handling | Optional try/catch — often skipped | Mandatory `fallback` — compiler rejects omission |
-| Audit trail | Custom code — inconsistent or missing | Automatic on every `decide` block |
-| Learning from use | Not possible — feedback disappears | `miolearn` closes the loop natively |
+| Audit trail | Custom code — inconsistent or missing | Automatic on every `ai.decide` block |
+| Compliance | Third-party frameworks, weeks of setup | One declaration activates full enforcement |
+| Industry knowledge | Lives in developer heads, not code | `sector:` profiles load it automatically |
 
 ---
 
@@ -86,7 +96,7 @@ One keyword activates a complete compliance regime for the entire program:
 compliance: HIPAA    // or PCI_DSS, SOC2, GDPR, FINRA, CCPA
 ```
 
-The runtime automatically enforces encryption, PII masking in logs, data retention, access controls, and generates compliance-format audit records for every `decide` block — without additional developer work.
+The runtime automatically enforces encryption, PII masking in logs, data retention, access controls, and generates compliance-format audit records for every `ai.decide` block — without additional developer work.
 
 ### Level 2 — Field Annotation (Granular Sensitivity)
 Individual fields carry sensitivity markers that control how data flows through logging, caching, and API responses:
@@ -101,55 +111,84 @@ set internal_score as restricted = calculateRisk(patient)
 set patient_card as phi pci = fetch payment where patient_id = patient.id
 ```
 
-**The fused audit object:** When a `decide` block runs inside a compliance regime, the AI reasoning and the compliance audit record are the same object. A HIPAA `decide` block generates a HIPAA-format audit record automatically. The developer wrote neither — the runtime generated both.
+**The fused audit object:** When an `ai.decide` block runs inside a compliance regime, the AI reasoning and the compliance audit record are the same object. A HIPAA `ai.decide` block generates a HIPAA-format audit record automatically. The developer wrote neither — the runtime generated both.
+
+### Explicit Compliance Actions (`cm.` namespace)
+For surgical compliance operations beyond the file-level declaration:
+
+```mohio
+cm.retain user.records for 7 years
+cm.purge(user.id) includes [user_records, audit_logs, session_data]
+cm.notify breach affected "user_records" estimated_count 1400 within 72 hours
+cm.report SOC2 period "Q1 2026" send to compliance_officer.email
+```
+
+---
+
+## Sector Profiles
+
+The first language with institutional knowledge built in. One declaration loads everything your industry requires:
+
+```mohio
+sector: healthcare   // activates HIPAA, HITECH — knows mrn, npi, phi, dob
+sector: financial    // activates PCI_DSS, SOC2 — knows card_number, routing_number, CTR thresholds
+sector: legal        // activates SOC2 — knows case_number, privileged_document
+sector: government   // activates FedRAMP, FISMA — knows clearance_level, foil_exempt
+sector: education    // activates FERPA, COPPA — knows student_id, minor protections
+```
+
+A developer working in healthcare does not need to know what PHI is, which fields carry it, how long records must be retained, or what AI decisions require human review. The language already knows.
+
+Sectors stack. A health-tech fintech app uses both:
+```mohio
+sector: healthcare
+sector: financial
+compliance: SOC2
+```
 
 ---
 
 ## Core Keywords
-
-Mohio's keywords are natural English, organized into semantic groups:
 
 ### Variables & Functions
 ```mohio
 set username = "ronnie"          // mutable variable
 hold MAX_RETRIES = 3             // immutable constant
 task checkFraud(tx) { ... }      // define a function
-result risk_score                // return a value
+give back risk_score             // return a value
 ```
 
 ### Control Flow
 ```mohio
-if score > 0.8 { block }
-or if score > 0.5 { block }
-else { block }
+if score > 0.8 { ... }
+or if score > 0.5 { ... }
+else { ... }
 
-when payment.received { ... }    // event-driven
-otherwise { ... }
+consider status                  // switch/case routing
+    when "active" → process
+    when "blocked" → reject
+    otherwise → review
 
 each tx in transactions { ... }  // iterate
 repeat 3 times { ... }           // counted loop
 while queue is not empty { ... } // conditional loop
 ```
 
-### AI-Native Primitives
+### AI-Native Primitives (`ai.` namespace — hard reserved)
 ```mohio
-decide isFraudulent returns bool confidence 0.85 {
-  consider "context for reasoning"
-  explain reasoning
-  audit "log entry"
-  fallback { result false }      // REQUIRED — compiler enforces this
-}
+ai.decide is_fraudulent(transaction) returns boolean
+    confidence above 0.85
+    weigh
+        transaction.amount, member.history,
+        device.fingerprint, velocity.pattern
+    fallback
+        give back false
+        miolog.warn "Fell below confidence threshold"
+    ai.audit to fraud_audit_log
 
-set image = mioai {
-  generate image
-  prompt "A clean dashboard for {{app.name}}"
-}
-
-miolearn.signal(
-  input:    ticket,
-  predicted: routeTicket,
-  correct:   agent.chosen_department,
-)
+set explanation = ai.explain decision fraud_check
+    audience "compliance officer"
+    format "paragraph"
 ```
 
 ### Data Operations
@@ -162,12 +201,12 @@ remove session where expired = true
 
 ### Connections & I/O
 ```mohio
-connect postgres as db           // declared once at file top
-connect redis   as cache
+connect postgres as db from env.DATABASE_URL
+connect redis   as cache from env.REDIS_URL
 
-receive POST /transaction as tx
-route GET /status { ... }
-give back { status: 200, body: result }
+route POST "/screen" { ... }
+receive from "stripe" verify signature env.STRIPE_SECRET
+give back 200 "Approved"
 ```
 
 ### Built-In Services (`mio*` prefix)
@@ -184,16 +223,19 @@ give back { status: 200, body: result }
 | `miotest` | Integrated unit and integration testing |
 | `miopdf` | PDF generation and parsing |
 | `miosms` | SMS messaging |
+| `mioai` | AI generation — text, images, embeddings, research |
+| `miolearn` | Feedback loop for model improvement |
 
 ---
 
 ## Design Philosophy
 
 - **Forgiving syntax** — whitespace, semicolons, and brace placement are irrelevant. The language never blocks intent over formatting.
-- **Natural English keywords** — `decide`, `consider`, `explain`, `fallback`, `fetch`, `give back`. Code reads like a specification.
+- **Natural English keywords** — `ai.decide`, `consider`, `ai.explain`, `fallback`, `fetch`, `give back`. Code reads like a specification.
 - **Secrets enforced** — `env.VARIABLE` syntax, enforced at parse time. Hardcoded secrets are a parse error.
 - **Compliance by declaration** — one keyword activates an entire regulatory regime.
-- **Model-agnostic** — the runtime selects the appropriate AI model based on declared return type, confidence threshold, and compliance mode. Developers never specify models in application code.
+- **Sector knowledge built in** — the language knows your industry before you write your first line.
+- **Model-agnostic** — the runtime selects the appropriate AI model. Developers never specify models in application code.
 - **`mio` CLI** — three keys, right hand, one motion.
 
 ---
@@ -201,17 +243,18 @@ give back { status: 200, body: result }
 ## What Mohio Is NOT
 
 - **Not a general-purpose language** — Mohio targets the application layer where AI reasoning, data operations, and service integrations converge. Not systems programming.
-- **Not a no-code tool** — Mohio is a programming language with a grammar, type system, runtime, and compiler. It requires developers.
-- **Not an AI wrapper** — the `decide` block is a language-level construct with runtime-enforced semantics. Fundamentally different from calling an AI API and parsing the response.
+- **Not a no-code tool** — Mohio is a real programming language with a grammar, type system, runtime, and compiler. It requires developers.
+- **Not an AI wrapper** — `ai.decide` is a language-level construct with runtime-enforced semantics. Fundamentally different from calling an AI API and parsing the response.
 - **Not model-opinionated** — model selection is an infrastructure concern, not an application concern.
+- **Not magic** — every decision is auditable. Every behavior is explainable. Nothing is hidden.
 
 ---
 
 ## Language Design Document
 
-The full Language Design Document (LDD) is the founding specification for Mohio. It covers the complete philosophy, all keywords and semantics, three full example programs, compliance architecture, and the build roadmap.
+The full Language Design Document (LDD) is the founding specification for Mohio. It covers the complete philosophy, all keywords and semantics, three full example programs, compliance architecture, sector profiles, and the build roadmap.
 
-📄 **[Read the full LDD →](docs/LDD.md)** *(coming soon)*
+📄 **[Read the full LDD →](docs/LDD.md)**
 
 ---
 
@@ -221,7 +264,7 @@ The full Language Design Document (LDD) is the founding specification for Mohio.
 |---|---|---|
 | **1** | Lark grammar + AST — `mio parse` works | Weeks 1–4 |
 | **2** | Python interpreter — `mio run` executes non-AI programs | Weeks 5–10 |
-| **3** | AI runtime — `decide` blocks execute end-to-end | Weeks 11–16 |
+| **3** | AI runtime — `ai.decide` blocks execute end-to-end | Weeks 11–16 |
 | **4** | Web server — `mio serve` starts an HTTP service | Weeks 17–20 |
 | **5** | VS Code extension — syntax, autocomplete, audit viewer | Weeks 21–24 |
 | **6** | mio* built-in library — all services functional | Weeks 25–32 |
@@ -235,6 +278,7 @@ The full Language Design Document (LDD) is the founding specification for Mohio.
 - **AI runtime:** Model-agnostic, routes to best available model
 - **Connections:** PostgreSQL, MongoDB, Redis, REST, gRPC — native syntax
 - **Compliance:** HIPAA, PCI_DSS, SOC2, GDPR, FINRA, CCPA
+- **Sectors:** healthcare, financial, legal, government, education
 - **CLI:** `mio` — parse, run, serve, deploy, test
 - **Editor:** VS Code extension (marketplace)
 - **Files:** `.mho`
@@ -246,8 +290,8 @@ The full Language Design Document (LDD) is the founding specification for Mohio.
 Mohio is being built in public. Star and watch this repo to follow progress.
 
 - 🌐 [mohio.io](https://mohio.io) — landing page and waitlist
-- 💬 Discussions — coming soon
-- 📋 Issues — coming soon
+- 💬 [Discord](https://discord.gg/mohio) — community and announcements
+- 📋 Issues — bug reports and language feedback
 - 🗺️ Project board — coming soon
 
 ---
