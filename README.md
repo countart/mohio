@@ -143,6 +143,14 @@ Mohio solves it. Connections just work. Services are built in. The language is o
 
 > *"We've effectively removed the 'Web' from Web Development. We aren't building endpoints — we are building Listeners."*
 
+### The Walk-By Test
+
+Every line of Mohio code must pass this test before it is locked into the language:
+
+> *If a manager can walk by a desk, glance at the monitor for three seconds, and understand the business intent without seeing a single bracket or semicolon — it passes.*
+
+This is not a style preference. It is the founding rule that produced the syntax. If a code block requires explanation — it gets rewritten. Every keyword, every example, every primitive in this language passed that test before it was locked. That is why Mohio reads the way it does.
+
 `route` is retired. `listen for` is the universal listener for everything a service receives — HTTP requests, webhooks, WebSocket connections, UI events, data changes, and scheduled triggers. One block per context. One `listen: done` seals the external interface of the entire page or service.
 
 ```mohio
@@ -186,9 +194,66 @@ listen: done
 
 **HTTP methods are never declared explicitly.** `new` implies POST. `request for` implies GET. The method is an infrastructure detail — not your problem.
 
-**Path is optional on a page.** The page is the location. Path is required in a journey, where listeners are declared globally.
+**Path is optional on a page — the page IS the location.** No path needed. Path is required in a journey, where listeners are declared globally across the entire application.
 
 **`from "Service"` on webhooks activates automatic signature verification.** Two guards run before your logic: signature check, then shape validation.
+
+### `otherwise` — The Parser Rule
+
+`otherwise` is the universal final fallback inside any verb block. Execute the block top to bottom — if `on.failure` fires, exit immediately. If execution reaches `otherwise`, run it as the final fallback. Once per block, always the last line before the block closer.
+
+```mohio
+find Tasks where status is "backlog"
+    on.failure show "You're all caught up!"
+    otherwise show results as list
+find: done
+```
+
+### `find` — The Search Verb
+
+`find` searches with matching criteria and returns a collection or single record. Distinct from `retrieve` (general DB query), `pull` (queue extraction), and `get` (property access):
+
+```mohio
+find Tasks where title is.matching search_input
+    on.failure show "No tasks found"
+    otherwise show results as list
+find: done
+```
+
+### `jump to` — Navigation Primitive
+
+Moves flow physically from one file to the next. More active than `redirect`. Used naturally with `on.success` and `on.failure`:
+
+```mohio
+make Task from task_form
+    on.failure show "Fix your errors"
+    otherwise jump to "pages/board.mho"
+make: done
+```
+
+### Standard SQL — Always Valid
+
+Standard SQL is valid anywhere inside a `.mho` file alongside native Mohio data calls. `mio fmt` will suggest the Mohio-native equivalent but never forces conversion. Both styles are permanently valid:
+
+```mohio
+// Both are valid in the same file:
+retrieve member from db where id = request.id        // Mohio-native
+SELECT * FROM members WHERE id = '{{ request.id }}'  // Standard SQL
+```
+
+### Reactive Triggers and Persistent Connections
+
+**`on.change`** fires when a shape field value changes — reactive triggers without polling:
+
+```mohio
+change to sh.Task
+    on.success notify task.assigned_to
+change: done
+```
+
+**`while.active`** is the persistent loop inside a WebSocket `connection` block. Runs until the connection closes. `on.open` and `on.close` handle the lifecycle.
+
+**`vr.`** is the parser collision safety valve. Never required — the parser resolves `sh.Transaction` (shape) vs `transaction` (instance) automatically. Available when a variable name would genuinely clash: `vr.task` explicitly means the variable named task, not the Task shape.
 
 ### The Atomic Guard — `new sh.[Shape]`
 
@@ -252,6 +317,25 @@ Learn nine prefixes once. Read any Mohio code immediately. The dot connects a ca
 | `if.` | Condition | `if.exists`, `if: done` |
 
 > *"Once you know `by.` means how — you know it everywhere. Once you know `do.` means constraint — you know it everywhere. This solves the Keyword Explosion problem. In most languages, you memorize hundreds of unique keywords. In Mohio, you learn nine prefixes and the rest is just English."*
+
+### Write Mohio in Your Language
+
+Translation is not a documentation feature. It is a compiler feature.
+
+The prefix system is what makes translation possible. The dot separates the category of intent from the plain English word. Swap the word — the prefix stays. The parser doesn't change. The runtime doesn't change. Only the vocabulary changes.
+
+```bash
+mio translate file.mho --to pt   # every keyword converts to Portuguese
+mio translate file.mho --to es   # every keyword converts to Spanish
+```
+
+A developer in São Paulo reads the same `.mho` file as Portuguese. A developer in Mumbai reads it as Hindi. A developer in Chicago reads it as English. One codebase. Native comprehension everywhere. The logic is identical. The structure is identical. The parser is identical.
+
+**Phase 1:** Portuguese (Brazil + Portugal), Spanish (Latin America + Spain)
+**Phase 2:** Hindi, Filipino, Vietnamese
+**Phase 3:** Polish, Czech, additional languages
+
+Language packs follow the same distribution model as community connectors — published to the Mohio registry, reviewed and certified by the Mohio team before shipping. Any developer or team can propose and contribute a mapping.
 
 ### Three-Tier Mutability
 
@@ -342,7 +426,26 @@ shape Transaction
 shape: done
 ```
 
-### AI Primitives
+### Block Scope — Three Levels
+
+Any Mohio verb can be an inline block without a name — for one-off logic right where it's needed. Named blocks are only needed when the same logic is called from multiple places:
+
+```mohio
+// Inline — no name, used once, right here
+check db.users for provided_id
+    on.failure give back "Identity not found"
+    otherwise give back "Identity Verified"
+check: done
+
+// Named action block — callable from anywhere
+VerifyUser(provided_id)
+    check db.users for provided_id
+        on.failure give back "Identity not found"
+    give back "Identity Verified"
+VerifyUser: done
+```
+
+Three scope levels: **inline block** (one-off, no name) → **page action** (top of `.mho` file, used on that page) → **journey action** (journey file, application-wide).
 
 `ai.decide` — makes a typed, confidence-gated AI decision with mandatory fallback and automatic audit. Hard reserved. The compiler will not build without a `not confident` block.
 
@@ -428,10 +531,10 @@ listen for
     new sh.Transaction
         require role "screener" or "system"
 
-        make member
-            find db.members where id is transaction.member_id
+        find member in db.members
+            where id is transaction.member_id
             cache for 5 minutes
-        make: done
+        find: done
 
         ai.decide isFraudulent(transaction) returns boolean
             check confidence above FRAUD_THRESHOLD
@@ -465,6 +568,69 @@ listen for
     new: done
 listen: done
 ```
+
+---
+
+## The Back to Front Bridge
+
+Mohio is the first language to seamlessly connect backend logic and frontend output from a single shape declaration — no separate API layer, no contract negotiation between teams, no client-side schema to keep in sync.
+
+When you declare a shape, that shape is the contract everywhere: the listener validates against it, the database stores to it, the page renders from it, and the AI reasons about it. One source of truth. No translation required.
+
+```mohio
+// Define the shape once
+shape Task
+    id          as uuid     required    default uuid()
+    title       as text     required    max 200
+    status      as text     default "pending"
+                            allowed "pending" "active" "complete"
+    assigned_to as text
+    due_date    as datetime
+shape: done
+
+// The listener validates against it (backend)
+listen for
+    new sh.Task
+        require role "member"
+        save task to db
+        otherwise jump to "pages/board.mho"
+    new: done
+listen: done
+
+// The page renders from it (frontend)
+page board
+fetch
+    tasks = retrieve set of sh.Task from db where assigned_to is session.user_id
+show
+    <ul>
+        each task in tasks
+            <li class="{{ task.status }}">{{ task.title }}</li>
+        each: done
+    </ul>
+```
+
+The same `sh.Task` contract governs the POST, the database query, and the HTML output. Change the shape — the compiler tells you everywhere that needs to update. This is what platforms like Lovable and Emergent cannot do: their visual layers and their backend logic are separate systems that have to be kept in sync manually.
+
+**Mohio doesn't have a frontend and a backend. It has one language.**
+
+---
+
+## What Other Platforms Hide
+
+Every vibe coding platform and visual builder makes the same tradeoff: move fast early, pay the complexity bill later — usually when you try to go to production. Mohio surfaces what other platforms hide, at the point where it matters most.
+
+| What gets hidden | What Mohio does |
+|-----------------|-----------------|
+| When dummy/mock data is being shown | `fetch` section is explicit — if you're not fetching real data, there's nothing to show |
+| Which endpoints still need to be built | `listen for` declares every listener explicitly — gaps are visible in the file |
+| Which database and whether it's structured or unstructured | `connect` is declared at journey level — type, location, and credentials are explicit |
+| Dev to prod connection status | `secret.` vs `env.` makes the environment explicit. `mio secrets check` validates before deploy |
+| Which libraries are needed or called | `assets` block in journey declares every external dependency — nothing implicit |
+| Security status per listener | `require role` inside `new sh.[Shape]` — missing security is visible as missing code |
+| AI decisions without audit trails | `ai.audit` is mandatory — the compiler rejects `ai.decide` blocks without it |
+| Compliance gaps | `mio check compliance` lists every technical and non-technical gap with actionable next steps |
+
+None of these are dashboard features or post-hoc audit tools. They are language features. The gaps show up in the code — before you deploy, not after.
 
 ---
 
@@ -613,11 +779,7 @@ mio contribute submit file.mho # Submit program to community training set
 
 ### Language Packs
 
-Write Mohio in your language. `mio translate` converts keyword-for-keyword between any two mapped languages. A developer in São Paulo reads the same `.mho` file as Portuguese. A developer in Mumbai reads it as Hindi. A developer in Chicago reads it as English. The code is identical. The comprehension is native.
-
-**Portuguese and Spanish ship first.** Hindi follows. Additional language packs are published to the Mohio registry — any developer or team can propose and contribute a mapping. The Mohio team reviews and certifies each pack before it ships.
-
-This is not a documentation feature. It is a compiler feature.
+See [Write Mohio in Your Language](#write-mohio-in-your-language) above for the full translation roadmap. Portuguese and Spanish ship first, Hindi and Filipino next, Polish and Czech after that. Language packs are community-contributed and Mohio-team certified.
 
 ### The Mohio Coding Platform
 
