@@ -233,13 +233,113 @@ make: done
 
 ### Standard SQL — Always Valid
 
-Standard SQL is valid anywhere inside a `.mho` file alongside native Mohio data calls. `mio fmt` will suggest the Mohio-native equivalent but never forces conversion. Both styles are permanently valid:
+Standard SQL is valid anywhere inside a `.mho` file alongside native Mohio data calls. `mio fmt` suggests the Mohio-native equivalent but never forces conversion. Both styles are permanently valid and can coexist in the same file.
+
+The native Mohio data query pattern uses named blocks:
 
 ```mohio
-// Both are valid in the same file:
-retrieve member from db where id = request.id        // Mohio-native
-SELECT * FROM members WHERE id = '{{ request.id }}'  // Standard SQL
+// Simple — named block retrieval
+retrieve from db.members
+    match id to request.id
+    return id, name, email
+    up to 20
+db.members: done
+
+// With join — and retrieve from replaces LEFT JOIN ON
+retrieve from db.members
+    match id to transaction.member_id
+    and retrieve from db.transactions
+        match member_id to member.id
+        where created_at > now() - 30 days
+    return member.name, transaction.amount, transaction.created_at
+    order by transaction.created_at descending
+    up to 20
+db.members: done
+
+// Export directly from a query
+retrieve from db.members
+    match status to "active"
+    return id, name, email
+    export as.csv to "members.csv"
+db.members: done
+
+give back "members.csv"
+
+// Raw SQL escape hatch — always valid
+retrieve from db
+    sql
+        SELECT m.id, m.name, COUNT(t.id) as transaction_count
+        FROM members m
+        LEFT JOIN transactions t ON t.member_id = m.id
+        GROUP BY m.id, m.name
+        HAVING COUNT(t.id) > 5
+    sql: done
+db: done
 ```
+
+| Keyword | Use for | Example |
+|---------|---------|---------|
+| `match` | Equality — field to value or field to field | `match id to request.id` |
+| `where` | Conditions — ranges, comparisons, complex logic | `where amount > 10000` |
+| `and retrieve from` | Join to another table | `and retrieve from db.transactions` |
+| `return [fields]` | Field selection — specific fields only | `return id, name, email` |
+| `return all` | All fields | `return all` |
+| `up to N` | Bounded result — no more than N records | `up to 20` |
+| `sql { }` | Raw SQL escape hatch | Full SQL inside the block |
+
+`limit N` is accepted by the parser — `mio fmt` suggests `up to N`. `limit` inside a `sql` block is correct SQL syntax and stays as-is.
+
+
+### Scheduling — mioschedule
+
+Mohio replaces server cron jobs with named schedule declarations in the journey file. Declared in code. Version controlled. No SSH access needed. The runtime manages execution — the developer declares intent.
+
+```mohio
+// Named scheduled task — journey level
+mioschedule weekly_digest
+    every monday at 9am
+    run SendWeeklyDigest
+    on.failure alert ops_team
+mioschedule: done
+
+mioschedule fraud_queue_check
+    every 5 minutes between 8am and 6pm
+    on weekdays only
+    run CheckFraudQueue
+    timeout after 2 minutes
+mioschedule: done
+
+// Relative — one-time future execution
+mioschedule payment_reminder
+    in 3 days from order.created_at
+    run SendPaymentReminder(order.id)
+    do.once for order.id
+mioschedule: done
+
+// On-demand trigger from a page
+run mioschedule.weekly_digest immediately
+    on.success show "Digest queued"
+    on.failure show "Failed to queue"
+```
+
+Standard cron expressions are also accepted — `mio fmt` suggests the natural language equivalent:
+
+```mohio
+mioschedule legacy_job
+    cron "0 2 * * 1"    // mio fmt suggests: every monday at 2am
+    run LegacyCleanup
+mioschedule: done
+```
+
+| Time pattern | Example |
+|-------------|---------|
+| `every [time]` | `every monday at 9am`, `every 5 minutes`, `every day at 2am` |
+| `every [time] between [t] and [t]` | `every 5 minutes between 8am and 6pm` |
+| `on weekdays only` | Day scope modifier |
+| `on [date] at [time]` | `on december 31 at 11:59pm` |
+| `in [duration] from [datetime]` | `in 3 days from order.created_at` |
+| `unless today is holiday` | Exception condition |
+| `cron "[expression]"` | Standard cron — always accepted |
 
 ### Reactive Triggers and Persistent Connections
 
@@ -253,7 +353,7 @@ change: done
 
 **`while.active`** is the persistent loop inside a WebSocket `connection` block. Runs until the connection closes. `on.open` and `on.close` handle the lifecycle.
 
-**`vr.`** is the parser collision safety valve. Never required — the parser resolves `sh.Transaction` (shape) vs `transaction` (instance) automatically. Available when a variable name would genuinely clash: `vr.task` explicitly means the variable named task, not the Task shape.
+**`vr.`** is RETIRED. The parser resolves `sh.Transaction` (shape) vs `transaction` (instance) automatically — `sh.` on the shape reference solves the ambiguity from the correct direction. `vr.` is no longer in canonical Mohio.
 
 ### The Atomic Guard — `new sh.[Shape]`
 
@@ -274,6 +374,44 @@ shape: done
 ```
 
 Inside the block, the instance is always lowercase — `transaction.amount`, `transaction.velocity_score`. The shape is `sh.Transaction`. The instance is `transaction`. Never ambiguous.
+
+
+### The Legal Passport — Data Carries Its Own Rules
+
+Retention and purge rules declared on a shape travel with the data everywhere it goes. The shape is the single source of truth for what data is, how long it must be kept, and what happens when it is deleted.
+
+```mohio
+shape UserAccount
+    id    as uuid required
+    email as text required
+    status as text default "active"
+
+    retain transactions for 7 years
+    retain audit_logs   for 7 years
+    retain all [phi]    for 6 years
+        unless status is "test_account"
+
+    on.purge
+        cm.purge user.id
+            includes "user_records" "audit_logs" "session_data"
+            preserve "legal_hold_records"
+        cm.purge: done
+    on.purge: done
+shape: done
+```
+
+`retain` is a standalone verb — `do.retain` is accepted but silently discarded. `purge` is a standalone verb — `do.purge` is accepted but silently discarded.
+
+The full conditional retention pattern:
+
+```mohio
+retain transactions
+    when status is "active"    for 7 years
+    when status is "suspended" for 1 year
+    unless status is "test_account"
+```
+
+> *"A compliance officer looking at Python is looking at how a developer decided to solve a problem. A compliance officer looking at Mohio is looking at the Rule of Law itself."* — External validator, unprompted
 
 ### The No-If Revolution
 
@@ -337,6 +475,31 @@ A developer in São Paulo reads the same `.mho` file as Portuguese. A developer 
 
 Language packs follow the same distribution model as community connectors — published to the Mohio registry, reviewed and certified by the Mohio team before shipping. Any developer or team can propose and contribute a mapping.
 
+
+### `unless` and `when` — Natural Language Conditionals
+
+`unless` replaces `else` and `if not` in rule and block context. `when` applies a positive condition. Both read as natural language policy:
+
+```mohio
+// Instead of:
+if status is not "test_account"
+    retain transactions for 7 years
+
+// Natural language:
+retain transactions for 7 years unless status is "test_account"
+
+// Positive condition:
+retain transactions for 7 years when status is "active"
+
+// Combined:
+retain transactions
+    when status is "active"    for 7 years
+    when status is "suspended" for 1 year
+    unless status is "test_account"
+```
+
+`if` is permanently valid — every developer can write Mohio the way they always have. `unless` and `when` are better alternatives, not replacements.
+
 ### Three-Tier Mutability
 
 ```mohio
@@ -397,6 +560,58 @@ create: done
 ```
 
 > *"A junior developer makes. A senior architect creates."*
+
+
+### Saga — Distributed Operations with Compensation
+
+A `saga` is a distributed operation where each step has an explicit rollback (`undo`). Absence of `undo` signals best effort — failure does not trigger compensation. `step: done` is the canonical closer.
+
+```mohio
+saga process_order(order, payment)
+
+    step reserve_inventory
+        update db.inventory
+            reserved = reserved + order.quantity
+        update: done
+        undo
+            update db.inventory
+                reserved = reserved - order.quantity
+            update: done
+        undo: done
+    step: done
+
+    step charge_payment
+        check payment with PaymentService
+            by.sending
+                amount = order.total
+                token = payment.token
+            sending: done
+            expect sh.ChargeResult
+            wait up to 5 seconds
+            if no answer give back error "Payment timed out"
+        check: done
+        undo
+            check payment with PaymentService
+                by.sending action = "refund", charge_id = charge.id
+                sending: done
+                do.once for "refund-{{ order.id }}"
+            check: done
+        undo: done
+    step: done
+
+    step notify_customer
+        // no undo = best effort
+        // fires only when all prior steps succeeded
+        miomail.send
+            to = order.customer_email
+            subject = "Order confirmed"
+        miomail: done
+    step: done
+
+saga: done
+```
+
+Use `pause short` between steps to avoid flooding external services. `epic` is reserved alongside `saga` for a future collection-of-sagas pattern.
 
 ### Block Structure — Universal Closers
 
@@ -730,7 +945,7 @@ Every `mio*` service uses `secret.` variables — never hardcoded credentials, n
 | `mioauth` | Auth — login, logout, JWT, OAuth, MFA, API keys, rate limiting |
 | `miocache` | Redis-compatible caching — get, set, flush, patterns |
 | `miolog` | Structured JSON logging — metrics, spans, alerts, observability hooks |
-| `mioschedule` | Scheduling — cron, one-time, recurring tasks |
+| `mioschedule` | Scheduling — named declarations in journey + programmatic inside tasks |
 | `miopdf` | PDF — generate from HTML, merge, split, protect, fill forms |
 | `mioimage` | Images — resize, crop, convert, watermark |
 | `mioai` | AI generation — text, images, research, classify, embed, translate |
@@ -788,6 +1003,10 @@ A visual development environment that generates clean, hand-editable `.mho` code
 Think Dreamweaver's two-way fidelity: visual and code views always in sync. Every visual action produces real, readable Mohio. You own it. You can modify it. The AI didn't write a black box.
 
 This is also the foundation for AI-assisted Mohio authoring — describe what you want, the platform writes the `.mho`. Not vague generated code. Valid, readable, auditable Mohio that runs.
+
+### Named Scheduling
+
+`mioschedule [name]` declarations replace server cron jobs entirely — see the [Scheduling](#scheduling--mioschedule) section above for the full pattern. The runtime manages execution state. No SSH access. No crontab editing.
 
 ### The Mohio Cookbook
 
