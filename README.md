@@ -1031,6 +1031,84 @@ mio contribute submit file.mho # Submit program to community training set
 ---
 
 
+
+### miomap — Location & Mapping
+
+Provider-agnostic. Declare once in journey. Covers geocoding, proximity search, service areas, display, navigation, and compliance-grade jurisdiction lookup.
+
+```mohio
+// Provider — journey level
+connect maps as locator
+    from google
+    key secret.GOOGLE_MAPS_API_KEY
+connect: done
+
+// Named service area — name is never quoted
+service area northeast_region
+    states "CT" "MA" "RI" "VT" "NH" "ME" "NY"
+service area: done
+
+// Geocode
+geocode member.address
+    as member.location
+    on.failure give back error "Address not found"
+geocode: done
+
+// Proximity search
+find branches in db.locations
+    within 10 miles of member.location
+    order by distance ascending
+    up to 5
+find: done
+
+// Sort in-memory by distance — separate from order by
+sort providers by distance from member.location
+    ascending
+    as nearest_providers
+sort: done
+
+// Service area check
+check member.address in service area northeast_region
+    on.failure give back "Service not available in your area"
+    otherwise continue
+check: done
+
+// Map display
+show map
+    centered on member.location
+    zoom 12
+show map: done
+
+pin branches on map
+    label branch.name
+    icon "branch-marker"
+    on click show branch.details
+pin: done
+
+// Directions
+directions from member.location to branch.location
+    by driving
+    as route
+directions: done
+
+// Device location with fallback
+locate member
+    as member.location
+    accuracy high
+    on.failure
+        geocode member.provided_address as member.location
+        geocode: done
+locate: done
+
+// Jurisdiction — compliance use case
+jurisdiction of member.address
+    as member.jurisdiction
+    includes state, county, tax_district
+jurisdiction: done
+```
+
+**Key rules:** Named declarations are never quoted — `service area northeast_region` not `service area "northeast_region"`. Data values are quoted when strings — `states "CT" "MA"` are data. `sort` is for in-memory collections. `order by` is for database queries. `on click` inside a `pin` block is a behavior modifier — different from `click on "[element]"` in `listen for` which is a listener declaration.
+
 ### miomail — Full Email System
 
 Provider declared once in the journey. All patterns flow from there.
