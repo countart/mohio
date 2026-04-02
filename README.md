@@ -623,16 +623,18 @@ saga process_order(order, payment)
     step charge_payment
         check payment with PaymentService
             by.sending
-                amount = order.total
-                token = payment.token
+                order.total
+                payment.token
             sending: done
-            expect sh.ChargeResult
+            expect sh.ChargeResult as charge
             wait up to 5 seconds
-            if no answer give back error "Payment timed out"
+            on.failure give back error "Payment timed out"
         check: done
         undo
             check payment with PaymentService
-                by.sending action = "refund", charge_id = charge.id
+                by.sending
+                    action "refund"
+                    charge.id
                 sending: done
                 do.once for "refund-{{ order.id }}"
             check: done
@@ -643,8 +645,8 @@ saga process_order(order, payment)
         // no undo = best effort
         // fires only when all prior steps succeeded
         miomail.send
-            to = order.customer_email
-            subject = "Order confirmed"
+            to order.customer_email
+            subject "Order confirmed"
         miomail: done
     step: done
 
