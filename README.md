@@ -990,6 +990,64 @@ mio contribute submit file.mho # Submit program to community training set
 
 ---
 
+
+### miomail — Full Email System
+
+Provider declared once in the journey. All patterns flow from there.
+
+```mohio
+// Provider declaration — journey level
+connect email as sender
+    from mailgun
+    key    secret.MAILGUN_API_KEY
+    domain secret.MAILGUN_DOMAIN
+connect: done
+```
+
+**Send — full pattern:**
+
+```mohio
+miomail
+    send
+        to       member.email
+        from     "hello@mohio.io" as "Mohio Support"
+        reply to "support@mohio.io"
+        cc       manager.email
+        subject  "Your Invoice — {{ invoice.number }}"
+        template "invoice_email"
+        inject
+            member  into member
+            invoice into invoice
+        inject: done
+        attach   invoice_pdf as "Invoice-{{ invoice.number }}.pdf"
+        priority high
+        do.once for member.id
+    send: done
+miomail: done
+```
+
+**Queue for scheduled delivery:**
+
+```mohio
+miomail
+    queue
+        to       member.email
+        subject  "Your Weekly Digest"
+        template "weekly_digest"
+        inject
+            member into member
+            posts  into top_posts
+        inject: done
+        send at "every monday at 8am"
+        do.once for "digest-{{ member.id }}-{{ week.number }}"
+    queue: done
+miomail: done
+```
+
+The `inject` block pushes values into templates — `[source] into [variable]` reads left to right. Block form only. Single value can close on the same line: `inject form.member into member inject: done`
+
+Bounce handling, complaint processing, and unsubscribe live in `listen for` webhook blocks — the email provider fires events, the listener catches them, `consider` routes them. Providers: `mailgun`, `sendgrid`, `smtp`, `ses`.
+
 ## What's Coming
 
 ### Language Packs
