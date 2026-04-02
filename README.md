@@ -139,6 +139,18 @@ Mohio solves it. Connections just work. Services are built in. The language is o
 
 ## How Mohio Works
 
+Mohio has three distinct concerns. Each has its place. Together they cover everything a modern application needs to do.
+
+| Concern | Keyword | What it covers |
+|---------|---------|---------------|
+| **Receive** | `listen for` | Everything that arrives — HTTP, webhooks, WebSocket, UI events, data changes, scheduled triggers |
+| **Serve** | `page` / `show` | Everything that goes out — HTML, CSS, JavaScript, display logic |
+| **Orchestrate** | `journey` | Everything that connects — multi-page flow, shared data, application config, scheduling |
+
+A `listen for` block handles all incoming traffic. A `page` block handles all outgoing display. A `journey` file connects them and declares what the whole application shares. That is the complete picture.
+
+The listener system alone does not make an application — it makes the receiving layer. Pages make the output layer. The journey makes them work together.
+
 ### Listeners, Not Endpoints
 
 > *"We've effectively removed the 'Web' from Web Development. We aren't building endpoints — we are building Listeners."*
@@ -151,27 +163,27 @@ Every line of Mohio code must pass this test before it is locked into the langua
 
 This is not a style preference. It is the founding rule that produced the syntax. If a code block requires explanation — it gets rewritten. Every keyword, every example, every primitive in this language passed that test before it was locked. That is why Mohio reads the way it does.
 
-`route` is retired. `listen for` is the universal listener for everything a service receives — HTTP requests, webhooks, WebSocket connections, UI events, data changes, and scheduled triggers. One block per context. One `listen: done` seals the external interface of the entire page or service.
+`route` is retired. `listen for` is the universal listener for everything a service receives — HTTP requests, webhooks, WebSocket connections, UI events, data changes, and scheduled triggers. Seven listener types. One block. One `listen: done` seals the external interface of the entire page or service.
 
 ```mohio
 listen for
     require role "manager"           // applies to everything this page hears
 
-    new sh.Order                     // POST — something new arrived
+    new sh.Order                     // POST — Atomic Guard. Bad data never reaches logic.
         make Invoice from order
             on.failure log "Invoice failed: {{ order.id }}"
             otherwise notify order.assigned_to
         make: done
     new: done
 
-    request for sh.Inventory         // GET — something was requested
+    request for sh.Inventory         // GET — shape validated before logic runs
         find Stock where item_id is inventory.id
             on.failure give back "Item not found"
             otherwise give back stock
         find: done
     request: done
 
-    new sh.Payment from "Stripe" at /webhooks/stripe   // webhook + auto signature verify
+    new sh.Payment from "Stripe" at /webhooks/stripe   // webhook — auto signature verify + shape guard
         check payment.status
             on.failure log "Payment failed: {{ payment.id }}"
             otherwise start ProcessOrder(payment.metadata.order_id)
@@ -189,8 +201,36 @@ listen for
         on.close show "Connection Lost"
     connection: done
 
+    change to sh.Task                // reactive — fires when a Task field changes
+        on.success notify task.assigned_to
+    change: done
+
+    click on "submit-order"          // UI event — fires on user interaction
+        make Order from order_form
+            on.failure show "Fix your errors"
+            otherwise jump to "pages/confirmation.mho"
+        make: done
+    click: done
+
+    every 30 seconds                 // inline scheduled trigger
+        check system.health
+            on.failure alert ops_team
+    every: done
+
 listen: done
 ```
+
+Seven listener types. One block. One `listen: done`. Everything the page receives is declared explicitly — nothing is hidden, nothing is assumed.
+
+| Listener | Implies | Use case |
+|----------|---------|---------|
+| `new sh.[Shape]` | POST | Form submissions, API calls, data creation |
+| `request for sh.[Shape]` | GET | Data retrieval, page requests |
+| `new sh.[Shape] from "Service"` | Webhook POST | Stripe, Mailgun, GitHub — auto signature verify |
+| `connection at /path` | WebSocket | Chat, live updates, collaborative tools |
+| `change to sh.[Shape]` | Data change | Reactive triggers, notifications on update |
+| `click on "[element]"` | UI event | Button clicks, form submissions from the page |
+| `every [time]` | Scheduled | Health checks, polling, time-based triggers |
 
 **HTTP methods are never declared explicitly.** `new` implies POST. `request for` implies GET. The method is an infrastructure detail — not your problem.
 
