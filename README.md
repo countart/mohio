@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://mohio.io/assets/logo.png" alt="Mohio" width="120" />
+<img src="https://mohio.io/img/logo.png" alt="Mohio" width="120" />
 
 # Mohio
 
