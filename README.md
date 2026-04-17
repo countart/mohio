@@ -121,6 +121,23 @@ shape Transaction
 shape: done
 ```
 
+### 4. The code reads like the prompt
+
+Vibe coding changed how developers work — but the output is still JavaScript.
+Still Python. Still code that doesn't read like the description that created it.
+
+Mohio is the first language where the code *is* the description.
+The modifier system (`modify.as`, `modify.by`, `modify.in`) is structured
+prompting with a grammar. You state intent with enough precision that
+the runtime executes without guessing.
+
+Programming isn't dying. It's evolving. The vibe coders, the AI-assisted
+developers, the natural language developers — they're not replacing code.
+They're revealing that the gap between intent and code has always been
+the problem. Mohio closes it at the language level.
+
+**This is where the evolution leads.**
+
 ---
 
 ## Lock Blocks Architecture
