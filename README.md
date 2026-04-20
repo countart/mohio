@@ -114,8 +114,8 @@ shape Transaction
     amount          as decimal  required    min 0.01        in.USD
     device_fingerprint as text  required
     velocity_score  as decimal  required    min 0.0 max 1.0
-    status          as text     default "pending"
-                    allowed "pending" "approved" "blocked"
+    status          as text     default     pending
+    status.allowed  pending, approved, blocked
     created_at      as datetime default now()
     retain for 5 years
 shape: done
@@ -147,7 +147,7 @@ Every piece of logic in Mohio is a block. Blocks lock together — verb opens, n
 ```mohio
 // A block opens with its verb
 find members in db.members
-    where status is "active"
+    where status is active
     order by created_at descending
     up to 50
     on.failure give back "No members found"
@@ -156,7 +156,7 @@ find: done
 // Blocks nest. The nesting is always explicit.
 listen for
     new sh.Order
-        require role "customer" or "system"
+        require role customer or system
         make Invoice from order
             on.failure notify ops_team about "Invoice creation failed"
             otherwise notify order.assigned_to
