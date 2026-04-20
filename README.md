@@ -230,6 +230,20 @@ No configuration. No library installation. One word.
 
 Available sectors: `financial` · `healthcare` · `legal` · `education` · `government`
 
+### Community Shape Library
+
+Domain expertise is installable.
+
+```bash
+mio install shape clinical-member      // adds clinical roles, NPI, license
+mio install shape financial-member     // adds KYC status, account tier
+mio install shape ach-record           // ACH transaction fields
+mio install shape wire-transfer        // FedWire fields
+mio install shape clinical-note        // HIPAA-aware clinical notes
+```
+
+A healthcare developer installs `clinical-member` and the shape already knows what an NPI is, what a clinical role requires, and what HIPAA demands of that field. The expertise travels with the shape. Community builds the vocabulary of their domain.
+
 ---
 
 ## AI Primitives
@@ -289,7 +303,7 @@ miomail: done
 | `mioimage` | Image processing with compression |
 | `miosearch` | Full-text search — Meilisearch, Elastic, Typesense |
 | `miomap` | Geolocation, proximity search, geocoding, mapping |
-| `miostream` | Streaming and SSE |
+| `miostream` | WebSocket, SSE, AI token streaming, live media |
 | `miopush` | Real-time push to active sessions |
 | `mioaccess` | Accessibility — TTV narration, captions |
 
@@ -431,7 +445,7 @@ mio serve journey.mho
 
 ## Status
 
-Mohio is in active language design. The LDD (Language Definition Document) is the authoritative specification. The first-mover window is 6–12 months. The compiler is the next milestone.
+Mohio is in active language design. The LDD (Language Design Document) is the authoritative specification. The first-mover window is 6–12 months. The compiler is the next milestone.
 
 Contributions, feedback, and sector-specific expertise are welcome. If you work in fintech, healthcare, legal, or government and see gaps in the sector profiles — open an issue or reach out directly.
 
