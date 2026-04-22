@@ -1,0 +1,579 @@
+
+start: statement*
+
+// ─────────────────────────────────────────────
+// TERMINALS
+// ─────────────────────────────────────────────
+
+// Keywords — priority .2 so they never match as NAME
+SECTOR.2:     "sector"
+CONNECT.2:    "connect"
+SHAPE.2:      "shape"
+TASK.2:       "task"
+HOLD.2:       "hold"
+LOCK.2:       "lock"
+RELEASE.2:    "release"
+COMPLIANCE.2: "compliance"
+INCLUDE.2:    "include"
+REQUIRE.2:    "require"
+ROLE.2:       "role"
+RATE.2:       "rate"
+LIMIT.2:      "limit"
+TIMESPAN.2:   "timespan"
+
+LISTEN.2:     "listen"
+FOR.2:        "for"
+NEW.2:        "new"
+REQUEST.2:    "request"
+CONNECTION.2: "connection"
+CHANGE.2:     "change"
+WHILE.2:      "while"
+SECTION.2:    "section"
+
+IF.2:         "if"
+OR.2:         "or"
+OTHERWISE.2:  "otherwise"
+CHECK.2:      "check"
+WHEN.2:       "when"
+EACH.2:       "each"
+IN.2:         "in"
+REPEAT.2:     "repeat"
+TIMES.2:      "times"
+
+RETRIEVE.2:   "retrieve"
+FIND.2:       "find"
+SAVE.2:       "save"
+UPDATE.2:     "update"
+REMOVE.2:     "remove"
+FROM.2:       "from"
+MATCH.2:      "match"
+WHERE.2:      "where"
+AND.2:        "and"
+ORDER.2:      "order"
+BY.2:         "by"
+CACHE.2:      "cache"
+EXPECT.2:     "expect"
+PULL.2:       "pull"
+UP.2:         "up"
+TO.2:         "to"
+AS.2:         "as"
+IS.2:         "is"
+NOT.2:        "not"
+RETURNS.2:    "returns"
+USING.2:      "using"
+WEIGH.2:      "weigh"
+CONFIDENT.2:  "confident"
+CONFIDENCE.2: "confidence"
+ABOVE.2:      "above"
+QUALITY.2:    "quality"
+AUDIENCE.2:   "audience"
+FORMAT.2:     "format"
+DECISION.2:   "decision"
+
+GIVE.2:       "give"
+BACK.2:       "back"
+JUMP.2:       "jump"
+HALT.2:       "halt"
+STOP.2:       "stop"
+SKIP.2:       "skip"
+SHOW.2:       "show"
+SEND.2:       "send"
+BROADCAST.2:  "broadcast"
+ROOM.2:       "room"
+EXCEPT.2:     "except"
+STREAM.2:     "stream"
+RAISE.2:      "raise"
+AGAIN.2:      "again"
+NOTIFY.2:     "notify"
+WITH.2:       "with"
+VIA.2:        "via"
+
+TRY.2:        "try"
+TRANSACTION.2: "transaction"
+CATCH.2:      "catch"
+ALWAYS.2:     "always"
+
+DONE.2:       "done"
+DEFAULT.2:    "default"
+NEVER.2:      "never"
+STORE.2:      "store"
+LOG.2:        "log"
+LABEL.2:      "label"
+RANGE.2:      "range"
+THRESHOLD.2:  "threshold"
+
+SET.2:        "set"
+TRUE.2:       "true"
+FALSE.2:      "false"
+NULL_KW.2:    "null"
+NONE_KW.2:    "none"
+
+// Time keywords
+TODAY.2:       "today"
+YESTERDAY.2:   "yesterday"
+NOW_CALL.2:    "now()"
+LAST_WEEK.2:   "last_week"
+LAST_MONTH.2:  "last_month"
+LAST_QUARTER.2:"last_quarter"
+LAST_YEAR.2:   "last_year"
+THIS_WEEK.2:   "this_week"
+THIS_MONTH.2:  "this_month"
+THIS_QUARTER.2:"this_quarter"
+THIS_YEAR.2:   "this_year"
+SINCE.2:       "since"
+BETWEEN.2:     "between"
+START.2:       "start"
+END.2:         "end"
+UNTIL.2:       "until"
+PRECISION.2:   "precision"
+TIMEZONE.2:    "timezone"
+EVERY.2:       "every"
+EXCLUDE.2:     "exclude"
+
+// Type names (lower priority than keywords, higher than NAME)
+TYPE_NAME.1: "text" | "number" | "decimal" | "integer" | "boolean"
+           | "bool" | "datetime" | "date" | "time" | "uuid" | "email"
+           | "url" | "json" | "list" | "map" | "any" | "result" | "void"
+
+// AI primitives — hard reserved (dot-connected keywords)
+AI_DECIDE.3:    "ai.decide"
+AI_AUDIT.3:     "ai.audit"
+AI_EXPLAIN.3:   "ai.explain"
+AI_CREATE.3:    "ai.create"
+AI_CHAIN.3:     "ai.chain"
+AI_OVERRIDE.3:  "ai.override"
+
+// Dot-connected event keywords
+ON_FAILURE.3:   "on.failure"
+ON_SUCCESS.3:   "on.success"
+ON_ERROR.3:     "on.error"
+ON_OPEN.3:      "on.open"
+ON_CLOSE.3:     "on.close"
+WHILE_ACTIVE.3: "while.active"
+NOT_FOUND.3:    "not.found"
+IS_EMPTY.3:     "is.empty"
+
+// Release variants
+RELEASE_NOW.3:  "release.now"
+RELEASE_LOCK.3: "release.lock"
+
+// Connector namespace prefixes (produce full token including trailing dot+name)
+SH_REF.3:      /sh\.[A-Z][a-zA-Z0-9_]*/
+ENV_REF.3:      /env\.[A-Z_][A-Z0-9_]*/
+SECRET_REF.3:   /secret\.[A-Z_][A-Z0-9_]*/
+DB_REF.3:       /db\.[a-zA-Z_][a-zA-Z0-9_]*/
+
+// Dot-state checks
+DOT_STATE.3:    /(?:is|not)\.[a-zA-Z_]+/
+
+// Dotted closer (blockname: done)  e.g.  retrieve: done  ai.decide: done
+DOTTED_CLOSER.3: /[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*/
+
+// Plain name (lowest priority — only matches if nothing above matched)
+NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+// Literals
+STRING: /\"[^\"]*\"/
+NUMBER: /\d+(?:\.\d+)?/
+PATH_LIT: /\/[a-zA-Z0-9_\/:\*\{\}\.\-]*/
+DATE_LIT: /\d{4}-\d{2}-\d{2}/
+TIME_LIT: /\d{2}:\d{2}(?::\d{2})?/
+TEMPLATE_STR: /\{\{[^\}]+\}\}/
+
+// Operators
+PLUS.2:    "+"
+MINUS.2:   "-"
+STAR.2:    "*"
+DIV.2:     "/"
+PERCENT.2: "%"
+MATH_OP: PLUS | MINUS | STAR | DIV | PERCENT
+CMP_OP:  ">=" | "<=" | "!=" | ">" | "<" | "=="
+
+// Ignored
+%ignore /[ \t\n\r]+/
+%ignore /\/\/[^\n]*/
+%ignore /\/\*[^*]*\*+(?:[^\/*][^*]*\*+)*\//
+
+// ─────────────────────────────────────────────
+// GRAMMAR RULES
+// ─────────────────────────────────────────────
+
+statement: declaration
+         | block_stmt
+         | action_stmt
+         | assignment
+         | closer
+
+// ─── CLOSER ───────────────────────────────────
+// Placed early so DOTTED_CLOSER is recognized before anything else tries to eat it
+
+closer: DOTTED_CLOSER ":" DONE
+      | DONE
+
+// ─── DECLARATIONS ─────────────────────────────
+
+declaration: sector_decl
+           | connect_decl
+           | shape_decl
+           | task_decl
+           | hold_decl
+           | lock_decl
+           | compliance_decl
+           | include_decl
+           | require_role_decl
+           | rate_limit_decl
+           | timespan_decl
+
+sector_decl: SECTOR ":" type_name
+
+connect_decl: CONNECT NAME AS NAME FROM value_expr
+
+shape_decl: SHAPE NAME shape_field* closer
+
+shape_field: NAME (AS type_name)? shape_field_mod*
+
+shape_field_mod: NEVER STORE
+               | NEVER LOG
+               | FORMAT STRING
+               | RANGE NUMBER NUMBER
+               | THRESHOLD NUMBER
+               | LABEL STRING
+
+task_decl: TASK NAME task_params? (RETURNS type_name)? statement* closer
+
+task_params: "(" param_list? ")"
+param_list: param ("," param)*
+param: NAME (AS type_name)? (DEFAULT value_expr)?
+
+hold_decl: HOLD NAME "="? value_expr
+
+lock_decl: LOCK NAME "="? value_expr
+
+compliance_decl: COMPLIANCE ":" NAME
+
+include_decl: INCLUDE STRING
+
+require_role_decl: REQUIRE ROLE role_list
+role_list: STRING (OR STRING)*
+
+rate_limit_decl: RATE LIMIT NUMBER "per" time_unit ("per" NAME)?
+
+timespan_decl: TIMESPAN NAME timespan_body* closer
+
+timespan_body: START datetime_expr
+             | END datetime_expr
+             | UNTIL datetime_expr
+             | PRECISION NAME
+             | TIMEZONE (STRING | NAME)
+             | EVERY weekday_expr
+             | EXCLUDE exclude_expr
+             | BETWEEN value_expr AND value_expr
+
+weekday_expr: NAME
+exclude_expr: NAME | NAME FROM dotted_name | DATE_LIT
+
+// ─── BLOCK STATEMENTS ─────────────────────────
+
+block_stmt: listen_block
+          | new_block
+          | request_block
+          | connection_block
+          | while_active_block
+          | change_block
+          | section_block
+          | if_block
+          | check_block
+          | each_block
+          | repeat_block
+          | while_block
+          | retrieve_block
+          | find_block
+          | save_block
+          | update_block
+          | remove_block
+          | ai_decide_block
+          | ai_chain_block
+          | try_block
+          | transaction_block
+
+listen_block: LISTEN FOR listener_body* closer
+
+listener_body: new_block
+             | request_block
+             | connection_block
+             | change_block
+             | statement
+
+new_block: NEW SH_REF (AT PATH_LIT)? statement* closer
+AT.2: "at"
+
+request_block: REQUEST FOR SH_REF (AT PATH_LIT)? statement* closer
+
+change_block: CHANGE TO SH_REF statement* closer
+
+connection_block: CONNECTION AT PATH_LIT connection_body* closer
+
+connection_body: on_open_stmt
+               | on_close_stmt
+               | while_active_block
+               | statement
+
+on_open_stmt: ON_OPEN inline_action
+on_close_stmt: ON_CLOSE inline_action
+
+while_active_block: WHILE_ACTIVE statement* closer
+
+if_block: IF condition statement* or_if_clause* otherwise_clause? closer
+
+or_if_clause: OR IF condition statement*
+
+otherwise_clause: OTHERWISE statement*
+
+check_block: CHECK value_expr check_when* otherwise_clause? closer
+
+check_when: WHEN value_expr ("->" | "→")? statement*
+
+each_block: EACH NAME IN value_expr statement* closer
+
+repeat_block: REPEAT value_expr TIMES statement* closer
+
+while_block: WHILE condition statement* closer
+
+section_block: SECTION PATH_LIT statement* closer
+
+// ─── DATA OPERATIONS ──────────────────────────
+
+retrieve_block: RETRIEVE NAME FROM source_ref retrieve_body* result_handlers closer
+
+retrieve_body: match_clause
+             | where_clause
+             | and_clause
+             | order_clause
+             | limit_clause
+             | cache_clause
+             | timespan_ref_clause
+             | EXPECT SH_REF AS NAME
+             | "path" PATH_LIT
+             | "streaming"
+
+find_block: FIND NAME IN source_ref find_body* result_handlers closer
+
+find_body: where_clause
+         | and_clause
+         | order_clause
+         | limit_clause
+         | cache_clause
+         | timespan_ref_clause
+
+save_block: SAVE TO source_ref field_value* closer
+
+field_value: NAME value_expr
+
+update_block: UPDATE source_ref update_body* closer
+update_body: match_clause | field_value
+
+remove_block: REMOVE FROM source_ref match_clause result_handlers closer
+
+match_clause: MATCH NAME IS value_expr
+where_clause: WHERE dotted_name IS value_expr
+and_clause: AND dotted_name (IS | SINCE | "before" | "after") value_expr
+order_clause: ORDER BY dotted_name ("asc" | "desc")?
+limit_clause: LIMIT NUMBER
+            | PULL UP TO NUMBER FROM source_ref
+cache_clause: CACHE FOR duration_expr
+timespan_ref_clause: TIMESPAN NAME
+
+source_ref: DB_REF | dotted_name | NAME
+
+result_handlers: result_handler*
+
+result_handler: on_failure_handler
+              | on_success_handler
+              | on_error_handler
+
+on_failure_handler: ON_FAILURE inline_action? statement*
+on_success_handler: ON_SUCCESS inline_action? statement*
+on_error_handler: ON_ERROR statement*
+
+// ─── AI PRIMITIVES ────────────────────────────
+
+ai_decide_block: AI_DECIDE NAME ("(" arg_list ")")? RETURNS type_name ai_decide_body* closer
+
+ai_decide_body: confidence_check
+              | using_chain
+              | weigh_clause
+              | not_confident_block
+              | on_failure_handler
+              | on_success_handler
+              | on_error_handler
+              | ai_audit_stmt
+              | ai_explain_stmt
+              | statement
+
+confidence_check: CHECK CONFIDENCE ABOVE value_expr
+
+using_chain: USING NAME
+
+weigh_clause: WEIGH weigh_list
+weigh_list: dotted_name ("," dotted_name)*
+
+not_confident_block: NOT CONFIDENT statement*
+
+ai_audit_stmt: AI_AUDIT TO NAME
+
+ai_explain_stmt: AI_EXPLAIN (DECISION NAME)? ai_explain_opt*
+ai_explain_opt: AUDIENCE STRING | FORMAT STRING
+
+ai_chain_block: AI_CHAIN NAME ai_chain_step* closer
+
+ai_chain_step: (TRY | "next.try") NAME ai_chain_step_body*
+ai_chain_step_body: QUALITY ABOVE value_expr
+                  | on_failure_handler
+                  | statement
+
+ai_create_stmt: AI_CREATE ai_create_type value_expr
+ai_create_type: "image" | "audio" | "logic" | "text"
+
+ai_override_stmt: AI_OVERRIDE NAME WITH value_expr
+
+// ─── TRY / CATCH / ALWAYS ─────────────────────
+
+try_block: TRY statement* catch_clause* always_clause?
+
+catch_clause: CATCH catch_type? (AS NAME)? statement*
+catch_type: "timeout" | "any" | NAME
+
+always_clause: ALWAYS statement*
+
+transaction_block: TRANSACTION statement* closer
+
+// ─── ACTION STATEMENTS ────────────────────────
+
+action_stmt: give_back_stmt
+           | jump_to_stmt
+           | halt_stmt
+           | stop_stmt
+           | skip_stmt
+           | show_stmt
+           | send_stmt
+           | broadcast_stmt
+           | stream_stmt
+           | raise_stmt
+           | release_stmt
+           | ai_audit_stmt
+           | ai_explain_stmt
+           | ai_create_stmt
+           | ai_override_stmt
+           | notify_stmt
+           | service_call_stmt
+
+give_back_stmt: GIVE BACK http_status? value_expr give_back_mod?
+give_back_mod: AS NAME | WITH value_expr
+http_status: NUMBER
+
+jump_to_stmt: JUMP TO (PATH_LIT | dotted_name | STRING)
+halt_stmt: HALT
+stop_stmt: STOP
+skip_stmt: SKIP
+
+show_stmt: SHOW value_expr show_mod?
+show_mod: IN dotted_name | AS NAME | WITH value_expr
+
+raise_stmt: RAISE (NAME | AGAIN)? value_expr?
+
+send_stmt: SEND value_expr TO dotted_name
+
+broadcast_stmt: BROADCAST TO ROOM value_expr (EXCEPT dotted_name)?
+
+stream_stmt: STREAM value_expr TO dotted_name
+
+notify_stmt: NOTIFY dotted_name? (WITH)? (VIA NAME)? notify_body*
+notify_body: (TO | FROM | "subject" | "message" | "template") value_expr
+
+release_stmt: RELEASE dotted_name
+            | RELEASE_NOW dotted_name "="? value_expr
+            | RELEASE_LOCK dotted_name "="? value_expr
+
+// Generic service call for mio* builtins: miolog.alert "msg"
+// Only matches dotted names (with a dot) to avoid swallowing keyword-led statements
+service_call_stmt: dotted_name_with_dot value_expr? service_param*
+service_param: NAME value_expr
+
+dotted_name_with_dot: NAME ("." NAME)+
+
+inline_action: give_back_stmt | show_stmt | jump_to_stmt | value_expr
+
+// ─── ASSIGNMENT ───────────────────────────────
+// SET is retired — accepted as noise
+// Only plain NAME (not a keyword) starts an assignment
+
+assignment: SET? NAME (AS type_name)? "="? value_expr
+
+// ─── CONDITIONS ───────────────────────────────
+
+condition: value_expr IS NOT? value_expr        -> cond_is
+         | value_expr CMP_OP value_expr         -> cond_cmp
+         | value_expr ABOVE value_expr          -> cond_above
+         | value_expr BELOW value_expr          -> cond_below
+         | value_expr DOT_STATE                 -> cond_dot_state
+         | NOT condition                        -> cond_not
+         | condition AND condition              -> cond_and
+         | condition OR condition               -> cond_or
+
+BELOW.2: "below"
+
+// ─── VALUE EXPRESSIONS ────────────────────────
+
+value_expr: literal
+          | SH_REF
+          | ENV_REF
+          | SECRET_REF
+          | DB_REF
+          | func_call
+          | dotted_name
+          | math_expr
+          | template_str
+          | list_lit
+          | map_lit
+          | time_expr
+          | datetime_expr
+
+literal: STRING | NUMBER | TRUE | FALSE | NULL_KW | NONE_KW
+
+dotted_name: NAME ("." NAME)*
+
+func_call: dotted_name "(" arg_list? ")"
+arg_list: value_expr ("," value_expr)*
+
+math_expr: "(" math_inner ")"
+math_inner: math_inner MATH_OP math_inner -> math_binop
+          | value_expr                    -> math_val
+
+template_str: TEMPLATE_STR | STRING
+
+list_lit: "[" (value_expr ("," value_expr)*)? "]"
+
+map_lit: "{" (map_entry ("," map_entry)*)? "}"
+map_entry: NAME ("=" | ":") value_expr
+
+// ─── TIME ─────────────────────────────────────
+
+time_expr: NOW_CALL (("-"|"+") duration_expr)?
+         | TODAY | YESTERDAY
+         | LAST_WEEK | LAST_MONTH | LAST_QUARTER | LAST_YEAR
+         | THIS_WEEK | THIS_MONTH | THIS_QUARTER | THIS_YEAR
+         | SINCE time_anchor
+
+time_anchor: NOW_CALL "-" duration_expr | LAST_MONTH | YESTERDAY | LAST_WEEK
+
+datetime_expr: DATE_LIT ("at" TIME_LIT)? NAME?
+             | time_expr
+
+duration_expr: NUMBER time_unit
+
+time_unit: "seconds" | "minutes" | "hours" | "days" | "weeks" | "months" | "years"
+         | "second" | "minute" | "hour" | "day" | "week" | "month" | "year"
+
+// ─── TYPE NAMES ───────────────────────────────
+
+type_name: TYPE_NAME | NAME

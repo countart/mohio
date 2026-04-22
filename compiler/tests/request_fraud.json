@@ -1,0 +1,12 @@
+{
+  "_shape":    "Transaction",
+  "_method":   "POST",
+  "_roles":    ["screener"],
+  "id":        "T2",
+  "amount":    74500,
+  "currency":  "USD",
+  "member_id": "M001",
+  "merchant":  "Unknown Offshore Merchant",
+  "device_id": "D_NEW_UNRECOGNIZED",
+  "timestamp": "2026-04-22"
+}

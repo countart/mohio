@@ -1,0 +1,9 @@
+# Mohio Language Compiler — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Parser
+lark>=1.1.0
+
+# Anthropic API (required for mio run --ai)
+# Bring your own API key: set ANTHROPIC_API_KEY=sk-ant-...
+anthropic>=0.96.0

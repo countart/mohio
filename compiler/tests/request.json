@@ -1,0 +1,12 @@
+{
+  "_shape":    "Transaction",
+  "_method":   "POST",
+  "_roles":    ["screener"],
+  "id":        "T1",
+  "amount":    300,
+  "currency":  "USD",
+  "member_id": "M001",
+  "merchant":  "Amazon",
+  "device_id": "D1",
+  "timestamp": "2026-04-22"
+}

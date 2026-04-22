@@ -1,0 +1,73 @@
+// Mohio Fraud Detection Demo
+// Phase 1 — canonical target program
+
+sector: financial
+
+connect db as postgres from env.DATABASE_URL
+
+hold FRAUD_THRESHOLD 0.85
+hold CTR_THRESHOLD 10000
+lock MAX_VELOCITY 5
+
+shape Transaction
+    id          as text
+    amount      as decimal
+    currency    as text
+    member_id   as text
+    merchant    as text
+    device_id   as text
+    timestamp   as datetime
+shape: done
+
+shape FraudDecision
+    flagged     as boolean
+    score       as decimal
+    reason      as text
+    reviewed_by as text
+shape: done
+
+task clearTransaction(transaction) returns text
+    save to db.cleared_transactions
+        id          transaction.id
+        amount      transaction.amount
+        member_id   transaction.member_id
+        cleared_at  now()
+    save: done
+    give back "Transaction approved"
+clearTransaction: done
+
+listen for
+
+    new sh.Transaction
+        require role "screener" or "system"
+
+        retrieve member from db.members
+            match id is transaction.member_id
+        retrieve: done
+
+        find recent in db.transactions
+            where member_id is transaction.member_id
+            and timestamp since now() - 24 hours
+        find: done
+
+        ai.decide isFraudulent(transaction) returns boolean
+            check confidence above FRAUD_THRESHOLD
+            weigh transaction.amount, transaction.device_id, member.history, recent
+            ai.audit to fraud_audit_log
+            not confident
+                give back 202 "Referred to manual review"
+            on.failure
+                give back 503 "Fraud check unavailable"
+        ai.decide: done
+
+        if isFraudulent is true
+            miolog.alert "High-risk transaction flagged"
+            give back 422 "Transaction blocked pending review"
+        if: done
+
+        result clearTransaction(transaction)
+        give back 200 result
+
+    new: done
+
+listen: done
