@@ -4,38 +4,37 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-*.egg
 *.egg-info/
 dist/
 build/
 .eggs/
+
+# Virtual environments
 venv/
-env/
 .venv/
-pip-log.txt
+env/
+.env/
 
-# Environment / secrets — NEVER commit these
+# Environment / secrets — NEVER commit your API key
 .env
-.env.*
 *.env
+.env.local
 
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
+# SQLite databases (created at runtime)
+*.db
+*.sqlite
+*.sqlite3
 
-# Editor
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Mohio runtime artifacts
 *.mho.cache
-*.audit.log
-mio-debug/
-
-# Node (for future tooling)
-node_modules/
-npm-debug.log
+audit_logs/
