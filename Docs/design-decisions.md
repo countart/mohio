@@ -99,6 +99,21 @@ This is one of the three things that make `ai.decide` a language construct rathe
 
 ---
 
+## ai.chain — Provider Failover and the Loop Problem
+
+**ai.chain** has two distinct failure modes. Both must be understood before using it in any batch or loop operation. Getting this wrong is a billing event at scale, not a performance inconvenience.
+
+**The loop problem.** An unresolved chain inside an each block re-evaluates provider availability on every iteration. 100 records = 100 provider checks. 10,000 records = 10,000 checks. Resolve before the loop. Pay once.
+
+**The mid-loop switch problem.** If a provider fails mid-loop — credits exhausted, rate limit, timeout — a naive implementation switches for that record and then re-checks from scratch on the next one. Record 47 gets GPT-4o. Record 48 checks Claude, fails, switches to GPT-4o again. Every remaining record pays the check-fail-switch cost.
+
+**The correct behavior.** When fallback() fires mid-loop, it updates active_provider in place on the shared chain object. Record 48 reads the already-updated provider. So do 49 through 100. One switch. Zero re-evaluation. The chain never goes backwards.
+
+**on.resolve** is the lock. Declare the chain, call on.resolve before the loop, then process records. Resolution cost: one provider ping. Cost per record: zero.
+mio check warns when an ai.chain appears inside an each block without prior on.resolve. It is a warning, not a compile error. The developer can override it. But it is on record.
+
+---
+
 ## Sector profiles — institutional knowledge as a language feature
 
 `sector: financial` and `sector: healthcare` are the first instance of institutional knowledge built directly into a programming language.
