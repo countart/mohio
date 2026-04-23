@@ -112,6 +112,17 @@ This is one of the three things that make `ai.decide` a language construct rathe
 **on.resolve** is the lock. Declare the chain, call on.resolve before the loop, then process records. Resolution cost: one provider ping. Cost per record: zero.
 mio check warns when an ai.chain appears inside an each block without prior on.resolve. It is a warning, not a compile error. The developer can override it. But it is on record.
 
+```mohio
+ai.chain fraud_checker
+    try "claude-sonnet-4-20250514"
+        quality above 0.75
+    then "gpt-4o"
+        quality above 0.70
+    then "claude-haiku-4-5-20251001"
+    on.resolve
+        miolog.info fraud_checker.active_provider
+ai.chain: done
+```
 ---
 
 ## Sector profiles — institutional knowledge as a language feature
