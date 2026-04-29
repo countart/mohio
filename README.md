@@ -259,16 +259,20 @@ Mohio is the first professional programming language with native multilingual sy
 
 ## Confirmed firsts
 
-These have been independently verified:
+Independently verified with zero prior context. Structural differences — not feature comparisons.
 
 - **First language where `ai.decide` is a compiler-enforced primitive** — not a library call, not middleware, not optional
 - **First language where a missing AI fallback is a build error** — the compiler refuses to build without `not confident`
-- **First language with automatic immutable AI audit trails as a language construct** — not a logging framework
-- **First language where compliance is a declaration** — `sector: financial` / `sector: healthcare` activate full regulatory frameworks
-- **First language where a single shape serves DB, API, UI, and compliance simultaneously**
-- **First professional programming language with native multilingual syntax** — `mio translate` (Scratch is educational; Inform 7 is experimental fiction; Mohio is production)
-- **First language with the Walk-By Test as a formal design constraint** — every keyword is evaluated against it
-
+- **First language with automatic immutable AI audit trails as a language construct** — not a logging framework, not optional
+- **First language where compliance is a declaration** — `sector: financial` / `sector: healthcare` activate full regulatory frameworks in one word
+- **First language where a single shape serves DB, API, UI, and compliance simultaneously** — one declaration, everything reads from it
+- **First language with the Walk-By Test as a formal design constraint** — every keyword, syntax decision, and error message evaluated against it before shipping
+- **First language with Lock Blocks architecture** — `verb: done` named closers make closer mismatches a compile error. Structure that is physically impossible to misinterpret.
+- **First language with straight-line logic** — `on.failure` is the exit ramp, `otherwise` is the safety net. The success path is always a straight line. Business policy, not conditional nesting.
+- **First language where time is a context-aware block primitive** — `timespan` activates its own vocabulary (precision, exclusions, business days) within a named block. Time-series databases handle time as data. Mohio handles time as logic.
+- **First language with a native Right to Be Forgotten verb** — `cm.purge` cascades across all linked stores simultaneously, requires a documented reason, and produces an immutable audit record.
+- **First language where institutional knowledge is an installable package** — `mio install shape clinical-member` brings regulatory rules, not just fields.
+- **First professional programming language with Zero-Drift multilingual syntax** — `mio translate` converts keywords to any supported language. The prefix system never changes — it is the structural guarantee. Scratch is educational. Inform 7 is experimental fiction. Mohio is production.
 ---
 
 ## Current state — Phase 1 complete
@@ -340,25 +344,18 @@ python mio.py run tests\fraud_demo.mho --param _shape=Transaction --param amount
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Language Design Document](docs/LDD.md) | The authoritative language specification — v3.5 |
-| [CLI Reference](docs/cli-reference.md) | Every `mio` command, flag, and exit code |
-| [MoQL Reference](docs/moql.md) | Mohio Query Language — full specification |
-| [Primitives Reference](docs/primitives.md) | All verbs, modifiers, prefixes, and closers |
-| [Sector — Financial](docs/sector-financial.md) | PCI-DSS, SOC2, AML, CTR, ECOA |
-| [Sector — Healthcare](docs/sector-healthcare.md) | HIPAA, HITECH, PHI field types, retention |
-| [Appendix — mioconnect](docs/appendix-01-mioconnect.md) | External service connectors |
-| [Appendix — miomail](docs/appendix-03-miomail.md) | Email — send, queue, receive |
-| [Appendix — mioform](docs/appendix-04-mioform.md) | Form declaration and rendering |
-| [Appendix — mioauth](docs/appendix-05-mioauth.md) | Authentication and authorization |
-| [Appendix — mioschedule](docs/appendix-06-mioschedule.md) | Task scheduling |
-| [Appendix — miocache](docs/appendix-07-miocache.md) | Caching |
-| [Appendix — miolog](docs/appendix-08-miolog.md) | Structured logging and observability |
-| [Appendix — miofile](docs/appendix-09-miofile.md) | Files, directories, cloud storage |
-| [Appendix — miotest](docs/appendix-10-miotest.md) | Testing framework |
-| [Appendix — miostream](docs/appendix-11-miostream.md) | WebSocket, SSE, AI streaming, live media |
-| [Appendix — AI Primitives](docs/appendix-12-ai-primitives.md) | ai.decide, ai.explain, ai.chain, ai.create |
+| Document | Description | Access |
+|----------|-------------|--------|
+| [Language Reference](docs/language-reference.md) | Complete syntax, keywords, modifiers, MoQL, and code examples | Free |
+| [CLI Reference](docs/cli-reference.md) | Every `mio` command, flag, and exit code | Free |
+| [Sector Overview — Financial](docs/sector-financial.md) | What `sector: financial` activates — field types, thresholds, AI constraints | Free |
+| [Sector Overview — Healthcare](docs/sector-healthcare.md) | What `sector: healthcare` activates — PHI types, retention, AI constraints | Free |
+| Language Design Document (LDD) | The authoritative specification — design decisions, compiler internals, full primitive reference | Pioneer Program |
+| Service Appendices (12 volumes) | Full reference for every built-in service — mioauth, miomail, miostream, miotest, and more | Pioneer Program |
+| Certified Sector Profiles | Production-ready `.mho` sector files — legally reviewed, regulatory-updated | Commercial |
+| MoQL Companion | Complete query language guide with sector-specific examples | Pioneer Program |
+
+The language and runtime are open source. The documentation that helps you build production systems with confidence is part of the Pioneer Program — [apply here](https://mohio.io) or email hello@mohio.io.
 
 ---
 
