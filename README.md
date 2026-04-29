@@ -346,16 +346,20 @@ python mio.py run tests\fraud_demo.mho --param _shape=Transaction --param amount
 
 | Document | Description | Access |
 |----------|-------------|--------|
-| [Language Reference](docs/language-reference.md) | Complete syntax, keywords, modifiers, MoQL, and code examples | Free |
-| [CLI Reference](docs/cli-reference.md) | Every `mio` command, flag, and exit code | Free |
+| [Language Reference](docs/mohio-language-reference-v3.6.xlsx) | Complete syntax, keywords, modifiers, MoQL, and code examples — 12-tab Excel reference | Free |
+| [Primitives & Modifiers](docs/mohio-primitives-reference-v3.6.md) | All verbs, prefixes, closers, AI primitives, and retired keywords | Free |
+| [Design Decisions](docs/design-decisions.md) | Every locked language decision — public canon | Free |
+| [Roadmap](docs/roadmap.md) | What is built, what is planned, acquisition horizon | Free |
 | [Sector Overview — Financial](docs/sector-financial.md) | What `sector: financial` activates — field types, thresholds, AI constraints | Free |
 | [Sector Overview — Healthcare](docs/sector-healthcare.md) | What `sector: healthcare` activates — PHI types, retention, AI constraints | Free |
+| CLI Reference | Every `mio` command, flag, and exit code | Free — [mohio.io/docs](https://mohio.io/docs) |
 | Language Design Document (LDD) | The authoritative specification — design decisions, compiler internals, full primitive reference | Pioneer Program |
 | Service Appendices (12 volumes) | Full reference for every built-in service — mioauth, miomail, miostream, miotest, and more | Pioneer Program |
-| Certified Sector Profiles | Production-ready `.mho` sector files — legally reviewed, regulatory-updated | Commercial |
 | MoQL Companion | Complete query language guide with sector-specific examples | Pioneer Program |
+| Certified Sector Profiles | Production-ready `.mho` sector files — legally reviewed, regulatory-updated | Commercial |
 
 The language and runtime are open source. The documentation that helps you build production systems with confidence is part of the Pioneer Program — [apply here](https://mohio.io) or email hello@mohio.io.
+
 
 ---
 
