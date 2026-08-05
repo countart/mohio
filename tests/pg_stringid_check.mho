@@ -1,0 +1,18 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// pg_stringid_check.mho -- string-id smoke test.
+// Run with DATABASE_URL pointing at the Railway Postgres.
+// "X-001" must save and come back. Before the fix a SERIAL id rejected the
+// string with a datatype mismatch and the row vanished (empty / error).
+connect db as postgres from env.DATABASE_URL
+
+save to db.idcheck
+    id "X-001"
+    label "string-id works on this backend"
+save: done
+
+retrieve row from db.idcheck
+    match id to "X-001"
+retrieve: done
+
+show row.label

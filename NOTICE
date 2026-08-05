@@ -1,0 +1,41 @@
+MOHIO — NOTICE
+
+Copyright © 2026 Particular LLC. All rights reserved except as expressly granted under license.
+
+MOHIO(TM) and the MOHIO name and logo are trademarks of Particular LLC. See TRADEMARKS.md
+for the full trademark and brand usage policy.
+
+---
+
+Use of this software is governed by the Business Source License 1.1 included in the LICENSE
+file. The applicable release version, source-control tag, file scope, redistributable
+runtime components, and Change Date for this release are recorded in VERSIONS.md and
+LICENSE-SCOPE.md.
+
+As of the Change Date recorded in VERSIONS.md for this release, or the fourth anniversary
+of this release's first public distribution, whichever comes first, this release converts
+automatically to the GNU Affero General Public License v3.0 or any later version
+(AGPL-3.0-or-later).
+
+---
+
+Certain compiler architecture concepts embodied in this software, including
+compiler-enforced AI safety primitives, sector-activated regulatory compliance
+enforcement, deterministic runtime boundary gates on AI agents, and agent-native
+structured compiler output, are the subject of patent applications filed with the
+United States Patent and Trademark Office by Particular LLC.
+
+---
+
+Reserved commercial offerings of Particular LLC, including MOHIO Enterprise, MOHIO Studio,
+MOHIO Flow, MOHIO hosted and managed services, official sector profiles, official langmaps,
+and other commercial products and services, are identified in
+RESERVED-COMMERCIAL-OFFERINGS.md and are not included in the Licensed Work.
+
+---
+
+Questions about licensing, commercial use, or trademark use may be directed to:
+
+Particular LLC
+legal@particularllc.com
+https://particularllc.com

@@ -1,0 +1,27 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// Mohio README showcase demo -- support ticket escalation
+// Demonstrates: sector: demo_high (community demo profile, not certified), ai.decide,
+// a genuine "not confident" fallback, ai.audit, sqlite (in-memory, --seed).
+// Replaces the week-1 fraud/patient_intake/invoice_saga demos, which required Postgres
+// and declared sector: financial / sector: healthcare -- profiles that load zero rules.
+
+sector: demo_high
+
+connect db as sqlite from env.DATABASE_URL
+
+retrieve ticket from db.tickets
+    match id to "T-1042"
+retrieve: done
+
+ai.decide critical_decision returns boolean
+    check confidence above 0.95
+    weigh ticket.priority_score, ticket.sentiment
+    ai.audit to escalation_audit_log
+    not confident
+        show "Referred to a human agent -- confidence below the sector floor"
+    on.failure
+        show "AI reasoning unavailable"
+ai.decide: done
+
+show "critical_decision complete"

@@ -1,0 +1,105 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+//
+// Mohio Language Pack — tlhIngan Hol (Klingon)
+// maps/en-klingon.langmap
+//
+// Community pack — demonstration only
+// "nuqDaq 'oH puchpa''e'" (Where is the bathroom?)
+// is not in here. But fraud detection is. Priorities.
+//
+// Connectors (on. do. as. is. not. if. with. from. to. in.)
+// are NEVER translated — they are Mohio structure, not vocabulary.
+//
+// Format: english token -> klingon token
+// -> means one direction (English source → Klingon display)
+// <-> means bidirectional (either can be the source)
+//
+
+// Core sector and compliance
+sector          <-> yoS
+financial       <-> Huch
+healthcare      <-> Qel
+connect         <-> muv
+include         <-> contained
+
+// Listening and routing
+listen for      <-> Qoy
+new             <-> chu'
+// at -- protected connector, not translated (route path marker)
+
+// Access control
+require role    <-> poQ ghoj
+or              <-> pagh
+
+// Data operations
+find            <-> Sam
+where           <-> 'e'
+up to           <-> mI'
+order by        <-> rI'
+descending      <-> bIngDaq
+match           <-> nob
+above           <-> law'
+below           <-> puS
+after           <-> 'el
+save to         <-> polHa'
+update          <-> choH
+give back       <-> nobHa'
+
+// Conditions
+check           <-> ngu'
+when            <-> e'
+otherwise       <-> qaSbe'chugh
+unless          <-> 'ach
+
+// AI primitives — note: ai. prefix never changes. Only the word after it.
+// ai.decide, ai.audit, ai.explain, ai.connect — these stay as-is
+// The WORDS inside the block translate
+confidence above    <-> Daj law'
+confidence below    <-> Daj puS
+weigh               <-> ngI'
+not confident       <-> Daj puS qaSbe'
+fallback            <-> lujDI'
+
+// Notifications and logging
+notify              <-> ja'
+via                 <-> lo'
+message             <-> mu'mey
+
+// Status values
+pending             <-> loS
+approved            <-> chaw'
+blocked             <-> botlh
+
+// Shapes and types
+shape               <-> meQ
+as text             <-> mu'mey rur
+as decimal          <-> mI' rur
+as boolean          <-> ghap
+as datetime         <-> poH
+required            <-> poQ
+optional            <-> wIv
+default             <-> motlh
+
+// Variables and holds
+hold                <-> pol
+lock                <-> jon
+
+// Give back with status
+"Transaction approved"   <-> "Duj chaw'lu'"
+"Transaction blocked"    <-> "Duj botlhlu'"
+"Referred to manual review" <-> "loSwI' legh vIneH"
+"Fraud check unavailable"   <-> "quvHa' ngu' chavbe'"
+
+// Expanded set — for a second demonstration program
+show            <-> 'ang
+hide            <-> So'
+page            <-> HaSta
+each            <-> Hoch
+send            <-> ngeH
+count           <-> togh
+first           <-> wa'DIch
+last            <-> Qav
+repeat          <-> qaSqa'
+true            <-> HIja'
+false           <-> ghobe'

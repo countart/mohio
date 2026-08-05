@@ -1,0 +1,11 @@
+{
+  "_shape":    "Transaction",
+  "_method":   "POST",
+  "_roles":    ["screener"],
+  "id":        "T1",
+  "amount":    500,
+  "member_id": "M001",
+  "device_id": "dev-abc",
+  "merchant":  "Coffee Shop",
+  "currency":  "USD"
+}

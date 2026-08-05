@@ -1,0 +1,1554 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// MOHIO ZORK v1.0 — The database IS the game. [current as of 2026-08-03 :: grant role + score-farming guards + escalation mechanism + canon corrections + ejection_rooms create-list fix]
+// 113 rooms, 166 items, 43 puzzles — all in seed_zork.json
+// This file is the router. Add content in the database, not here.
+
+connect db as postgres from env.DATABASE_URL
+
+shape GameCommand
+    command as text required
+shape: done
+
+// AI narrator + resolve_noun now live in journey.mho (auto-applied spine).
+
+include "_cheats.mho"   // easter eggs + extractable cheats (see _cheats.mho)
+
+listen for
+    new sh.GameCommand
+        // Zork is a public game: every visitor is a player. Establish that role
+        // SERVER-side so `require role` is satisfied by a verified grant, not by a
+        // client-asserted `_roles` payload (which the auth rebuild stopped trusting).
+        grant role "player"
+        require role "player"
+        command request.command
+
+        // ── SESSION ──────────────────────────────────────────
+        // 2026-08-04: mio_session is now runtime-owned (see the session-lifecycle brief).
+        // session.id IS the value this cookie carries -- the runtime derives it from the
+        // same incoming cookie this block used to read back, so the check/otherwise dance
+        // was provably redundant once the chicken-and-egg mint bug was fixed. The runtime
+        // now emits the cookie itself on every response, including a same-request
+        // rotation on a real privilege change (grant role above).
+        player_session session.id
+
+        // ── WORLD ───────────────────────────────────────────────
+        // Items are per-session. A player's world is cloned once from the
+        // '__world__' template, so one player taking a treasure can never remove
+        // it from anyone else's game.
+        retrieve mine from db.items
+            match session_id to player_session
+            on.failure
+                retrieve cloned from db.items
+                    sql
+                        INSERT INTO items (session_id, cheat_description, container_open, description, fixed, id, is_container, is_treasure, lit, location, name, score_value, short_name, start_location, takeable, takeable_message, trophy_score)
+                        SELECT {{ player_session }}, cheat_description, container_open, description, fixed, id, is_container, is_treasure, lit, location, name, score_value, short_name, start_location, takeable, takeable_message, trophy_score
+                        FROM items WHERE session_id = '__world__'
+                    sql: done
+                retrieve: done
+        retrieve: done
+
+        trace ""
+
+        // Set defaults FIRST — always run, never skipped
+        current_room    "west_of_house"
+        score           "0"
+        moves           "0"
+        lantern_lit     "false"
+        marble_seen     "false"
+        marble_maze     "false"
+        maze_cheat      "false"
+        marble_broken   "false"
+        compiler_warned "false"
+        architect_sealed      "false"
+        architect_door_open   "false"
+        window_open           "false"
+        cyclops_fled          "false"
+        architect_vision_seen "false"
+        chair_vision_seen     "false"
+        key_dislodged         "false"
+        give_up_count         "0"
+        pending_verb      ""
+        pending_noun      ""
+        pending_canonical ""
+        trace trace & "[defaults room=" & current_room & "]"
+
+        // Override from saved game if one exists
+        retrieve save from db.saved_games
+            match session_id to player_session
+            on.success
+                current_room    save.current_room default "west_of_house"
+                score           save.score default "0"
+                moves           save.moves default "0"
+                lantern_lit     save.lantern_lit default "false"
+                marble_seen     save.marble_seen default "false"
+                marble_maze     save.marble_maze default "false"
+                maze_cheat      save.maze_cheat default "false"
+                marble_broken   save.marble_broken default "false"
+                compiler_warned save.compiler_warned default "false"
+                architect_sealed save.architect_sealed default "false"
+                architect_door_open save.architect_door_open default "false"
+                window_open save.window_open default "false"
+                cyclops_fled save.cyclops_fled default "false"
+                architect_vision_seen save.architect_vision_seen default "false"
+                chair_vision_seen save.chair_vision_seen default "false"
+                key_dislodged save.key_dislodged default "false"
+                give_up_count save.give_up_count default "0"
+                pending_verb      save.pending_verb default ""
+                pending_noun      save.pending_noun default ""
+                pending_canonical save.pending_canonical default ""
+        retrieve: done
+        trace trace & "[restore room=" & current_room & " sess=" & player_session & "]"
+        retrieve probe from db.rooms
+            match id to "west_of_house"
+            on.success trace trace & "[rooms-lit:HIT]"
+            on.failure trace trace & "[rooms-lit:MISS]"
+        retrieve: done
+        retrieve probe2 from db.rooms
+            match id to current_room
+            on.success trace trace & "[rooms-var:HIT]"
+            on.failure trace trace & "[rooms-var:MISS]"
+        retrieve: done
+
+        // ── PERSISTENCE WRAP (staged): everything below runs inside try; the
+        // auto-save in `always` then fires on EVERY give-back return.
+        try
+        // ── PENDING SUGGESTION (yes/no) ──────────────────────
+        // If we previously asked "did you mean X?", a "yes" accepts it
+        // (rewrites the command + self-heals the alias), "no" cancels, and
+        // anything else abandons the suggestion. Pure DB — costs nothing.
+        check pending_canonical
+            when ""
+                pending_active "false"
+            otherwise
+                pending_active "true"
+        check: done
+
+        check pending_active
+            when "true"
+                check command
+                    when "yes"
+                        command pending_verb & " " & pending_canonical
+                        // Self-heal: bank the typed word as an alias, but only
+                        // if it is not already an alias for something else.
+                        retrieve existing from db.item_aliases
+                            match alias to pending_noun
+                            on.failure
+                                save to db.item_aliases
+                                    alias     pending_noun
+                                    item_id   pending_canonical
+                                    canonical pending_canonical
+                                save: done
+                        retrieve: done
+                        pending_verb      ""
+                        pending_noun      ""
+                        pending_canonical ""
+                    when "no"
+                        pending_verb      ""
+                        pending_noun      ""
+                        pending_canonical ""
+                        give back 200 "Okay."
+                    otherwise
+                        pending_verb      ""
+                        pending_noun      ""
+                        pending_canonical ""
+                check: done
+        check: done
+
+        // ── SHORTCUTS ────────────────────────────────────────
+        check command
+            when "n"           command "go north"
+            when "s"           command "go south"
+            when "e"           command "go east"
+            when "w"           command "go west"
+            when "u"           command "go up"
+            when "d"           command "go down"
+            when "north"       command "go north"
+            when "south"       command "go south"
+            when "east"        command "go east"
+            when "west"        command "go west"
+            when "up"          command "go up"
+            when "down"        command "go down"
+            when "ne"          command "go ne"
+            when "nw"          command "go nw"
+            when "se"          command "go se"
+            when "sw"          command "go sw"
+            when "northeast"   command "go ne"
+            when "northwest"   command "go nw"
+            when "southeast"   command "go se"
+            when "southwest"   command "go sw"
+            when "go northeast" command "go ne"
+            when "go northwest" command "go nw"
+            when "go southeast" command "go se"
+            when "go southwest" command "go sw"
+            when "l"           command "look"
+            when "i"           command "inventory"
+            when "look around" command "look"
+            when "where am i"  command "look"
+        check: done
+
+        // ── VERB + NOUN EXTRACTION ───────────────────────────
+        verb ""
+        noun ""
+        verb command before " " default command
+        noun command after " " default ""
+        trace trace & "[extract verb=" & verb & " noun=" & noun & "]"
+
+        // ── VERB ALIAS LOOKUP ────────────────────────────────
+        retrieve alias from db.verb_aliases
+            match alias to verb
+            on.success
+                verb alias.canonical
+                command verb & " " & noun
+        retrieve: done
+
+        // ── NOUN ALIAS LOOKUP ────────────────────────────────
+        // Mirror the verb-alias pattern: rewrite a typed noun (lamp, bird, box)
+        // to the item's canonical short_name (lantern, canary, mailbox) via the
+        // item_aliases table. Exact-match, same proven pattern as verb_aliases.
+        retrieve ialias from db.item_aliases
+            match alias to noun
+            on.success
+                noun ialias.canonical
+        retrieve: done
+
+        // ── TAKE ALL — sweep every takeable item in the room ─
+        // Caught after verb+noun normalization and BEFORE the fuzzy resolver,
+        // so "all" never reaches ai.decide (which returns no response on a
+        // word it cannot resolve). retrieve.all on.failure fires on zero rows.
+        check verb
+            when "take"
+                check noun
+                    when "all"
+                        retrieve.all takeables from db.items
+                            match session_id to player_session
+                            match location to current_room
+                            match takeable to "true"
+                            on.failure give back 200 "There is nothing here to take."
+                        retrieve.all: done
+                        took_text ""
+                        took_score 0
+                        each obj in takeables
+                            update db.items
+                                match session_id to player_session
+                                match id to obj.id
+                                location "inventory"
+                            update: done
+                            obj_score obj.score_value as.int
+                            took_score (took_score + obj_score)
+                            took_text (took_text & obj.name & "\n")
+                        each: done
+                        score_int score as.int
+                        score (score_int + took_score)
+                        moves_int moves as.int
+                        moves (moves_int + 1)
+                        give back 200 ("Taken:" & "\n" & took_text)
+                check: done
+        check: done
+
+        // ── FUZZY NOUN RESOLVER (APPLANG self-healing) ───────
+        // Last resort for item verbs (take/drop) when the typed noun matched
+        // no canonical item AND no alias. Ask the model which PRESENT item was
+        // meant; on confirmation we bank it into item_aliases so the same novel
+        // word only ever costs one AI call. Scoped to take/drop in v1 because
+        // examine/read have puzzle/special targets that must take precedence.
+        check verb
+            when "take" item_verb "true"
+            when "drop" item_verb "true"
+            otherwise   item_verb "false"
+        check: done
+
+        check item_verb
+            when "true"
+                check noun
+                    when ""
+                        needs_resolve "false"
+                    otherwise
+                        retrieve here_item from db.items
+                            match session_id to player_session
+                            match short_name to noun
+                            match any
+                                location to "inventory"
+                                location to current_room
+                            match any: done
+                            on.success needs_resolve "false"
+                            on.failure needs_resolve "true"
+                        retrieve: done
+                check: done
+            otherwise
+                needs_resolve "false"
+        check: done
+
+        check needs_resolve
+            when "true"
+                retrieve candidates from db.items
+                    match session_id to player_session
+                    match any
+                        location to "inventory"
+                        location to current_room
+                    match any: done
+                    on.failure candidates ""
+                retrieve: done
+                ai.decide resolve_noun
+                check resolve_noun
+                    when ""
+                        give back 200 "You don't see anything like that here."
+                    otherwise
+                        pending_verb      verb
+                        pending_noun      noun
+                        pending_canonical resolve_noun
+                        give back 200 ("You don't see that here. Did you mean the " & resolve_noun & "? (yes/no)")
+                check: done
+        check: done
+
+        // ── LOOK + NOUN → EXAMINE ────────────────────────────
+        // "look marble" / "look at marble" means examine, not room look.
+        // "look at X" leaves noun as "at X" — strip the "at ".
+        check verb
+            when "look"
+                check noun
+                    when ""
+                        // bare look — stays as room look
+                        verb "look"
+                    otherwise
+                        // look <something> — treat as examine
+                        verb "examine"
+                        noun noun after "at " default noun
+                check: done
+        check: done
+
+
+        // ── LETTER OPENER THROUGH THE KEYHOLE ────────────────
+        // Escalating attempts if the leaflet isn't positioned first. Three tries
+        // without it and the key is knocked loose out of reach for good -- this
+        // puzzle can be permanently lost, not just blocked. Intercepted here (not
+        // via db.puzzles) because it needs branching on accumulated state across
+        // repeated attempts, which the flat puzzle table can't express.
+        check verb
+            when "push"    lo_verb "true"
+            when "move"    lo_verb "true"
+            when "slide"   lo_verb "true"
+            otherwise      lo_verb "false"
+        check: done
+        check lo_verb
+            when "true"
+                check noun
+                    when "letter opener"
+                        check current_room
+                            when "living_room"
+                                retrieve lo_lost from db.flags
+                                    match session_id to player_session
+                                    match flag_name to "key_lost"
+                                    on.success lo_lost_ok "true"
+                                    on.failure lo_lost_ok "false"
+                                retrieve: done
+                                check lo_lost_ok
+                                    when "true"
+                                        give back 200 "There's nothing left to knock loose. Whatever fell is gone for good."
+                                    otherwise
+                                        retrieve lo_under from db.flags
+                                            match session_id to player_session
+                                            match flag_name to "leaflet_under_door"
+                                            on.success lo_under_ok "true"
+                                            on.failure lo_under_ok "false"
+                                        retrieve: done
+                                        check lo_under_ok
+                                            when "true"
+                                                retrieve loscored from db.flags
+                                                    match session_id to player_session
+                                                    match flag_name to "key_on_leaflet"
+                                                    on.success loscored_ok "true"
+                                                    on.failure loscored_ok "false"
+                                                retrieve: done
+                                                save to db.flags
+                                                    session_id player_session
+                                                    flag_name  "key_on_leaflet"
+                                                save: done
+                                                check loscored_ok
+                                                    when "true"
+                                                        loscore_add "0"
+                                                    otherwise
+                                                        loscore_add "5"
+                                                check: done
+                                                loscore_int score as.int
+                                                loscore_add_int loscore_add as.int
+                                                score       (loscore_int + loscore_add_int)
+                                                give back 200 "You push the letter opener into the keyhole. After a moment you hear a metallic clink -- the key has fallen onto the leaflet on the other side!"
+                                            otherwise
+                                                retrieve lo_p2 from db.flags
+                                                    match session_id to player_session
+                                                    match flag_name to "key_push_2"
+                                                    on.success lo_p2_ok "true"
+                                                    on.failure lo_p2_ok "false"
+                                                retrieve: done
+                                                check lo_p2_ok
+                                                    when "true"
+                                                        save to db.flags
+                                                            session_id player_session
+                                                            flag_name  "key_lost"
+                                                        save: done
+                                                        give back 200 "You give one last push through the keyhole and hear the clink of a key hitting the floor. Shame you can't pull it from under the door."
+                                                    otherwise
+                                                        retrieve lo_p1 from db.flags
+                                                            match session_id to player_session
+                                                            match flag_name to "key_push_1"
+                                                            on.success lo_p1_ok "true"
+                                                            on.failure lo_p1_ok "false"
+                                                        retrieve: done
+                                                        check lo_p1_ok
+                                                            when "true"
+                                                                save to db.flags
+                                                                    session_id player_session
+                                                                    flag_name  "key_push_2"
+                                                                save: done
+                                                                give back 200 "It feels as if you are pushing on something important. There may be a way in after all if you could only get to it..."
+                                                            otherwise
+                                                                save to db.flags
+                                                                    session_id player_session
+                                                                    flag_name  "key_push_1"
+                                                                save: done
+                                                                give back 200 "You push the letter opener through the keyhole but something is blocking it from going in."
+                                                        check: done
+                                                check: done
+                                        check: done
+                                check: done
+                            otherwise
+                                loroom_skip "ok"
+                        check: done
+                    otherwise
+                        lonoun_skip "ok"
+                check: done
+            otherwise
+                loverb_skip "ok"
+        check: done
+
+        // ── COMMAND ROUTER ───────────────────────────────────
+        check verb
+            when ""
+                give back 200 "ready"
+
+            when "look"
+                retrieve room from db.rooms
+                    match id to current_room
+                    on.failure give back 200 ("You are nowhere[look]. " & trace)
+                retrieve: done
+                // Items present in the room, listed under the description.
+                room_items_text ""
+                retrieve.all room_objs from db.items
+                    match session_id to player_session
+                    match location to current_room
+                    match takeable to "true"
+                    on.success
+                        each obj in room_objs
+                            room_items_text (room_items_text & "\n" & "There is a " & obj.name & " here.")
+                        each: done
+                retrieve.all: done
+                // Maze cheat — marble activated, show true paths
+                check maze_cheat
+                    when "true"
+                        check room.cheat_description
+                            when ""
+                                give back 200 (room.description & room_items_text)
+                            otherwise
+                                give back 200 (room.cheat_description & room_items_text)
+                        check: done
+                check: done
+                check room.dark
+                    when "true"
+                        check lantern_lit
+                            when "true"
+                                give back 200 (room.description & room_items_text)
+                            otherwise
+                                give back 200 "It is pitch dark. You are likely to be eaten by a grue."
+                        check: done
+                    otherwise
+                        give back 200 (room.description & room_items_text)
+                check: done
+
+            when "inventory"
+                retrieve.all carrying from db.items
+                    match session_id to player_session
+                    match location to "inventory"
+                    on.failure give back 200 "You are empty-handed."
+                retrieve.all: done
+                inv_text ""
+                each obj in carrying
+                    inv_text (inv_text & obj.name & "\n")
+                each: done
+                give back 200 ("You are carrying:" & "\n" & inv_text)
+
+            when "score"
+                give back 200 "Your score is {{score}} in {{moves}} moves."
+
+            when "cache"
+                give back 200 "APPLANG Cache is active. Novel commands are banked on first use — free on every repeat. Your AI cost scales with novelty, not traffic."
+
+            when "give up"
+                // The pitiful surrender — three-strike escalation ending in a lame death.
+                give_up_int give_up_count as.int
+                give_up_count (give_up_int + 1)
+                check give_up_count
+                    when "1"
+                        give back 200 "Give up? Don't do it! You're standing in the middle of the Great Underground Empire with treasures yet unclaimed — and besides, you're helping build the future just by being here. Shake it off. Onward."
+                    when "2"
+                        give back 200 "The air turns cold. A lattice of glowing code knits itself into a tall, spectacled figure: the Compiler. He studies you with weary patience. 'Giving up,' he says, 'is merely an unhandled exception you have chosen not to catch. There is always a more elegant path. Refactor your approach.' He dissolves into a cloud of unresolved tokens. (You sense he will not intervene a third time.)"
+                    otherwise
+                        // Third strike — the lame death and respawn
+                        give_up_count "0"
+                        current_room "west_of_house"
+                        score "0"
+                        moves "0"
+                        remove from db.saved_games
+                            where session_id is player_session
+                        remove: done
+                        give back 200 "The Compiler reappears, regards you for a long moment, and simply shrugs. 'Ok.' You lie down in the dirt, self-defeated. You stop eating. You stop drinking. Slowly, peacefully, you wither away, while all around you the world keeps growing — new rooms, new code, new adventurers stepping over your bones. Time passes. A great deal of it. — And then, impossibly, you open your eyes. You are standing in an open field west of a white house, with a boarded front door. There is a small mailbox here. Perhaps this time you will not give up."
+                check: done
+
+            when "quit"
+                give back 200 "Your score was {{score}} in {{moves}} moves. Thanks for playing Zork, built with Mohio."
+
+            when "put"
+                // Deposit a treasure in the trophy case (living room). Accepts
+                // "put <treasure>" or "put <treasure> in case"; the is_treasure
+                // gate below rejects non-treasures, so any treasure funnels here.
+                item_name noun before " in " default noun
+                check current_room
+                    when "living_room"
+                        retrieve treasure from db.items
+                            match session_id to player_session
+                            match short_name to item_name
+                            match location to "inventory"
+                            on.failure give back 200 "You aren't carrying that."
+                        retrieve: done
+                        check treasure.is_treasure
+                            when "true"
+                                update db.items
+                                    match session_id to player_session
+                                    match id to treasure.id
+                                    location "trophy_case"
+                                update: done
+                                dep_score treasure.trophy_score as.int
+                                score_int score as.int
+                                score (score_int + dep_score)
+                                retrieve.all in_case from db.items
+                                    match session_id to player_session
+                                    match is_treasure to "true"
+                                    match location to "trophy_case"
+                                    on.failure secured "0"
+                                    on.success secured in_case.count
+                                retrieve.all: done
+                                check secured
+                                    when "20"
+                                        give back 200 ("The " & treasure.name & " settles into the case. That is all twenty treasures of the Great Underground Empire secured." & "\n\n" & "*** You have won ***" & "\n\n" & "Final score: " & score & " in " & moves & " moves.")
+                                    otherwise
+                                        give back 200 ("The " & treasure.name & " settles into the trophy case. (" & secured & " of 20 secured, score " & score & ".)")
+                                check: done
+                            otherwise
+                                give back 200 "Only treasures belong in the trophy case."
+                        check: done
+                    otherwise
+                        // Not the trophy case -- try a generic room puzzle for "put"
+                        // (e.g. "put coal in furnace"). item_name is the part BEFORE
+                        // " in " (the carried item, e.g. "coal"); put_target is the part
+                        // AFTER " in " (the receptacle, e.g. "furnace") -- puzzles match
+                        // on target, and requires_item enforces the carried item below.
+                        put_target noun after " in " default noun
+                        retrieve pputzl from db.puzzles
+                            match room to current_room
+                            match verb to "put"
+                            match target to put_target
+                            on.failure give back 200 "You need to be in the living room, where the trophy case is."
+                        retrieve: done
+                        check pputzl.requires_item
+                            when ""
+                                pitem_skip "ok"
+                            otherwise
+                                retrieve pneeded from db.items
+                                    match session_id to player_session
+                                    match id to pputzl.requires_item
+                                    match location to "inventory"
+                                    on.failure give back 200 pputzl.failure
+                                retrieve: done
+                        check: done
+                        retrieve pscored from db.flags
+                            match session_id to player_session
+                            match flag_name to pputzl.flag_set
+                            on.success pscored_ok "true"
+                            on.failure pscored_ok "false"
+                        retrieve: done
+                        check pputzl.flag_set
+                            when ""
+                                pset_skip "ok"
+                            otherwise
+                                save to db.flags
+                                    session_id player_session
+                                    flag_name  pputzl.flag_set
+                                save: done
+                        check: done
+                        check pscored_ok
+                            when "true"
+                                pputzl_score "0"
+                            otherwise
+                                pputzl_score pputzl.score as.int
+                        check: done
+                        pscore_int   score as.int
+                        score        (pscore_int + pputzl_score)
+                        give back 200 pputzl.success
+                check: done
+
+            when "start"
+                remove from db.saved_games
+                    where session_id is player_session
+                remove: done
+                give back 200 "Game reset. Type 'look' to begin."
+
+            when "go"
+                // Single data-driven movement handler. Exits live in db.exits
+                // (room_id, direction, dest), regenerated from the authoritative
+                // exit_* columns — one lookup replaces the ten direction branches.
+                retrieve exit from db.exits
+                    match room_id to current_room
+                    match direction to noun
+                    on.failure give back 200 "You can't go that way."
+                    on.success
+                        // Data-driven gate: a puzzle that declares it opens this exit keeps
+                        // it shut until that puzzle's flag is set (see db.flags).
+                        retrieve gate_puzzle from db.puzzles
+                            match room to current_room
+                            match opens_exit to noun
+                            on.success
+                                retrieve gate_flag from db.flags
+                                    match session_id to player_session
+                                    match flag_name to gate_puzzle.flag_set
+                                    on.failure give back 200 gate_puzzle.failure
+                                retrieve: done
+                        retrieve: done
+                        // Cyclops reverse: the broken east wall (strange_passage -> west) is a
+                        // passive consequence no puzzle declares, so gate it on cyclops_gone.
+                        check current_room
+                            when "strange_passage"
+                                check noun
+                                    when "west"
+                                        retrieve cyc from db.flags
+                                            match session_id to player_session
+                                            match flag_name to "cyclops_gone"
+                                            on.failure give back 200 "The western wall of the passage is solid, unbroken stone. Nothing short of a panicking cyclops is coming through there."
+                                        retrieve: done
+                                check: done
+                        check: done
+                        current_room exit.dest
+                        moves_int moves as.int
+                        moves     (moves_int + 1)
+                        retrieve dest_room from db.rooms
+                            match id to current_room
+                            on.failure give back 200 "Room not found."
+                        retrieve: done
+                        room_items_text ""
+                        retrieve.all room_objs from db.items
+                            match session_id to player_session
+                            match location to current_room
+                            match takeable to "true"
+                            on.success
+                                each obj in room_objs
+                                    room_items_text (room_items_text & "\n" & "There is a " & obj.name & " here.")
+                                each: done
+                        retrieve.all: done
+                        give back 200 (dest_room.description & room_items_text)
+                retrieve: done
+
+            when "take"
+                // Puzzle-first: a scripted take (e.g. "take skeleton", "take leaflet"
+                // after the key trick) takes priority over plain pickup. If no puzzle
+                // matches this room+target, or its requires_flag isn't met yet, fall
+                // through SILENTLY to ordinary pickup below -- this is not a gate that
+                // blocks the action, it's an enhancement layered on top of it.
+                retrieve tpuzzle from db.puzzles
+                    match room to current_room
+                    match verb to "take"
+                    match target to noun
+                    on.success
+                        check tpuzzle.requires_flag
+                            when ""
+                                treq_ok "true"
+                            otherwise
+                                retrieve treq from db.flags
+                                    match session_id to player_session
+                                    match flag_name to tpuzzle.requires_flag
+                                    on.success treq_ok "true"
+                                    on.failure treq_ok "false"
+                                retrieve: done
+                        check: done
+                        check treq_ok
+                            when "true"
+                                retrieve tscored from db.flags
+                                    match session_id to player_session
+                                    match flag_name to tpuzzle.flag_set
+                                    on.success tscored_ok "true"
+                                    on.failure tscored_ok "false"
+                                retrieve: done
+                                check tpuzzle.flag_set
+                                    when ""
+                                        tset_skip "ok"
+                                    otherwise
+                                        save to db.flags
+                                            session_id player_session
+                                            flag_name  tpuzzle.flag_set
+                                        save: done
+                                check: done
+                                check tscored_ok
+                                    when "true"
+                                        tpuzzle_score "0"
+                                    otherwise
+                                        tpuzzle_score tpuzzle.score as.int
+                                check: done
+                                tscore_int    score as.int
+                                score         (tscore_int + tpuzzle_score)
+                                give back 200 tpuzzle.success
+                        check: done
+                retrieve: done
+                retrieve item from db.items
+                    match session_id to player_session
+                    match short_name to noun
+                    match location to current_room
+                    on.failure give back 200 "You don't see that here."
+                retrieve: done
+                check item.takeable
+                    when "false"
+                        give back 200 "You can't take that."
+                    otherwise
+                        update db.items
+                            match session_id to player_session
+                            match id to item.id
+                            location "inventory"
+                        update: done
+                        item_score  item.score_value as.int
+                        score_int   score as.int
+                        moves_int   moves as.int
+                        score       (score_int + item_score)
+                        moves       (moves_int + 1)
+                        give back 200 "Taken."
+                check: done
+
+            when "drop"
+                retrieve item from db.items
+                    match session_id to player_session
+                    match short_name to noun
+                    match location to "inventory"
+                    on.failure give back 200 "You aren't carrying that."
+                retrieve: done
+                update db.items
+                    match session_id to player_session
+                    match id to item.id
+                    location current_room
+                update: done
+                moves_int moves as.int
+                moves     (moves_int + 1)
+                give back 200 "Dropped."
+
+            when "examine"
+                // Special: the Architect — looking at him in his chamber ejects you.
+                check noun
+                    when "architect"
+                        check current_room
+                            when "architects_chamber"
+                                create list ejection_rooms
+                                    "troll_room"
+                                    "round_room"
+                                    "cellar"
+                                    "maze_1"
+                                    "reservoir_south"
+                                    "temple"
+                                    "coal_mine"
+                                    "dome_room"
+                                create: done
+                                ejected_to random from ejection_rooms
+                                current_room ejected_to
+                                architect_sealed "true"
+                                retrieve dest from db.rooms
+                                    match id to current_room
+                                    on.failure give back 200 "You tumble through darkness and land somewhere unknown. The Architect's chamber is gone."
+                                retrieve: done
+                                give back 200 ("The Architect's head snaps up. His eyes meet yours — and they are not kind. 'NO.' He stands, the chair spinning away behind him, and throws out both arms toward the dead. 'GET OUT!' The troll turns. The cyclops turns. The thief and the ghost turn, and where their faces should be there is only cascading code, and it is all looking at you. The dead surge forward — hands of light and text — and they HURL you backward through the solid wall. You tumble through darkness. Behind you, fading, the heavy CLACK of a mechanical lock sliding home. The clean room is gone, as if it never was. " & dest.description)
+                            otherwise
+                                give back 200 "There is no architect here — only the memory of a figure you may have glimpsed somewhere deeper."
+                        check: done
+                check: done
+                // First — verify the item is present (in room or inventory).
+                // The marble vision must NOT fire unless you actually have it here.
+                retrieve seen from db.items
+                    match session_id to player_session
+                    match short_name to noun
+                    match any
+                        location to "inventory"
+                        location to current_room
+                    match any: done
+                    on.failure give back 200 "You don't see that here."
+                retrieve: done
+                // Item is confirmed present — now handle marble easter egg or generic
+                check noun
+                    when "marble"
+                        // The vision requires the marble IN HAND — the text says
+                        // "in your hand", so it must be carried, not just seen.
+                        check seen.location
+                            when "inventory"
+                                check current_room
+                                    when "maze_1"
+                                        marble_maze "true"
+                                        give back 200 "The green pattern inside the marble is swirling frantically, forming shapes that almost look like arrows. The marble grows warm in your hand. Perhaps a word of power would help."
+                                    when "maze_2"
+                                        marble_maze "true"
+                                        give back 200 "The marble pulses with green light. The pattern forms a clear arrow pointing west. It pulses twice, then settles."
+                                    when "maze_3"
+                                        marble_maze "true"
+                                        give back 200 "The marble flares brightly. The pattern points west insistently. West is the way out."
+                                    otherwise
+                                        check marble_seen
+                                            when "true"
+                                                check marble_maze
+                                                    when "true"
+                                                        give back 200 "The swirling green pattern moves slowly now, as if resting. It remembers what it showed you."
+                                                    otherwise
+                                                        give back 200 "The pattern swirls slowly. It is still waiting. You feel it wants to be somewhere specific."
+                                                check: done
+                                            otherwise
+                                                marble_seen "true"
+                                                give back 200 "You hold the marble up. The green pattern inside quickens. Then the floor is gone. You are suspended in a space that has no walls, no ceiling — only a deep green luminescence swirling around you in slow, enormous currents. You are not falling. You are not afraid, though you know you should be. The currents move through you as much as around you, and for a moment you understand something — not in words, but in the way you understand your own name. You understand that the marble is a key. That it remembers a place. That it will show you the way through, but only if you carry it there, and only if you know the word. The word forms in the swirling light before you. You try to read it. It dissolves. The floor returns. You are sitting on the floor of the room. The marble is in your hand, cool and perfectly still. Somewhere underground, a door you did not know existed is waiting to be found."
+                                        check: done
+                                check: done
+                            otherwise
+                                // Marble seen in room but not yet taken — just the description
+                                give back 200 "A small glass marble. Inside it, a deep green pattern swirls slowly, too slowly, as if it isn't obeying the usual rules. It seems to be waiting for something. You should pick it up."
+                        check: done
+                    otherwise
+                        give back 200 seen.description
+                check: done
+
+            when "read"
+                // Read: a read-puzzle (newspaper, black book — richer text + effects) takes
+                // priority; otherwise show the item's description. The item fallback lives
+                // entirely inside on.failure as a self-contained terminal (retrieve + give back
+                // together) so no binding needs to cross the on.failure boundary.
+                retrieve rpuzzle from db.puzzles
+                    match room to current_room
+                    match verb to "read"
+                    match target to noun
+                    on.failure
+                        retrieve readable from db.items
+                            match session_id to player_session
+                            match short_name to noun
+                            match any
+                                location to "inventory"
+                                location to current_room
+                            match any: done
+                            on.failure give back 200 "There is nothing here to read."
+                            on.success give back 200 readable.description
+                        retrieve: done
+                retrieve: done
+                check rpuzzle.requires_item
+                    when ""
+                        ritem_skip "ok"
+                    otherwise
+                        retrieve rneeded from db.items
+                            match session_id to player_session
+                            match id to rpuzzle.requires_item
+                            match location to "inventory"
+                            on.failure give back 200 rpuzzle.failure
+                        retrieve: done
+                check: done
+                check rpuzzle.requires_flag
+                    when ""
+                        rreq_skip "ok"
+                    otherwise
+                        retrieve rreq from db.flags
+                            match session_id to player_session
+                            match flag_name to rpuzzle.requires_flag
+                            on.failure give back 200 rpuzzle.failure
+                        retrieve: done
+                check: done
+                retrieve rscored from db.flags
+                    match session_id to player_session
+                    match flag_name to rpuzzle.flag_set
+                    on.success rscored_ok "true"
+                    on.failure rscored_ok "false"
+                retrieve: done
+                check rpuzzle.flag_set
+                    when ""
+                        rset_skip "ok"
+                    otherwise
+                        save to db.flags
+                            session_id player_session
+                            flag_name  rpuzzle.flag_set
+                        save: done
+                check: done
+                check rscored_ok
+                    when "true"
+                        rpuzzle_score "0"
+                    otherwise
+                        rpuzzle_score rpuzzle.score as.int
+                check: done
+                rscore_int    score as.int
+                score         (rscore_int + rpuzzle_score)
+                give back 200 rpuzzle.success
+
+            when "open"
+                // Open a container or door. Containers reveal their contents (canonical:
+                // "Opening the mailbox reveals a leaflet"); the contents move into the room
+                // so they become takeable. Doors/exits are handled via the puzzle table.
+                // First: is the target a container item present in this room?
+                retrieve container from db.items
+                    match session_id to player_session
+                    match short_name to noun
+                    match any
+                        location to current_room
+                        location to "inventory"
+                    match any: done
+                    match is_container to "true"
+                    on.failure
+                        // Not a container here — fall back to the puzzle table (doors, etc.)
+                        retrieve opuzzle from db.puzzles
+                            match room to current_room
+                            match verb to "open"
+                            match target to noun
+                            on.failure give back 200 "You can't open that."
+                            on.success
+                                check opuzzle.requires_flag
+                                    when ""
+                                        oreq_skip "ok"
+                                    otherwise
+                                        retrieve oreq from db.flags
+                                            match session_id to player_session
+                                            match flag_name to opuzzle.requires_flag
+                                            on.failure give back 200 opuzzle.failure
+                                        retrieve: done
+                                check: done
+                                retrieve oscored from db.flags
+                                    match session_id to player_session
+                                    match flag_name to opuzzle.flag_set
+                                    on.success oscored_ok "true"
+                                    on.failure oscored_ok "false"
+                                retrieve: done
+                                check opuzzle.flag_set
+                                    when ""
+                                        oset_skip "ok"
+                                    otherwise
+                                        save to db.flags
+                                            session_id player_session
+                                            flag_name  opuzzle.flag_set
+                                        save: done
+                                check: done
+                                check oscored_ok
+                                    when "true"
+                                        opuzzle_score "0"
+                                    otherwise
+                                        opuzzle_score opuzzle.score as.int
+                                check: done
+                                oscore_int    score as.int
+                                score         (oscore_int + opuzzle_score)
+                                give back 200 opuzzle.success
+                        retrieve: done
+                retrieve: done
+                // It's a container — mark it open and reveal contents into the room.
+                update db.items
+                    match session_id to player_session
+                    match id to container.id
+                    container_open "true"
+                update: done
+                update db.items
+                    match session_id to player_session
+                    match location to container.id
+                    location current_room
+                update: done
+                // Use the container's open-puzzle text if one exists (canonical flavor),
+                // otherwise a clean generic reveal.
+                retrieve revealtext from db.puzzles
+                    match room to current_room
+                    match verb to "open"
+                    match target to noun
+                    on.failure give back 200 ("Opening the " & noun & " reveals its contents.")
+                    on.success give back 200 revealtext.success
+                retrieve: done
+
+            when "light"
+                check noun
+                    when "lantern"
+                        retrieve item from db.items
+                            match session_id to player_session
+                            match short_name to noun
+                            match location to "inventory"
+                            on.failure give back 200 "You aren't carrying that."
+                        retrieve: done
+                        lantern_lit "true"
+                        moves_int moves as.int
+                        moves     (moves_int + 1)
+                        give back 200 "The lantern is now on, a steady circle of light pushing back the dark."
+                    when "torch"
+                        retrieve item from db.items
+                            match session_id to player_session
+                            match short_name to noun
+                            match location to "inventory"
+                            on.failure give back 200 "You aren't carrying that."
+                        retrieve: done
+                        lantern_lit "true"
+                        moves_int moves as.int
+                        moves     (moves_int + 1)
+                        give back 200 "The torch flares to life, throwing light and a little heat."
+                check: done
+                // Not a portable light source you carry -- route to the puzzle table
+                // (e.g. "light candles", where the candles are scenery, not inventory).
+                retrieve lpuzzle from db.puzzles
+                    match room to current_room
+                    match verb to "light"
+                    match target to noun
+                    on.failure give back 200 ("You can't light the " & noun & ".")
+                retrieve: done
+                check lpuzzle.requires_item
+                    when ""
+                        litem_skip "ok"
+                    otherwise
+                        retrieve lneeded from db.items
+                            match session_id to player_session
+                            match id to lpuzzle.requires_item
+                            match location to "inventory"
+                            on.failure give back 200 lpuzzle.failure
+                        retrieve: done
+                check: done
+                check lpuzzle.requires_flag
+                    when ""
+                        lreq_skip "ok"
+                    otherwise
+                        retrieve lreq from db.flags
+                            match session_id to player_session
+                            match flag_name to lpuzzle.requires_flag
+                            on.failure give back 200 lpuzzle.failure
+                        retrieve: done
+                check: done
+                retrieve lscored from db.flags
+                    match session_id to player_session
+                    match flag_name to lpuzzle.flag_set
+                    on.success lscored_ok "true"
+                    on.failure lscored_ok "false"
+                retrieve: done
+                check lpuzzle.flag_set
+                    when ""
+                        lset_skip "ok"
+                    otherwise
+                        save to db.flags
+                            session_id player_session
+                            flag_name  lpuzzle.flag_set
+                        save: done
+                check: done
+                check lscored_ok
+                    when "true"
+                        lpuzzle_score "0"
+                    otherwise
+                        lpuzzle_score lpuzzle.score as.int
+                check: done
+                lscore_int    score as.int
+                score         (lscore_int + lpuzzle_score)
+                give back 200 lpuzzle.success
+
+            when "sit"
+                // The throne in the Land of the Dead — forces the vision.
+                check current_room
+                    when "land_of_dead"
+                        check chair_vision_seen
+                            when "true"
+                                give back 200 "You sit again in the throne, but the apparitions do not stir. Whatever was meant to happen here has already happened. You rise."
+                            otherwise
+                                chair_vision_seen "true"
+                                give back 200 "You lower yourself into the throne. Instantly the apparitions close in — cold hands seize your wrists, your shoulders, your head, holding you fast. You cannot move, however hard you struggle. And then you are not struggling, because the vision comes. A man stands before you where there was only void: spectacles, a coffee mug, watching you with a strange proprietorial calm, as if he made all of this. He says nothing for a long moment. Then he presses a card into your mind, if not your hand: mohio.io — discord.gg/9tq7tGSNYE. 'You were never supposed to get this far,' he says, almost to himself. 'Almost no one does.' He studies you the way a builder studies a crack in a wall. And then he is gone, the void is just a void, and the cold hands release you. You can move again. You should rise."
+                        check: done
+                    otherwise
+                        give back 200 "There is nothing here to sit on."
+                check: done
+
+            when "stand"
+                // Rising from the throne dislodges the key.
+                check current_room
+                    when "land_of_dead"
+                        check chair_vision_seen
+                            when "true"
+                                check key_dislodged
+                                    when "true"
+                                        give back 200 "You stand. The throne is just a chair now."
+                                    otherwise
+                                        key_dislodged "true"
+                                        update db.items
+                                            match session_id to player_session
+                                            match id to "mohio_key"
+                                            location "land_of_dead"
+                                        update: done
+                                        give back 200 "You rise from the throne. As you do, something works loose from the chair behind you and falls to the stone floor with a bright metallic clink. It rolls, wobbles, and settles. It looks like a key — though not like any key you have seen. One end is a tight spiral of machined metal. It must have been lodged in the throne. The Architect, wherever he is, did not seem to know it was there."
+                                check: done
+                            otherwise
+                                give back 200 "You are already standing."
+                        check: done
+                    otherwise
+                        give back 200 "You are already standing."
+                check: done
+
+            when "attack"
+                // Combat — dispatches to the puzzle table. requires_item (e.g. the sword)
+                // must be carried; on success the puzzle's flag is set (e.g. troll_dead),
+                // which the GO gate reads to open the exit. Non-lethal: no weapon = no effect.
+                retrieve puzzle from db.puzzles
+                    match room to current_room
+                    match verb to "attack"
+                    match target to noun
+                    on.failure give back 200 "Attacking that accomplishes nothing."
+                retrieve: done
+                check puzzle.requires_item
+                    when ""
+                        weapon_ok "ok"
+                    otherwise
+                        retrieve weapon from db.items
+                            match session_id to player_session
+                            match id to puzzle.requires_item
+                            match location to "inventory"
+                            on.failure give back 200 puzzle.failure
+                        retrieve: done
+                check: done
+                retrieve ascored from db.flags
+                    match session_id to player_session
+                    match flag_name to puzzle.flag_set
+                    on.success ascored_ok "true"
+                    on.failure ascored_ok "false"
+                retrieve: done
+                check ascored_ok
+                    when "true"
+                        puzzle_score "0"
+                    otherwise
+                        puzzle_score puzzle.score as.int
+                check: done
+                score_int    score as.int
+                score        (score_int + puzzle_score)
+                check puzzle.flag_set
+                    when ""
+                        aset_skip "ok"
+                    otherwise
+                        save to db.flags
+                            session_id player_session
+                            flag_name  puzzle.flag_set
+                        save: done
+                check: done
+                give back 200 puzzle.success
+
+            when "say"
+                retrieve puzzle from db.puzzles
+                    match room to current_room
+                    match verb to "say"
+                    match target to noun
+                    on.failure give back 200 ("Nothing happens[puzzle]. " & trace)
+                retrieve: done
+                check puzzle.requires_item
+                    when ""
+                        sitem_skip "ok"
+                    otherwise
+                        retrieve sneeded from db.items
+                            match session_id to player_session
+                            match id to puzzle.requires_item
+                            match location to "inventory"
+                            on.failure give back 200 puzzle.failure
+                        retrieve: done
+                check: done
+                check puzzle.requires_flag
+                    when ""
+                        sreq_skip "ok"
+                    otherwise
+                        retrieve sreq from db.flags
+                            match session_id to player_session
+                            match flag_name to puzzle.requires_flag
+                            on.failure give back 200 puzzle.failure
+                        retrieve: done
+                check: done
+                retrieve sscored from db.flags
+                    match session_id to player_session
+                    match flag_name to puzzle.flag_set
+                    on.success sscored_ok "true"
+                    on.failure sscored_ok "false"
+                retrieve: done
+                check puzzle.flag_set
+                    when ""
+                        sset_skip "ok"
+                    otherwise
+                        save to db.flags
+                            session_id player_session
+                            flag_name  puzzle.flag_set
+                        save: done
+                check: done
+                check sscored_ok
+                    when "true"
+                        spuzzle_score "0"
+                    otherwise
+                        spuzzle_score puzzle.score as.int
+                check: done
+                sscore_int    score as.int
+                score         (sscore_int + spuzzle_score)
+                give back 200 puzzle.success
+
+            when "discord"
+                call egg_discord
+                call: done
+
+            when "mohio"
+                call egg_mohio
+                call: done
+
+            when "mio"
+                call egg_mio
+                call: done
+
+            when "help"
+                give back 200 "Commands: look (l), go [n/s/e/w/u/d], take [item], drop [item], examine (x) [item], inventory (i), score, open, unlock, attack, light, read, say [word], discord, cache, quit, start over. The database is the game — mohio.io"
+
+            // ── TEST / CHEAT COMMANDS ─────────────────────────────
+            // Dev-only helpers to reach and test any puzzle fast. Not advertised in help.
+            // tp <room_id>   — teleport to any room
+            // gimme          — drop all puzzle-required items into inventory
+            // setflag <name> — set a game flag to "true"
+            // puzzles        — list puzzles in the current room
+            when "tp"
+                // teleport: noun is the target room id
+                retrieve target from db.rooms
+                    match id to noun
+                    on.failure give back 200 "No such room: {{noun}}"
+                retrieve: done
+                current_room noun
+                give back 200 ("[TP] Now in {{noun}}.\n\n" & target.description)
+
+            when "gimme"
+                call cheat_gimme
+                call: done
+
+            when "setflag"
+                // Inline for the same reason "tp" is inline: needs router-scope
+                // player_session, which an isolated task cannot see without param
+                // plumbing. Generic -- noun is whatever flag name is typed, nothing
+                // hardcoded here. Dev/test only, not advertised in help.
+                save to db.flags
+                    session_id player_session
+                    flag_name  noun
+                save: done
+                give back 200 ("[SETFLAG] " & noun & " set.")
+
+            when "break"
+                // 'any' room puzzle — break marble
+                retrieve puzzle from db.puzzles
+                    match room to "any"
+                    match verb to "break"
+                    match target to noun
+                    on.failure give back 200 "You can't break that."
+                retrieve: done
+                check puzzle.requires_item
+                    when ""
+                        bitem_skip "ok"
+                    otherwise
+                        retrieve bneeded from db.items
+                            match session_id to player_session
+                            match id to puzzle.requires_item
+                            match location to "inventory"
+                            on.failure give back 200 puzzle.failure
+                        retrieve: done
+                check: done
+                check noun
+                    when "marble"
+                        marble_broken "true"
+                        check puzzle.flag_set
+                            when ""
+                                bmset_skip "ok"
+                            otherwise
+                                save to db.flags
+                                    session_id player_session
+                                    flag_name  puzzle.flag_set
+                                save: done
+                        check: done
+                        give back 200 puzzle.success
+                    otherwise
+                        give back 200 "You can't break that."
+                check: done
+
+            when "kick"
+                // 'any' room puzzle — compiler appears if warned
+                check compiler_warned
+                    when "true"
+                        retrieve puzzle from db.puzzles
+                            match room to "any"
+                            match verb to "kick"
+                            on.failure give back 200 "You kick at the air. Nothing happens."
+                        retrieve: done
+                        check puzzle.flag_set
+                            when ""
+                                kvset_skip "ok"
+                            otherwise
+                                save to db.flags
+                                    session_id player_session
+                                    flag_name  puzzle.flag_set
+                                save: done
+                        check: done
+                        update db.items
+                            match session_id to player_session
+                            match id to "compiler_warning"
+                            location current_room
+                        update: done
+                        give back 200 puzzle.success
+                    otherwise
+                        compiler_warned "true"
+                        give back 200 "You kick at nothing in particular. A faint voice somewhere whispers: 'That command fails the Walk-By Test.' You feel watched."
+                check: done
+
+            otherwise
+                // The Architect's door is the ONE unlock that moves the player and can be
+                // sealed forever. Every other unlock (the gothic door) falls through to the
+                // generic puzzle path below, which enforces the key and sets the flag.
+                check current_room
+                    when "strange_passage"
+                        check verb
+                            when "unlock"
+                                check architect_sealed
+                                    when "true"
+                                        give back 200 "Where the rusted door stood there is now only seamless stone. The brass plate, the spiral keyhole — gone, as if they were never there. The Architect does not wish to be seen again."
+                                    otherwise
+                                        retrieve akey from db.items
+                                            match session_id to player_session
+                                            match id to "mohio_key"
+                                            match location to "inventory"
+                                            on.failure give back 200 "The door does not budge. The spiral keyhole catches the light as you touch it — patient, expectant. It is waiting for something shaped to match it. Something you may already have seen."
+                                        retrieve: done
+                                        architect_door_open "true"
+                                        current_room "architects_chamber"
+                                        retrieve adest from db.rooms
+                                            match id to "architects_chamber"
+                                            on.failure give back 200 "The door opens onto humming light."
+                                        retrieve: done
+                                        give back 200 ("The swirl key slides into the spiral keyhole as if poured there. A deep mechanism turns — once, twice — and the rusted door swings inward without a sound. " & adest.description)
+                                check: done
+                            otherwise
+                                arch_skip "ok"
+                        check: done
+                    otherwise
+                        arch_skip "ok"
+                check: done
+                // Puzzle handler — fully data-driven
+                retrieve puzzle from db.puzzles
+                    match room to current_room
+                    match verb to verb
+                    match target to noun
+                    on.failure
+                        // APPLANG cache — check db first, AI only on miss
+                        retrieve cached from db.ai_cache
+                            match command to command
+                            match room to current_room
+                            on.failure
+                                ai.decide narrator
+                                // Empty-guard: if the AI fell back / returned nothing, give a
+                                // sensible default and do NOT cache the empty (caching an empty
+                                // would poison every future identical command).
+                                check narrator
+                                    when ""
+                                        give back 200 ("Nothing happens[narrator]. " & trace)
+                                    otherwise
+                                        save to db.ai_cache
+                                            command    command
+                                            room       current_room
+                                            response   narrator
+                                            model      "claude-sonnet-4-6"
+                                            use_count  0
+                                            created_at now()
+                                        save: done
+                                        give back 200 narrator
+                                check: done
+                        retrieve: done
+                        uc_int    cached.use_count as.int
+                        update db.ai_cache
+                            match command to command
+                            match room to current_room
+                            use_count (uc_int + 1)
+                        update: done
+                        give back 200 cached.response
+                retrieve: done
+                // ── ESCALATING FAILURE (opt-in via puzzle.hint_2) ────
+                // A puzzle with hint_2 set uses a 3-strike escalation on its
+                // requires_flag precondition instead of a flat failure message:
+                // attempt 1 -> puzzle.failure, attempt 2 -> puzzle.hint_2,
+                // attempt 3 -> puzzle.permanent_failure AND the puzzle becomes
+                // permanently unsolvable. Fully data-driven -- set hint_2 and
+                // permanent_failure on any puzzle row to opt in; every other
+                // puzzle is completely unaffected.
+                check puzzle.hint_2
+                    when ""
+                        esc_active "false"
+                    otherwise
+                        esc_active "true"
+                check: done
+                check esc_active
+                    when "true"
+                        retrieve elost from db.flags
+                            match session_id to player_session
+                            match flag_name to (puzzle.id & "_lost")
+                            on.success elost_ok "true"
+                            on.failure elost_ok "false"
+                        retrieve: done
+                        check elost_ok
+                            when "true"
+                                give back 200 puzzle.permanent_failure
+                            otherwise
+                                retrieve emet from db.flags
+                                    match session_id to player_session
+                                    match flag_name to puzzle.requires_flag
+                                    on.success emet_ok "true"
+                                    on.failure emet_ok "false"
+                                retrieve: done
+                                check emet_ok
+                                    when "false"
+                                        retrieve etry2 from db.flags
+                                            match session_id to player_session
+                                            match flag_name to (puzzle.id & "_try2")
+                                            on.success etry2_ok "true"
+                                            on.failure etry2_ok "false"
+                                        retrieve: done
+                                        check etry2_ok
+                                            when "true"
+                                                save to db.flags
+                                                    session_id player_session
+                                                    flag_name (puzzle.id & "_lost")
+                                                save: done
+                                                give back 200 puzzle.permanent_failure
+                                            otherwise
+                                                retrieve etry1 from db.flags
+                                                    match session_id to player_session
+                                                    match flag_name to (puzzle.id & "_try1")
+                                                    on.success etry1_ok "true"
+                                                    on.failure etry1_ok "false"
+                                                retrieve: done
+                                                check etry1_ok
+                                                    when "true"
+                                                        save to db.flags
+                                                            session_id player_session
+                                                            flag_name (puzzle.id & "_try2")
+                                                        save: done
+                                                        give back 200 puzzle.hint_2
+                                                    otherwise
+                                                        save to db.flags
+                                                            session_id player_session
+                                                            flag_name (puzzle.id & "_try1")
+                                                        save: done
+                                                        give back 200 puzzle.failure
+                                                check: done
+                                        check: done
+                                    otherwise
+                                        esc_pass_skip "ok"
+                                check: done
+                        check: done
+                    otherwise
+                        esc_skip "ok"
+                check: done
+                // Prerequisite gate: if this puzzle needs an earlier flag, enforce it.
+                check puzzle.requires_flag
+                    when ""
+                        req_skip "ok"
+                    otherwise
+                        retrieve req from db.flags
+                            match session_id to player_session
+                            match flag_name to puzzle.requires_flag
+                            on.failure give back 200 puzzle.failure
+                        retrieve: done
+                check: done
+                // Item gate: if this puzzle needs an item, the player must be carrying it.
+                // Without this a locked door announces it opens while you hold no key.
+                check puzzle.requires_item
+                    when ""
+                        item_skip "ok"
+                    otherwise
+                        retrieve needed from db.items
+                            match session_id to player_session
+                            match id to puzzle.requires_item
+                            match location to "inventory"
+                            on.failure give back 200 puzzle.failure
+                        retrieve: done
+                check: done
+                retrieve gscored from db.flags
+                    match session_id to player_session
+                    match flag_name to puzzle.flag_set
+                    on.success gscored_ok "true"
+                    on.failure gscored_ok "false"
+                retrieve: done
+                check gscored_ok
+                    when "true"
+                        puzzle_score "0"
+                    otherwise
+                        puzzle_score puzzle.score as.int
+                check: done
+                score_int    score as.int
+                moves_int    moves as.int
+                score        (score_int + puzzle_score)
+                moves        (moves_int + 1)
+                // ── PUZZLE EFFECTS ────────────────────────────────────
+                // Set this puzzle's flag; the GO gate reads it to open the exit.
+                check puzzle.flag_set
+                    when ""
+                        set_skip "ok"
+                    otherwise
+                        save to db.flags
+                            session_id player_session
+                            flag_name  puzzle.flag_set
+                        save: done
+                check: done
+                // The leaflet trick actually hands over the skeleton key. The success text
+                // says "the key comes with it" -- make that true.
+                check puzzle.flag_set
+                    when "skeleton_key_found"
+                        update db.items
+                            match session_id to player_session
+                            match id to "skeleton_key"
+                            location "inventory"
+                        update: done
+                    otherwise
+                        grant_skip "ok"
+                check: done
+                // Generic teleport effect: any puzzle whose opens_exit is EMPTY (so it is
+                // not a directional gate) but whose exit_dest IS set moves the player
+                // there directly. Data-driven -- no room name is hardcoded here; a puzzle
+                // row (e.g. "touch mirror", "pray") declares its own destination.
+                check puzzle.opens_exit
+                    when ""
+                        check puzzle.exit_dest
+                            when ""
+                                teleport_skip "ok"
+                            otherwise
+                                current_room puzzle.exit_dest
+                        check: done
+                    otherwise
+                        gate_skip "ok"
+                check: done
+                give back 200 puzzle.success
+        check: done
+
+        always
+        // ── AUTO-SAVE ─────────────────────────────────────────
+        upsert db.saved_games
+            match session_id to player_session
+            current_room  current_room
+            score         score
+            moves         moves
+            lantern_lit   lantern_lit
+            marble_seen     marble_seen
+            marble_maze     marble_maze
+            maze_cheat      maze_cheat
+            marble_broken    marble_broken
+            compiler_warned  compiler_warned
+            architect_sealed architect_sealed
+            architect_door_open architect_door_open
+            window_open window_open
+            cyclops_fled cyclops_fled
+            architect_vision_seen architect_vision_seen
+            chair_vision_seen chair_vision_seen
+            key_dislodged key_dislodged
+            give_up_count give_up_count
+            pending_verb      pending_verb
+            pending_noun      pending_noun
+            pending_canonical pending_canonical
+        upsert: done
+        try: done
+
+    new: done
+listen: done

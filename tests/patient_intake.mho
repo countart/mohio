@@ -1,0 +1,145 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// patient_intake.mho
+// Mohio Demo -- Healthcare Sector
+//
+// A patient intake and triage system.
+// Demonstrates: sector: healthcare, HIPAA enforcement, shapes with PHI fields,
+// ai.decide for clinical triage, human review gates, check/when/otherwise.
+//
+// sector: healthcare activates automatically:
+//   - HIPAA and HITECH compliance
+//   - PHI field type awareness (mrn, dob, diagnosis, etc.)
+//   - 6-year retention on all PHI
+//   - 0.95 minimum confidence on clinical AI decisions
+//   - Audit logging on every PHI field access
+//   - MFA required for all clinical roles
+//
+// Run:
+//   mio run patient_intake.mho --request-file tests/request_intake.json --seed tests/seed_healthcare.json --ai --verbose
+
+sector: healthcare
+
+connect db as postgres from env.DATABASE_URL
+
+//  SHAPES ------------------------------------------------------------------------
+//
+// The shape is simultaneously the database schema, API contract,
+// frontend validation rules, and HIPAA field classifier.
+// mrn, dob, and patient_name are auto-tagged [phi] by sector: healthcare.
+
+shape Patient
+    id              as uuid         required    default uuid()
+    mrn             as text         required
+    patient_name    as text         required
+    dob             as text         required
+    insurance_id    as text         required
+    primary_concern as text         required
+    vitals_temp     as decimal
+    vitals_hr       as integer
+    triage_level    as integer
+    assigned_to     as text
+    status          as text         default "waiting"
+    created_at      as datetime     default now()
+    retain for 6 years
+shape: done
+
+shape TriageDecision
+    patient_id      as uuid         required
+    triage_level    as integer      required
+    reasoning       as text         required
+    confidence      as decimal      required
+    requires_human  as boolean      default true
+    reviewed_by     as text
+shape: done
+
+// ENTRY POINT ---------------------------------------------------------------------
+//
+// listen for declares a permanent standing listener.
+// new sh.Patient fires when a new patient shape arrives.
+// HTTP method is never declared -- the verb is the intent.
+
+listen for
+
+    new sh.Patient
+        require role "intake_staff" or "clinician" or "system"
+
+        // Save the incoming patient record.
+        // PHI fields are encrypted at rest automatically by sector: healthcare.
+        save to db.patients
+            id              patient.id
+            mrn             patient.mrn
+            patient_name    patient.patient_name
+            dob             patient.dob
+            insurance_id    patient.insurance_id
+            primary_concern patient.primary_concern
+            vitals_temp     patient.vitals_temp
+            vitals_hr       patient.vitals_hr
+            status          "waiting"
+            created_at      now()
+        save: done
+
+        //  TRIAGE ASSESSMENT ---------------------------------------------------
+        //
+        // ai.decide is a language construct -- not a function call.
+        // sector: healthcare enforces 0.95 minimum confidence on clinical decisions.
+        // The compiler refuses to build without a not confident block.
+        // ai.audit writes an immutable record -- inputs, output, confidence, model.
+        // ai.audit must appear before not confident -- required order.
+
+        ai.decide assess_triage returns text
+            confidence above 0.95
+            weigh patient.primary_concern, patient.vitals_temp, patient.vitals_hr, patient.dob
+            ai.audit to phi_audit_log
+            not confident
+                // Below 0.95 -- too uncertain for an AI-only clinical decision.
+                // Flag for human review. Never leave a patient in limbo.
+                update db.patients
+                    status "needs_triage_review"
+                    match id to patient.id
+                update: done
+                miolog.alert "AI triage below confidence threshold -- manual assessment required"
+                give back 202 "Referred to charge nurse for manual triage"
+            on.failure
+                give back 503 "Triage service unavailable"
+        ai.decide: done
+
+        //  ACT ON THE TRIAGE DECISION ------------------------------------
+        //
+        // check/when/otherwise -- the canonical multi-condition branch.
+        // One block. Three outcomes. No if statements.
+
+        check assess_triage
+            when "immediate"
+                miolog.alert "Immediate triage required"
+                update db.patients
+                    status          "in_triage"
+                    triage_level    1
+                    match id to patient.id
+                update: done
+            when "urgent"
+                update db.patients
+                    status          "in_triage"
+                    triage_level    3
+                    match id to patient.id
+                update: done
+            when "standard"
+                update db.patients
+                    status          "waiting"
+                    triage_level    4
+                    match id to patient.id
+                update: done
+            otherwise
+                miolog.warn "Unrecognised triage level -- defaulting to manual review"
+                update db.patients
+                    status "needs_triage_review"
+                    match id to patient.id
+                update: done
+        check: done
+
+        miolog.info "Patient intake complete"
+        give back 200 "Patient registered and triaged"
+
+    new: done
+
+listen: done

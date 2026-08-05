@@ -1,0 +1,59 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// particularllc-skeleton.mho
+//
+// A minimal, VERIFIED skeleton for rebuilding particularllc.com in Mohio.
+// Serves a custom home at / and each section as a `page` route, plus the one
+// dynamic piece (the news/articles pull) as a `find` inside a page. This is the
+// exact structure the site needs: static pages + one dynamic list.
+//
+// Run:   python mio.py serve examples/particularllc-skeleton.mho
+//
+// IMPORTANT: paths after `at` are UNQUOTED path literals -- `page at /about`,
+// never `page at "/about"`. A quoted path does not register and the page will
+// not serve. (This is the one catch; a grammar change to also accept the quoted
+// form is a separate item.)
+
+connect db as sqlite from env.DATABASE_URL
+
+// ── Home (served at / -- the custom home route works today) ──────────────────
+page at /
+    give back 200 "<h1>Particular LLC</h1>
+<p>Software, publishing, and consulting. Mooresville, NC.</p>
+<ul>
+  <li><a href=\"/software\">Software (led by Mohio)</a></li>
+  <li><a href=\"/publishing\">Publishing (Particular Reads)</a></li>
+  <li><a href=\"/consulting\">Consulting (ExecutiveKT)</a></li>
+  <li><a href=\"/news\">News</a></li>
+</ul>"
+page: done
+
+// ── Static section pages ─────────────────────────────────────────────────────
+page at /software
+    give back 200 "<h1>Software</h1><p>Led by Mohio, an AI-native language.</p>"
+page: done
+
+page at /publishing
+    give back 200 "<h1>Publishing</h1><p>Particular Reads.</p>"
+page: done
+
+page at /consulting
+    give back 200 "<h1>Consulting</h1><p>ExecutiveKT. Reach us at hello@particularllc.com.</p>"
+page: done
+
+// ── News: the one dynamic piece (replaces articles.php) ──────────────────────
+// Find published articles newest-first, build the list, serve it. This is the
+// GATHER -> ACT arc with no AI in the middle.
+page at /news
+    find posts in db.articles
+        where published is true
+        order.down by id
+    find: done
+
+    hold html "<h1>News</h1>"
+    repeat each p in posts
+        html (html & "<article><h2>" & p.title & "</h2><p>" & p.summary & "</p></article>")
+    repeat: done
+
+    give back 200 html
+page: done

@@ -1,0 +1,11 @@
+{
+  "tickets": [
+    {
+      "id": "T-1042",
+      "customer": "Jordan Rivera",
+      "priority_score": "72",
+      "sentiment": "frustrated",
+      "description": "Third contact this week about the same billing charge."
+    }
+  ]
+}

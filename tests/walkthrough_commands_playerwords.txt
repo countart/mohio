@@ -1,0 +1,163 @@
+ne
+east
+open window
+west
+west
+take lantern
+light lantern
+take sword
+move rug
+open trapdoor
+east
+take matches
+east
+east
+north
+east
+down
+down
+se
+sw
+west
+up
+west
+west
+west
+west
+south
+south
+east
+down
+take bell
+take book
+ring bell
+read book
+south
+take diamond
+north
+up
+north
+north
+north
+east
+take bar
+up
+nw
+north
+north
+take jewels
+north
+take trident
+north
+north
+north
+west
+down
+up
+take painting
+east
+east
+east
+take bauble
+up
+open egg
+take canary
+take egg
+down
+south
+north
+east
+north
+east
+east
+take figurine
+east
+north
+down
+take bracelet
+east
+north
+south
+north
+take scarab
+north
+east
+down
+north
+west
+west
+east
+take coins
+take skull
+south
+west
+take gold
+up
+sw
+east
+south
+se
+take violin
+up
+take chalice
+take emerald
+take coin
+down
+nw
+south
+west
+up
+south
+down
+north
+up
+up
+north
+east
+south
+north
+sw
+west
+up
+west
+west
+west
+west
+se
+east
+down
+down
+down
+take coffin
+open coffin
+take sceptre
+up
+south
+down
+north
+north
+north
+west
+west
+south
+up
+put painting in case
+put egg in case
+put sceptre in case
+put violin in case
+put diamond in case
+put canary in case
+put emerald in case
+put gold in case
+put skull in case
+put coin in case
+put coins in case
+put jewels in case
+put chalice in case
+put coffin in case
+put bar in case
+put figurine in case
+put scarab in case
+put trident in case
+put bauble in case
+put bracelet in case

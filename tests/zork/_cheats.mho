@@ -1,0 +1,94 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// cheats.mho — easter eggs + extractable cheats for Zork, kept in their own include page.
+// Pulled in by `include "cheats.mho"` in zork_demo.mho. Isolating them here makes
+// gating/stripping before release a one-file job. (tp stays in the router: it mutates
+// router-scope current_room and would not persist as an isolated task.)
+
+task egg_discord
+        give back 200 "A shimmering portal appears. Through it you hear voices discussing code. The URL resolves: discord.gg/9tq7tGSNYE — the Mohio community awaits."
+task: done
+
+task egg_mohio
+        give back 200 "You said the magic word. Something underground stirs. Find the swirling marble and carry it to the maze."
+task: done
+
+task egg_mio
+        give back 200 "[mio check] tests/zork/zork_demo.mho — 0 errors. 24 puzzles active. APPLANG cache running. The dungeon is structurally sound."
+task: done
+
+task cheat_gimme
+        // Load all 13 puzzle-required items into inventory at once.
+        update db.items
+            match session_id to player_session
+            match id to "bell"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "black_book"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "brass_key"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "coal"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "food"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "leaflet"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "letter_opener"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "marble"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "matches"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "mohio_key"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "rope"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "skeleton_key"
+            location "inventory"
+        update: done
+        update db.items
+            match session_id to player_session
+            match id to "sword"
+            location "inventory"
+        update: done
+        give back 200 "[GIMME] All 13 puzzle items are now in your inventory."
+task: done
+
+task cheat_setflag
+        // Flag system isn't wired yet (Batch 2b). For now this is a no-op stub that
+        // acknowledges — real flag-gated puzzle testing waits for the flag engine.
+        give back 200 "[SETFLAG] Flag engine not wired yet (Batch 2b). Use gimme + tp to reach item-gated puzzles for now."
+task: done

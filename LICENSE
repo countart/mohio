@@ -1,0 +1,266 @@
+# Business Source License 1.1
+
+# Mohio Public Core License Parameters
+
+**Document Version:** Draft v0.6   
+**Prepared for:** Mohio Public Core releases  
+**Licensor:** Particular LLC, a North Carolina limited liability company  
+**Legal Contact:** legal@particularllc.com  
+**Website:** https://particularllc.com
+
+## Important Notice
+
+This License governs only the Licensed Work expressly identified below and in the applicable `LICENSE-SCOPE.md` file for a release. It does not grant rights to MOHIO trademarks, logos, brand assets, hosted services, enterprise services, private repositories, official paid services, official langmaps, certified/custom sector profiles, signing keys, proprietary backends, or other materials not expressly included in the Licensed Work.
+
+MOHIO is developed as an open-core language platform. This License is intended to permit broad use of the Mohio Public Core for building and running applications while reserving commercial licensing for Mohio-as-a-platform, hosted runtime/compiler/server/studio offerings, competing platform offerings, certified/custom sector profiles, official langmaps, advanced compliance/audit/governance services, and enterprise components.
+
+## Licensed Work
+
+The “Licensed Work” means the Mohio Public Core, consisting only of the Mohio compiler, Mohio command-line tooling, Mohio public runtime components, public examples, and other source files expressly identified as licensed under the Business Source License 1.1 in the `LICENSE-SCOPE.md` file included with each applicable release.
+
+The Licensed Work does not include, unless expressly identified in `LICENSE-SCOPE.md` for the applicable release:
+
+- MOHIO Enterprise components;
+- commercial or enterprise runtime modules;
+- hosted platform services or service backends;
+- official paid langmap services, paid langmap packages, or official langmap marketplaces;
+- official sector profiles, certified profiles, custom profiles, compliance profiles, policy packs, certification packs, or profile-generation systems;
+- advanced compliance, audit, certification, entitlement, governance, or policy-control services;
+- model-routing, cost-optimization, inference-control, or governed-agent services not expressly included in the public release;
+- connectors, connector marketplaces, managed integration services, or enterprise integration services not expressly included in the public release;
+- MOHIO Studio, MOHIO Flow, MOHIO Enterprise, MOHIO Cloud, MOHIO Hosting, MOHIO Server, MOHIO University, MohioU, Get Mohio, or other separately offered Particular LLC products or services;
+- trademarks, logos, brand assets, domain names, certification marks, compatibility marks, or trust marks;
+- private repositories, internal tools, signing keys, credentials, deployment infrastructure, commercial control planes, or proprietary commercial services.
+
+Copyright © 2026 Particular LLC. All rights reserved except as expressly granted under this License.
+
+## Version and Scope Records
+
+This License applies separately to each version of the Licensed Work released by Particular LLC under the Business Source License 1.1. The applicable release version, release date, source-control tag, file scope, redistributable runtime components, and Change Date should be recorded in `VERSIONS.md`, `LICENSE-SCOPE.md`, and, where applicable, an authenticated release manifest.
+
+## Change Date
+
+Four years from the date each specific version of the Licensed Work is first publicly distributed under this License, unless a shorter Change Date is specified in `VERSIONS.md` for that version.
+
+The Change Date for each release should be recorded in `VERSIONS.md` in the repository.
+
+## Change License
+
+GNU Affero General Public License version 3.0 or any later version (`AGPL-3.0-or-later`).  
+https://www.gnu.org/licenses/agpl-3.0.html
+
+## Additional Use Grant
+
+Subject to all terms and conditions of this License, Particular LLC grants you permission to make Production Use of the Licensed Work solely for Permitted Application Use, as defined below.
+
+No Production Use is granted except as expressly stated in this Additional Use Grant or in a separate written commercial license from Particular LLC.
+
+## 1. Permitted Application Use
+
+“Permitted Application Use” means using the Licensed Work, or a modified version or derivative work that is not a Compliance-Reduced Build, Circumvention Build, Hosted Mohio Service, Standalone Mohio Offering, Competing Mohio Offering, or Commercial Mohio Platform, to:
+
+(a) develop, compile, interpret, test, operate, and maintain Applications;
+
+(b) make internal Production Use of Applications within your organization and entities that control, are controlled by, or are under common control with your organization;
+
+(c) host and operate Applications for customers or other third parties, provided the hosted offering is the Application itself and does not provide general-purpose access to MOHIO compilation, interpretation, runtime execution, deployment, hosting, serving, management, development-tooling, profile marketplace, langmap marketplace, compliance services, audit services, certification services, or app-serving-platform capabilities;
+
+(d) license, sell, or otherwise distribute Applications to customers or end users, provided that the Application is not a Hosted Mohio Service, Standalone Mohio Offering, Competing Mohio Offering, Commercial Mohio Platform, Compliance-Reduced Build, or Circumvention Build;
+
+(e) reproduce and distribute Runtime Components in object-code form solely as incorporated into, and reasonably necessary to operate, an Application, provided that you comply with the notice and license-display requirements of this License and the runtime distribution scope in `LICENSE-SCOPE.md` for the applicable release; and
+
+(f) connect an Application to official MOHIO services, paid services, langmap services, sector profile services, compliance services, audit services, entitlement services, APIs, marketplaces, certification services, or managed services only as permitted by the applicable service terms, subscription terms, commercial agreement, enterprise agreement, or written authorization from Particular LLC.
+
+You may modify the Licensed Work and make Production Use of the modified version under this Additional Use Grant only if the modified version remains within Permitted Application Use and is not used for any Excluded Production Use.
+
+For clarity, this License is intended to allow you to build, run, host, and sell your own Applications using the Mohio Public Core. It is not intended to allow you to offer Mohio itself, or a substantially similar compiler, runtime, hosted service, server, app-serving platform, studio, IDE, profile marketplace, langmap marketplace, certification service, compliance service, audit service, managed runtime, or competing language platform, without a separate written commercial license from Particular LLC.
+
+## 2. Excluded Production Uses
+
+No Production Use is granted under this Additional Use Grant for any of the following uses. A separate written commercial license from Particular LLC is required for any such Production Use:
+
+(i) a Hosted Mohio Service;
+
+(ii) a Standalone Mohio Offering;
+
+(iii) a Competing Mohio Offering;
+
+(iv) a Commercial Mohio Platform;
+
+(v) a Compliance-Reduced Build;
+
+(vi) a Circumvention Build;
+
+(vii) a paid, subscription, supported, hosted, managed, service-bureau, timesharing, marketplace, consulting-delivery, or commercial service that allows third parties to submit, compile, interpret, execute, deploy, host, serve, manage, test, debug, optimize, profile, transform, translate, audit, certify, validate, or operate arbitrary Mohio source code or Mohio programs;
+
+(viii) a hosted compiler, hosted interpreter, hosted runtime, app server, managed execution service, development environment, IDE, studio, app-serving platform, profile marketplace, langmap marketplace, connector marketplace, audit service, compliance service, certification service, training platform, or managed platform whose primary or material functionality is based on the Licensed Work or provides MOHIO as a platform;
+
+(ix) redistribution, sublicensing, resale, rental, leasing, managed-service use, timesharing, service-bureau use, consulting-delivery use, or commercial operation of the Licensed Work as a product, platform, runtime, compiler, interpreter, server, developer tool, studio, app-serving system, hosted service, or managed service rather than as an incidental runtime component of an Application permitted by Section 1;
+
+(x) removal, bypass, disabling, weakening, alteration, substitution, or circumvention of service gates, entitlement checks, subscription checks, paid-feature checks, certification checks, signature checks, audit controls, compliance controls, langmap access controls, profile access controls, sector-profile controls, usage limits, official service calls, or other protected functionality;
+
+(xi) use of the Licensed Work to create, train, benchmark, validate, operate, support, or improve a product or service intended to replace, replicate, compete with, or provide a substitute for a MOHIO product or service offered, commercially released, publicly announced, or expressly identified by Particular LLC in `RESERVED-COMMERCIAL-OFFERINGS.md` as a reserved commercial offering, including MOHIO Enterprise, MOHIO Studio, MOHIO Flow, MOHIO Cloud, MOHIO Hosting, MOHIO Server, Get Mohio, official langmap services, official sector profile services, official compliance services, official audit services, certification services, managed runtime services, or commercial platform services;
+
+(xii) use of the Licensed Work to provide custom compiler files, modified runtime files, modified interpreter files, stripped compliance controls, disabled audit controls, altered sector-profile behavior, modified profile loaders, unofficial certification tooling, hosted app-serving systems, or managed Mohio execution services to customers or third parties as a product or service;
+
+(xiii) any use that violates applicable service terms, subscription terms, enterprise terms, profile terms, langmap terms, API terms, certification terms, trademark terms, or written agreements with Particular LLC.
+
+Contact legal@particularllc.com for commercial licensing.
+
+## 3. Definitions
+
+### 3.1 Production Use
+
+“Production Use” means use of the Licensed Work for internal business operations, revenue-generating activity, customer-facing operations, delivery of products or services to third parties, hosted services, managed services, commercial distribution, or any use other than development, testing, evaluation, demonstration, education, research, or other non-production use already permitted by this License.
+
+### 3.2 Application
+
+“Application” means a software program, product, or service developed by or for you that uses the Licensed Work but whose primary purpose is to provide functionality other than general-purpose compilation, interpretation, execution, deployment, hosting, serving, management, development, transformation, translation, certification, auditing, compliance verification, app-serving, or operation of Mohio source code or Mohio programs for third parties.
+
+An Application may be commercial, customer-facing, hosted, or distributed, provided that it does not become a Hosted Mohio Service, Standalone Mohio Offering, Competing Mohio Offering, Commercial Mohio Platform, Compliance-Reduced Build, or Circumvention Build.
+
+### 3.3 Runtime Components
+
+“Runtime Components” means the portions of the Licensed Work expressly identified as redistributable runtime components in `LICENSE-SCOPE.md` included with the applicable release.
+
+### 3.4 Hosted Mohio Service
+
+“Hosted Mohio Service” means a hosted service, managed service, platform, API, app server, cloud service, development environment, IDE, studio, marketplace, training environment, or other service through which a third party can submit, compile, interpret, execute, deploy, host, serve, test, debug, manage, translate, transform, optimize, profile, certify, audit, validate, or otherwise operate arbitrary Mohio source code or Mohio programs, or otherwise obtain general-purpose access to the material compiler, interpreter, runtime, deployment, hosting, serving, app-serving, development-tool, profile, langmap, compliance, audit, certification, or management capabilities of the Licensed Work.
+
+A service is not a Hosted Mohio Service merely because an Application built with the Licensed Work is hosted, is customer-facing, or exposes an application-specific API. A feature limited to configuring or extending the specific business functionality of an Application is not a Hosted Mohio Service unless it provides general-purpose access to Mohio compilation, interpretation, execution, deployment, hosting, serving, runtime management, profile management, langmap management, audit services, compliance services, certification services, or app-serving-platform functionality.
+
+### 3.5 Standalone Mohio Offering
+
+“Standalone Mohio Offering” means a product or service offered to third parties in which the Licensed Work, or a derivative work of it, is separately accessible or is a principal component providing general-purpose Mohio compilation, interpretation, execution, runtime, deployment, hosting, serving, app-serving, development-tool, profile, langmap, compliance, audit, certification, translation, transformation, or management functionality, rather than an incidental component of an Application.
+
+### 3.6 Competing Mohio Offering
+
+“Competing Mohio Offering” means any product or service that is marketed, provided, sold, distributed, hosted, supported, or made available as a practical substitute for a MOHIO product or service offered, commercially released, publicly announced, or expressly identified by Particular LLC in `RESERVED-COMMERCIAL-OFFERINGS.md` as a reserved commercial offering, including MOHIO Enterprise, MOHIO Studio, MOHIO Flow, MOHIO Cloud, MOHIO Hosting, MOHIO Server, Get Mohio, official langmap services, official sector profile services, official compliance services, official audit services, certification services, managed runtime services, or commercial platform services.
+
+A product or service may be a Competing Mohio Offering even if it is offered without charge, offered through a different interface, offered on a different technical platform, offered as a consulting deliverable, offered as a managed service, offered as part of a larger platform, or described using different terminology.
+
+For clarity, a product or service is not a Competing Mohio Offering merely because it is an Application built with the Licensed Work and provides application-specific functionality to end users, provided that the product or service remains within Permitted Application Use and does not provide MOHIO itself as a hosted compiler, runtime, interpreter, server, studio, development environment, managed platform, profile marketplace, langmap marketplace, compliance service, audit service, certification service, or substantially similar language platform.
+
+### 3.7 Commercial Mohio Platform
+
+“Commercial Mohio Platform” means any paid, subscription, hosted, managed, customer-facing, marketplace, service-bureau, timesharing, resale, sublicensing, consulting-delivery, supported, or commercial offering that provides MOHIO compilation, interpretation, execution, deployment, hosting, serving, app-server, app-serving, development-tooling, studio, IDE, langmap, sector profile, compliance, audit, certification, connector, managed runtime, or platform capabilities to third parties as a material feature of the offering.
+
+### 3.8 Official Release
+
+“Official Release” means the unmodified release of the Licensed Work first publicly distributed by Particular LLC and identified by its release version, release manifest, authenticated source-control tag, and applicable `LICENSE-SCOPE.md`.
+
+### 3.9 Official Control Materials
+
+“Official Control Materials” means the control manifests, control tests, release manifests, signature files, certification materials, profile manifests, langmap manifests, policy files, entitlement descriptors, and other materials identified by Particular LLC as official control materials for the applicable Official Release.
+
+### 3.10 Designated Control
+
+“Designated Control” means a compiler, interpreter, runtime, audit, compliance, certification, entitlement, profile, sector-profile, langmap, signature, diagnostic, or service-enforcement mechanism identified as a Designated Control in the Official Control Materials for the applicable Official Release.
+
+### 3.11 Normative Control Test
+
+“Normative Control Test” means a test, expected result, test identifier, validation rule, certification rule, compliance rule, audit rule, diagnostic rule, profile rule, sector-profile rule, langmap rule, or runtime rule designated as normative in the Official Control Materials for the applicable Official Release.
+
+### 3.12 Compliance-Reduced Build
+
+“Compliance-Reduced Build” means a modified version or derivative work of the Licensed Work that, under materially equivalent supported inputs, configuration, dependencies, profiles, langmaps, official control materials, and operating conditions, does one or more of the following:
+
+1. causes a Designated Control to fail an applicable Normative Control Test;
+2. permits compilation, interpretation, execution, storage, transmission, deletion, disclosure, completion, certification, validation, approval, or app-serving of an operation that the Official Release would reject, block, fail, warn against, flag, restrict, audit, log, or require to be handled solely because of an applicable Designated Control;
+3. removes, disables, bypasses, weakens, masks, substitutes, or changes from mandatory to optional a Designated Control that is mandatory in the Official Release under the same applicable profile, sector profile, langmap, documented configuration, or official control material;
+4. suppresses, falsifies, materially alters, materially delays, omits, or misrepresents a required audit event, compliance result, diagnostic, failure, warning, policy result, profile result, sector-profile result, langmap result, certification result, control-status output, entitlement result, or signature result produced by a Designated Control;
+5. introduces an undocumented mechanism, configuration, code path, hook, dependency substitution, runtime condition, profile substitution, sector-profile substitution, langmap substitution, entitlement bypass, signing-key substitution, external service substitution, or alternate control material that produces any result described in paragraphs 1 through 4; or
+6. represents, markets, supports, distributes, hosts, or operates the modified version as preserving official compliance, certification, audit, compatibility, langmap, profile, sector-profile, or runtime status when it does not pass all applicable Normative Control Tests.
+
+A build is not a Compliance-Reduced Build solely because its source-code or object-code hashes differ from the Official Release.
+
+A modification that affects only unrelated functionality, strengthens a Designated Control, corrects a defect, improves diagnostics, improves security, or improves reliability is not a Compliance-Reduced Build if the modified build continues to pass all applicable Normative Control Tests and remains at least as restrictive as the Official Release with respect to the applicable Designated Controls.
+
+Use of a configuration option expressly permitted by the Official Control Materials and official documentation for the applicable release does not, by itself, create a Compliance-Reduced Build.
+
+Modification, replacement, or removal of a local copy of the Official Control Materials does not alter which controls and tests apply to the applicable Official Release.
+
+### 3.13 Circumvention Build
+
+“Circumvention Build” means a modified version or derivative work of the Licensed Work, or any associated code, patch, plugin, script, service, configuration, documentation, instruction, or mechanism, designed or used to bypass, disable, avoid, remove, replace, weaken, defeat, or circumvent service gates, entitlement checks, subscription checks, paid-feature checks, certification checks, signature checks, audit controls, compliance controls, langmap access controls, sector profile access controls, usage limits, official service calls, or protected functionality.
+
+A separate written commercial license from Particular LLC is required for Production Use of any Licensed Work in connection with a Circumvention Build.
+
+## 4. Application Code, User Code, and Output
+
+Particular LLC claims no copyright ownership in source code, application code, data, prompts, configuration, outputs, artifacts, or other original material created by you merely because it was authored in, processed by, compiled by, interpreted by, executed using, transformed by, served by, or operated with the Licensed Work.
+
+Any portion of the Licensed Work copied into, linked into, embedded in, packaged with, distributed with, or required to operate an Application remains subject to this License.
+
+## 5. Commercial Services, Official Profiles, and Official Langmaps
+
+Official MOHIO services, paid services, hosted services, enterprise services, managed services, official langmaps, official sector profiles, certified profiles, custom profiles, compliance profiles, policy packs, profile-generation systems, certification services, official connectors, and advanced compliance, audit, entitlement, cost-optimization, governance, or profile services are not included in this License unless expressly identified in `LICENSE-SCOPE.md` for the applicable release.
+
+Access to those services or materials requires the applicable service terms, subscription terms, commercial agreement, enterprise agreement, profile terms, langmap terms, API terms, certification terms, or written authorization from Particular LLC.
+
+## 6. Trademarks and Brand Policy
+
+No trademark license is granted by this License. Permitted trademark uses, if any, are described in `TRADEMARKS.md`. Nothing in that policy limits any use permitted by applicable law.
+
+MOHIO is a trademark of Particular LLC. U.S. trademark application pending. miotranslate™ is a claimed trademark of Particular LLC. Just be Particular™ is a claimed trademark of Particular LLC; registration is pending or has been filed, and the ® symbol should not be used unless and until registration issues for the applicable goods or services.
+
+You may not use MOHIO, Mohio, miotranslate, Just be Particular, any MOHIO logo, any official profile/certification mark, or any confusingly similar mark to identify, market, support, sell, host, distribute, or promote any modified, unofficial, competing, compliance-reduced, circumvention, standalone, hosted, managed, or commercial platform offering except as expressly permitted in writing by Particular LLC.
+
+## 7. Patents
+
+Particular LLC has filed or may file provisional patent applications and other patent applications covering aspects of MOHIO technology, including aspects of the compiler, runtime, audit, compliance, governance, profile, langmap, cost, inference, and agent-control systems.
+
+Subject to your compliance with this License, Particular LLC covenants not to assert its patent claims against your Permitted Application Use of the Licensed Work as distributed by Particular LLC under this License, solely to the extent such patent claims are necessarily infringed by that Permitted Application Use of the Licensed Work. This covenant does not apply to Excluded Production Uses, Commercial Mohio Platforms, Hosted Mohio Services, Standalone Mohio Offerings, Competing Mohio Offerings, Compliance-Reduced Builds, Circumvention Builds, official services, enterprise components, separately licensed commercial components, or any use outside the scope expressly granted by this License.
+
+Rights not expressly granted are reserved. Particular LLC may provide additional patent covenants, patent license terms, or patent policy statements in `PATENT-POLICY.md`, commercial agreements, enterprise agreements, or other written terms.
+
+## 8. Notice and License Display
+
+Each original or modified copy of the Licensed Work must conspicuously display this License and any notices required by the Business Source License 1.1 terms, `LICENSE-SCOPE.md`, `NOTICE`, `TRADEMARKS.md`, or applicable release materials.
+
+If you distribute an Application containing Runtime Components, you must include the notices required by `LICENSE-SCOPE.md` and any applicable release materials.
+
+## 9. Suggested Short Notice
+
+```text
+Use of this software is governed by the Business Source License included in the LICENSE file.
+Copyright © 2026 Particular LLC. All rights reserved except as expressly granted.
+```
+
+---
+
+# Business Source License 1.1 Terms
+
+License text copyright © 2017 MariaDB Corporation Ab, All Rights Reserved. "Business Source License" is a trademark of MariaDB Corporation Ab.
+
+## Terms
+
+The Licensor hereby grants you the right to copy, modify, create derivative works, redistribute, and make non-production use of the Licensed Work. The Licensor may make an Additional Use Grant, above, permitting limited production use.
+
+Effective on the Change Date, or the fourth anniversary of the first publicly available distribution of a specific version of the Licensed Work under this License, whichever comes first, the Licensor hereby grants you rights under the terms of the Change License, and the rights granted in the paragraph above terminate.
+
+If your use of the Licensed Work does not comply with the requirements currently in effect as described in this License, you must purchase a commercial license from the Licensor, its affiliated entities, or authorized resellers, or you must refrain from using the Licensed Work.
+
+All copies of the original and modified Licensed Work, and derivative works of the Licensed Work, are subject to this License. This License applies separately for each version of the Licensed Work and the Change Date may vary for each version of the Licensed Work released by Licensor.
+
+You must conspicuously display this License on each original or modified copy of the Licensed Work. If you receive the Licensed Work in original or modified form from a third party, the terms and conditions set forth in this License apply to your use of that work.
+
+Any use of the Licensed Work in violation of this License will automatically terminate your rights under this License for the current and all other versions of the Licensed Work.
+
+This License does not grant you any right in any trademark or logo of Licensor or its affiliates (provided that you may use a trademark or logo of Licensor as expressly required by this License).
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS, EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND TITLE.
+
+MariaDB hereby grants you permission to use this License's text to license your works, and to refer to it using the trademark "Business Source License", as long as you comply with the Covenants of Licensor below.
+
+## Covenants of Licensor
+
+In consideration of the right to use this License's text and the "Business Source License" name and trademark, Licensor covenants to MariaDB, and to all other recipients of the licensed work to be provided by Licensor:
+
+1. To specify as the Change License the GPL Version 2.0 or any later version, or a license that is compatible with GPL Version 2.0 or a later version, where "compatible" means that software provided under the Change License can be included in a program with software provided under GPL Version 2.0 or a later version. Licensor may specify additional Change Licenses without limitation.
+
+2. To either: (a) specify an additional grant of rights to use that does not impose any additional restriction on the right granted in this License, as the Additional Use Grant; or (b) insert the text "None".
+
+3. To specify a Change Date.
+
+4. Not to modify this License in any other way.

@@ -1,0 +1,13 @@
+{
+  "_shape":       "Order",
+  "_method":      "POST",
+  "_roles":       ["customer"],
+  "id":           "O1",
+  "customer_id":  "M001",
+  "subtotal":     100.00,
+  "tax":          8.00,
+  "total":        108.00,
+  "currency":     "USD",
+  "product_id":   "P1",
+  "status":       "pending"
+}

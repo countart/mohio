@@ -1,0 +1,62 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+//
+// Mohio Language Pack — Emoji
+// maps/en-emoji.langmap
+//
+// Community pack — demonstration only. Yes, you can write Mohio in emoji.
+// Connectors (on. as. is. not. at. etc.) are NEVER translated.
+// Keywords are space-separated, so emoji tokens bound cleanly.
+//
+// Format: english <-> emoji   (bidirectional)
+//
+
+version = "1.0"
+
+// Core
+sector        <-> 🏷
+financial     <-> 💰
+healthcare    <-> 🏥
+connect       <-> 🔌
+include       <-> 📎
+
+// Routing and pages
+listen for    <-> 👂
+new           <-> ✨
+page          <-> 📄
+show          <-> 👁
+hide          <-> 🙈
+
+// Data
+find          <-> 🔍
+where         <-> 📍
+save to       <-> 💾
+update        <-> 🔄
+give back     <-> 🔙
+match         <-> 🎯
+
+// Conditions
+check         <-> 🔎
+when          <-> ⏰
+otherwise     <-> 🔀
+unless        <-> ⛔
+
+// Actions
+notify        <-> 🔔
+message       <-> 💬
+send          <-> 📤
+
+// Status
+pending       <-> ⏳
+approved      <-> ✅
+blocked       <-> 🚫
+
+// Shapes and vars
+shape         <-> 📐
+task          <-> 🛠
+hold          <-> 📌
+required      <-> ❗
+
+// Booleans
+true          <-> 👍
+false         <-> 👎

@@ -1,0 +1,37 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// contact.mho — a complete, deployable contact form
+// Serve with:  mio serve examples/contact.mho
+// Needs in the environment:
+//   DATABASE_URL   the Postgres connection string (Railway provides this)
+//   MOHIO_SECRET   any long random string (signs the CSRF token)
+
+connect db as postgres from env.DATABASE_URL
+
+shape Contact
+    name    as text required label "Your name"
+    email   as text required format "email"
+    message as text required error "Tell us what you need"
+shape: done
+
+listen for
+    request for sh.Contact at /contact
+        render
+            <h1>Get in touch</h1>
+            <p>We read every message.</p>
+            {{ form sh.Contact }}
+        render: done
+    request: done
+
+    new sh.Contact at /contact
+        save to db.messages
+            name    contact.name
+            email   contact.email
+            message contact.message
+        save: done
+        render
+            <h1>Thanks, {{ contact.name }}</h1>
+            <p>Your message is in. We'll be in touch at {{ contact.email }}.</p>
+        render: done
+    new: done
+listen: done

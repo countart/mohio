@@ -1,0 +1,103 @@
+{
+  "Task with take/give back": {
+    "prefix": "task",
+    "body": [
+      "task ${1:name}",
+      "\ttake ${2:a} as ${3:int}",
+      "\tgive back ${4:result}",
+      "task: done"
+    ],
+    "description": "A task: declares inputs with take, output with give back"
+  },
+  "Shape": {
+    "prefix": "shape",
+    "body": [
+      "shape ${1:Name}",
+      "\t${2:field} as ${3:text}",
+      "shape: done"
+    ],
+    "description": "A shape (a structured record)"
+  },
+  "Check / when / otherwise": {
+    "prefix": "check",
+    "body": [
+      "check ${1:value}",
+      "\twhen ${2:is more than 10}",
+      "\t\t${3:show \"high\"}",
+      "\totherwise",
+      "\t\t${4:show \"low\"}",
+      "check: done"
+    ],
+    "description": "A decision block (no-IF)"
+  },
+  "Repeat each": {
+    "prefix": "each",
+    "body": [
+      "repeat each ${1:item} in ${2:list}",
+      "\t${3:show ${1:item}}",
+      "repeat: done"
+    ],
+    "description": "Loop over a list"
+  },
+  "Save to db": {
+    "prefix": "save",
+    "body": [
+      "save to db.${1:table}",
+      "\t${2:field} ${3:value}",
+      "save: done"
+    ],
+    "description": "Write a record"
+  },
+  "Find in db": {
+    "prefix": "find",
+    "body": [
+      "find ${1:rows} in db.${2:table}",
+      "\tmatch ${3:field} to ${4:value}",
+      "find: done"
+    ],
+    "description": "Read many rows"
+  },
+  "Retrieve one (with not-found)": {
+    "prefix": "retrieve",
+    "body": [
+      "retrieve ${1:row} from db.${2:table}",
+      "\tmatch ${3:field} to ${4:value}",
+      "\ton.failure",
+      "\t\tgive back 404 \"${5:not found}\"",
+      "retrieve: done"
+    ],
+    "description": "Read one row, fail loud if absent"
+  },
+  "Listen for (route)": {
+    "prefix": "listen",
+    "body": [
+      "listen for",
+      "\tnew sh.${1:Shape}",
+      "\t\t${2:save to db.records}",
+      "\t\t\t${3:field} ${1:Shape:lower}.${3:field}",
+      "\t\tsave: done",
+      "listen: done"
+    ],
+    "description": "A standing listener / route"
+  },
+  "ai.decide": {
+    "prefix": "aidecide",
+    "body": [
+      "ai.decide ${1:decision}",
+      "\tconsider ${2:the inputs}",
+      "\tfallback ${3:safe default}",
+      "ai.decide: done"
+    ],
+    "description": "An AI reasoning primitive (fallback is mandatory)"
+  },
+  "Create list": {
+    "prefix": "createlist",
+    "body": [
+      "create list ${1:items}",
+      "\t${2:\"first\"}",
+      "\t${3:\"second\"}",
+      "create: done"
+    ],
+    "description": "Build a populated list"
+  }
+}

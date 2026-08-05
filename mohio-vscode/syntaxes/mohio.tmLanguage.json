@@ -1,0 +1,85 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mohio",
+  "scopeName": "source.mohio",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#closers" },
+    { "include": "#block-openers" },
+    { "include": "#namespaces" },
+    { "include": "#casts" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.mohio", "match": "//.*$" },
+        { "name": "comment.block.mohio", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.mohio",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.mohio", "match": "\\\\." },
+        {
+          "name": "meta.interpolation.mohio",
+          "begin": "\\{\\{",
+          "end": "\\}\\}",
+          "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.mohio" } },
+          "endCaptures": { "0": { "name": "punctuation.section.embedded.end.mohio" } },
+          "patterns": [
+            { "name": "variable.other.mohio", "match": "[A-Za-z_][A-Za-z0-9_.]*" }
+          ]
+        }
+      ]
+    },
+    "closers": {
+      "match": "\\b(shape|task|journey|page|module|contract|saga|step|create|listen|check|repeat|while|loop|try|catch|find|retrieve|save|update|remove|render|validate|sql)\\s*(:\\s*done)\\b",
+      "captures": {
+        "1": { "name": "keyword.control.block.mohio" },
+        "2": { "name": "keyword.control.block.mohio" }
+      }
+    },
+    "block-openers": {
+      "match": "^\\s*(shape|task|journey|page|module|contract|saga|step|create|listen|check|repeat|while|loop|try|catch|find|retrieve|save|update|remove|render|validate|sql)\\b",
+      "captures": {
+        "1": { "name": "keyword.control.block.mohio" }
+      }
+    },
+    "namespaces": {
+      "name": "support.function.namespace.mohio",
+      "match": "\\b(ai|cm|mioai|mioauth|miocache|miochain|miocookie|miodata|miofile|miograph|miohttp|mioimage|mioknow|miolog|miomail|miopdf|mioprint|miopublish|miopush|mioresponse|mioschedule|miosecurity|miostream|miosys|miotest|miotranslate|miovault|db|sh)\\.[a-z_]+"
+    },
+    "casts": {
+      "name": "support.function.cast.mohio",
+      "match": "\\b(as|round|order|match|on|do|is|in)\\.[a-z0-9.]+"
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.mohio", "match": "\\b(when|otherwise|unless|if|else|each|stop|skip|times|compensate)\\b" },
+        { "name": "keyword.declaration.mohio", "match": "\\b(take|give|back|hold|lock|field|default|returns|connect|list)\\b" },
+        { "name": "keyword.operator.data.mohio", "match": "\\b(where|match|order|add|append|prepend|calculate)\\b" },
+        { "name": "keyword.other.mohio", "match": "\\b(call|show|use|include|raise|new|require|role)\\b" },
+        { "name": "keyword.operator.word.mohio", "match": "\\b(is|and|or|not|above|below|between|more|less|than|all|any|first|last|position|pos|to|of|for|in|at|by|with)\\b" }
+      ]
+    },
+    "types": {
+      "name": "storage.type.mohio",
+      "match": "\\b(text|int|integer|dec|decimal|boolean|json|list|USD|CAD|EUR|GBP)\\b"
+    },
+    "constants": {
+      "name": "constant.language.mohio",
+      "match": "\\b(true|false|null|none|empty)\\b"
+    },
+    "numbers": {
+      "name": "constant.numeric.mohio",
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+    }
+  }
+}

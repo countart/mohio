@@ -1,0 +1,13 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// README illustration -- a deliberately-broken ai.decide, missing its "not confident" block.
+// Shows the real mio check output referenced in the README's "compiler refuses to build
+// without a fallback" section. Deliberately does not parse clean; carved out of the corpus
+// gate by living in tests/ (see tests/test_corpus_parses.py's own docstring).
+
+priority_score 72
+
+ai.decide critical_decision returns boolean
+    check confidence above 0.85
+    weigh priority_score
+ai.decide: done

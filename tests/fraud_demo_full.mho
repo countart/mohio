@@ -1,0 +1,353 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// fraud_demo_full.mho
+// Mohio Fraud Detection -- Full Demo
+// Demonstrates every major Mohio pattern in one compliance-grade application.
+//
+// Patterns: sector: financial, three-layer progressive resolution,
+// CTR threshold, velocity/structuring detection, ai.decide, ai.explain,
+// ai.override, ai.audit, give back random, learning loop, notification chain,
+// miocache, shapes, MioQL, task, mioai.resolve (CANDIDATE)
+//
+// Walk-By Test: a compliance officer can audit this file.
+// An engineer can understand it in five minutes.
+// A manager can read it cold.
+
+sector: financial
+
+//  CONNECTIONS ---------------------------------------------------------------------
+connect db as postgres
+    from env.DATABASE_URL
+connect: done
+
+connect email as sender
+    from env.MAIL_PROVIDER
+    key secret.MAIL_API_KEY
+connect: done
+
+mioconnect Slack
+    auth bearer secret.SLACK_BOT_TOKEN
+mioconnect: done
+
+miocache
+    build fraud_cache
+        from env.REDIS_URL
+        expires 24 hours
+miocache: done
+
+miolog
+    build fraud_audit_log
+        json on
+        retain for 7 years
+    build compliance_log
+        json on
+        retain for 7 years
+    build app_log
+        json on
+        retain for 90 days
+miolog: done
+
+//  CONSTANTS ------------------------------------------------------------------------?
+hold FRAUD_THRESHOLD        0.85
+hold CTR_THRESHOLD          10000.00
+hold STRUCTURING_WINDOW     1 hour
+hold STRUCTURING_COUNT      3
+hold STRUCTURING_FLOOR      3000.00
+
+//  SHAPES ------------------------------------------------------------------------
+shape Transaction
+    id                  as uuid         required    default uuid()
+    member_id           as text         required
+    amount              as decimal      required    min 0.01    in.USD
+    device_fingerprint  as text         required
+    velocity_score      as decimal      required    min 0.0     max 1.0
+    status              as text         default     pending
+    status.allowed      pending, approved, blocked, review, ctr_filed
+    ip_address          as text
+    merchant_id         as text
+    created             as datetime     default     now()
+    retain for 7 years
+shape: done
+
+shape FraudDecision
+    transaction_id      as uuid         required
+    is_fraudulent       as boolean      required
+    confidence          as decimal      required
+    source              as text         required    // cache / learned / ai
+    action              as text         required
+    explanation         as text
+    reviewed_by         as text         default     ai
+    overridden          as boolean      default     false
+    created             as datetime     default     now()
+    retain for 7 years
+shape: done
+
+shape ScreenerOverride
+    transaction_id      as uuid         required
+    screener_id         as text         required
+    actual_outcome      as boolean      required
+    reason              as text         required
+    created             as datetime     default     now()
+    retain for 7 years
+shape: done
+
+//  RESPONSE POOLS ------------------------------------------------------
+// Screener review prompts -- give back random selects one each time
+create list screener_prompts
+    "Review transaction carefully. Check device history and member profile."
+    "Verify merchant and cross-reference with recent activity."
+    "Check velocity pattern. Has this member transacted recently?"
+    "Review IP address. Does it match the member's known locations?"
+    "Compare device fingerprint against member's registered devices."
+create: done
+
+//  TASK -- Resolve Prior Decision ---------------------------------------------------
+// Three-layer progressive resolution.
+// Cache first. Learned decisions second. AI last.
+// Every AI decision is saved -- the system gets smarter over time.
+
+task ResolveFraudIntent
+    transaction     as sh.Transaction   required
+    returns sh.FraudDecision
+
+    // Layer 1 -- cache (instant, free)
+    retrieve cached from fraud_cache
+        key "fraud:{{ transaction.device_fingerprint }}:{{ transaction.member_id }}"
+    retrieve: done
+
+    check cached
+        when is not empty
+            miolog.app_log.info "Fraud decision served from cache -- {{ transaction.id }}" done
+            give back cached
+    check: done
+
+    // Layer 2 -- learned from prior AI decisions (fast, fills over time)
+    find prior in db.fraud_decisions
+        where device_fingerprint is transaction.device_fingerprint
+        where member_id is transaction.member_id
+        where overridden is false
+        where confidence is above FRAUD_THRESHOLD
+        order by created descending
+        up to 1
+    find: done
+
+    check prior
+        when is not empty
+            miolog.app_log.info "Fraud decision served from learned data -- {{ transaction.id }}" done
+            give back prior
+    check: done
+
+    // Layer 3 -- AI decides (accurate, costs tokens, teaches the system)
+    ai.decide isFraudulent returns boolean
+        check confidence above FRAUD_THRESHOLD
+        weigh
+            transaction.amount
+            transaction.device_fingerprint
+            transaction.velocity_score
+            transaction.member_id
+            transaction.merchant_id
+            transaction.ip_address
+        not confident
+            give back pending "Referred to manual review"
+        ai.audit to fraud_audit_log
+    ai.decide: done
+
+    // Generate compliance explanation if fraudulent
+    check isFraudulent
+        when true
+            ai.explain decision isFraudulent
+                audience "compliance officer"
+                format "paragraph"
+    check: done
+
+    // Save the AI decision -- Layer 2 next time
+    save to db.fraud_decisions
+        transaction_id      transaction.id
+        is_fraudulent       isFraudulent
+        confidence          isFraudulent.confidence
+        source              "ai"
+        device_fingerprint  transaction.device_fingerprint
+        member_id           transaction.member_id
+        explanation         explanation
+        created             now()
+    save: done
+
+    // Cache the decision -- Layer 1 next time
+    save to fraud_cache
+        key     "fraud:{{ transaction.device_fingerprint }}:{{ transaction.member_id }}"
+        value   isFraudulent
+        for     24 hours
+    save: done
+
+    miolog.app_log.info "Fraud decision saved to learning database -- {{ transaction.id }}" done
+
+task: done
+
+//  LISTENER -- Screen Incoming Transaction ------------------------------------
+listen for
+    new sh.Transaction at /transactions/screen
+        require role screener or system
+
+        miolog.app_log.info "Transaction received for screening -- {{ transaction.id }}" done
+
+        //  CTR CHECK ------------------------------------------------------
+        // sector: financial knows about CTR -- no configuration needed
+        check transaction.amount
+            when above CTR_THRESHOLD
+                update db.transactions
+                    status  ctr_filed
+                    match id to transaction.id
+                update: done
+                notify compliance_team
+                    message "CTR threshold triggered -- ${{ transaction.amount }} -- Transaction {{ transaction.id }}"
+                    via email
+                miolog.compliance_log.info "CTR required -- {{ transaction.id }} -- amount {{ transaction.amount }}" done
+        check: done
+
+        //  VELOCITY / STRUCTURING CHECK ------------------------------------
+        // Multiple transactions just under CTR threshold in a short window
+        // Classic structuring pattern -- AML requirement
+        find recent in db.transactions
+            where member_id is transaction.member_id
+            where created is after now() minus STRUCTURING_WINDOW
+            where amount is above STRUCTURING_FLOOR
+            where status is not blocked
+            order by created descending
+        find: done
+
+        check recent.count
+            when above STRUCTURING_COUNT
+                // Possible structuring -- flag for AML review
+                ai.decide isStructuring returns boolean
+                    check confidence above 0.90
+                    weigh
+                        recent
+                        transaction.member_id
+                        transaction.amount
+                        STRUCTURING_WINDOW
+                    not confident
+                        give back pending "Structuring review required -- manual investigation needed"
+                    ai.audit to compliance_audit_log
+                ai.decide: done
+
+                check isStructuring
+                    when true
+                        notify compliance_team
+                            message "Possible structuring detected -- Member {{ transaction.member_id }} -- {{ recent.count }} transactions in {{ STRUCTURING_WINDOW }}"
+                            via email
+                        miolog.compliance_log.warn "Structuring flag -- {{ transaction.member_id }}" done
+                check: done
+        check: done
+
+        //  THREE-LAYER FRAUD RESOLUTION ------------------------------------
+        call ResolveFraudIntent
+            transaction transaction
+        call: done
+
+        //  ACT ON DECISION ------------------------------------------------------
+        check resolution.is_fraudulent
+            when true
+                // Block the transaction
+                update db.transactions
+                    status  blocked
+                    match id to transaction.id
+                update: done
+
+                // Notify fraud team
+                notify fraud_team
+                    message "Transaction BLOCKED -- {{ transaction.id }} -- Confidence {{ resolution.confidence }} -- Source: {{ resolution.source }}"
+                    via slack env.FRAUD_CHANNEL
+
+                // Notify member with plain English explanation
+                notify transaction.member_id
+                    template "transaction_blocked_email"
+                    inject resolution.explanation into template
+                    inject: done
+                    via email
+
+                miolog.fraud_audit_log.warn "Transaction blocked -- {{ transaction.id }}" done
+                give back 403 "Transaction blocked"
+
+            when false
+                // Approve the transaction
+                update db.transactions
+                    status  approved
+                    match id to transaction.id
+                update: done
+
+                miolog.app_log.info "Transaction approved -- {{ transaction.id }}" done
+                give back 200 "Transaction approved"
+
+        check: done
+
+    new: done
+
+    //  SCREENER REVIEW ENDPOINT ---------------------------------------------------?
+    // Human screener reviews a pending transaction
+    request for sh.Transaction at /transactions/{{ transaction_id }}/review
+        require role screener
+
+        retrieve transaction in db.transactions
+            match id to transaction_id
+        retrieve: done
+
+        // Give the screener a random review prompt
+        check screener_prompts
+            give back random as prompt
+        check: done
+
+        give back 200
+            with transaction   transaction
+            with review_prompt prompt
+
+    request: done
+
+    //  SCREENER OVERRIDE ENDPOINT ------------------------------------
+    // Screener overrides an AI decision -- automatically audited
+    new sh.ScreenerOverride at /transactions/{{ transaction_id }}/override
+        require role screener
+
+        retrieve transaction in db.transactions
+            match id to transaction_id
+        retrieve: done
+
+        // ai.override automatically audits and signals the learning pipeline
+        ai.override decision isFraudulent
+            by screener.id
+            actual_outcome override.actual_outcome
+            reason override.reason
+        ai.override: done
+
+        // Update the transaction status
+        check override.actual_outcome
+            when true
+                update db.transactions
+                    status  blocked
+                    match id to transaction.id
+                update: done
+            when false
+                update db.transactions
+                    status  approved
+                    match id to transaction.id
+                update: done
+        check: done
+
+        // Update the learned decision -- mark overridden so Layer 2 skips it
+        update db.fraud_decisions
+            overridden  true
+            reviewed_by screener.id
+            match transaction_id to transaction_id
+        update: done
+
+        // Invalidate the cache -- force fresh resolution next time
+        invalidate fraud_cache
+            key "fraud:{{ transaction.device_fingerprint }}:{{ transaction.member_id }}"
+        invalidate: done
+
+        miolog.fraud_audit_log.info "Screener override -- {{ transaction_id }} -- by {{ screener.id }} -- outcome {{ override.actual_outcome }}" done
+
+        give back 200 "Override recorded"
+
+    new: done
+
+listen: done

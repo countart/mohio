@@ -1,0 +1,6173 @@
+{
+  "rooms": [
+    {
+      "id": "west_of_house",
+      "name": "West of House",
+      "description": "You are standing in an open field west of a white house, with a boarded front door. There is a small mailbox here.",
+      "exit_north": "north_of_house",
+      "exit_south": "south_of_house",
+      "exit_east": "",
+      "exit_west": "forest",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "true",
+      "cheat_description": "",
+      "exit_ne": "north_of_house",
+      "exit_nw": "",
+      "exit_se": "south_of_house",
+      "exit_sw": "stone_barrow"
+    },
+    {
+      "id": "north_of_house",
+      "name": "North of House",
+      "description": "You are facing the north side of a white house. There is no door here, and all the windows are barred.",
+      "exit_north": "forest_path",
+      "exit_south": "west_of_house",
+      "exit_east": "behind_house",
+      "exit_west": "west_of_house",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "behind_house",
+      "exit_sw": "west_of_house"
+    },
+    {
+      "id": "south_of_house",
+      "name": "South of House",
+      "description": "You are facing the south side of a white house. There is no door here, and all the windows are boarded.",
+      "exit_north": "west_of_house",
+      "exit_south": "forest",
+      "exit_east": "behind_house",
+      "exit_west": "west_of_house",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "behind_house",
+      "exit_nw": "west_of_house",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "behind_house",
+      "name": "Behind the House",
+      "description": "You are behind the white house. A path leads into the forest to the east. In one corner of the house there is a small window which is slightly ajar.",
+      "exit_north": "north_of_house",
+      "exit_south": "south_of_house",
+      "exit_east": "forest",
+      "exit_west": "kitchen",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "north_of_house",
+      "exit_se": "",
+      "exit_sw": "south_of_house"
+    },
+    {
+      "id": "kitchen",
+      "name": "Kitchen",
+      "description": "You are in the kitchen of the white house. A table seems to have been used recently for the preparation of food. A passage leads to the west and a dark staircase can be seen leading upward. A dark chimney leads down and to the east is a small window which is open. To the north, a narrow door sits slightly ajar; a faint fluorescent glow pulses around its edges, just barely.",
+      "exit_north": "bathroom",
+      "exit_south": "",
+      "exit_east": "behind_house",
+      "exit_west": "living_room",
+      "exit_up": "attic",
+      "exit_down": "studio",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "living_room",
+      "name": "Living Room",
+      "description": "You are in the living room. There is a doorway to the east, a wooden door with strange gothic lettering to the west, which appears to be nailed shut, a trophy case, and a large oriental rug in the center of the room. Above the trophy case hangs an elvish sword of great antiquity. A battery-powered brass lantern is on the trophy case.",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "kitchen",
+      "exit_west": "strange_passage",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "true",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "attic",
+      "name": "Attic",
+      "description": "This is the attic. The only exit is stairs that lead down. A large coil of rope is lying in the corner. On a table is a nasty-looking knife.",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "kitchen",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "cellar",
+      "name": "Cellar",
+      "description": "You are in a dark and damp cellar with a narrow passageway leading north, and a crawlway to the south. On the west is the bottom of a steep metal ramp which is unclimbable.",
+      "exit_north": "troll_room",
+      "exit_south": "east_of_chasm",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "living_room",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "true",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "troll_room",
+      "name": "Troll Room",
+      "description": "This is a small room with passages to the east and south and a forbidding hole leading west. Bloodstains and deep scratches are visible on the walls. A nasty-looking troll, brandishing a bloody axe, blocks all passages out of the room.",
+      "exit_north": "",
+      "exit_south": "cellar",
+      "exit_east": "east_west_passage",
+      "exit_west": "maze_1",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "east_west_passage",
+      "name": "East-West Passage",
+      "description": "This is a long east-west passage. A wooden door leads north.",
+      "exit_north": "chasm_room",
+      "exit_south": "",
+      "exit_east": "round_room",
+      "exit_west": "troll_room",
+      "exit_up": "",
+      "exit_down": "chasm_room",
+      "dark": "true",
+      "checkpoint": "true",
+      "cheat_description": "",
+      "exit_ne": "chasm_room",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "round_room",
+      "name": "Round Room",
+      "description": "This is a circular room with passages in all directions. There is a narrow hole leading up.",
+      "exit_north": "north_south_passage",
+      "exit_south": "narrow_passage",
+      "exit_east": "loud_room",
+      "exit_west": "east_west_passage",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "true",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "engravings_cave",
+      "exit_sw": ""
+    },
+    {
+      "id": "loud_room",
+      "name": "Loud Room",
+      "description": "This is a large room with a ceiling which cannot be seen. Scattered about are pieces of rusted machinery. There is a loud roaring sound all around you. The floor is vibrating. There is a passage south.",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "damp_cave",
+      "exit_west": "round_room",
+      "exit_up": "deep_canyon",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "cave_entrance",
+      "name": "Cave Entrance",
+      "description": "The cave narrows to a tight passage here. A cool breeze flows from the east. To the west lies the canyon.",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "bat_room",
+      "exit_west": "canyon",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "treasure_room",
+      "name": "Treasure Room",
+      "description": "This is a large room filled with enormous quantities of valuable treasures. There are passages in all directions.",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "cyclops_room",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "east_of_chasm",
+      "name": "East of Chasm",
+      "description": "You are on the east edge of a chasm, the bottom of which cannot be seen. A narrow ledge runs north. On the south edge of the chasm is a large wooden platform. A tiny canoe rests near the top of the chasm.",
+      "exit_north": "cellar",
+      "exit_south": "",
+      "exit_east": "gallery",
+      "exit_west": "west_of_chasm",
+      "exit_up": "",
+      "exit_down": "cellar",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "west_of_chasm",
+      "name": "West of Chasm",
+      "description": "You are on the west edge of a chasm, the bottom of which cannot be seen. A narrow ledge runs south. Across the chasm is a large wooden platform.",
+      "exit_north": "bat_room",
+      "exit_south": "sandy_cave",
+      "exit_east": "east_of_chasm",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "bat_room",
+      "name": "Bat Room",
+      "description": "You are in a small room. A large vampire bat is here, looking at you in a very unfriendly way.",
+      "exit_north": "",
+      "exit_south": "squeaky_room",
+      "exit_east": "shaft_room",
+      "exit_west": "cave_entrance",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "sandy_cave",
+      "name": "Sandy Cave",
+      "description": "This is a sandy cave whose entrance is to the north. There is a smell of coal dust in the air.",
+      "exit_north": "west_of_chasm",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "canyon_bottom",
+      "exit_se": "",
+      "exit_sw": "sandy_beach"
+    },
+    {
+      "id": "coal_mine",
+      "name": "Coal Mine",
+      "description": "This is a coal mine. The walls glisten with anthracite. There is a large shovel here. The air is fresher to the west.",
+      "exit_north": "sandy_cave",
+      "exit_south": "",
+      "exit_east": "gas_room",
+      "exit_west": "cave_entrance",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "coal_mine_2",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_1",
+      "name": "Maze",
+      "description": "You are in a maze of twisty little passages, all alike. A faint, foul smell drifts from the east.",
+      "exit_north": "maze_1",
+      "exit_south": "maze_2",
+      "exit_east": "troll_room",
+      "exit_west": "maze_4",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "MOHIO LENS ACTIVE. Room 1: North leads to dead end with skeleton. South loops back. East goes deeper. West returns to round room.",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_2",
+      "name": "Maze",
+      "description": "You are in a maze of twisty little passages, all alike.",
+      "exit_north": "",
+      "exit_south": "maze_1",
+      "exit_east": "maze_3",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "MOHIO LENS ACTIVE. Room 2: North and east both lead to room 3. West returns to room 1. South is a dead end.",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_3",
+      "name": "Maze",
+      "description": "You are in a maze of twisty little passages, all alike.",
+      "exit_north": "maze_4",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "maze_2",
+      "exit_up": "maze_5",
+      "exit_down": "",
+      "dark": "true",
+      "checkpoint": "false",
+      "cheat_description": "MOHIO LENS ACTIVE. Room 3: West leads to coal mine exit. North and south loop. East returns to room 2. The way out is west.",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "forest",
+      "name": "Forest",
+      "description": "This is a dimly lit forest, with large trees all around. One particularly large tree with some low branches stands here.",
+      "exit_north": "clearing",
+      "exit_south": "forest_path",
+      "exit_east": "forest",
+      "exit_west": "forest",
+      "exit_up": "treetop",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "forest_path",
+      "name": "Forest Path",
+      "description": "This is a dimly lit forest, with large trees all around. To the east, there appears to be sunlight.",
+      "exit_north": "grating_clearing",
+      "exit_south": "forest",
+      "exit_east": "west_of_house",
+      "exit_west": "forest",
+      "exit_up": "treetop",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "clearing",
+      "name": "Clearing",
+      "description": "This is a clearing, with a forest surrounding you on the west and south. There is a pile of leaves on the ground.",
+      "exit_north": "forest",
+      "exit_south": "forest_path",
+      "exit_east": "canyon_view",
+      "exit_west": "forest",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "treetop",
+      "name": "Treetop",
+      "description": "You are about ten feet above the ground nestled among some large branches. The nearest branch above you is beyond your reach. On the branch is a small birds nest containing a jewel-encrusted egg.",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "forest_path",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "canyon",
+      "name": "Canyon",
+      "description": "You are at the top of the Great Canyon on its south wall. From here there is a marvelous view of the Canyon and parts of the Frigid River upstream. Across the canyon, the walls of the White Cliffs still appear to loom far above. Following the Canyon upstream, Aragain Falls may be seen, complete with rainbow. It is possible to climb down into the canyon from here.",
+      "exit_north": "",
+      "exit_south": "canyon_view",
+      "exit_east": "cave_entrance",
+      "exit_west": "east_of_chasm",
+      "exit_up": "canyon_view",
+      "exit_down": "canyon_bottom",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "canyon_bottom",
+      "name": "Canyon Bottom",
+      "description": "You are beneath the walls of the river canyon which may be climbable here. There is a small stream here, which is the lesser part of the runoff of Aragain Falls. To the north is a narrow path.",
+      "exit_north": "end_of_rainbow",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "cliff_middle",
+      "exit_down": "end_of_rainbow",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "end_of_rainbow",
+      "exit_nw": "",
+      "exit_se": "sandy_cave",
+      "exit_sw": ""
+    },
+    {
+      "id": "cyclops_room",
+      "name": "Cyclops Room",
+      "description": "This is a small room with exits to the east and west. In the room is a large cyclops, who looks at you hungrily.",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "strange_passage",
+      "exit_west": "",
+      "exit_up": "treasure_room",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "maze_15",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "strange_passage",
+      "name": "Strange Passage",
+      "description": "This is a narrow passage, which opens into a room to the east and a passage to the west.",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "living_room",
+      "exit_west": "cyclops_room",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "hades_entrance",
+      "name": "Entrance to Hades",
+      "description": "You are in a cold and musty room. The air around you is filled with whispering voices. There are passages to the north and south.",
+      "exit_north": "",
+      "exit_south": "land_of_dead",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "tiny_cave",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "land_of_dead",
+      "name": "Land of the Living Dead",
+      "description": "You have entered the Land of the Living Dead. Thousands of lost souls drift through an enormous void, their faces turned toward you. In the very center of the room, ringed by the apparitions, stands a small throne-like chair of dark wood and metal. It seems to be waiting. There is a passage to the north.",
+      "exit_north": "hades_entrance",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "false",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "gallery",
+      "name": "Gallery",
+      "description": "This is an art gallery. Most of the paintings have been stolen by vandals with exceptional taste. The vandals left through either the north or west exits.",
+      "dark": "true",
+      "exit_north": "studio",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "east_of_chasm",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "studio",
+      "name": "Studio",
+      "description": "This is what appears to have been an artist's studio. The walls and floors are splattered with paints of 69 different colors. Strangely enough, nothing of value is hanging here. At the south end of the room is an open door (also covered with paint). A dark and narrow chimney leads up from a fireplace; although you might be able to get up it, it seems unlikely you could get back down.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "gallery",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "kitchen",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "dam_room",
+      "name": "Dam Room",
+      "description": "You are standing on the top of the Flood Control Dam #3, which was quite a tourist attraction in times far distant. There are paths to the north, south, and west, and a scramble down.",
+      "dark": "false",
+      "exit_north": "dam_lobby",
+      "exit_south": "deep_canyon",
+      "exit_east": "dam_base",
+      "exit_west": "reservoir_south",
+      "exit_up": "",
+      "exit_down": "dam_base",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "dam_lobby",
+      "name": "Dam Lobby",
+      "description": "This room appears to have been the waiting room for groups touring the dam. There are open doorways here to the north and east marked 'Private', and there is a path leading south over the top of the dam.",
+      "dark": "false",
+      "exit_north": "maintenance_room",
+      "exit_south": "dam_room",
+      "exit_east": "maintenance_room",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maintenance_room",
+      "name": "Maintenance Room",
+      "description": "This is what appears to have been the maintenance room for Flood Control Dam #3. Apparently, this room has been ransacked recently, for most of the valuable equipment is gone. On the wall in front of you is a group of buttons colored blue, yellow, brown, and red. There are doorways to the west and south.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "dam_lobby",
+      "exit_east": "",
+      "exit_west": "dam_lobby",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "deep_canyon",
+      "name": "Deep Canyon",
+      "description": "You are on the south edge of a deep canyon. Passages lead off to the east, northwest and southwest. A stairway leads down. You can hear a faint rushing sound from below.",
+      "dark": "false",
+      "exit_north": "dam_room",
+      "exit_south": "",
+      "exit_east": "dam_room",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "loud_room",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "reservoir_south",
+      "exit_se": "",
+      "exit_sw": "north_south_passage"
+    },
+    {
+      "id": "reservoir_south",
+      "name": "Reservoir South",
+      "description": "You are in a long room on the south shore of a large lake, far too deep and wide for crossing. There is a path along the stream to the east or west, a steep pathway climbing southwest along the edge of a chasm, and a path leading into a canyon to the southeast.",
+      "dark": "false",
+      "exit_north": "reservoir",
+      "exit_south": "",
+      "exit_east": "dam_room",
+      "exit_west": "stream_view",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "deep_canyon",
+      "exit_sw": "chasm_room"
+    },
+    {
+      "id": "reservoir",
+      "name": "Reservoir",
+      "description": "You are on the lake. Beaches can be seen north and south. Upstream a small stream enters the lake through a narrow cleft in the rocks. The dam can be seen downstream.",
+      "dark": "false",
+      "exit_north": "reservoir_north",
+      "exit_south": "reservoir_south",
+      "exit_east": "",
+      "exit_west": "in_stream",
+      "exit_up": "in_stream",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "reservoir_north",
+      "name": "Reservoir North",
+      "description": "You are in a large cavernous room, the south of which was formerly a lake. However, with the water level lowered, there is merely a wide stream running through the center of the room.",
+      "dark": "true",
+      "exit_north": "atlantis_room",
+      "exit_south": "reservoir",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "atlantis_room",
+      "name": "Atlantis Room",
+      "description": "This is an ancient room, long under water. There is an exit to the south and a staircase leading up.",
+      "dark": "true",
+      "exit_north": "small_cave",
+      "exit_south": "reservoir_north",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "small_cave",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "stream_view",
+      "name": "Stream View",
+      "description": "You are standing on a path beside a gently flowing stream. The path follows the stream, which flows from west to east.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "reservoir_south",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "north_south_passage",
+      "name": "North South Passage",
+      "description": "This is a high north-south passage, which forks to the northeast.",
+      "dark": "true",
+      "exit_north": "chasm_room",
+      "exit_south": "round_room",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "deep_canyon",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "narrow_passage",
+      "name": "Narrow Passage",
+      "description": "This is a long and narrow passage, which is cluttered with broken bottles. A passage exits to the north and northeast.",
+      "dark": "true",
+      "exit_north": "round_room",
+      "exit_south": "mirror_room_south",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "engravings_cave",
+      "name": "Engravings Cave",
+      "description": "You have entered a low cave with passages leading northwest and east. There are old engravings on the walls here.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "dome_room",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "round_room",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "dome_room",
+      "name": "Dome Room",
+      "description": "You are at the periphery of a large dome, which forms the ceiling of another room below you. Protecting you from a precipitous drop is a wooden railing which circles the dome.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "engravings_cave",
+      "exit_up": "",
+      "exit_down": "torch_room",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "torch_room",
+      "name": "Torch Room",
+      "description": "This is a large room with a prominent doorway leading to a down staircase. Above you is a large dome painted with scenes depicting the underworld. Up around the edge of the dome (20 feet up) is a wooden railing. In the center of the room sits a white marble pedestal.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "temple",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "temple",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "temple",
+      "name": "Temple",
+      "description": "This is the north end of a large temple. On the east wall is some ancient script, which is probably a prayer in an unknown language. Engraved in the marble in the floor is a stairway leading downward. To the west is a door. To the south a passage leads into darkness.",
+      "dark": "false",
+      "exit_north": "torch_room",
+      "exit_south": "altar",
+      "exit_east": "egyptian_room",
+      "exit_west": "",
+      "exit_up": "torch_room",
+      "exit_down": "egyptian_room",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "altar",
+      "name": "Altar",
+      "description": "This is the south end of a large temple. In front of you is what appears to be an altar. In one corner is a small hole in the floor which leads into darkness. You probably could not get back up it.",
+      "dark": "false",
+      "exit_north": "temple",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "cave_south",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "egyptian_room",
+      "name": "Egyptian Room",
+      "description": "This is a room which looks like an Egyptian tomb. There is an ascending staircase to the west.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "temple",
+      "exit_up": "temple",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "dam_base",
+      "name": "Dam Base",
+      "description": "You are at the base of Flood Control Dam #3, which looms above you and to the north. The river Frigid is flowing by here. Along the river are the White Cliffs which seem to form giant walls stretching from north to south along the shores of the river as it winds its way downstream.",
+      "dark": "false",
+      "exit_north": "dam_room",
+      "exit_south": "river_1",
+      "exit_east": "river_1",
+      "exit_west": "dam_room",
+      "exit_up": "dam_room",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "cave_south",
+      "name": "Cave South",
+      "description": "This is a tiny cave with entrances west and north, and a staircase leading up.",
+      "dark": "true",
+      "exit_north": "mirror_room_south",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "winding_passage",
+      "exit_up": "altar",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "mirror_room_north",
+      "name": "Mirror Room North",
+      "description": "You are in a large square room with tall ceilings. On the south wall is an enormous mirror which fills the entire wall. There are exits on the other three sides of the room.",
+      "dark": "true",
+      "exit_north": "cold_passage",
+      "exit_south": "",
+      "exit_east": "small_cave",
+      "exit_west": "twisting_passage",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "mirror_room_south",
+      "name": "Mirror Room South",
+      "description": "You are in a large square room with tall ceilings. On the north wall is an enormous mirror which fills the entire wall. There are exits on the other three sides of the room.",
+      "dark": "true",
+      "exit_north": "narrow_passage",
+      "exit_south": "",
+      "exit_east": "tiny_cave",
+      "exit_west": "winding_passage",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "winding_passage",
+      "name": "Winding Passage",
+      "description": "This is a winding passage. It seems that there are only exits on the east and north.",
+      "dark": "true",
+      "exit_north": "mirror_room_south",
+      "exit_south": "",
+      "exit_east": "tiny_cave",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "twisting_passage",
+      "name": "Twisting Passage",
+      "description": "This is a winding passage. It seems that there are only exits on the east and north.",
+      "dark": "true",
+      "exit_north": "mirror_room_north",
+      "exit_south": "",
+      "exit_east": "small_cave",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "cold_passage",
+      "name": "Cold Passage",
+      "description": "This is a cold and damp corridor where a long east-west passageway turns into a southward path.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "mirror_room_north",
+      "exit_east": "",
+      "exit_west": "slide_room",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "slide_room",
+      "name": "Slide Room",
+      "description": "This is a small chamber, which appears to have been part of a coal mine. On the south wall of the chamber the letters 'Granite Wall' are etched in the rock. To the east is a long passage, and there is a steep metal slide twisting downward. To the north is a small opening.",
+      "dark": "true",
+      "exit_north": "mine_entrance",
+      "exit_south": "",
+      "exit_east": "cold_passage",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "cellar",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "mine_entrance",
+      "name": "Mine Entrance",
+      "description": "You are standing at the entrance of what might have been a coal mine. The shaft enters the west wall, and there is another exit on the south end of the room.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "slide_room",
+      "exit_east": "",
+      "exit_west": "squeaky_room",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "squeaky_room",
+      "name": "Squeaky Room",
+      "description": "You are in a small room. Strange squeaky sounds may be heard coming from the passage at the north end. You may also escape to the east.",
+      "dark": "true",
+      "exit_north": "bat_room",
+      "exit_south": "",
+      "exit_east": "mine_entrance",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "gas_room",
+      "name": "Gas Room",
+      "description": "This is a small room which smells strongly of coal gas. There is a short climb up some stairs and a narrow tunnel leading east.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "coal_mine_1",
+      "exit_west": "",
+      "exit_up": "smelly_room",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "coal_mine_1",
+      "name": "Coal Mine 1",
+      "description": "This is a non-descript part of a coal mine.",
+      "dark": "true",
+      "exit_north": "coal_mine_2",
+      "exit_south": "",
+      "exit_east": "gas_room",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "coal_mine_1",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "coal_mine_2",
+      "name": "Coal Mine 2",
+      "description": "This is a non-descript part of a coal mine.",
+      "dark": "true",
+      "exit_north": "coal_mine_2",
+      "exit_south": "coal_mine",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "coal_mine_3",
+      "exit_sw": ""
+    },
+    {
+      "id": "coal_mine_3",
+      "name": "Coal Mine 3",
+      "description": "This is a non-descript part of a coal mine.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "coal_mine_3",
+      "exit_east": "coal_mine_2",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": "coal_mine_4"
+    },
+    {
+      "id": "coal_mine_4",
+      "name": "Coal Mine 4",
+      "description": "This is a non-descript part of a coal mine.",
+      "dark": "true",
+      "exit_north": "coal_mine_3",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "coal_mine_4",
+      "exit_up": "",
+      "exit_down": "ladder_top",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "ladder_top",
+      "name": "Ladder Top",
+      "description": "This is a very small room. In the corner is a rickety wooden ladder, leading downward. It might be safe to descend. There is also a staircase leading upward.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "coal_mine_4",
+      "exit_down": "ladder_bottom",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "ladder_bottom",
+      "name": "Ladder Bottom",
+      "description": "This is a rather wide room. On one side is the bottom of a narrow wooden ladder. To the west and the south are passages leaving the room.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "dead_end_5",
+      "exit_east": "",
+      "exit_west": "timber_room",
+      "exit_up": "ladder_top",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "timber_room",
+      "name": "Timber Room",
+      "description": "This is a long and narrow passage, which is cluttered with broken timbers. A wide passage comes from the east and turns at the west end of the room into a very narrow passageway. From the west comes a strong draft.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "ladder_bottom",
+      "exit_west": "lower_shaft",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "lower_shaft",
+      "name": "Lower Shaft",
+      "description": "This is a small square room, in the center of which is a large hole in the ground. A large basket is sitting in the hole, suspended by a strong rope.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "machine_room",
+      "exit_east": "timber_room",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "machine_room",
+      "name": "Machine Room",
+      "description": "This is a large, cold room whose sole exit is to the north. In one corner there is a machine which is reminiscent of a clothes dryer. On its face is a switch which is labelled 'START'. The switch does not appear to be manipulable by any human hand (unless the fingers are about 1/16 by 1/4 inch). On the front of the machine is a large lid, which is closed.",
+      "dark": "true",
+      "exit_north": "lower_shaft",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "end_of_rainbow",
+      "name": "End Of Rainbow",
+      "description": "You are on a small, rocky beach on the continuation of the Frigid River past the Falls. The beach is narrow due to the presence of the White Cliffs. The river canyon opens here and sunlight shines in from above. A rainbow crosses over the falls to the east and a narrow path continues to the southwest.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "canyon_bottom",
+      "exit_east": "on_rainbow",
+      "exit_west": "",
+      "exit_up": "on_rainbow",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "on_rainbow",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": "canyon_bottom"
+    },
+    {
+      "id": "aragain_falls",
+      "name": "Aragain Falls",
+      "description": "You are at the top of Aragain Falls, an enormous waterfall with a drop of about 450 feet. The only path here is on the north end. A solid rainbow appears to lead east across the falls.",
+      "dark": "false",
+      "exit_north": "shore",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "on_rainbow",
+      "exit_up": "on_rainbow",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "shore",
+      "name": "Shore",
+      "description": "You are on the east shore of the river. The water here seems somewhat treacherous. A path travels from north to south here, the south end quickly turning around a sharp corner.",
+      "dark": "false",
+      "exit_north": "sandy_beach",
+      "exit_south": "aragain_falls",
+      "exit_east": "",
+      "exit_west": "river_5",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "sandy_beach",
+      "name": "Sandy Beach",
+      "description": "You are on a large sandy beach on the east shore of the river, which is flowing quickly by. A path runs beside the river to the south here, and a passage is partially buried in sand to the northeast.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "shore",
+      "exit_east": "",
+      "exit_west": "river_4",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "sandy_cave",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "grating_room",
+      "name": "Grating Room",
+      "description": "You are in a small room near the maze. There are twisty passages in the immediate vicinity. Above you is a grating locked with a skull-and-crossbones lock.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "grating_clearing",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": "maze_11"
+    },
+    {
+      "id": "chasm_room",
+      "name": "Chasm Room",
+      "description": "A chasm runs southwest to northeast and the path follows it. You are on the south side. Here, a crack opens into a passage.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "north_south_passage",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "east_west_passage",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "reservoir_south",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": "east_west_passage"
+    },
+    {
+      "id": "grating_clearing",
+      "name": "Grating Clearing",
+      "description": "You are in a clearing, with a forest surrounding you on all sides. A path leads south. There is a grating securely fastened into the ground.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "forest_path",
+      "exit_east": "forest",
+      "exit_west": "forest",
+      "exit_up": "",
+      "exit_down": "grating_room",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "canyon_view",
+      "name": "Canyon View",
+      "description": "You are at the top of the Great Canyon on its west wall. From here there is a marvelous view of the canyon and parts of the Frigid River upstream. Across the canyon, the walls of the White Cliffs join the mighty ramparts of the Flathead Mountains to the east. Following the Canyon upstream to the north, Aragain Falls may be seen, complete with rainbow. The mighty Frigid River flows out from a great dark cavern. To the west and south can be seen an immense forest, stretching for miles around. A path leads northwest. It is possible to climb down into the canyon from here.",
+      "dark": "false",
+      "exit_north": "canyon",
+      "exit_south": "",
+      "exit_east": "cliff_middle",
+      "exit_west": "forest",
+      "exit_up": "",
+      "exit_down": "cliff_middle",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "clearing",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_4",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "maze_1",
+      "exit_south": "",
+      "exit_east": "dead_end_1",
+      "exit_west": "maze_3",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_5",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike. A skeleton, probably the remains of a luckless adventurer, lies here.",
+      "dark": "true",
+      "exit_north": "maze_3",
+      "exit_south": "",
+      "exit_east": "dead_end_2",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": "maze_6"
+    },
+    {
+      "id": "maze_6",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "maze_7",
+      "exit_west": "maze_6",
+      "exit_up": "maze_9",
+      "exit_down": "maze_5",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_7",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "maze_15",
+      "exit_east": "maze_8",
+      "exit_west": "maze_6",
+      "exit_up": "maze_14",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_8",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "maze_8",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "maze_7",
+      "exit_nw": "",
+      "exit_se": "dead_end_3",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_9",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "maze_6",
+      "exit_south": "maze_13",
+      "exit_east": "maze_10",
+      "exit_west": "maze_12",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "maze_9",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_10",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "maze_9",
+      "exit_west": "maze_13",
+      "exit_up": "maze_11",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_11",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "maze_10",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "grating_room",
+      "exit_nw": "maze_13",
+      "exit_se": "",
+      "exit_sw": "maze_12"
+    },
+    {
+      "id": "maze_12",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "dead_end_4",
+      "exit_south": "",
+      "exit_east": "maze_13",
+      "exit_west": "",
+      "exit_up": "maze_9",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": "maze_11"
+    },
+    {
+      "id": "maze_13",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "maze_10",
+      "exit_east": "maze_9",
+      "exit_west": "maze_11",
+      "exit_up": "",
+      "exit_down": "dead_end_5",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_14",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "maze_7",
+      "exit_east": "",
+      "exit_west": "maze_15",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "maze_7",
+      "exit_nw": "maze_14",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "maze_15",
+      "name": "Maze",
+      "description": "This is part of a maze of twisty little passages, all alike.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "maze_7",
+      "exit_east": "",
+      "exit_west": "maze_14",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "cyclops_room",
+      "exit_sw": ""
+    },
+    {
+      "id": "dead_end_1",
+      "name": "Dead End",
+      "description": "You have come to a dead end in the maze.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "maze_4",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "dead_end_2",
+      "name": "Dead End",
+      "description": "You have come to a dead end in the maze.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "maze_5",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "dead_end_3",
+      "name": "Dead End",
+      "description": "You have come to a dead end in the maze.",
+      "dark": "true",
+      "exit_north": "maze_8",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "dead_end_4",
+      "name": "Dead End",
+      "description": "You have come to a dead end in the maze.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "maze_12",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "dead_end_5",
+      "name": "Dead End",
+      "description": "You have come to a dead end in the mine.",
+      "dark": "true",
+      "exit_north": "ladder_bottom",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "river_1",
+      "name": "Frigid River",
+      "description": "You are on the Frigid River in the vicinity of the Dam. The river flows quietly here. There is a landing on the west shore.",
+      "dark": "false",
+      "exit_north": "dam_base",
+      "exit_south": "river_2",
+      "exit_east": "white_cliffs_north",
+      "exit_west": "dam_base",
+      "exit_up": "",
+      "exit_down": "river_2",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "river_2",
+      "name": "Frigid River",
+      "description": "The river turns a corner here making it impossible to see the Dam. The White Cliffs loom on the east bank and large rocks prevent landing on the west.",
+      "dark": "false",
+      "exit_north": "river_1",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "river_1",
+      "exit_down": "river_3",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "river_3",
+      "name": "Frigid River",
+      "description": "The river descends here into a valley. There is a narrow beach on the west shore below the cliffs. In the distance a faint rumbling can be heard.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "white_cliffs_north",
+      "exit_up": "river_2",
+      "exit_down": "river_4",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "river_4",
+      "name": "Frigid River",
+      "description": "The river is running faster here and the sound ahead appears to be that of rushing water. On the east shore is a sandy beach. A small area of beach can also be seen below the cliffs on the west shore.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "sandy_beach",
+      "exit_west": "white_cliffs_south",
+      "exit_up": "river_3",
+      "exit_down": "river_5",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "river_5",
+      "name": "Frigid River",
+      "description": "The sound of rushing water is nearly unbearable here. On the east shore is a large landing area.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "shore",
+      "exit_west": "",
+      "exit_up": "river_4",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "white_cliffs_north",
+      "name": "White Cliffs Beach",
+      "description": "You are on a narrow strip of beach which runs along the base of the White Cliffs. There is a narrow path heading south along the Cliffs and a tight passage leading west into the cliffs themselves.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "white_cliffs_south",
+      "exit_east": "river_3",
+      "exit_west": "damp_cave",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "white_cliffs_south",
+      "name": "White Cliffs Beach",
+      "description": "You are on a rocky, narrow strip of beach beside the Cliffs. A narrow path leads north along the shore.",
+      "dark": "true",
+      "exit_north": "white_cliffs_north",
+      "exit_south": "",
+      "exit_east": "river_4",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "on_rainbow",
+      "name": "On the Rainbow",
+      "description": "You are on top of a rainbow (I bet you never thought you would walk on a rainbow), with a magnificent view of the Falls. The rainbow travels east-west here.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "aragain_falls",
+      "exit_west": "end_of_rainbow",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": "end_of_rainbow"
+    },
+    {
+      "id": "shaft_room",
+      "name": "Shaft Room",
+      "description": "This is a large room, in the middle of which is a small shaft descending through the floor into darkness below. To the west and the north are exits from this room. Constructed over the top of the shaft is a metal framework to which a heavy iron chain is attached.",
+      "dark": "true",
+      "exit_north": "smelly_room",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "bat_room",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "stone_barrow",
+      "name": "Stone Barrow",
+      "description": "You are standing in front of a massive barrow of stone. In the east face is a huge stone door which is open. You cannot see into the dark of the tomb.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "west_of_house",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "small_cave",
+      "name": "Cave",
+      "description": "This is a tiny cave with entrances west and north, and a staircase leading down.",
+      "dark": "true",
+      "exit_north": "mirror_room_north",
+      "exit_south": "atlantis_room",
+      "exit_east": "",
+      "exit_west": "twisting_passage",
+      "exit_up": "",
+      "exit_down": "atlantis_room",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "tiny_cave",
+      "name": "Cave",
+      "description": "This is a tiny cave with entrances west and north, and a dark, forbidding staircase leading down.",
+      "dark": "true",
+      "exit_north": "mirror_room_south",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "winding_passage",
+      "exit_up": "",
+      "exit_down": "hades_entrance",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "damp_cave",
+      "name": "Damp Cave",
+      "description": "This cave has exits to the west and east, and narrows to a crack toward the south. The earth is particularly damp here.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "white_cliffs_north",
+      "exit_west": "loud_room",
+      "exit_up": "",
+      "exit_down": "",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "smelly_room",
+      "name": "Smelly Room",
+      "description": "This is a small nondescript room. However, from the direction of a small descending staircase a foul odor can be detected. To the south is a narrow tunnel.",
+      "dark": "true",
+      "exit_north": "",
+      "exit_south": "shaft_room",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "gas_room",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "cliff_middle",
+      "name": "Rocky Ledge",
+      "description": "You are on a ledge about halfway up the wall of the river canyon. You can see from here that the main flow from Aragain Falls twists along a passage which it is impossible for you to enter. Below you is the canyon bottom. Above you is more cliff, which appears climbable.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "canyon_view",
+      "exit_up": "canyon_view",
+      "exit_down": "canyon_bottom",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "in_stream",
+      "name": "Stream",
+      "description": "You are on the gently flowing stream. The upstream route is too narrow to navigate, and the downstream route is invisible due to twisting walls. There is a narrow beach to land on.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "reservoir",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "reservoir",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    },
+    {
+      "id": "architects_chamber",
+      "name": "The Architect's Chamber",
+      "description": "You step through the door into a room that does not belong in any dungeon. It is clean — impossibly clean — fluorescent-lit and humming. Banks of machines line the walls, thick cables snaking across the floor. Monitors scroll endless rivers of glowing code. In the center, in a worn leather chair, sits a man: grey hair, spectacles, a coffee mug. The Architect. Around him stand the dead — the troll, the cyclops, the thief, the ghost — but here you see what they truly are: streaming lines of code and light, AI given shape, flickering where the rendering frays. He has not noticed you. You are powerless here. A mere observer. An intruder who was never meant to see this. There is nothing to do but LOOK — and perhaps you should not even do that.",
+      "dark": "false",
+      "exit_north": "",
+      "exit_south": "",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": "",
+      "checkpoint": "",
+      "cheat_description": "MOHIO LENS: The Architect's Chamber. The man behind it all. Do NOT linger. He does not like being seen. Try LOOK, then leave — if he lets you."
+    },
+    {
+      "id": "bathroom",
+      "name": "Powder Room",
+      "description": "A tiny powder room, barely big enough to turn around in. The fluorescent light overhead hums and stutters, and in the half-second flickers the room feels like it is not quite empty. Above the sink hangs a mirror. Something has been scratched into the glass from the inside — deep, deliberate gouges that catch the light:\n\n        m o h i o\n        discord.gg/TRt25pc8\n        JOIN US\n\nThe scratches are fresh. You did not hear anyone leave. The only way out is south, back to the kitchen.",
+      "exit_north": "",
+      "exit_south": "kitchen",
+      "exit_east": "",
+      "exit_west": "",
+      "exit_up": "",
+      "exit_down": "",
+      "dark": "false",
+      "checkpoint": "",
+      "cheat_description": "",
+      "exit_ne": "",
+      "exit_nw": "",
+      "exit_se": "",
+      "exit_sw": ""
+    }
+  ],
+  "items": [
+    {
+      "id": "lantern",
+      "name": "brass lantern",
+      "description": "A battery-powered brass lantern.",
+      "location": "living_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "lantern",
+      "session_id": "__world__"
+    },
+    {
+      "id": "sword",
+      "name": "elvish sword",
+      "description": "This is an elvish sword of great antiquity.",
+      "location": "living_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "sword",
+      "session_id": "__world__"
+    },
+    {
+      "id": "leaflet",
+      "name": "leaflet",
+      "description": "WELCOME TO ZORK! — ZORK is a game of adventure, danger, and low cunning. In it you will explore some of the most amazing territory ever seen by mortals. No computer should be without one! — In ZORK, you move from room to room exploring your environment, solving puzzles, fighting enemies, and collecting treasure. To play, type simple commands like GO NORTH, TAKE LAMP, OPEN DOOR, or just N, S, E, W to move. Type LOOK to see where you are, INVENTORY (or I) to see what you carry, and EXAMINE something to look closely. Type HELP at any time for guidance. — Your goal is to collect the Twenty Treasures of Zork and install them in your trophy case, all while surviving the dangers of the Great Underground Empire. — This version is built with MOHIO — the AI-native programming language. mohio.io — The game is afoot!",
+      "location": "mailbox",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "mailbox",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "leaflet",
+      "session_id": "__world__"
+    },
+    {
+      "id": "mailbox",
+      "name": "small mailbox",
+      "description": "A small mailbox mounted on a post. It is currently closed.",
+      "location": "west_of_house",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The mailbox is firmly attached to its post.",
+      "start_location": "west_of_house",
+      "cheat_description": "",
+      "is_container": "true",
+      "container_open": "false",
+      "short_name": "mailbox",
+      "session_id": "__world__"
+    },
+    {
+      "id": "brass_key",
+      "name": "brass key",
+      "description": "A small brass key, old and slightly tarnished.",
+      "location": "kitchen",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "kitchen",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "key",
+      "session_id": "__world__"
+    },
+    {
+      "id": "matches",
+      "name": "matchbook",
+      "description": "A book of matches. Several are still unused.",
+      "location": "kitchen",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "kitchen",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "matches",
+      "session_id": "__world__"
+    },
+    {
+      "id": "rope",
+      "name": "rope",
+      "description": "A coil of sturdy hemp rope, about 50 feet long.",
+      "location": "attic",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "attic",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "rope",
+      "session_id": "__world__"
+    },
+    {
+      "id": "chest",
+      "name": "treasure chest",
+      "description": "A large chest bound with brass fittings. It is locked.",
+      "location": "treasure_room",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The chest is too heavy to carry.",
+      "start_location": "treasure_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "chest",
+      "session_id": "__world__"
+    },
+    {
+      "id": "trophy_case",
+      "name": "trophy case",
+      "description": "The trophy case is securely fastened to the wall. It is a closed transparent container.",
+      "location": "living_room",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The trophy case is bolted to the wall.",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "true",
+      "container_open": "false",
+      "short_name": "case",
+      "session_id": "__world__"
+    },
+    {
+      "id": "painting",
+      "name": "painting",
+      "description": "Fortunately, it is hanging on the wall and is thus out of reach.",
+      "location": "living_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "painting",
+      "session_id": "__world__"
+    },
+    {
+      "id": "egg",
+      "name": "jeweled egg",
+      "description": "The egg is covered with fine gold inlay and ornamented in lapis lazuli and mother-of-pearl. Unlike most eggs, this one is hinged and has a delicate looking clasp holding it closed. The egg appears extremely fragile.",
+      "location": "treetop",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 5,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "treetop",
+      "cheat_description": "",
+      "is_container": "true",
+      "container_open": "false",
+      "short_name": "egg",
+      "session_id": "__world__"
+    },
+    {
+      "id": "shovel",
+      "name": "shovel",
+      "description": "A sturdy shovel. Good for digging in sandy places.",
+      "location": "sandy_cave",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "sandy_cave",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "shovel",
+      "session_id": "__world__"
+    },
+    {
+      "id": "coal",
+      "name": "coal",
+      "description": "A large lump of coal. It might be useful somewhere with great heat.",
+      "location": "coal_mine",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "coal_mine",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "coal",
+      "session_id": "__world__"
+    },
+    {
+      "id": "sceptre",
+      "name": "sceptre",
+      "description": "A sceptre made entirely of crystal. It appears to be ceremonial and of considerable value.",
+      "location": "coffin",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "loud_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "sceptre",
+      "session_id": "__world__"
+    },
+    {
+      "id": "knife",
+      "name": "shiny knife",
+      "description": "A rusty knife. It has seen better days but is still sharp enough to be useful.",
+      "location": "dead_end_1",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "dead_end_1",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "shiny knife",
+      "session_id": "__world__"
+    },
+    {
+      "id": "skeleton",
+      "name": "skeleton",
+      "description": "A human skeleton, yellowed with age. A cautionary tale.",
+      "location": "dead_end_1",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "You really don't want to carry that.",
+      "start_location": "dead_end_1",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "skeleton",
+      "session_id": "__world__"
+    },
+    {
+      "id": "candles",
+      "name": "black candles",
+      "description": "A pair of large black candles. They are not lit.",
+      "location": "hades_entrance",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "hades_entrance",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "candles",
+      "session_id": "__world__"
+    },
+    {
+      "id": "violin",
+      "name": "violin",
+      "description": "This is a beautiful Stradivarius violin, of obvious and enormous value.",
+      "location": "cyclops_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 10,
+      "trophy_score": 20,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "cyclops_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "violin",
+      "session_id": "__world__"
+    },
+    {
+      "id": "diamond",
+      "name": "diamond",
+      "description": "A large sparkling diamond. The facets catch and scatter the light beautifully.",
+      "location": "land_of_dead",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 10,
+      "trophy_score": 20,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "land_of_dead",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "diamond",
+      "session_id": "__world__"
+    },
+    {
+      "id": "troll_axe",
+      "name": "troll axe",
+      "description": "A large and very bloody axe. It belongs to the troll.",
+      "location": "troll_room",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The troll won't let go of the axe.",
+      "start_location": "troll_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "axe",
+      "session_id": "__world__"
+    },
+    {
+      "id": "letter_opener",
+      "name": "letter opener",
+      "description": "A thin brass letter opener. Could be useful for poking into small spaces.",
+      "location": "kitchen",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "kitchen",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "opener",
+      "session_id": "__world__"
+    },
+    {
+      "id": "food",
+      "name": "food",
+      "description": "A hearty-looking pile of food. Something might find it appealing.",
+      "location": "kitchen",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "kitchen",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "food",
+      "session_id": "__world__"
+    },
+    {
+      "id": "canary",
+      "name": "golden canary",
+      "description": "This is a golden clockwork canary. It has ruby eyes and a silver beak. Through a crystal window below its left wing you can see intricate machinery inside. It appears to have wound down.",
+      "location": "egg",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 15,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "egg",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "canary",
+      "session_id": "__world__"
+    },
+    {
+      "id": "skeleton_key",
+      "name": "skeleton key",
+      "description": "A long iron skeleton key. It looks like it would fit the gothic door.",
+      "location": "nowhere",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "nowhere",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "key",
+      "session_id": "__world__"
+    },
+    {
+      "id": "furnace",
+      "name": "furnace",
+      "description": "A large iron furnace. It is cold and dark inside. Something could be heated here.",
+      "location": "coal_mine",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "",
+      "start_location": "coal_mine",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "furnace",
+      "session_id": "__world__"
+    },
+    {
+      "id": "marble",
+      "name": "swirling marble",
+      "description": "A small glass marble, no larger than your thumbnail. Inside it, a deep green pattern swirls slowly — too slowly, as if it isn't obeying the usual rules. It feels lighter than it should. Holding it, you have the distinct and unsettling impression that it is waiting for something.",
+      "location": "living_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "marble",
+      "session_id": "__world__"
+    },
+    {
+      "id": "torch",
+      "name": "torch",
+      "description": "A torch, burning brightly. It lights the way through the darkest passages.",
+      "location": "cave_entrance",
+      "takeable": "true",
+      "lit": "true",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "cave_entrance",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "torch",
+      "session_id": "__world__"
+    },
+    {
+      "id": "large_emerald",
+      "name": "large emerald",
+      "description": "An emerald the size of your fist. It glows with an inner green light.",
+      "location": "treasure_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "treasure_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "emerald",
+      "session_id": "__world__"
+    },
+    {
+      "id": "pot_of_gold",
+      "name": "pot of gold",
+      "description": "A small iron pot filled with gold coins. Heavier than it looks.",
+      "location": "maze_3",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "maze_3",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "gold",
+      "session_id": "__world__"
+    },
+    {
+      "id": "rug",
+      "name": "large oriental rug",
+      "description": "A large oriental rug covers most of the floor. There seems to be something beneath it.",
+      "location": "living_room",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The rug is too large to carry.",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "rug",
+      "session_id": "__world__"
+    },
+    {
+      "id": "trapdoor",
+      "name": "trapdoor",
+      "description": "A closed trap door is set into the floor beneath where the rug once lay.",
+      "location": "living_room",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "You can't take the trapdoor.",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "trapdoor",
+      "session_id": "__world__"
+    },
+    {
+      "id": "welcome_mat",
+      "name": "rubber mat",
+      "description": "The mat says 'Welcome to Zork!' -- Built with MOHIO.",
+      "location": "west_of_house",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "west_of_house",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "mat",
+      "session_id": "__world__"
+    },
+    {
+      "id": "newspaper",
+      "name": "newspaper",
+      "description": "US NEWS AND DUNGEON REPORT. This is the Mohio version of Zork. For more information, visit mohio.io. Aspiring adventurers should avail themselves of every opportunity to broaden their intellectual horizons and increase their perspicacity.",
+      "location": "living_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "newspaper",
+      "session_id": "__world__"
+    },
+    {
+      "id": "sack",
+      "name": "brown sack",
+      "description": "An elongated brown sack, smelling of hot peppers.",
+      "location": "kitchen",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "kitchen",
+      "cheat_description": "",
+      "is_container": "true",
+      "container_open": "false",
+      "short_name": "sack",
+      "session_id": "__world__"
+    },
+    {
+      "id": "bottle",
+      "name": "glass bottle",
+      "description": "A small transparent glass bottle. It contains water.",
+      "location": "kitchen",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "kitchen",
+      "cheat_description": "",
+      "is_container": "true",
+      "container_open": "false",
+      "short_name": "bottle",
+      "session_id": "__world__"
+    },
+    {
+      "id": "garlic",
+      "name": "clove of garlic",
+      "description": "A garlic clove. Useful for warding off certain undesirable creatures.",
+      "location": "sack",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "kitchen",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "garlic",
+      "session_id": "__world__"
+    },
+    {
+      "id": "lunch",
+      "name": "lunch",
+      "description": "A hot pepper sandwich. It smells wonderful.",
+      "location": "sack",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "kitchen",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "lunch",
+      "session_id": "__world__"
+    },
+    {
+      "id": "crystal_skull",
+      "name": "crystal skull",
+      "description": "A skull carved from a single piece of quartz. Light passes through it in strange ways.",
+      "location": "dead_end_1",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 10,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "dead_end_1",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "skull",
+      "session_id": "__world__"
+    },
+    {
+      "id": "zorkmid_coin",
+      "name": "zorkmid coin",
+      "description": "A gold coin stamped with the words 'IN FROB WE TRUST'. The face on the coin looks vaguely like a troll.",
+      "location": "treasure_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 10,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "treasure_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "coin",
+      "session_id": "__world__"
+    },
+    {
+      "id": "mohio_stone",
+      "name": "obsidian stone",
+      "description": "A smooth black stone. One face is perfectly flat and polished. Etched into it, barely visible, are the characters: m o h i o. Below that, a URL: mohio.io. You feel you should remember this.",
+      "location": "land_of_dead",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "land_of_dead",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "stone",
+      "session_id": "__world__"
+    },
+    {
+      "id": "discord_scroll",
+      "name": "glowing scroll",
+      "description": "A scroll that glows with a faint purple light. Written on it: 'Seek the community of builders at discord.gg/TRt25pc8 — where the language lives.'",
+      "location": "strange_passage",
+      "takeable": "true",
+      "lit": "true",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "strange_passage",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "scroll",
+      "session_id": "__world__"
+    },
+    {
+      "id": "mohiou_card",
+      "name": "business card",
+      "description": "A small card, crisp and white. On the front: MOHIO UNIVERSITY — Learn to build with the world's first AI-native language. On the back: mohiou.com — Use code ZORK2026 for free access to 'Build Your Own Zork in Mohio'.",
+      "location": "treasure_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "treasure_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "card",
+      "session_id": "__world__"
+    },
+    {
+      "id": "rusty_knife",
+      "name": "rusty knife",
+      "description": "A knife, badly corroded. It would make a poor weapon but might have other uses.",
+      "location": "dead_end_1",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "dead_end_1",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "rusty knife",
+      "session_id": "__world__"
+    },
+    {
+      "id": "dead_lantern",
+      "name": "useless lantern",
+      "description": "A brass lantern, identical to yours. Unfortunately it is completely dead. A reminder that batteries run out.",
+      "location": "dead_end_1",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "dead_end_1",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "lantern",
+      "session_id": "__world__"
+    },
+    {
+      "id": "coin_bag",
+      "name": "bag of coins",
+      "description": "A leather bag containing several zorkmid coins. Someone was carrying their savings into the dungeon. That did not work out.",
+      "location": "dead_end_1",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 15,
+      "trophy_score": 15,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "dead_end_1",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "coins",
+      "session_id": "__world__"
+    },
+    {
+      "id": "bell",
+      "name": "brass bell",
+      "description": "A small brass bell. It has a clear, resonant tone. Something about it feels ceremonial.",
+      "location": "hades_entrance",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "hades_entrance",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "bell",
+      "session_id": "__world__"
+    },
+    {
+      "id": "black_book",
+      "name": "black book",
+      "description": "A small black book with no title. The pages are thin and covered in a script you almost recognize. Reading it aloud in the right place might do something.",
+      "location": "hades_entrance",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "hades_entrance",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "book",
+      "session_id": "__world__"
+    },
+    {
+      "id": "painting_zork2",
+      "name": "large painting",
+      "description": "An enormous oil painting dominates the wall. It depicts a scene from what appears to be another story entirely — a wizard in purple robes gesturing at a cowering dragon, while behind him a woman in a tower watches with an expression of profound boredom. The dragon looks embarrassed. The wizard looks uncertain. The woman looks like she has been waiting a very long time and has opinions about it. — You have the distinct feeling the painting is watching you back. — The plaque below reads: 'The Wizard of Frobozz — Act II'. You do not know what Act I was.",
+      "location": "gallery",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The painting is far too large, and besides, you have the sense it would not want to be moved.",
+      "start_location": "living_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "painting",
+      "session_id": "__world__"
+    },
+    {
+      "id": "compiler_warning",
+      "name": "glowing warning",
+      "description": "A small card has materialized on the floor. It reads: 'WARNING: This action has been noted. The Compiler is watching. Repeated offenses will result in a visit. — mohio check'",
+      "location": "nowhere",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "nowhere",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "warning",
+      "session_id": "__world__"
+    },
+    {
+      "id": "window",
+      "name": "window",
+      "description": "The window is slightly ajar, just wide enough to climb through.",
+      "location": "behind_house",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The window is part of the house. You can't take it.",
+      "start_location": "behind_house",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "window",
+      "session_id": "__world__"
+    },
+    {
+      "id": "trunk",
+      "name": "trunk of jewels",
+      "description": "A large trunk, brimming with assorted jewels, lies here where the lake bottom used to be.",
+      "location": "reservoir_north",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 15,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "reservoir_north",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "jewels",
+      "session_id": "__world__"
+    },
+    {
+      "id": "chalice",
+      "name": "silver chalice",
+      "description": "There is a silver chalice, intricately engraved, here.",
+      "location": "treasure_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "treasure_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "chalice",
+      "session_id": "__world__"
+    },
+    {
+      "id": "coffin",
+      "name": "gold coffin",
+      "description": "The solid-gold coffin used for the burial of Ramses II is here.",
+      "location": "egyptian_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 15,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "egyptian_room",
+      "cheat_description": "",
+      "is_container": "true",
+      "container_open": "false",
+      "short_name": "coffin",
+      "session_id": "__world__"
+    },
+    {
+      "id": "platinum_bar",
+      "name": "platinum bar",
+      "description": "On the ground is a large platinum bar.",
+      "location": "loud_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 10,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "loud_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "bar",
+      "session_id": "__world__"
+    },
+    {
+      "id": "jade",
+      "name": "jade figurine",
+      "description": "There is an exquisite jade figurine here.",
+      "location": "bat_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": "5",
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "bat_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "figurine",
+      "session_id": "__world__"
+    },
+    {
+      "id": "scarab",
+      "name": "jeweled scarab",
+      "description": "There is a beautiful jeweled scarab here.",
+      "location": "sandy_cave",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": 5,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "sandy_cave",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "scarab",
+      "session_id": "__world__"
+    },
+    {
+      "id": "trident",
+      "name": "crystal trident",
+      "description": "On the shore lies Poseidon's own crystal trident.",
+      "location": "atlantis_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 11,
+      "trophy_score": 4,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "atlantis_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "trident",
+      "session_id": "__world__"
+    },
+    {
+      "id": "bauble",
+      "name": "brass bauble",
+      "description": "There is a beautiful brass bauble here.",
+      "location": "forest",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 1,
+      "trophy_score": 1,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "forest",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "bauble",
+      "session_id": "__world__"
+    },
+    {
+      "id": "sapphire",
+      "name": "sapphire bracelet",
+      "description": "There is a sapphire-encrusted bracelet here.",
+      "location": "gas_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "true",
+      "score_value": 5,
+      "trophy_score": "5",
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "gas_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "bracelet",
+      "session_id": "__world__"
+    },
+    {
+      "id": "air_pump",
+      "name": "air pump",
+      "description": "A small hand-held air pump.",
+      "location": "reservoir_north",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "reservoir_north",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "pump",
+      "session_id": "__world__"
+    },
+    {
+      "id": "wrench",
+      "name": "wrench",
+      "description": "A wrench, suitable for turning bolts.",
+      "location": "maintenance_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "maintenance_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "wrench",
+      "session_id": "__world__"
+    },
+    {
+      "id": "screwdriver",
+      "name": "screwdriver",
+      "description": "A flathead screwdriver.",
+      "location": "maintenance_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "maintenance_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "screwdriver",
+      "session_id": "__world__"
+    },
+    {
+      "id": "matchbook",
+      "name": "matchbook",
+      "description": "A matchbook whose cover says 'Visit Beautiful FCD#3'. There are several matches inside.",
+      "location": "dam_lobby",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "dam_lobby",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "matchbook",
+      "session_id": "__world__"
+    },
+    {
+      "id": "wrench_bolt",
+      "name": "bolt",
+      "description": "There is a large metal bolt here, connected to a small green plastic bubble.",
+      "location": "dam_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "dam_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "bolt",
+      "session_id": "__world__"
+    },
+    {
+      "id": "guidebook",
+      "name": "tour guidebook",
+      "description": "Some guidebooks entitled 'Flood Control Dam #3' are here.",
+      "location": "dam_lobby",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "dam_lobby",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "guidebook",
+      "session_id": "__world__"
+    },
+    {
+      "id": "screwdriver_tool",
+      "name": "tube",
+      "description": "There is an object which looks like a tube of toothpaste here.",
+      "location": "maintenance_room",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "maintenance_room",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "tube",
+      "session_id": "__world__"
+    },
+    {
+      "id": "mohio_key",
+      "name": "swirl key",
+      "description": "Not like any key you know. The shaft ends in a tight metal spiral, machined with great precision to fit something specific. It is the same spiral that swirls inside the marble, the same mark etched on the obsidian stone. It is warm. It looks important — it looks like it opens something that matters.",
+      "location": "hidden",
+      "takeable": "true",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "false",
+      "takeable_message": "",
+      "start_location": "hidden",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "key",
+      "session_id": "__world__"
+    },
+    {
+      "id": "architect_door",
+      "name": "rusting door",
+      "description": "A heavy iron door, deeply rusted, set into the living rock where no door should be. A corroded brass plate is riveted to it. Most of the engraving has worn away, but you can still make out: github.com/countart/mohio. There is a keyhole shaped like a spiral. The door is locked.",
+      "location": "strange_passage",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The door is set into solid rock. It is not going anywhere — unless you can open it.",
+      "start_location": "strange_passage",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "door",
+      "session_id": "__world__"
+    },
+    {
+      "id": "dead_throne",
+      "name": "throne-like chair",
+      "description": "A small throne, carved from dark wood and banded with tarnished metal. It is the only solid thing in this void of drifting souls. It looks like it is meant to be sat in — and the apparitions seem to be waiting for you to do exactly that.",
+      "location": "land_of_dead",
+      "takeable": "false",
+      "lit": "false",
+      "is_treasure": "false",
+      "score_value": 0,
+      "trophy_score": 0,
+      "fixed": "true",
+      "takeable_message": "The throne is fixed to the center of the void.",
+      "start_location": "land_of_dead",
+      "cheat_description": "",
+      "is_container": "false",
+      "container_open": "false",
+      "short_name": "chair",
+      "session_id": "__world__"
+    }
+  ],
+  "saved_games": [
+    {
+      "session_id": "__schema_template__",
+      "current_room": "west_of_house",
+      "score": "0",
+      "moves": "0",
+      "lantern_lit": "false",
+      "marble_seen": "false",
+      "marble_maze": "false",
+      "maze_cheat": "false",
+      "marble_broken": "false",
+      "compiler_warned": "false",
+      "architect_sealed": "false",
+      "architect_door_open": "false",
+      "architect_vision_seen": "false",
+      "chair_vision_seen": "false",
+      "key_dislodged": "false",
+      "give_up_count": "0",
+      "pending_verb": "",
+      "pending_noun": "",
+      "pending_canonical": ""
+    }
+  ],
+  "puzzles": [
+    {
+      "id": "troll_combat",
+      "room": "troll_room",
+      "verb": "attack",
+      "target": "troll",
+      "requires_item": "sword",
+      "flag_set": "troll_dead",
+      "score": 25,
+      "success": "You kill the troll with your elvish sword! The path east is now clear.",
+      "failure": "The troll is far too strong to face bare-handed. You will need a weapon.",
+      "death_on_failure": "true",
+      "opens_exit": "east",
+      "requires_flag": "",
+      "exit_dest": "east_west_passage"
+    },
+    {
+      "id": "chest_unlock",
+      "room": "treasure_room",
+      "verb": "unlock",
+      "target": "chest",
+      "requires_item": "brass_key",
+      "flag_set": "chest_unlocked",
+      "score": 10,
+      "success": "The chest unlocks with a satisfying click.",
+      "failure": "You don't have anything to unlock it with.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "trapdoor_unlock",
+      "room": "living_room",
+      "verb": "unlock",
+      "target": "trap door",
+      "requires_item": "brass_key",
+      "flag_set": "trapdoor_open",
+      "score": 5,
+      "success": "The trapdoor opens revealing a staircase leading down into darkness.",
+      "failure": "The trapdoor is shut. A large rug covers part of the floor; you might want to move it first.",
+      "death_on_failure": "false",
+      "opens_exit": "down",
+      "requires_flag": "",
+      "exit_dest": "cellar"
+    },
+    {
+      "id": "cyclops_puzzle",
+      "room": "cyclops_room",
+      "verb": "give",
+      "target": "cyclops",
+      "requires_item": "food",
+      "flag_set": "cyclops_gone",
+      "score": 10,
+      "success": "The cyclops grabs the food and lumbers away. The way east is clear.",
+      "failure": "The cyclops stares at you with its one eye. Perhaps it wants something.",
+      "death_on_failure": "false",
+      "opens_exit": "east",
+      "requires_flag": "",
+      "exit_dest": "strange_passage"
+    },
+    {
+      "id": "hades_puzzle",
+      "room": "hades_entrance",
+      "verb": "light",
+      "target": "candles",
+      "requires_item": "matches",
+      "flag_set": "hades_open",
+      "score": 15,
+      "success": "You light the black candles. The spirits wail and flee. The door to the west opens.",
+      "failure": "You need something to light the candles with.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": "land_of_dead"
+    },
+    {
+      "id": "rope_bridge",
+      "room": "east_of_chasm",
+      "verb": "cross",
+      "target": "bridge",
+      "requires_item": "rope",
+      "flag_set": "bridge_crossed",
+      "score": 10,
+      "success": "You secure the rope and cross the bridge safely.",
+      "failure": "The bridge looks too fragile without something to secure it.",
+      "death_on_failure": "false",
+      "opens_exit": "west",
+      "requires_flag": "",
+      "exit_dest": "west_of_chasm"
+    },
+    {
+      "id": "slide_leaflet",
+      "room": "living_room",
+      "verb": "slide",
+      "target": "leaflet",
+      "requires_item": "leaflet",
+      "flag_set": "leaflet_under_door",
+      "score": 0,
+      "success": "You slide the leaflet under the gothic door. You can just barely see it on the other side.",
+      "failure": "You need the leaflet in your inventory to slide it under the door.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "push_letter_opener",
+      "room": "living_room",
+      "verb": "push",
+      "target": "letter opener",
+      "requires_item": "letter_opener",
+      "flag_set": "key_on_leaflet",
+      "score": 5,
+      "success": "You push the letter opener into the keyhole. After a moment you hear a metallic clink — the key has fallen onto the leaflet on the other side!",
+      "failure": "You need to slide the leaflet under the door first.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "leaflet_under_door",
+      "exit_dest": ""
+    },
+    {
+      "id": "pull_leaflet",
+      "room": "living_room",
+      "verb": "pull",
+      "target": "leaflet",
+      "requires_item": "leaflet",
+      "flag_set": "skeleton_key_found",
+      "score": 10,
+      "success": "You carefully pull the leaflet back under the door. The skeleton key comes with it! You now have the key.",
+      "failure": "You need to push the letter opener through the keyhole first to knock the key loose.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "key_on_leaflet",
+      "exit_dest": ""
+    },
+    {
+      "id": "unlock_gothic_door",
+      "room": "living_room",
+      "verb": "unlock",
+      "target": "gothic door",
+      "requires_item": "skeleton_key",
+      "flag_set": "gothic_door_open",
+      "score": 15,
+      "success": "The skeleton key turns in the lock with a satisfying click. The gothic door swings open, revealing a dark passage to the west.",
+      "failure": "You need the skeleton key to unlock this door. It's behind the door itself — figure out how to get it.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "skeleton_key_found",
+      "exit_dest": "strange_passage"
+    },
+    {
+      "id": "coal_furnace",
+      "room": "coal_mine",
+      "verb": "put",
+      "target": "furnace",
+      "requires_item": "coal",
+      "flag_set": "furnace_lit",
+      "score": 10,
+      "success": "You put the coal in the furnace and light it. The furnace roars to life with intense heat. Something nearby begins to gleam...",
+      "failure": "You need coal to fuel the furnace.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "move_rug",
+      "room": "living_room",
+      "verb": "move",
+      "target": "rug",
+      "requires_item": "",
+      "flag_set": "rug_moved",
+      "score": 0,
+      "success": "With a great effort, the rug is moved to one side of the room, revealing the dusty cover of a closed trap door.",
+      "failure": "The rug is already moved.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "push_leaflet",
+      "room": "living_room",
+      "verb": "push",
+      "target": "leaflet",
+      "requires_item": "leaflet",
+      "flag_set": "leaflet_under_door",
+      "score": 0,
+      "success": "You slide the leaflet under the gothic door. You can just barely see it on the other side.",
+      "failure": "You need the leaflet in your inventory to slide it under the door.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "slide_letter_opener",
+      "room": "living_room",
+      "verb": "slide",
+      "target": "letter opener",
+      "requires_item": "letter_opener",
+      "flag_set": "key_on_leaflet",
+      "score": 5,
+      "success": "You push the letter opener into the keyhole. After a moment you hear a metallic clink — the key has fallen onto the leaflet on the other side!",
+      "failure": "You need to slide the leaflet under the door first.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "leaflet_under_door",
+      "exit_dest": ""
+    },
+    {
+      "id": "move_letter_opener",
+      "room": "living_room",
+      "verb": "move",
+      "target": "letter opener",
+      "requires_item": "letter_opener",
+      "flag_set": "key_on_leaflet",
+      "score": 5,
+      "success": "You push the letter opener into the keyhole. After a moment you hear a metallic clink — the key has fallen onto the leaflet on the other side!",
+      "failure": "You need to slide the leaflet under the door first.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "leaflet_under_door",
+      "exit_dest": ""
+    },
+    {
+      "id": "grab_leaflet",
+      "room": "living_room",
+      "verb": "take",
+      "target": "leaflet",
+      "requires_item": "leaflet",
+      "flag_set": "skeleton_key_found",
+      "score": 10,
+      "success": "You carefully pull the leaflet back under the door. The skeleton key comes with it! You now have the key.",
+      "failure": "You need to push the letter opener through the keyhole first to knock the key loose.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "key_on_leaflet",
+      "exit_dest": ""
+    },
+    {
+      "id": "lift_rug",
+      "room": "living_room",
+      "verb": "lift",
+      "target": "rug",
+      "requires_item": "",
+      "flag_set": "rug_moved",
+      "score": 0,
+      "success": "You move the rug aside, revealing a closed trapdoor in the floor.",
+      "failure": "The rug is already moved.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "push_rug",
+      "room": "living_room",
+      "verb": "push",
+      "target": "rug",
+      "requires_item": "",
+      "flag_set": "rug_moved",
+      "score": 0,
+      "success": "You move the rug aside, revealing a closed trapdoor in the floor.",
+      "failure": "The rug is already moved.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "pull_rug",
+      "room": "living_room",
+      "verb": "pull",
+      "target": "rug",
+      "requires_item": "",
+      "flag_set": "rug_moved",
+      "score": 0,
+      "success": "You move the rug aside, revealing a closed trapdoor in the floor.",
+      "failure": "The rug is already moved.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "say_mohio_maze",
+      "room": "maze_1",
+      "verb": "say",
+      "target": "mohio",
+      "requires_item": "marble",
+      "flag_set": "maze_cheat",
+      "score": 5,
+      "success": "The marble flares with brilliant green light. The walls of the maze seem to shift and settle, as if acknowledging something. You understand the maze now. Type LOOK to see your path.",
+      "failure": "You need to be carrying the swirling marble and have examined it here first.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "marble_maze",
+      "exit_dest": ""
+    },
+    {
+      "id": "break_marble",
+      "room": "any",
+      "verb": "break",
+      "target": "marble",
+      "requires_item": "marble",
+      "flag_set": "marble_broken",
+      "score": 0,
+      "success": "The marble slips from your fingers and shatters on the stone floor. The green light flares once — brilliantly — then dies. Something that was waiting stops waiting. The pieces are too small to gather. The pattern is gone.",
+      "failure": "You are not carrying the marble.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "say_mohio_outside",
+      "room": "west_of_house",
+      "verb": "say",
+      "target": "mohio",
+      "requires_item": "",
+      "flag_set": "",
+      "score": 0,
+      "success": "The word hangs in the air like smoke. A distant chime sounds, as if something underground has taken notice. You feel watched.",
+      "failure": "",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "read_newspaper",
+      "room": "living_room",
+      "verb": "read",
+      "target": "newspaper",
+      "requires_item": "",
+      "flag_set": "newspaper_read",
+      "score": 0,
+      "success": "US NEWS & DUNGEON REPORT — Special Mohio Edition — This version of Zork runs entirely on Mohio, an AI-native programming language built by one person in Mooresville, NC. The game world — 34 rooms, 38 items, 20 puzzles — lives in a database. The language is the router. — Visit mohio.io to learn more. COUPON: Use code ZORK2026 at mohiou.com for free access to 'Build Your Own Zork in Mohio'. — Discord: discord.gg/TRt25pc8",
+      "failure": "",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "say_odysseus",
+      "room": "cyclops_room",
+      "verb": "say",
+      "target": "odysseus",
+      "requires_item": "",
+      "flag_set": "cyclops_gone",
+      "score": 10,
+      "success": "The cyclops freezes. His one enormous eye goes wide with something between recognition and terror. 'ODYSSEUS!' he roars — or perhaps it is a wail — and hurls himself westward through the wall, taking most of the wall with him. Dust settles. A passage west is now open where the wall used to be.",
+      "failure": "The cyclops fills the eastern passage, watching you with his one enormous eye. He does not look inclined to move. There may be a name he would rather not hear.",
+      "death_on_failure": "false",
+      "opens_exit": "east",
+      "requires_flag": "",
+      "exit_dest": "strange_passage"
+    },
+    {
+      "id": "disturb_skeleton",
+      "room": "dead_end_4",
+      "verb": "take",
+      "target": "skeleton",
+      "requires_item": "",
+      "flag_set": "ghost_summoned",
+      "score": 0,
+      "success": "As your hand touches the skeleton it crumbles to dust. The temperature drops sharply. A translucent figure rises from where the bones lay — the ghost of the Dead Adventurer, still wearing the expression of someone who made one bad decision too many. It regards your treasures with professional interest. Then it and your most valuable possession are simply gone. You hear faint laughter from somewhere below.",
+      "failure": "",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "ring_bell",
+      "room": "hades_entrance",
+      "verb": "ring",
+      "target": "bell",
+      "requires_item": "bell",
+      "flag_set": "bell_rung",
+      "score": 0,
+      "success": "The bell rings with a tone that seems to travel downward rather than outward. The whispering voices around you grow momentarily louder, then subside. Something has changed, though you cannot say what.",
+      "failure": "You are not carrying the bell.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "read_black_book",
+      "room": "hades_entrance",
+      "verb": "read",
+      "target": "book",
+      "requires_item": "black_book",
+      "flag_set": "spirits_appeased",
+      "score": 15,
+      "success": "You open the black book and read aloud. The words are in a language you do not know but your mouth forms them anyway. The candles gutter and go out, then relight themselves in blue. The evil spirits surrounding you make a sound like wind through a very long corridor and then they are gone. The passage south is clear.",
+      "failure": "The spirits surge toward you. You are not ready. The bell must be rung first.",
+      "death_on_failure": "false",
+      "opens_exit": "south",
+      "requires_flag": "bell_rung",
+      "exit_dest": "land_of_dead"
+    },
+    {
+      "id": "compiler_appears",
+      "room": "any",
+      "verb": "kick",
+      "target": "",
+      "requires_item": "",
+      "flag_set": "compiler_visited",
+      "score": 0,
+      "success": "You kick out aggressively once more. Suddenly, the temperature in the room plummets to absolute zero. The air ripples with lines of translucent, glowing code that knit together into a towering, spectacled silhouette: The Compiler. He looks down at your bruised foot, sighs heavily, and notes, 'A brute-force input exception. Highly inefficient.' Before you can recant your command, he reaches into his shifting robes, pulls out a crisp, glowing card, and presses it into your hand. 'Refactor your approach,' he whispers, before dissolving back into a cloud of unresolved tokens. — You have been handed a card: mohio.io — and on the back, a Discord invite (discord.gg/TRt25pc8) and a note: 'Take a lesson. mohiou.com.'",
+      "failure": "",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "compiler_warned",
+      "exit_dest": ""
+    },
+    {
+      "id": "open_mailbox",
+      "room": "west_of_house",
+      "verb": "open",
+      "target": "mailbox",
+      "requires_item": "",
+      "flag_set": "mailbox_open",
+      "score": 0,
+      "success": "Opening the small mailbox reveals a leaflet.",
+      "failure": "",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "open_trapdoor",
+      "room": "living_room",
+      "verb": "open",
+      "target": "trapdoor",
+      "requires_item": "",
+      "flag_set": "trapdoor_open",
+      "score": 5,
+      "success": "The door reluctantly opens to reveal a rickety staircase descending into darkness.",
+      "failure": "There is a large rug covering the floor. You might want to move it first.",
+      "death_on_failure": "false",
+      "opens_exit": "down",
+      "requires_flag": "rug_moved",
+      "exit_dest": "cellar"
+    },
+    {
+      "id": "open_window",
+      "room": "behind_house",
+      "verb": "open",
+      "target": "window",
+      "requires_item": "",
+      "flag_set": "window_open",
+      "score": 0,
+      "success": "With great effort, you open the window far enough to allow entry.",
+      "failure": "The kitchen window is shut. It sits slightly ajar, just enough to tempt you, but you will need to open it before you can climb through.",
+      "death_on_failure": "false",
+      "opens_exit": "west",
+      "requires_flag": "",
+      "exit_dest": "kitchen"
+    },
+    {
+      "id": "enter_window",
+      "room": "behind_house",
+      "verb": "enter",
+      "target": "window",
+      "requires_item": "",
+      "flag_set": "",
+      "score": 0,
+      "success": "You climb through the open window into the kitchen.",
+      "failure": "The window is closed. You should open it first.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "window_open",
+      "exit_dest": "kitchen"
+    },
+    {
+      "id": "climb_tree",
+      "room": "forest",
+      "verb": "climb",
+      "target": "tree",
+      "requires_item": "",
+      "flag_set": "",
+      "score": 0,
+      "success": "You climb up the large tree. About ten feet up you find a small nest.",
+      "failure": "",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "requires_flag": "",
+      "exit_dest": "treetop"
+    },
+    {
+      "id": "unlock_architect_door",
+      "room": "strange_passage",
+      "verb": "unlock",
+      "target": "door",
+      "requires_item": "mohio_key",
+      "requires_flag": "",
+      "flag_set": "architect_door_open",
+      "score": 0,
+      "success": "The swirl key slides into the spiral keyhole as if it were poured there. A deep mechanism turns — once, twice — and the rusted door swings inward without a sound, revealing a clean, humming light beyond. This is not part of the dungeon. You step toward it.",
+      "failure": "The door is locked. The keyhole is shaped like a spiral — you'll need a key to match.",
+      "death_on_failure": "false",
+      "opens_exit": "",
+      "exit_dest": ""
+    },
+    {
+      "id": "say_ulysses",
+      "room": "cyclops_room",
+      "verb": "say",
+      "target": "ulysses",
+      "requires_item": "",
+      "flag_set": "cyclops_gone",
+      "score": "10",
+      "success": "The cyclops, hearing the name of his father's deadly nemesis, flees the room by knocking down the wall on the east of the room. The way east — and the staircase up — are now clear.",
+      "failure": "The cyclops fills the eastern passage, watching you with his one enormous eye. He does not look inclined to move. There may be a name he would rather not hear.",
+      "death_on_failure": "false",
+      "opens_exit": "east",
+      "requires_flag": "",
+      "exit_dest": "strange_passage"
+    }
+  ],
+  "trophy_case": [],
+  "sessions": [],
+  "exits": [
+    {
+      "room_id": "west_of_house",
+      "direction": "north",
+      "dest": "north_of_house"
+    },
+    {
+      "room_id": "west_of_house",
+      "direction": "south",
+      "dest": "south_of_house"
+    },
+    {
+      "room_id": "west_of_house",
+      "direction": "west",
+      "dest": "forest"
+    },
+    {
+      "room_id": "west_of_house",
+      "direction": "ne",
+      "dest": "north_of_house"
+    },
+    {
+      "room_id": "west_of_house",
+      "direction": "se",
+      "dest": "south_of_house"
+    },
+    {
+      "room_id": "west_of_house",
+      "direction": "sw",
+      "dest": "stone_barrow"
+    },
+    {
+      "room_id": "north_of_house",
+      "direction": "north",
+      "dest": "forest_path"
+    },
+    {
+      "room_id": "north_of_house",
+      "direction": "south",
+      "dest": "west_of_house"
+    },
+    {
+      "room_id": "north_of_house",
+      "direction": "east",
+      "dest": "behind_house"
+    },
+    {
+      "room_id": "north_of_house",
+      "direction": "west",
+      "dest": "west_of_house"
+    },
+    {
+      "room_id": "north_of_house",
+      "direction": "se",
+      "dest": "behind_house"
+    },
+    {
+      "room_id": "north_of_house",
+      "direction": "sw",
+      "dest": "west_of_house"
+    },
+    {
+      "room_id": "south_of_house",
+      "direction": "north",
+      "dest": "west_of_house"
+    },
+    {
+      "room_id": "south_of_house",
+      "direction": "south",
+      "dest": "forest"
+    },
+    {
+      "room_id": "south_of_house",
+      "direction": "east",
+      "dest": "behind_house"
+    },
+    {
+      "room_id": "south_of_house",
+      "direction": "west",
+      "dest": "west_of_house"
+    },
+    {
+      "room_id": "south_of_house",
+      "direction": "ne",
+      "dest": "behind_house"
+    },
+    {
+      "room_id": "south_of_house",
+      "direction": "nw",
+      "dest": "west_of_house"
+    },
+    {
+      "room_id": "behind_house",
+      "direction": "north",
+      "dest": "north_of_house"
+    },
+    {
+      "room_id": "behind_house",
+      "direction": "south",
+      "dest": "south_of_house"
+    },
+    {
+      "room_id": "behind_house",
+      "direction": "east",
+      "dest": "forest"
+    },
+    {
+      "room_id": "behind_house",
+      "direction": "west",
+      "dest": "kitchen"
+    },
+    {
+      "room_id": "behind_house",
+      "direction": "nw",
+      "dest": "north_of_house"
+    },
+    {
+      "room_id": "behind_house",
+      "direction": "sw",
+      "dest": "south_of_house"
+    },
+    {
+      "room_id": "kitchen",
+      "direction": "north",
+      "dest": "bathroom"
+    },
+    {
+      "room_id": "kitchen",
+      "direction": "east",
+      "dest": "behind_house"
+    },
+    {
+      "room_id": "kitchen",
+      "direction": "west",
+      "dest": "living_room"
+    },
+    {
+      "room_id": "kitchen",
+      "direction": "up",
+      "dest": "attic"
+    },
+    {
+      "room_id": "kitchen",
+      "direction": "down",
+      "dest": "studio"
+    },
+    {
+      "room_id": "living_room",
+      "direction": "east",
+      "dest": "kitchen"
+    },
+    {
+      "room_id": "living_room",
+      "direction": "west",
+      "dest": "strange_passage"
+    },
+    {
+      "room_id": "attic",
+      "direction": "down",
+      "dest": "kitchen"
+    },
+    {
+      "room_id": "cellar",
+      "direction": "north",
+      "dest": "troll_room"
+    },
+    {
+      "room_id": "cellar",
+      "direction": "south",
+      "dest": "east_of_chasm"
+    },
+    {
+      "room_id": "cellar",
+      "direction": "up",
+      "dest": "living_room"
+    },
+    {
+      "room_id": "troll_room",
+      "direction": "south",
+      "dest": "cellar"
+    },
+    {
+      "room_id": "troll_room",
+      "direction": "east",
+      "dest": "east_west_passage"
+    },
+    {
+      "room_id": "troll_room",
+      "direction": "west",
+      "dest": "maze_1"
+    },
+    {
+      "room_id": "east_west_passage",
+      "direction": "north",
+      "dest": "chasm_room"
+    },
+    {
+      "room_id": "east_west_passage",
+      "direction": "east",
+      "dest": "round_room"
+    },
+    {
+      "room_id": "east_west_passage",
+      "direction": "west",
+      "dest": "troll_room"
+    },
+    {
+      "room_id": "east_west_passage",
+      "direction": "down",
+      "dest": "chasm_room"
+    },
+    {
+      "room_id": "east_west_passage",
+      "direction": "ne",
+      "dest": "chasm_room"
+    },
+    {
+      "room_id": "round_room",
+      "direction": "north",
+      "dest": "north_south_passage"
+    },
+    {
+      "room_id": "round_room",
+      "direction": "south",
+      "dest": "narrow_passage"
+    },
+    {
+      "room_id": "round_room",
+      "direction": "east",
+      "dest": "loud_room"
+    },
+    {
+      "room_id": "round_room",
+      "direction": "west",
+      "dest": "east_west_passage"
+    },
+    {
+      "room_id": "round_room",
+      "direction": "se",
+      "dest": "engravings_cave"
+    },
+    {
+      "room_id": "loud_room",
+      "direction": "east",
+      "dest": "damp_cave"
+    },
+    {
+      "room_id": "loud_room",
+      "direction": "west",
+      "dest": "round_room"
+    },
+    {
+      "room_id": "loud_room",
+      "direction": "up",
+      "dest": "deep_canyon"
+    },
+    {
+      "room_id": "cave_entrance",
+      "direction": "east",
+      "dest": "bat_room"
+    },
+    {
+      "room_id": "cave_entrance",
+      "direction": "west",
+      "dest": "canyon"
+    },
+    {
+      "room_id": "treasure_room",
+      "direction": "down",
+      "dest": "cyclops_room"
+    },
+    {
+      "room_id": "east_of_chasm",
+      "direction": "north",
+      "dest": "cellar"
+    },
+    {
+      "room_id": "east_of_chasm",
+      "direction": "east",
+      "dest": "gallery"
+    },
+    {
+      "room_id": "east_of_chasm",
+      "direction": "west",
+      "dest": "west_of_chasm"
+    },
+    {
+      "room_id": "east_of_chasm",
+      "direction": "down",
+      "dest": "cellar"
+    },
+    {
+      "room_id": "west_of_chasm",
+      "direction": "north",
+      "dest": "bat_room"
+    },
+    {
+      "room_id": "west_of_chasm",
+      "direction": "south",
+      "dest": "sandy_cave"
+    },
+    {
+      "room_id": "west_of_chasm",
+      "direction": "east",
+      "dest": "east_of_chasm"
+    },
+    {
+      "room_id": "bat_room",
+      "direction": "south",
+      "dest": "squeaky_room"
+    },
+    {
+      "room_id": "bat_room",
+      "direction": "east",
+      "dest": "shaft_room"
+    },
+    {
+      "room_id": "bat_room",
+      "direction": "west",
+      "dest": "cave_entrance"
+    },
+    {
+      "room_id": "sandy_cave",
+      "direction": "north",
+      "dest": "west_of_chasm"
+    },
+    {
+      "room_id": "sandy_cave",
+      "direction": "nw",
+      "dest": "canyon_bottom"
+    },
+    {
+      "room_id": "sandy_cave",
+      "direction": "sw",
+      "dest": "sandy_beach"
+    },
+    {
+      "room_id": "coal_mine",
+      "direction": "north",
+      "dest": "sandy_cave"
+    },
+    {
+      "room_id": "coal_mine",
+      "direction": "east",
+      "dest": "gas_room"
+    },
+    {
+      "room_id": "coal_mine",
+      "direction": "west",
+      "dest": "cave_entrance"
+    },
+    {
+      "room_id": "coal_mine",
+      "direction": "ne",
+      "dest": "coal_mine_2"
+    },
+    {
+      "room_id": "maze_1",
+      "direction": "north",
+      "dest": "maze_1"
+    },
+    {
+      "room_id": "maze_1",
+      "direction": "south",
+      "dest": "maze_2"
+    },
+    {
+      "room_id": "maze_1",
+      "direction": "east",
+      "dest": "troll_room"
+    },
+    {
+      "room_id": "maze_1",
+      "direction": "west",
+      "dest": "maze_4"
+    },
+    {
+      "room_id": "maze_2",
+      "direction": "south",
+      "dest": "maze_1"
+    },
+    {
+      "room_id": "maze_2",
+      "direction": "east",
+      "dest": "maze_3"
+    },
+    {
+      "room_id": "maze_3",
+      "direction": "north",
+      "dest": "maze_4"
+    },
+    {
+      "room_id": "maze_3",
+      "direction": "west",
+      "dest": "maze_2"
+    },
+    {
+      "room_id": "maze_3",
+      "direction": "up",
+      "dest": "maze_5"
+    },
+    {
+      "room_id": "forest",
+      "direction": "north",
+      "dest": "clearing"
+    },
+    {
+      "room_id": "forest",
+      "direction": "south",
+      "dest": "forest_path"
+    },
+    {
+      "room_id": "forest",
+      "direction": "east",
+      "dest": "forest"
+    },
+    {
+      "room_id": "forest",
+      "direction": "west",
+      "dest": "forest"
+    },
+    {
+      "room_id": "forest",
+      "direction": "up",
+      "dest": "treetop"
+    },
+    {
+      "room_id": "forest_path",
+      "direction": "north",
+      "dest": "grating_clearing"
+    },
+    {
+      "room_id": "forest_path",
+      "direction": "south",
+      "dest": "forest"
+    },
+    {
+      "room_id": "forest_path",
+      "direction": "east",
+      "dest": "west_of_house"
+    },
+    {
+      "room_id": "forest_path",
+      "direction": "west",
+      "dest": "forest"
+    },
+    {
+      "room_id": "forest_path",
+      "direction": "up",
+      "dest": "treetop"
+    },
+    {
+      "room_id": "clearing",
+      "direction": "north",
+      "dest": "forest"
+    },
+    {
+      "room_id": "clearing",
+      "direction": "south",
+      "dest": "forest_path"
+    },
+    {
+      "room_id": "clearing",
+      "direction": "east",
+      "dest": "canyon_view"
+    },
+    {
+      "room_id": "clearing",
+      "direction": "west",
+      "dest": "forest"
+    },
+    {
+      "room_id": "treetop",
+      "direction": "down",
+      "dest": "forest_path"
+    },
+    {
+      "room_id": "canyon",
+      "direction": "south",
+      "dest": "canyon_view"
+    },
+    {
+      "room_id": "canyon",
+      "direction": "east",
+      "dest": "cave_entrance"
+    },
+    {
+      "room_id": "canyon",
+      "direction": "west",
+      "dest": "east_of_chasm"
+    },
+    {
+      "room_id": "canyon",
+      "direction": "up",
+      "dest": "canyon_view"
+    },
+    {
+      "room_id": "canyon",
+      "direction": "down",
+      "dest": "canyon_bottom"
+    },
+    {
+      "room_id": "canyon_bottom",
+      "direction": "north",
+      "dest": "end_of_rainbow"
+    },
+    {
+      "room_id": "canyon_bottom",
+      "direction": "up",
+      "dest": "cliff_middle"
+    },
+    {
+      "room_id": "canyon_bottom",
+      "direction": "down",
+      "dest": "end_of_rainbow"
+    },
+    {
+      "room_id": "canyon_bottom",
+      "direction": "ne",
+      "dest": "end_of_rainbow"
+    },
+    {
+      "room_id": "canyon_bottom",
+      "direction": "se",
+      "dest": "sandy_cave"
+    },
+    {
+      "room_id": "cyclops_room",
+      "direction": "east",
+      "dest": "strange_passage"
+    },
+    {
+      "room_id": "cyclops_room",
+      "direction": "up",
+      "dest": "treasure_room"
+    },
+    {
+      "room_id": "cyclops_room",
+      "direction": "nw",
+      "dest": "maze_15"
+    },
+    {
+      "room_id": "strange_passage",
+      "direction": "east",
+      "dest": "living_room"
+    },
+    {
+      "room_id": "strange_passage",
+      "direction": "west",
+      "dest": "cyclops_room"
+    },
+    {
+      "room_id": "hades_entrance",
+      "direction": "south",
+      "dest": "land_of_dead"
+    },
+    {
+      "room_id": "hades_entrance",
+      "direction": "up",
+      "dest": "tiny_cave"
+    },
+    {
+      "room_id": "land_of_dead",
+      "direction": "north",
+      "dest": "hades_entrance"
+    },
+    {
+      "room_id": "gallery",
+      "direction": "north",
+      "dest": "studio"
+    },
+    {
+      "room_id": "gallery",
+      "direction": "west",
+      "dest": "east_of_chasm"
+    },
+    {
+      "room_id": "studio",
+      "direction": "south",
+      "dest": "gallery"
+    },
+    {
+      "room_id": "studio",
+      "direction": "up",
+      "dest": "kitchen"
+    },
+    {
+      "room_id": "dam_room",
+      "direction": "north",
+      "dest": "dam_lobby"
+    },
+    {
+      "room_id": "dam_room",
+      "direction": "south",
+      "dest": "deep_canyon"
+    },
+    {
+      "room_id": "dam_room",
+      "direction": "east",
+      "dest": "dam_base"
+    },
+    {
+      "room_id": "dam_room",
+      "direction": "west",
+      "dest": "reservoir_south"
+    },
+    {
+      "room_id": "dam_room",
+      "direction": "down",
+      "dest": "dam_base"
+    },
+    {
+      "room_id": "dam_lobby",
+      "direction": "north",
+      "dest": "maintenance_room"
+    },
+    {
+      "room_id": "dam_lobby",
+      "direction": "south",
+      "dest": "dam_room"
+    },
+    {
+      "room_id": "dam_lobby",
+      "direction": "east",
+      "dest": "maintenance_room"
+    },
+    {
+      "room_id": "maintenance_room",
+      "direction": "south",
+      "dest": "dam_lobby"
+    },
+    {
+      "room_id": "maintenance_room",
+      "direction": "west",
+      "dest": "dam_lobby"
+    },
+    {
+      "room_id": "deep_canyon",
+      "direction": "north",
+      "dest": "dam_room"
+    },
+    {
+      "room_id": "deep_canyon",
+      "direction": "east",
+      "dest": "dam_room"
+    },
+    {
+      "room_id": "deep_canyon",
+      "direction": "down",
+      "dest": "loud_room"
+    },
+    {
+      "room_id": "deep_canyon",
+      "direction": "nw",
+      "dest": "reservoir_south"
+    },
+    {
+      "room_id": "deep_canyon",
+      "direction": "sw",
+      "dest": "north_south_passage"
+    },
+    {
+      "room_id": "reservoir_south",
+      "direction": "north",
+      "dest": "reservoir"
+    },
+    {
+      "room_id": "reservoir_south",
+      "direction": "east",
+      "dest": "dam_room"
+    },
+    {
+      "room_id": "reservoir_south",
+      "direction": "west",
+      "dest": "stream_view"
+    },
+    {
+      "room_id": "reservoir_south",
+      "direction": "se",
+      "dest": "deep_canyon"
+    },
+    {
+      "room_id": "reservoir_south",
+      "direction": "sw",
+      "dest": "chasm_room"
+    },
+    {
+      "room_id": "reservoir",
+      "direction": "north",
+      "dest": "reservoir_north"
+    },
+    {
+      "room_id": "reservoir",
+      "direction": "south",
+      "dest": "reservoir_south"
+    },
+    {
+      "room_id": "reservoir",
+      "direction": "west",
+      "dest": "in_stream"
+    },
+    {
+      "room_id": "reservoir",
+      "direction": "up",
+      "dest": "in_stream"
+    },
+    {
+      "room_id": "reservoir_north",
+      "direction": "north",
+      "dest": "atlantis_room"
+    },
+    {
+      "room_id": "reservoir_north",
+      "direction": "south",
+      "dest": "reservoir"
+    },
+    {
+      "room_id": "atlantis_room",
+      "direction": "north",
+      "dest": "small_cave"
+    },
+    {
+      "room_id": "atlantis_room",
+      "direction": "south",
+      "dest": "reservoir_north"
+    },
+    {
+      "room_id": "atlantis_room",
+      "direction": "up",
+      "dest": "small_cave"
+    },
+    {
+      "room_id": "stream_view",
+      "direction": "east",
+      "dest": "reservoir_south"
+    },
+    {
+      "room_id": "north_south_passage",
+      "direction": "north",
+      "dest": "chasm_room"
+    },
+    {
+      "room_id": "north_south_passage",
+      "direction": "south",
+      "dest": "round_room"
+    },
+    {
+      "room_id": "north_south_passage",
+      "direction": "ne",
+      "dest": "deep_canyon"
+    },
+    {
+      "room_id": "narrow_passage",
+      "direction": "north",
+      "dest": "round_room"
+    },
+    {
+      "room_id": "narrow_passage",
+      "direction": "south",
+      "dest": "mirror_room_south"
+    },
+    {
+      "room_id": "engravings_cave",
+      "direction": "east",
+      "dest": "dome_room"
+    },
+    {
+      "room_id": "engravings_cave",
+      "direction": "nw",
+      "dest": "round_room"
+    },
+    {
+      "room_id": "dome_room",
+      "direction": "west",
+      "dest": "engravings_cave"
+    },
+    {
+      "room_id": "dome_room",
+      "direction": "down",
+      "dest": "torch_room"
+    },
+    {
+      "room_id": "torch_room",
+      "direction": "south",
+      "dest": "temple"
+    },
+    {
+      "room_id": "torch_room",
+      "direction": "down",
+      "dest": "temple"
+    },
+    {
+      "room_id": "temple",
+      "direction": "north",
+      "dest": "torch_room"
+    },
+    {
+      "room_id": "temple",
+      "direction": "south",
+      "dest": "altar"
+    },
+    {
+      "room_id": "temple",
+      "direction": "east",
+      "dest": "egyptian_room"
+    },
+    {
+      "room_id": "temple",
+      "direction": "up",
+      "dest": "torch_room"
+    },
+    {
+      "room_id": "temple",
+      "direction": "down",
+      "dest": "egyptian_room"
+    },
+    {
+      "room_id": "altar",
+      "direction": "north",
+      "dest": "temple"
+    },
+    {
+      "room_id": "altar",
+      "direction": "down",
+      "dest": "cave_south"
+    },
+    {
+      "room_id": "egyptian_room",
+      "direction": "west",
+      "dest": "temple"
+    },
+    {
+      "room_id": "egyptian_room",
+      "direction": "up",
+      "dest": "temple"
+    },
+    {
+      "room_id": "dam_base",
+      "direction": "north",
+      "dest": "dam_room"
+    },
+    {
+      "room_id": "dam_base",
+      "direction": "south",
+      "dest": "river_1"
+    },
+    {
+      "room_id": "dam_base",
+      "direction": "east",
+      "dest": "river_1"
+    },
+    {
+      "room_id": "dam_base",
+      "direction": "west",
+      "dest": "dam_room"
+    },
+    {
+      "room_id": "dam_base",
+      "direction": "up",
+      "dest": "dam_room"
+    },
+    {
+      "room_id": "cave_south",
+      "direction": "north",
+      "dest": "mirror_room_south"
+    },
+    {
+      "room_id": "cave_south",
+      "direction": "west",
+      "dest": "winding_passage"
+    },
+    {
+      "room_id": "cave_south",
+      "direction": "up",
+      "dest": "altar"
+    },
+    {
+      "room_id": "mirror_room_north",
+      "direction": "north",
+      "dest": "cold_passage"
+    },
+    {
+      "room_id": "mirror_room_north",
+      "direction": "east",
+      "dest": "small_cave"
+    },
+    {
+      "room_id": "mirror_room_north",
+      "direction": "west",
+      "dest": "twisting_passage"
+    },
+    {
+      "room_id": "mirror_room_south",
+      "direction": "north",
+      "dest": "narrow_passage"
+    },
+    {
+      "room_id": "mirror_room_south",
+      "direction": "east",
+      "dest": "tiny_cave"
+    },
+    {
+      "room_id": "mirror_room_south",
+      "direction": "west",
+      "dest": "winding_passage"
+    },
+    {
+      "room_id": "winding_passage",
+      "direction": "north",
+      "dest": "mirror_room_south"
+    },
+    {
+      "room_id": "winding_passage",
+      "direction": "east",
+      "dest": "tiny_cave"
+    },
+    {
+      "room_id": "twisting_passage",
+      "direction": "north",
+      "dest": "mirror_room_north"
+    },
+    {
+      "room_id": "twisting_passage",
+      "direction": "east",
+      "dest": "small_cave"
+    },
+    {
+      "room_id": "cold_passage",
+      "direction": "south",
+      "dest": "mirror_room_north"
+    },
+    {
+      "room_id": "cold_passage",
+      "direction": "west",
+      "dest": "slide_room"
+    },
+    {
+      "room_id": "slide_room",
+      "direction": "north",
+      "dest": "mine_entrance"
+    },
+    {
+      "room_id": "slide_room",
+      "direction": "east",
+      "dest": "cold_passage"
+    },
+    {
+      "room_id": "slide_room",
+      "direction": "down",
+      "dest": "cellar"
+    },
+    {
+      "room_id": "mine_entrance",
+      "direction": "south",
+      "dest": "slide_room"
+    },
+    {
+      "room_id": "mine_entrance",
+      "direction": "west",
+      "dest": "squeaky_room"
+    },
+    {
+      "room_id": "squeaky_room",
+      "direction": "north",
+      "dest": "bat_room"
+    },
+    {
+      "room_id": "squeaky_room",
+      "direction": "east",
+      "dest": "mine_entrance"
+    },
+    {
+      "room_id": "gas_room",
+      "direction": "east",
+      "dest": "coal_mine_1"
+    },
+    {
+      "room_id": "gas_room",
+      "direction": "up",
+      "dest": "smelly_room"
+    },
+    {
+      "room_id": "coal_mine_1",
+      "direction": "north",
+      "dest": "coal_mine_2"
+    },
+    {
+      "room_id": "coal_mine_1",
+      "direction": "east",
+      "dest": "gas_room"
+    },
+    {
+      "room_id": "coal_mine_1",
+      "direction": "ne",
+      "dest": "coal_mine_1"
+    },
+    {
+      "room_id": "coal_mine_2",
+      "direction": "north",
+      "dest": "coal_mine_2"
+    },
+    {
+      "room_id": "coal_mine_2",
+      "direction": "south",
+      "dest": "coal_mine"
+    },
+    {
+      "room_id": "coal_mine_2",
+      "direction": "se",
+      "dest": "coal_mine_3"
+    },
+    {
+      "room_id": "coal_mine_3",
+      "direction": "south",
+      "dest": "coal_mine_3"
+    },
+    {
+      "room_id": "coal_mine_3",
+      "direction": "east",
+      "dest": "coal_mine_2"
+    },
+    {
+      "room_id": "coal_mine_3",
+      "direction": "sw",
+      "dest": "coal_mine_4"
+    },
+    {
+      "room_id": "coal_mine_4",
+      "direction": "north",
+      "dest": "coal_mine_3"
+    },
+    {
+      "room_id": "coal_mine_4",
+      "direction": "west",
+      "dest": "coal_mine_4"
+    },
+    {
+      "room_id": "coal_mine_4",
+      "direction": "down",
+      "dest": "ladder_top"
+    },
+    {
+      "room_id": "ladder_top",
+      "direction": "up",
+      "dest": "coal_mine_4"
+    },
+    {
+      "room_id": "ladder_top",
+      "direction": "down",
+      "dest": "ladder_bottom"
+    },
+    {
+      "room_id": "ladder_bottom",
+      "direction": "south",
+      "dest": "dead_end_5"
+    },
+    {
+      "room_id": "ladder_bottom",
+      "direction": "west",
+      "dest": "timber_room"
+    },
+    {
+      "room_id": "ladder_bottom",
+      "direction": "up",
+      "dest": "ladder_top"
+    },
+    {
+      "room_id": "timber_room",
+      "direction": "east",
+      "dest": "ladder_bottom"
+    },
+    {
+      "room_id": "timber_room",
+      "direction": "west",
+      "dest": "lower_shaft"
+    },
+    {
+      "room_id": "lower_shaft",
+      "direction": "south",
+      "dest": "machine_room"
+    },
+    {
+      "room_id": "lower_shaft",
+      "direction": "east",
+      "dest": "timber_room"
+    },
+    {
+      "room_id": "machine_room",
+      "direction": "north",
+      "dest": "lower_shaft"
+    },
+    {
+      "room_id": "end_of_rainbow",
+      "direction": "south",
+      "dest": "canyon_bottom"
+    },
+    {
+      "room_id": "end_of_rainbow",
+      "direction": "east",
+      "dest": "on_rainbow"
+    },
+    {
+      "room_id": "end_of_rainbow",
+      "direction": "up",
+      "dest": "on_rainbow"
+    },
+    {
+      "room_id": "end_of_rainbow",
+      "direction": "ne",
+      "dest": "on_rainbow"
+    },
+    {
+      "room_id": "end_of_rainbow",
+      "direction": "sw",
+      "dest": "canyon_bottom"
+    },
+    {
+      "room_id": "aragain_falls",
+      "direction": "north",
+      "dest": "shore"
+    },
+    {
+      "room_id": "aragain_falls",
+      "direction": "west",
+      "dest": "on_rainbow"
+    },
+    {
+      "room_id": "aragain_falls",
+      "direction": "up",
+      "dest": "on_rainbow"
+    },
+    {
+      "room_id": "shore",
+      "direction": "north",
+      "dest": "sandy_beach"
+    },
+    {
+      "room_id": "shore",
+      "direction": "south",
+      "dest": "aragain_falls"
+    },
+    {
+      "room_id": "shore",
+      "direction": "west",
+      "dest": "river_5"
+    },
+    {
+      "room_id": "sandy_beach",
+      "direction": "south",
+      "dest": "shore"
+    },
+    {
+      "room_id": "sandy_beach",
+      "direction": "west",
+      "dest": "river_4"
+    },
+    {
+      "room_id": "sandy_beach",
+      "direction": "ne",
+      "dest": "sandy_cave"
+    },
+    {
+      "room_id": "grating_room",
+      "direction": "up",
+      "dest": "grating_clearing"
+    },
+    {
+      "room_id": "grating_room",
+      "direction": "sw",
+      "dest": "maze_11"
+    },
+    {
+      "room_id": "chasm_room",
+      "direction": "south",
+      "dest": "north_south_passage"
+    },
+    {
+      "room_id": "chasm_room",
+      "direction": "up",
+      "dest": "east_west_passage"
+    },
+    {
+      "room_id": "chasm_room",
+      "direction": "ne",
+      "dest": "reservoir_south"
+    },
+    {
+      "room_id": "chasm_room",
+      "direction": "sw",
+      "dest": "east_west_passage"
+    },
+    {
+      "room_id": "grating_clearing",
+      "direction": "south",
+      "dest": "forest_path"
+    },
+    {
+      "room_id": "grating_clearing",
+      "direction": "east",
+      "dest": "forest"
+    },
+    {
+      "room_id": "grating_clearing",
+      "direction": "west",
+      "dest": "forest"
+    },
+    {
+      "room_id": "grating_clearing",
+      "direction": "down",
+      "dest": "grating_room"
+    },
+    {
+      "room_id": "canyon_view",
+      "direction": "north",
+      "dest": "canyon"
+    },
+    {
+      "room_id": "canyon_view",
+      "direction": "east",
+      "dest": "cliff_middle"
+    },
+    {
+      "room_id": "canyon_view",
+      "direction": "west",
+      "dest": "forest"
+    },
+    {
+      "room_id": "canyon_view",
+      "direction": "down",
+      "dest": "cliff_middle"
+    },
+    {
+      "room_id": "canyon_view",
+      "direction": "nw",
+      "dest": "clearing"
+    },
+    {
+      "room_id": "maze_4",
+      "direction": "north",
+      "dest": "maze_1"
+    },
+    {
+      "room_id": "maze_4",
+      "direction": "east",
+      "dest": "dead_end_1"
+    },
+    {
+      "room_id": "maze_4",
+      "direction": "west",
+      "dest": "maze_3"
+    },
+    {
+      "room_id": "maze_5",
+      "direction": "north",
+      "dest": "maze_3"
+    },
+    {
+      "room_id": "maze_5",
+      "direction": "east",
+      "dest": "dead_end_2"
+    },
+    {
+      "room_id": "maze_5",
+      "direction": "sw",
+      "dest": "maze_6"
+    },
+    {
+      "room_id": "maze_6",
+      "direction": "east",
+      "dest": "maze_7"
+    },
+    {
+      "room_id": "maze_6",
+      "direction": "west",
+      "dest": "maze_6"
+    },
+    {
+      "room_id": "maze_6",
+      "direction": "up",
+      "dest": "maze_9"
+    },
+    {
+      "room_id": "maze_6",
+      "direction": "down",
+      "dest": "maze_5"
+    },
+    {
+      "room_id": "maze_7",
+      "direction": "south",
+      "dest": "maze_15"
+    },
+    {
+      "room_id": "maze_7",
+      "direction": "east",
+      "dest": "maze_8"
+    },
+    {
+      "room_id": "maze_7",
+      "direction": "west",
+      "dest": "maze_6"
+    },
+    {
+      "room_id": "maze_7",
+      "direction": "up",
+      "dest": "maze_14"
+    },
+    {
+      "room_id": "maze_8",
+      "direction": "west",
+      "dest": "maze_8"
+    },
+    {
+      "room_id": "maze_8",
+      "direction": "ne",
+      "dest": "maze_7"
+    },
+    {
+      "room_id": "maze_8",
+      "direction": "se",
+      "dest": "dead_end_3"
+    },
+    {
+      "room_id": "maze_9",
+      "direction": "north",
+      "dest": "maze_6"
+    },
+    {
+      "room_id": "maze_9",
+      "direction": "south",
+      "dest": "maze_13"
+    },
+    {
+      "room_id": "maze_9",
+      "direction": "east",
+      "dest": "maze_10"
+    },
+    {
+      "room_id": "maze_9",
+      "direction": "west",
+      "dest": "maze_12"
+    },
+    {
+      "room_id": "maze_9",
+      "direction": "nw",
+      "dest": "maze_9"
+    },
+    {
+      "room_id": "maze_10",
+      "direction": "east",
+      "dest": "maze_9"
+    },
+    {
+      "room_id": "maze_10",
+      "direction": "west",
+      "dest": "maze_13"
+    },
+    {
+      "room_id": "maze_10",
+      "direction": "up",
+      "dest": "maze_11"
+    },
+    {
+      "room_id": "maze_11",
+      "direction": "down",
+      "dest": "maze_10"
+    },
+    {
+      "room_id": "maze_11",
+      "direction": "ne",
+      "dest": "grating_room"
+    },
+    {
+      "room_id": "maze_11",
+      "direction": "nw",
+      "dest": "maze_13"
+    },
+    {
+      "room_id": "maze_11",
+      "direction": "sw",
+      "dest": "maze_12"
+    },
+    {
+      "room_id": "maze_12",
+      "direction": "north",
+      "dest": "dead_end_4"
+    },
+    {
+      "room_id": "maze_12",
+      "direction": "east",
+      "dest": "maze_13"
+    },
+    {
+      "room_id": "maze_12",
+      "direction": "up",
+      "dest": "maze_9"
+    },
+    {
+      "room_id": "maze_12",
+      "direction": "sw",
+      "dest": "maze_11"
+    },
+    {
+      "room_id": "maze_13",
+      "direction": "south",
+      "dest": "maze_10"
+    },
+    {
+      "room_id": "maze_13",
+      "direction": "east",
+      "dest": "maze_9"
+    },
+    {
+      "room_id": "maze_13",
+      "direction": "west",
+      "dest": "maze_11"
+    },
+    {
+      "room_id": "maze_13",
+      "direction": "down",
+      "dest": "dead_end_5"
+    },
+    {
+      "room_id": "maze_14",
+      "direction": "south",
+      "dest": "maze_7"
+    },
+    {
+      "room_id": "maze_14",
+      "direction": "west",
+      "dest": "maze_15"
+    },
+    {
+      "room_id": "maze_14",
+      "direction": "ne",
+      "dest": "maze_7"
+    },
+    {
+      "room_id": "maze_14",
+      "direction": "nw",
+      "dest": "maze_14"
+    },
+    {
+      "room_id": "maze_15",
+      "direction": "south",
+      "dest": "maze_7"
+    },
+    {
+      "room_id": "maze_15",
+      "direction": "west",
+      "dest": "maze_14"
+    },
+    {
+      "room_id": "maze_15",
+      "direction": "se",
+      "dest": "cyclops_room"
+    },
+    {
+      "room_id": "dead_end_1",
+      "direction": "south",
+      "dest": "maze_4"
+    },
+    {
+      "room_id": "dead_end_2",
+      "direction": "west",
+      "dest": "maze_5"
+    },
+    {
+      "room_id": "dead_end_3",
+      "direction": "north",
+      "dest": "maze_8"
+    },
+    {
+      "room_id": "dead_end_4",
+      "direction": "south",
+      "dest": "maze_12"
+    },
+    {
+      "room_id": "dead_end_5",
+      "direction": "north",
+      "dest": "ladder_bottom"
+    },
+    {
+      "room_id": "river_1",
+      "direction": "north",
+      "dest": "dam_base"
+    },
+    {
+      "room_id": "river_1",
+      "direction": "south",
+      "dest": "river_2"
+    },
+    {
+      "room_id": "river_1",
+      "direction": "east",
+      "dest": "white_cliffs_north"
+    },
+    {
+      "room_id": "river_1",
+      "direction": "west",
+      "dest": "dam_base"
+    },
+    {
+      "room_id": "river_1",
+      "direction": "down",
+      "dest": "river_2"
+    },
+    {
+      "room_id": "river_2",
+      "direction": "north",
+      "dest": "river_1"
+    },
+    {
+      "room_id": "river_2",
+      "direction": "up",
+      "dest": "river_1"
+    },
+    {
+      "room_id": "river_2",
+      "direction": "down",
+      "dest": "river_3"
+    },
+    {
+      "room_id": "river_3",
+      "direction": "west",
+      "dest": "white_cliffs_north"
+    },
+    {
+      "room_id": "river_3",
+      "direction": "up",
+      "dest": "river_2"
+    },
+    {
+      "room_id": "river_3",
+      "direction": "down",
+      "dest": "river_4"
+    },
+    {
+      "room_id": "river_4",
+      "direction": "east",
+      "dest": "sandy_beach"
+    },
+    {
+      "room_id": "river_4",
+      "direction": "west",
+      "dest": "white_cliffs_south"
+    },
+    {
+      "room_id": "river_4",
+      "direction": "up",
+      "dest": "river_3"
+    },
+    {
+      "room_id": "river_4",
+      "direction": "down",
+      "dest": "river_5"
+    },
+    {
+      "room_id": "river_5",
+      "direction": "east",
+      "dest": "shore"
+    },
+    {
+      "room_id": "river_5",
+      "direction": "up",
+      "dest": "river_4"
+    },
+    {
+      "room_id": "white_cliffs_north",
+      "direction": "south",
+      "dest": "white_cliffs_south"
+    },
+    {
+      "room_id": "white_cliffs_north",
+      "direction": "east",
+      "dest": "river_3"
+    },
+    {
+      "room_id": "white_cliffs_north",
+      "direction": "west",
+      "dest": "damp_cave"
+    },
+    {
+      "room_id": "white_cliffs_south",
+      "direction": "north",
+      "dest": "white_cliffs_north"
+    },
+    {
+      "room_id": "white_cliffs_south",
+      "direction": "east",
+      "dest": "river_4"
+    },
+    {
+      "room_id": "on_rainbow",
+      "direction": "east",
+      "dest": "aragain_falls"
+    },
+    {
+      "room_id": "on_rainbow",
+      "direction": "west",
+      "dest": "end_of_rainbow"
+    },
+    {
+      "room_id": "on_rainbow",
+      "direction": "sw",
+      "dest": "end_of_rainbow"
+    },
+    {
+      "room_id": "shaft_room",
+      "direction": "north",
+      "dest": "smelly_room"
+    },
+    {
+      "room_id": "shaft_room",
+      "direction": "west",
+      "dest": "bat_room"
+    },
+    {
+      "room_id": "stone_barrow",
+      "direction": "ne",
+      "dest": "west_of_house"
+    },
+    {
+      "room_id": "small_cave",
+      "direction": "north",
+      "dest": "mirror_room_north"
+    },
+    {
+      "room_id": "small_cave",
+      "direction": "south",
+      "dest": "atlantis_room"
+    },
+    {
+      "room_id": "small_cave",
+      "direction": "west",
+      "dest": "twisting_passage"
+    },
+    {
+      "room_id": "small_cave",
+      "direction": "down",
+      "dest": "atlantis_room"
+    },
+    {
+      "room_id": "tiny_cave",
+      "direction": "north",
+      "dest": "mirror_room_south"
+    },
+    {
+      "room_id": "tiny_cave",
+      "direction": "west",
+      "dest": "winding_passage"
+    },
+    {
+      "room_id": "tiny_cave",
+      "direction": "down",
+      "dest": "hades_entrance"
+    },
+    {
+      "room_id": "damp_cave",
+      "direction": "east",
+      "dest": "white_cliffs_north"
+    },
+    {
+      "room_id": "damp_cave",
+      "direction": "west",
+      "dest": "loud_room"
+    },
+    {
+      "room_id": "smelly_room",
+      "direction": "south",
+      "dest": "shaft_room"
+    },
+    {
+      "room_id": "smelly_room",
+      "direction": "down",
+      "dest": "gas_room"
+    },
+    {
+      "room_id": "cliff_middle",
+      "direction": "west",
+      "dest": "canyon_view"
+    },
+    {
+      "room_id": "cliff_middle",
+      "direction": "up",
+      "dest": "canyon_view"
+    },
+    {
+      "room_id": "cliff_middle",
+      "direction": "down",
+      "dest": "canyon_bottom"
+    },
+    {
+      "room_id": "in_stream",
+      "direction": "east",
+      "dest": "reservoir"
+    },
+    {
+      "room_id": "in_stream",
+      "direction": "down",
+      "dest": "reservoir"
+    },
+    {
+      "room_id": "bathroom",
+      "direction": "south",
+      "dest": "kitchen"
+    },
+    {
+      "room_id": "living_room",
+      "direction": "down",
+      "dest": "cellar"
+    }
+  ],
+  "verb_aliases": [
+    {
+      "alias": "grab",
+      "canonical": "take"
+    },
+    {
+      "alias": "get",
+      "canonical": "take"
+    },
+    {
+      "alias": "collect",
+      "canonical": "take"
+    },
+    {
+      "alias": "acquire",
+      "canonical": "take"
+    },
+    {
+      "alias": "carry",
+      "canonical": "take"
+    },
+    {
+      "alias": "x",
+      "canonical": "examine"
+    },
+    {
+      "alias": "inspect",
+      "canonical": "examine"
+    },
+    {
+      "alias": "check",
+      "canonical": "examine"
+    },
+    {
+      "alias": "search",
+      "canonical": "examine"
+    },
+    {
+      "alias": "throw",
+      "canonical": "drop"
+    },
+    {
+      "alias": "toss",
+      "canonical": "drop"
+    },
+    {
+      "alias": "discard",
+      "canonical": "drop"
+    },
+    {
+      "alias": "walk",
+      "canonical": "go"
+    },
+    {
+      "alias": "run",
+      "canonical": "go"
+    },
+    {
+      "alias": "head",
+      "canonical": "go"
+    },
+    {
+      "alias": "travel",
+      "canonical": "go"
+    },
+    {
+      "alias": "shut",
+      "canonical": "close"
+    },
+    {
+      "alias": "hit",
+      "canonical": "attack"
+    },
+    {
+      "alias": "fight",
+      "canonical": "attack"
+    },
+    {
+      "alias": "kill",
+      "canonical": "attack"
+    },
+    {
+      "alias": "slay",
+      "canonical": "attack"
+    },
+    {
+      "alias": "strike",
+      "canonical": "attack"
+    },
+    {
+      "alias": "swing",
+      "canonical": "attack"
+    },
+    {
+      "alias": "rise",
+      "canonical": "stand"
+    },
+    {
+      "alias": "get up",
+      "canonical": "stand"
+    },
+    {
+      "alias": "stand up",
+      "canonical": "stand"
+    },
+    {
+      "alias": "arise",
+      "canonical": "stand"
+    },
+    {
+      "alias": "sit down",
+      "canonical": "sit"
+    },
+    {
+      "alias": "sit in chair",
+      "canonical": "sit"
+    },
+    {
+      "alias": "headbutt",
+      "canonical": "kick"
+    },
+    {
+      "alias": "head butt",
+      "canonical": "kick"
+    },
+    {
+      "alias": "punch",
+      "canonical": "attack"
+    },
+    {
+      "alias": "i give up",
+      "canonical": "give up"
+    },
+    {
+      "alias": "surrender",
+      "canonical": "give up"
+    },
+    {
+      "alias": "giveup",
+      "canonical": "give up"
+    },
+    {
+      "alias": "observe",
+      "canonical": "look"
+    },
+    {
+      "alias": "gaze",
+      "canonical": "look"
+    },
+    {
+      "alias": "survey",
+      "canonical": "look"
+    },
+    {
+      "alias": "turn on",
+      "canonical": "light"
+    },
+    {
+      "alias": "turn off",
+      "canonical": "extinguish"
+    }
+  ],
+  "ai_cache": [],
+  "ejection_rooms": [
+    {
+      "id": "troll_room",
+      "active": "true"
+    },
+    {
+      "id": "round_room",
+      "active": "true"
+    },
+    {
+      "id": "cellar",
+      "active": "true"
+    },
+    {
+      "id": "maze_1",
+      "active": "true"
+    },
+    {
+      "id": "reservoir_south",
+      "active": "true"
+    },
+    {
+      "id": "temple",
+      "active": "true"
+    },
+    {
+      "id": "coal_mine",
+      "active": "true"
+    },
+    {
+      "id": "dome_room",
+      "active": "true"
+    }
+  ],
+  "item_aliases": [
+    {
+      "alias": "lamp",
+      "item_id": "lantern",
+      "canonical": "lantern"
+    },
+    {
+      "alias": "light",
+      "item_id": "lantern",
+      "canonical": "lantern"
+    },
+    {
+      "alias": "brass lantern",
+      "item_id": "lantern",
+      "canonical": "lantern"
+    },
+    {
+      "alias": "old lantern",
+      "item_id": "lantern",
+      "canonical": "lantern"
+    },
+    {
+      "alias": "elvish sword",
+      "item_id": "sword",
+      "canonical": "sword"
+    },
+    {
+      "alias": "blade",
+      "item_id": "sword",
+      "canonical": "sword"
+    },
+    {
+      "alias": "paper",
+      "item_id": "leaflet",
+      "canonical": "leaflet"
+    },
+    {
+      "alias": "pamphlet",
+      "item_id": "leaflet",
+      "canonical": "leaflet"
+    },
+    {
+      "alias": "box",
+      "item_id": "mailbox",
+      "canonical": "mailbox"
+    },
+    {
+      "alias": "small mailbox",
+      "item_id": "mailbox",
+      "canonical": "mailbox"
+    },
+    {
+      "alias": "match",
+      "item_id": "matches",
+      "canonical": "matches"
+    },
+    {
+      "alias": "matchbook",
+      "item_id": "matches",
+      "canonical": "matches"
+    },
+    {
+      "alias": "cord",
+      "item_id": "rope",
+      "canonical": "rope"
+    },
+    {
+      "alias": "trophy case",
+      "item_id": "trophy_case",
+      "canonical": "case"
+    },
+    {
+      "alias": "art",
+      "item_id": "painting",
+      "canonical": "painting"
+    },
+    {
+      "alias": "picture",
+      "item_id": "painting",
+      "canonical": "painting"
+    },
+    {
+      "alias": "jeweled egg",
+      "item_id": "egg",
+      "canonical": "egg"
+    },
+    {
+      "alias": "scepter",
+      "item_id": "sceptre",
+      "canonical": "sceptre"
+    },
+    {
+      "alias": "wand",
+      "item_id": "sceptre",
+      "canonical": "sceptre"
+    },
+    {
+      "alias": "candle",
+      "item_id": "candles",
+      "canonical": "candles"
+    },
+    {
+      "alias": "black candles",
+      "item_id": "candles",
+      "canonical": "candles"
+    },
+    {
+      "alias": "bloody axe",
+      "item_id": "troll_axe",
+      "canonical": "axe"
+    },
+    {
+      "alias": "bird",
+      "item_id": "canary",
+      "canonical": "canary"
+    },
+    {
+      "alias": "golden canary",
+      "item_id": "canary",
+      "canonical": "canary"
+    },
+    {
+      "alias": "clockwork canary",
+      "item_id": "canary",
+      "canonical": "canary"
+    },
+    {
+      "alias": "ivory torch",
+      "item_id": "torch",
+      "canonical": "torch"
+    },
+    {
+      "alias": "bag",
+      "item_id": "sack",
+      "canonical": "sack"
+    },
+    {
+      "alias": "brown sack",
+      "item_id": "sack",
+      "canonical": "sack"
+    },
+    {
+      "alias": "glass bottle",
+      "item_id": "bottle",
+      "canonical": "bottle"
+    },
+    {
+      "alias": "flask",
+      "item_id": "bottle",
+      "canonical": "bottle"
+    },
+    {
+      "alias": "clove",
+      "item_id": "garlic",
+      "canonical": "garlic"
+    },
+    {
+      "alias": "clove of garlic",
+      "item_id": "garlic",
+      "canonical": "garlic"
+    },
+    {
+      "alias": "cup",
+      "item_id": "chalice",
+      "canonical": "chalice"
+    },
+    {
+      "alias": "silver chalice",
+      "item_id": "chalice",
+      "canonical": "chalice"
+    },
+    {
+      "alias": "goblet",
+      "item_id": "chalice",
+      "canonical": "chalice"
+    },
+    {
+      "alias": "casket",
+      "item_id": "coffin",
+      "canonical": "coffin"
+    },
+    {
+      "alias": "gold coffin",
+      "item_id": "coffin",
+      "canonical": "coffin"
+    },
+    {
+      "alias": "brass_key",
+      "item_id": "brass_key",
+      "canonical": "key"
+    },
+    {
+      "alias": "trophy_case",
+      "item_id": "trophy_case",
+      "canonical": "case"
+    },
+    {
+      "alias": "knife",
+      "item_id": "knife",
+      "canonical": "shiny knife"
+    },
+    {
+      "alias": "troll_axe",
+      "item_id": "troll_axe",
+      "canonical": "axe"
+    },
+    {
+      "alias": "letter_opener",
+      "item_id": "letter_opener",
+      "canonical": "opener"
+    },
+    {
+      "alias": "skeleton_key",
+      "item_id": "skeleton_key",
+      "canonical": "key"
+    },
+    {
+      "alias": "large_emerald",
+      "item_id": "large_emerald",
+      "canonical": "emerald"
+    },
+    {
+      "alias": "pot_of_gold",
+      "item_id": "pot_of_gold",
+      "canonical": "gold"
+    },
+    {
+      "alias": "welcome_mat",
+      "item_id": "welcome_mat",
+      "canonical": "mat"
+    },
+    {
+      "alias": "crystal_skull",
+      "item_id": "crystal_skull",
+      "canonical": "skull"
+    },
+    {
+      "alias": "zorkmid_coin",
+      "item_id": "zorkmid_coin",
+      "canonical": "coin"
+    },
+    {
+      "alias": "mohio_stone",
+      "item_id": "mohio_stone",
+      "canonical": "stone"
+    },
+    {
+      "alias": "discord_scroll",
+      "item_id": "discord_scroll",
+      "canonical": "scroll"
+    },
+    {
+      "alias": "mohiou_card",
+      "item_id": "mohiou_card",
+      "canonical": "card"
+    },
+    {
+      "alias": "rusty_knife",
+      "item_id": "rusty_knife",
+      "canonical": "rusty knife"
+    },
+    {
+      "alias": "dead_lantern",
+      "item_id": "dead_lantern",
+      "canonical": "lantern"
+    },
+    {
+      "alias": "coin_bag",
+      "item_id": "coin_bag",
+      "canonical": "coins"
+    },
+    {
+      "alias": "black_book",
+      "item_id": "black_book",
+      "canonical": "book"
+    },
+    {
+      "alias": "painting_zork2",
+      "item_id": "painting_zork2",
+      "canonical": "painting"
+    },
+    {
+      "alias": "compiler_warning",
+      "item_id": "compiler_warning",
+      "canonical": "warning"
+    },
+    {
+      "alias": "trunk",
+      "item_id": "trunk",
+      "canonical": "jewels"
+    },
+    {
+      "alias": "platinum_bar",
+      "item_id": "platinum_bar",
+      "canonical": "bar"
+    },
+    {
+      "alias": "jade",
+      "item_id": "jade",
+      "canonical": "figurine"
+    },
+    {
+      "alias": "sapphire",
+      "item_id": "sapphire",
+      "canonical": "bracelet"
+    },
+    {
+      "alias": "air_pump",
+      "item_id": "air_pump",
+      "canonical": "pump"
+    },
+    {
+      "alias": "wrench_bolt",
+      "item_id": "wrench_bolt",
+      "canonical": "bolt"
+    },
+    {
+      "alias": "screwdriver_tool",
+      "item_id": "screwdriver_tool",
+      "canonical": "tube"
+    },
+    {
+      "alias": "mohio_key",
+      "item_id": "mohio_key",
+      "canonical": "key"
+    },
+    {
+      "alias": "architect_door",
+      "item_id": "architect_door",
+      "canonical": "door"
+    },
+    {
+      "alias": "dead_throne",
+      "item_id": "dead_throne",
+      "canonical": "chair"
+    }
+  ],
+  "flags": [
+    {
+      "session_id": "__schema_template__",
+      "flag_name": "__template__"
+    }
+  ]
+}

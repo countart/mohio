@@ -1,0 +1,198 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// invoice_saga.mho
+// Mohio Demo -- Business / SaaS
+//
+// End-to-end order fulfillment with a saga.
+// Demonstrates: saga, step, undo, create, miomail, mioconnect connector call.
+//
+// The saga pattern:
+//   Step 1 reserves inventory.
+//   Step 2 generates the invoice.
+//   Step 3 charges the customer.
+//   Step 4 confirms and notifies.
+//
+//   If Step 3 fails:
+//     Step 2 undo -- invoice voided.
+//     Step 1 undo -- inventory hold released.
+//
+//   The code IS the rollback policy. No separate document needed.
+//
+// Run:
+//   mio run invoice_saga.mho --request-file tests/request_order.json --seed tests/seed_saas.json --verbose
+
+connect db       as postgres from env.DATABASE_URL
+
+//  CONNECTORS ---------------------------------------------------------------------
+
+mioconnect Stripe
+    address "https://api.stripe.com/v1"
+    auth bearer env.STRIPE_SECRET_KEY
+    operation charge
+        path "/charges"
+        method POST
+    operation: done
+mioconnect: done
+
+//  SHAPES ------------------------------------------------------------------------
+
+shape Order
+    id              as uuid         required    default uuid()
+    customer_id     as uuid         required
+    subtotal        as decimal      required
+    tax             as decimal      required
+    total           as decimal      required
+    currency        as text         default "USD"
+    status          as text         default "pending"
+    created_at      as datetime     default now()
+    retain for 7 years
+shape: done
+
+shape Invoice
+    id              as uuid         required    default uuid()
+    order_id        as uuid         required
+    customer_id     as uuid         required
+    number          as text         required
+    subtotal        as decimal      required
+    tax             as decimal      required
+    total           as decimal      required
+    currency        as text         default "USD"
+    status          as text         default "unpaid"
+    issued_at       as datetime     default now()
+    retain for 7 years
+shape: done
+
+shape ChargeRequest
+    amount          as decimal      required
+    currency        as text         required
+    customer_id     as uuid         required
+    idempotency_key as text         required
+shape: done
+
+shape ChargeResult
+    charge_id       as text         required
+    status          as text         required
+shape: done
+
+//  TASK: FULFILL ORDER ------------------------------------------------------
+//
+// The saga lives in a task -- keeps the listen handler clean,
+// and ensures each named block has an unambiguous closer.
+
+task fulfillOrder
+    take order as sh.Order
+    take customer as sh.Customer
+    returns  text
+
+
+    saga fulfill_order
+
+        // STEP 1 -- Reserve inventory
+        step reserve_inventory
+            update db.inventory
+                status          "reserved"
+                reserved_for    order.id
+                match product_id to order.product_id
+            update: done
+            undo
+                update db.inventory
+                    status          "available"
+                    reserved_for    ""
+                    match reserved_for to order.id
+                update: done
+        step: done
+
+        // STEP 2 -- Generate the invoice
+        step generate_invoice
+            create invoice as sh.Invoice
+                order_id        order.id
+                customer_id     order.customer_id
+                number          "INV-001"
+                subtotal        order.subtotal
+                tax             order.tax
+                total           order.total
+                currency        order.currency
+            create: done
+
+            save to db.invoices
+                id          invoice.id
+                order_id    invoice.order_id
+                customer_id invoice.customer_id
+                number      invoice.number
+                subtotal    invoice.subtotal
+                tax         invoice.tax
+                total       invoice.total
+                status      "unpaid"
+                issued_at   now()
+            save: done
+
+            undo
+                update db.invoices
+                    status "void"
+                    match id to invoice.id
+                update: done
+        step: done
+
+        // STEP 3 -- Charge the customer
+        // idempotency_key on the shape prevents double charges on retry.
+        step charge_customer
+            create charge_payload as sh.ChargeRequest
+                amount          order.total
+                currency        order.currency
+                customer_id     order.customer_id
+                idempotency_key order.id
+            create: done
+
+            Stripe.charge with charge_payload as charge_result
+            check charge_result.ok
+                when false
+                    give back 402 "Payment declined"
+            check: done
+        step: done
+
+        // STEP 4 -- Confirm and notify
+        step confirm_order
+            update db.orders
+                status "confirmed"
+                match id to order.id
+            update: done
+
+            miomail.send to customer.email subject "Your order is confirmed"
+        step: done
+
+    saga: done
+
+    // The saga resolves to a terminal status. COMMITTED means every step held;
+    // COMPENSATED means a step failed and the completed steps were rolled back.
+    // The response follows the status -- the code is the policy.
+    check fulfill_order.status
+        when "COMMITTED"
+            give back 201 "Order confirmed"
+        otherwise
+            give back 402 "Payment declined -- order rolled back"
+    check: done
+
+task: done
+
+//  ENTRY POINT ---------------------------------------------------------------------
+
+listen for
+
+    new sh.Order
+        require role "customer" or "system"
+
+        retrieve customer from db.customers
+            match id to order.customer_id
+            on.failure
+                give back 404 "Customer not found"
+        retrieve: done
+
+        call fulfillOrder
+            order    order
+            customer customer
+        call: done
+        give back 201 "Order confirmed"
+
+    new: done
+
+listen: done

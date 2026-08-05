@@ -1,0 +1,11 @@
+{
+  "_shape":    "Transaction",
+  "_method":   "POST",
+  "_roles":    ["screener"],
+  "id":        "T2",
+  "amount":    75000,
+  "member_id": "M001",
+  "device_id": "dev-new",
+  "merchant":  "Overseas Wire",
+  "currency":  "USD"
+}

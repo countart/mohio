@@ -1,0 +1,13 @@
+{
+  "_shape":           "Patient",
+  "_method":          "POST",
+  "_roles":           ["intake_staff"],
+  "id":               "PAT001",
+  "mrn":              "123-45-6789",
+  "patient_name":     "John Doe",
+  "dob":              "1990-01-15",
+  "insurance_id":     "INS-BCBS-001",
+  "primary_concern":  "chest pain and shortness of breath",
+  "vitals_temp":      "99.1",
+  "vitals_hr":        "102"
+}

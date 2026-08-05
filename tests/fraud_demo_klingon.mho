@@ -1,0 +1,115 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// fraud_demo_klingon.mho
+// Mohio Fraud Detection -- tlhIngan Hol (Klingon)
+//
+// language: klingon
+// langmap: maps/en-klingon.langmap
+//
+// Translated from fraud_demo_simple.mho -- keywords in Klingon,
+// identifiers and field names remain English (language-neutral).
+// The compiler produces an identical AST to the English version.
+//
+// Qapla'! (Success!)
+
+// fraud_demo_simple.mho
+// Mohio Fraud Detection -- Simple Demo
+// Demonstrates: ai.decide, confidence threshold, fallback, ai.audit
+// sector: financial, shapes, find, hold, give back
+// Walk-By Test: a non-technical person can read this cold.
+
+yos: huch
+
+//  CONNECTIONS ------------------------------------------------------
+muv db as sqlite
+    from env.DATABASE_URL
+muv: done
+
+muv email as sender
+    from env.MAIL_PROVIDER
+    key secret.MAIL_API_KEY
+muv: done
+
+//  CONSTANTS ------------------------------------------------------
+pol FRAUD_THRESHOLD    0.85
+pol CTR_THRESHOLD      10000
+
+//  SHAPES ------------------------------------------------------
+meq Transaction
+    id                  as uuid         poq    motlh uuid()
+    member_id           mu'mey rur         poq
+    amount              mi' rur      poq    min 0.01    in.USD
+    device_fingerprint  mu'mey rur         poq
+    velocity_score      mi' rur      poq    min 0.0     max 1.0
+    status              mu'mey rur         motlh     los
+    status.allowed      los, chaw', botlh, review
+    created             poh     motlh     now()
+    retain for 7 years
+meq: done
+
+meq FraudDecision
+    transaction_id      as uuid         poq
+    is_fraudulent       ghap      poq
+    confidence          mi' rur      poq
+    action              mu'mey rur         poq
+    reviewed_by         mu'mey rur         motlh     ai
+    created             poh     motlh     now()
+meq: done
+
+//  LISTENER ------------------------------------------------------
+qoy
+    chu' sh.Transaction at /transactions/screen
+        poq ghoj screener pagh system
+
+        // Find recent transactions from this device
+        sam recent in db.transactions
+            'e' device_fingerprint is transaction.device_fingerprint
+            'e' created is 'el now() minus 1 hour
+            mi' 10
+            ri' created bingdaq
+        sam: done
+
+        // Check for CTR threshold -- sector: financial enforces this
+        ngu' transaction.amount
+            e' law' CTR_THRESHOLD
+                ja' compliance_team
+                    mu'mey "CTR threshold triggered -- {{ transaction.amount }} -- {{ transaction.id }}"
+                    lo' email
+                miolog.compliance_log.info "CTR review required -- {{ transaction.id }}" done
+        ngu': done
+
+        // AI decides -- the core primitive
+        ai.decide isFraudulent returns boolean
+            ngu' daj law' FRAUD_THRESHOLD
+            ngi'
+                transaction.amount
+                transaction.device_fingerprint
+                transaction.velocity_score
+                recent
+            daj pus qasbe'
+                nobha' los "Referred to manual review"
+            ai.audit to fraud_audit_log
+        ai.decide: done
+
+        // Act on the decision
+        ngu' isFraudulent
+            e' true
+                choh db.transactions
+                    status  botlh
+                    nob id to transaction.id
+                choh: done
+                ja' fraud_team
+                    mu'mey "Transaction blocked -- {{ transaction.id }} -- confidence {{ isFraudulent.confidence }}"
+                    lo' slack env.FRAUD_CHANNEL
+                nobha' 403 "Transaction blocked"
+
+            e' false
+                choh db.transactions
+                    status  chaw'
+                    nob id to transaction.id
+                choh: done
+                nobha' 200 "Transaction approved"
+        ngu': done
+
+    chu': done
+listen: done

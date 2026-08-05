@@ -1,0 +1,108 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// member_dashboard.mho
+// Mohio Demo -- SaaS / Consumer
+//
+// A member dashboard backend -- profile, activity feed.
+// Demonstrates: retrieve, find, cache, on.failure, order.down,
+// the No-If Revolution (on.failure replaces null checks), each/skip.
+//
+// No AI decisions. No saga. No sector.
+// Just a clean SaaS backend in plain Mohio.
+// A new developer can read this on day one.
+//
+// Run:
+//   mio run member_dashboard.mho --request-file tests/request_dashboard.json --seed tests/seed_saas.json --verbose
+
+connect db as postgres from env.DATABASE_URL
+
+//  SHAPES ------------------------------------------------------------------------
+
+shape Member
+    id              as uuid         required    default uuid()
+    name            as text         required
+    email           as text         required    unique
+    plan            as text         default "free"
+    status          as text         default "active"
+    created_at      as datetime     default now()
+    last_active_at  as datetime
+shape: done
+
+shape ActivityItem
+    id              as uuid         required    default uuid()
+    member_id       as uuid         required
+    type            as text         required
+    description     as text         required
+    created_at      as datetime     default now()
+shape: done
+
+shape DashboardSummary
+    member_id       as uuid         required
+    plan            as text         required
+    activity_count  as integer
+    last_active_at  as datetime
+shape: done
+
+//  TASKS ------------------------------------------------------------------------
+
+task updateProfile
+    take request as sh.Member
+    returns text
+
+    update db.members
+        name        request.name
+        match id to request.member_id
+    update: done
+
+    save to db.activity
+        member_id   request.member_id
+        type        "profile_updated"
+        description "Profile updated"
+        created_at  now()
+    save: done
+
+    give back "Profile updated"
+task: done
+
+//  LISTENERS ------------------------------------------------------------------------
+
+listen for
+
+    //  GET DASHBOARD ------------------------------------------------------
+    //
+    // The No-If Revolution:
+    // retrieve member -- on.failure exits immediately with 404.
+    // No null check. No nested if. No separate error path.
+    // The straight line continues only if the member exists.
+
+    request for sh.DashboardSummary
+        require role "member"
+
+        retrieve member from db.members
+            match id to request.member_id
+            on.failure
+                give back 404 "Member not found"
+        retrieve: done
+
+        // Find their 10 most recent activity items.
+        find recent_activity in db.activity
+            where member_id is request.member_id
+            order.down by created_at
+            up to 10
+        find: done
+
+        // Assemble the summary values.
+        activity_count  recent_activity.count
+        last_active_at  member.last_active_at
+
+        // Update last_active_at. Member doesn't wait for this.
+        update db.members
+            last_active_at now()
+            match id to request.member_id
+        update: done
+
+        give back 200 member
+
+    request: done
+
+listen: done

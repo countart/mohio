@@ -1,0 +1,46 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+//
+// Mohio Sector Profile -- Demo Regulated  (SAMPLE / non-certified, public)
+// sector: demo_regulated
+//
+// PURPOSE: exercise the sector-enforcement mechanism end to end. The shipped demo profiles
+// declare only a confidence floor, so the never-store and framework-grade paths -- both of which
+// are implemented -- were never reached by anything. A mechanism nothing exercises is a mechanism
+// nobody can tell is working.
+//
+// THIS IS NOT A COMPLIANCE CONTROL. It is not legally reviewed, it does not represent any real
+// regulatory reading, and the framework names below are present to activate the grade mapping,
+// not to assert what those frameworks require. A real regulated profile is a certified-tier
+// artifact produced with counsel; this is a test fixture that happens to be readable.
+//
+
+sector: demo_regulated
+    meta
+        version "0.1"
+        maintainer "Mohio community sample"
+        tier "community"
+        note "Demo profile for exercising enforcement. Not legally reviewed. No certified compliance."
+    meta: done
+
+    // Activates the framework -> audit-grade mapping. hipaa maps to append_only, so a program
+    // under this sector requires an append-only audit sink and will record a degraded incident
+    // on a merely-durable one.
+    compliance: hipaa
+
+    // Fields the compiler must REFUSE to let a shape store. This is the "refuse to compile"
+    // surface: the violation never reaches a running system, because no build is produced.
+    field types
+        ssn is [phi, pii]
+            never store
+            label "Social security number"
+        card_number is [pci]
+            never store
+            label "Payment card number"
+        region is [public]
+            label "Region code"
+    field: done
+
+    ai.decide rules for sector "demo_regulated"
+        minimum confidence 0.90 for critical_decision
+    ai.decide: done

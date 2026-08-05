@@ -1,0 +1,63 @@
+# Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Mohio Language Compiler — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Parser ───────────────────────────────────────────────────
+lark>=1.1.0
+
+# ── AI Providers ─────────────────────────────────────────────
+# Anthropic (Claude) — required. Default provider for ai.decide and
+# ai.create text. Bring your own key: set ANTHROPIC_API_KEY=sk-ant-...
+anthropic>=0.96.0
+
+# OpenAI and Gemini providers (used in ai.connect chains and ai.create
+# image/video) are called over plain HTTP — NO SDK install required.
+# Just set the env keys when you actually use those providers:
+#   OPENAI_API_KEY   — gpt-*, o-series, gpt-image/dall-e, sora
+#   GEMINI_API_KEY   (or GOOGLE_API_KEY) — gemini-*, imagen, veo
+# A missing key only errors if that provider is called directly; in a
+# fallback chain a keyless provider is simply skipped.
+
+# ── Auth / Security ──────────────────────────────────────────
+# Password hashing for `hash bcrypt` / `verify`. Imported lazily inside
+# a try/except, so the deploy still boots if it is absent — but bcrypt
+# hashing will not work until this is installed.
+bcrypt>=4.0
+
+# Field / at-rest encryption (sealed [phi]/[pii] fields, key-provider seam). Imported lazily,
+# so the deploy still boots without it — but encrypted writes fail with "No module named
+# 'cryptography'" and PHI/PII would not be sealed. Required for any encryption-backed compliance.
+cryptography>=49.0.0
+
+# ── HTTP Server (mio serve) ──────────────────────────────────
+fastapi>=0.110.0
+uvicorn>=0.30.0
+starlette>=0.37.0
+
+# ── Upload safety ────────────────────────────────────────────
+# HTML sanitizer for `accept html` uploads. An uploaded page is cleaned
+# before it is stored, so hidden script cannot run against whoever opens
+# it later. Without this, an HTML upload is REFUSED rather than stored
+# unsanitized -- so a deploy missing it fails loud instead of silently
+# serving whatever was uploaded.
+# NOTE: bleach was the usual choice, but it was retired on 2026-06-05
+# and gets no further security fixes. nh3 (Ammonia bindings) is maintained.
+nh3>=0.2.0
+
+# ── Database drivers ─────────────────────────────────────────
+# SQLite is built into Python. Install the driver for whichever backend
+# you `connect` to (each is imported lazily, only when that backend runs):
+psycopg2-binary>=2.9.0     # PostgreSQL  (Railway uses this)
+pymysql>=1.1.0             # MySQL / MariaDB
+pymongo>=4.0.0             # MongoDB
+# redis>=5.0.0             # Redis cache (when wired)
+
+# ── Phase 2 (uncomment when features ship) ───────────────────
+# weasyprint>=62.0         # miopdf  — PDF generation
+# Pillow>=10.0.0           # mioimage — image processing
+# meilisearch>=0.31.0      # miosearch — full-text search
+
+# ── Development ──────────────────────────────────────────────
+# colorama>=0.4.6          # Windows color support (optional)
+python-multipart>=0.0.9

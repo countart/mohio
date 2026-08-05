@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zork — Mohio Demo</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --teal: #0D7377;
+    --teal-bright: #14FFEC;
+    --teal-dim: #0a5457;
+    --dark: #080e0f;
+    --darker: #050a0b;
+    --slate: #1E2D3D;
+    --text: #b8d4d5;
+    --text-dim: #4a7a7d;
+    --cursor-color: #14FFEC;
+    --glow: 0 0 20px rgba(20,255,236,0.3);
+    --glow-strong: 0 0 40px rgba(20,255,236,0.5);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--dark);
+    color: var(--text);
+    font-family: 'Share Tech Mono', monospace;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Scanline effect */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.15) 2px,
+      rgba(0,0,0,0.15) 4px
+    );
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  /* CRT vignette */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 99;
+  }
+
+  /* Animated grid background */
+  .bg-grid {
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(13,115,119,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(13,115,119,0.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+    animation: gridPulse 8s ease-in-out infinite;
+    z-index: 0;
+  }
+
+  @keyframes gridPulse {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+  }
+
+  .container {
+    position: relative;
+    z-index: 10;
+    width: min(780px, 95vw);
+    height: min(94vh, 1000px);
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--teal-dim);
+    background: rgba(5,10,11,0.95);
+    box-shadow: var(--glow), inset 0 0 60px rgba(13,115,119,0.05);
+  }
+
+  /* Terminal header */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--teal-dim);
+    background: rgba(13,115,119,0.08);
+    flex-shrink: 0;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .logo {
+    width: 24px;
+    height: 24px;
+    opacity: 0.9;
+  }
+
+  .header-title {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--teal-bright);
+    text-transform: uppercase;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--teal-bright);
+    box-shadow: 0 0 8px var(--teal-bright);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .status-text {
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+
+  /* Output area */
+  .output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    scroll-behavior: smooth;
+  }
+
+  .output::-webkit-scrollbar { width: 4px; }
+  .output::-webkit-scrollbar-track { background: transparent; }
+  .output::-webkit-scrollbar-thumb { background: var(--teal-dim); border-radius: 2px; }
+
+  .line {
+    font-size: 14px;
+    line-height: 1.7;
+    animation: fadeIn 0.2s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .line-system {
+    color: var(--teal-bright);
+    font-size: 12px;
+    letter-spacing: 1px;
+    margin-top: 16px;
+    margin-bottom: 4px;
+  }
+
+  .line-response {
+    color: var(--text);
+    padding-left: 0;
+    white-space: pre-wrap;   /* honor \n line breaks in game output; long lines still wrap */
+  }
+
+  .line-command {
+    color: var(--teal-bright);
+    opacity: 0.7;
+  }
+
+  .line-prompt {
+    color: var(--text-dim);
+  }
+
+  .line-error {
+    color: #ff6b6b;
+  }
+
+  .line-empty { height: 8px; }
+
+  /* Divider */
+  .divider {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--teal-dim), transparent);
+    margin: 4px 0;
+    opacity: 0.5;
+  }
+
+  /* Input area */
+  .input-area {
+    border-top: 1px solid var(--teal-dim);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(13,115,119,0.04);
+    flex-shrink: 0;
+  }
+
+  .prompt-symbol {
+    color: var(--teal-bright);
+    font-size: 16px;
+    font-weight: bold;
+    flex-shrink: 0;
+    text-shadow: var(--glow);
+  }
+
+  .input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--teal-bright);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 15px;
+    caret-color: var(--cursor-color);
+    letter-spacing: 0.5px;
+  }
+
+  .input::placeholder {
+    color: var(--text-dim);
+    opacity: 0.5;
+  }
+
+  .send-btn {
+    background: transparent;
+    border: 1px solid var(--teal-dim);
+    color: var(--text-dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  .send-btn:hover {
+    border-color: var(--teal-bright);
+    color: var(--teal-bright);
+    box-shadow: var(--glow);
+  }
+
+  /* Footer */
+  .footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 24px;
+    border-top: 1px solid rgba(13,115,119,0.2);
+    flex-shrink: 0;
+  }
+
+  .footer-text {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+
+  .footer-link {
+    font-size: 10px;
+    color: var(--teal-dim);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    text-decoration: none;
+    transition: color 0.2s;
+  }
+
+  .footer-link:hover { color: var(--teal-bright); }
+
+  .footer-attrib {
+    font-size: 9px;
+    color: var(--text-dim);
+    opacity: 0.55;
+    letter-spacing: 0.5px;
+    cursor: help;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 40%;
+  }
+  .footer-attrib:hover { opacity: 0.85; }
+
+  /* Loading animation */
+  .thinking {
+    display: none;
+    color: var(--teal-dim);
+    font-size: 13px;
+    animation: blink 0.8s step-end infinite;
+  }
+
+  .thinking.active { display: block; }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+
+  /* Session badge */
+  .session-badge {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border: 1px solid var(--teal-dim);
+    border-radius: 2px;
+  }
+
+  /* Intro screen */
+  .intro-art {
+    color: var(--teal-dim);
+    font-size: 11px;
+    line-height: 1.4;
+    margin-bottom: 8px;
+    white-space: pre;
+  }
+
+  /* Help bar */
+  .help-bar {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 0 24px 12px;
+    flex-shrink: 0;
+  }
+
+  .help-cmd {
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    border: 1px solid transparent;
+    padding: 3px 8px;
+    transition: all 0.15s;
+    border-radius: 2px;
+  }
+
+  .help-cmd:hover {
+    color: var(--teal-bright);
+    border-color: var(--teal-dim);
+  }
+
+  .help-cmd span {
+    color: var(--teal-bright);
+    opacity: 0.6;
+  }
+</style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <img src="https://mohio.io/img/logo-spiral.png" class="logo" alt="Mohio" onerror="this.style.display='none'">
+      <span class="header-title">Mohio · Zork Demo</span>
+    </div>
+    <div class="header-right">
+      <span class="session-badge" id="sessionBadge">session: —</span>
+      <div class="status-dot" id="statusDot"></div>
+      <span class="status-text" id="statusText">connecting</span>
+    </div>
+  </div>
+
+  <!-- Output -->
+  <div class="output" id="output">
+    <div class="line intro-art">  ███╗   ███╗ ██████╗ ██╗  ██╗██╗ ██████╗
+  ████╗ ████║██╔═══██╗██║  ██║██║██╔═══██╗
+  ██╔████╔██║██║   ██║███████║██║██║   ██║
+  ██║╚██╔╝██║██║   ██║██╔══██║██║██║   ██║
+  ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║╚██████╔╝
+  ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝ ╚═════╝</div>
+    <div class="line line-system">// MOHIO LANGUAGE RUNTIME · INTERACTIVE DEMO</div>
+    <div class="line-empty"></div>
+    <div class="line">A text adventure running on the Mohio programming language.</div>
+    <div class="line">Session state persists between commands via <span style="color:var(--teal-bright)">X-Session-ID</span>.</div>
+    <div class="line-empty"></div>
+    <div class="divider"></div>
+    <div class="line-empty"></div>
+    <div class="line" id="initLine" style="color:var(--text-dim);font-size:12px">Initializing session...</div>
+  </div>
+
+  <!-- Help bar -->
+  <div class="help-bar">
+    <div class="help-cmd" onclick="sendCommand('look')"><span>&gt;</span> look</div>
+    <div class="help-cmd" onclick="sendCommand('go east')"><span>&gt;</span> go east</div>
+    <div class="help-cmd" onclick="sendCommand('go west')"><span>&gt;</span> go west</div>
+    <div class="help-cmd" onclick="sendCommand('go down')"><span>&gt;</span> go down</div>
+    <div class="help-cmd" onclick="sendCommand('go up')"><span>&gt;</span> go up</div>
+    <div class="help-cmd" onclick="sendCommand('take lantern')"><span>&gt;</span> take lantern</div>
+    <div class="help-cmd" onclick="sendCommand('inventory')"><span>&gt;</span> inventory</div>
+    <div class="help-cmd" onclick="confirmRestart()"><span>&gt;</span> start over</div>
+  </div>
+
+  <!-- Input -->
+  <div class="input-area">
+    <span class="prompt-symbol">&gt;_</span>
+    <input
+      type="text"
+      class="input"
+      id="commandInput"
+      placeholder="enter command..."
+      autocomplete="off"
+      autocorrect="off"
+      spellcheck="false"
+    >
+    <div class="thinking" id="thinking">processing...</div>
+    <button class="send-btn" onclick="submitCommand()">Enter</button>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span class="footer-text">Built with Mohio · mio serve zork_demo.mho</span>
+    <span class="footer-attrib" title="Based on the original ZORK source code by Infocom, released by Microsoft, Activision & the Microsoft Open Source Programs Office under the MIT License (2025). This is a free, non-commercial educational demonstration of the Mohio language. ZORK is a trademark of its respective owner; no affiliation or endorsement is implied. Easter eggs, AI narration & Mohio-original content © Particular LLC.">ZORK © Infocom/Microsoft · MIT · not affiliated ⓘ</span>
+    <a href="https://mohio.io" target="_blank" class="footer-link">mohio.io</a>
+  </div>
+
+</div>
+
+<script>
+  // ── Config ────────────────────────────────────────────────
+  const API_URL = window.location.origin + '/';
+  const SESSION_ID = 'player_' + Math.random().toString(36).slice(2, 10);
+
+  // ── Elements ──────────────────────────────────────────────
+  const output     = document.getElementById('output');
+  const input      = document.getElementById('commandInput');
+  const thinking   = document.getElementById('thinking');
+  const statusDot  = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const sessionBadge = document.getElementById('sessionBadge');
+  const initLine   = document.getElementById('initLine');
+
+  // ── Session setup ─────────────────────────────────────────
+  sessionBadge.textContent = 'session: ' + SESSION_ID.slice(7);
+
+  // ── Output helpers ────────────────────────────────────────
+  function addLine(text, cls = 'line-response') {
+    const div = document.createElement('div');
+    div.className = 'line ' + cls;
+    div.textContent = text;
+    output.appendChild(div);
+    output.scrollTop = output.scrollHeight;
+  }
+
+  function addEmpty() {
+    const div = document.createElement('div');
+    div.className = 'line-empty';
+    output.appendChild(div);
+  }
+
+  function addDivider() {
+    const div = document.createElement('div');
+    div.className = 'divider';
+    output.appendChild(div);
+  }
+
+  function setStatus(connected) {
+    if (connected) {
+      statusDot.style.background = 'var(--teal-bright)';
+      statusDot.style.boxShadow = '0 0 8px var(--teal-bright)';
+      statusText.textContent = 'connected';
+    } else {
+      statusDot.style.background = '#ff6b6b';
+      statusDot.style.boxShadow = '0 0 8px #ff6b6b';
+      statusText.textContent = 'offline';
+    }
+  }
+
+  // ── Send command ──────────────────────────────────────────
+  async function sendCommand(cmd) {
+    if (!cmd) return;
+
+    input.value = '';
+    addEmpty();
+    addLine('> ' + cmd, 'line-command');
+    addEmpty();
+
+    thinking.classList.add('active');
+    input.disabled = true;
+
+    try {
+      const res = await postCommand(cmd);
+
+      setStatus(true);
+      const data = await res.json();
+      const msg = formatResponse(data);
+      addLine(msg, 'line-response');
+
+    } catch (err) {
+      setStatus(false);
+      addLine('Connection error — is the server running?', 'line-error');
+      addLine('Trying: ' + API_URL, 'line-error');
+    } finally {
+      thinking.classList.remove('active');
+      input.disabled = false;
+      input.focus();
+      addEmpty();
+    }
+  }
+
+  function submitCommand() {
+    const cmd = input.value.trim();
+    if (cmd) sendCommand(cmd);
+  }
+
+  // ── Keyboard ──────────────────────────────────────────────
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitCommand();
+  });
+
+  // ── Start over confirmation ──────────────────────────────
+  function confirmRestart() {
+    if (confirm('Start over? This will reset all progress and return you to the beginning.')) {
+      sendCommand('start over');
+    }
+  }
+
+  // ── Response formatter ───────────────────────────────────
+  function formatResponse(data) {
+    // Standard text response
+    if (data.message) return data.message;
+    if (data.body)    return data.body;
+    // Shape/dict response — look for description field
+    if (data.description) return data.description;
+    // Raw string
+    if (typeof data === 'string') return data;
+    // Last resort
+    return JSON.stringify(data);
+  }
+
+  // ── Auto-start: init session then send 'look' ────────────
+  async function postCommand(cmd) {
+    return fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-ID': SESSION_ID,
+      },
+      body: JSON.stringify({
+        _shape: 'GameCommand',
+        _roles: ['player'],
+        command: cmd,
+      }),
+    });
+  }
+
+  async function init() {
+    // Show warming up message after 3 seconds if still waiting
+    const warmupMessages = [
+      { delay: 3000,  text: '[parser] compiling grammar...' },
+      { delay: 8000,  text: '[runtime] loading game world...' },
+      { delay: 15000, text: '[database] seeding rooms and items...' },
+      { delay: 22000, text: '[mohio] almost ready — first load takes a moment...' },
+    ];
+
+    const warmupTimers = warmupMessages.map(({ delay, text }) =>
+      setTimeout(() => {
+        if (initLine && initLine.parentNode) {
+          initLine.textContent = text;
+          initLine.style.color = 'var(--accent)';
+        }
+      }, delay)
+    );
+
+    try {
+      // Request 1 — blank command initializes session state (sets current_room etc.)
+      await postCommand('');
+
+      // Request 2 — look now has current_room in session
+      const res = await postCommand('look');
+
+      // Clear any pending warmup timers
+      warmupTimers.forEach(clearTimeout);
+
+      setStatus(true);
+      const data = await res.json();
+      const msg = formatResponse(data);
+
+      initLine.remove();
+      addEmpty();
+      addLine(msg, 'line-response');
+      addEmpty();
+      addDivider();
+      addEmpty();
+      addLine('Type a command below or click a quick action.', 'line-system');
+      addEmpty();
+
+    } catch (err) {
+      warmupTimers.forEach(clearTimeout);
+      setStatus(false);
+      initLine.textContent = 'Could not connect to server.';
+      initLine.style.color = '#ff6b6b';
+    }
+
+    input.focus();
+  }
+
+  init();
+</script>
+</body>
+</html>

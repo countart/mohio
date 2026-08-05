@@ -1,0 +1,22 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+//
+// Mohio Sector Profile -- Demo Low  (SAMPLE / non-certified, public)
+// sector: demo_low
+//
+// Non-regulated demo profile used to exercise the sector-enforcement MECHANISM in
+// the public test suite without shipping a regulated profile. Baseline AI
+// confidence floor 0.85. Not a compliance control, not legally reviewed.
+//
+
+sector: demo_low
+    meta
+        version "0.1"
+        maintainer "Mohio community sample"
+        tier "community"
+        note "Demo profile for testing. Not legally reviewed. No certified compliance."
+    meta: done
+
+    ai.decide rules for sector "demo_low"
+        minimum confidence 0.85 for standard_decision
+    ai.decide: done

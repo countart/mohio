@@ -1,0 +1,99 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// ─────────────────────────────────────────────────────────────
+// MULTI-MATCH TEST — verifies retrieve/update honor ALL match clauses
+//
+// Setup: two rows, SAME command, DIFFERENT room.
+// If multi-match works, operations target exactly one row.
+// If only the first match clause is honored, they collide.
+//
+// Run:  mio serve test_multimatch.mho --port 8080
+// Then: POST / with {"command": "run"}
+// ─────────────────────────────────────────────────────────────
+
+sector: test
+connect db as postgres from env.DATABASE_URL
+
+shape TestCommand
+    command as text required
+shape: done
+
+listen for
+    new sh.TestCommand
+        require role "player"
+        command request.command
+
+        check command
+            // ── TEST 1: SEED two ambiguous rows ──────────────
+            when "seed"
+                // Clear any prior test data
+                remove from db.test_cache
+                    where command is "look"
+                remove: done
+
+                // Row A: command="look", room="kitchen"
+                save to db.test_cache
+                    command   "look"
+                    room      "kitchen"
+                    response  "You are in the kitchen."
+                    use_count 0
+                save: done
+
+                // Row B: command="look", room="cellar"  (SAME command)
+                save to db.test_cache
+                    command   "look"
+                    room      "cellar"
+                    response  "You are in the cellar."
+                    use_count 0
+                save: done
+
+                give back 200 "Seeded two rows: look/kitchen and look/cellar."
+
+            // ── TEST 2: RETRIEVE with two-field match ────────
+            // Should return ONLY the cellar row, not the kitchen row.
+            when "retrieve"
+                retrieve hit from db.test_cache
+                    match command to "look"
+                    match room to "cellar"
+                    on.failure give back 200 "FAIL: no row matched look+cellar"
+                retrieve: done
+                // If multi-match works: hit.response = "You are in the cellar."
+                // If only first match honored: returns kitchen row (first inserted)
+                give back 200 hit.response
+
+            // ── TEST 3: UPDATE with two-field match ──────────
+            // Should increment ONLY the cellar row's use_count.
+            when "update"
+                update db.test_cache
+                    match command to "look"
+                    match room to "cellar"
+                    use_count 99
+                update: done
+                give back 200 "Updated look+cellar use_count to 99."
+
+            // ── TEST 4: VERIFY the update hit the right row ──
+            // Kitchen row should STILL be 0. Cellar should be 99.
+            when "verify_kitchen"
+                retrieve k from db.test_cache
+                    match command to "look"
+                    match room to "kitchen"
+                    on.failure give back 200 "FAIL: kitchen row gone"
+                retrieve: done
+                // Expect: 0 (untouched). If update hit wrong row, this is 99.
+                give back 200 "kitchen use_count = {{k.use_count}} (expect 0)"
+
+            when "verify_cellar"
+                retrieve c from db.test_cache
+                    match command to "look"
+                    match room to "cellar"
+                    on.failure give back 200 "FAIL: cellar row gone"
+                retrieve: done
+                // Expect: 99. If update missed, this is 0.
+                give back 200 "cellar use_count = {{c.use_count}} (expect 99)"
+
+            otherwise
+                give back 200 "Commands: seed, retrieve, update, verify_kitchen, verify_cellar"
+        check: done
+
+    new: done
+listen: done

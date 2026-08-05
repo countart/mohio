@@ -1,0 +1,6 @@
+{
+  "_shape":     "DashboardSummary",
+  "_method":    "GET",
+  "_roles":     ["member"],
+  "member_id":  "M001"
+}

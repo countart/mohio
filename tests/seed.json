@@ -1,0 +1,65 @@
+{
+  "members": [
+    {
+      "id": "M001",
+      "name": "Jane Smith",
+      "email": "jane@example.com",
+      "status": "active",
+      "history": "clean",
+      "risk_score": "low",
+      "device_id": "dev-abc",
+      "created_at": "2024-01-15T10:00:00Z"
+    },
+    {
+      "id": "M002",
+      "name": "Bob Jones",
+      "email": "bob@example.com",
+      "status": "active",
+      "history": "flagged",
+      "risk_score": "high",
+      "device_id": "dev-xyz",
+      "created_at": "2024-03-20T14:00:00Z"
+    }
+  ],
+  "transactions": [],
+  "cleared_transactions": [],
+  "fraud_audit_log": [],
+  "patients": [],
+  "phi_audit_log": [],
+  "billing_audit_log": [],
+  "customers": [
+    {
+      "id": "M001",
+      "name": "Jane Smith",
+      "email": "jane@example.com",
+      "stripe_customer_id": "cus_abc123"
+    }
+  ],
+  "orders": [],
+  "invoices": [],
+  "inventory": [
+    {
+      "product_id": "P1",
+      "name": "Mohio Pro License",
+      "quantity": "100",
+      "status": "available",
+      "reserved_for": ""
+    }
+  ],
+  "activity": [
+    {
+      "id": "A001",
+      "member_id": "M001",
+      "type": "login",
+      "description": "Logged in",
+      "created_at": "2025-05-01T09:00:00Z"
+    },
+    {
+      "id": "A002",
+      "member_id": "M001",
+      "type": "feature_used",
+      "description": "Used fraud detection",
+      "created_at": "2025-05-02T11:00:00Z"
+    }
+  ]
+}

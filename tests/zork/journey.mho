@@ -1,0 +1,32 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// journey.mho — Zork shared spine (htaccess-style auto-include)
+// Drop this in tests/ next to zork_demo.mho. It is auto-merged into every .mho
+// in this directory with NO include line. Prepended, so zork_demo.mho overrides
+// on any name conflict. Add shared helper tasks here over time.
+// Once this is in place, DELETE the two ai.decide blocks from zork_demo.mho.
+
+ai.decide narrator returns text
+    model "claude-sonnet-4-6"
+    goal "respond as a sardonic Zork narrator to an unrecognized command"
+    context "Room: {{current_room}}. Command: {{command}}."
+    persona "classic Zork narrator — dry, wry, brief, slightly annoyed"
+    weigh command, current_room
+    ai.audit to game_audit_log
+    not confident
+        give back 200 "I don't understand that."
+ai.decide: done
+
+// Fuzzy noun matcher for the self-healing resolver. Given a typed word that
+// matched no item and no alias, return the short_name of the PRESENT item the
+// player most likely meant. Returns "" when not confident (>= 0.60 to commit).
+ai.decide resolve_noun returns text
+    model "claude-sonnet-4-6"
+    goal "the player typed a word that matches no item present in the room or inventory. From the listed present items only, return the single short_name the player most likely meant. Return only that short_name and nothing else. If nothing is a plausible match, return an empty string."
+    context "Typed word: {{noun}}. Items present (room + inventory): {{candidates}}."
+    persona "a precise item-name matcher — literal, exact, never invents an item absent from the list"
+    weigh noun, candidates
+    ai.audit to game_audit_log
+    not confident
+        give back 200 ""
+ai.decide: done

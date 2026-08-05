@@ -1,0 +1,29 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+//
+// Mohio Claim 18 Demo -- Deterministic Runtime Boundary Gate
+// Run:   python mio.py run boundary_gate_demo.mho
+// Check: python mio.py check boundary_gate_demo.mho --security
+//
+
+sector: financial
+
+connect db as sqlite from env.DATABASE_URL
+
+listen for POST "/demo/agent/bounded"
+
+    ai.agent fraudResearcher
+        goal "Analyze this transaction for fraud indicators."
+        limits
+            max steps    3
+            max tokens   1500
+            cost ceiling 0.25
+        limits: done
+
+        not confident
+            give back 503 "Boundary gate intercepted -- routed to manual review."
+    ai.agent: done
+
+    give back 200 fraudResearcher as json
+
+listen: done

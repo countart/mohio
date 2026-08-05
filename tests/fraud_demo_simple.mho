@@ -1,0 +1,35 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// fraud_demo_simple.mho
+// The smallest fraud check in Mohio: one AI decision, no database.
+// Demonstrates: sector, shape, ai.decide with the required fallback, check / when.
+// Walk-By Test: a non-technical person can read this cold.
+
+sector: financial
+
+shape Transaction
+    amount          as decimal
+    member_history  as text
+    device_id       as text
+shape: done
+
+listen for
+    new sh.Transaction
+        require role "screener"
+
+        ai.decide is_fraud returns boolean
+            confidence above 0.85
+            weigh
+                transaction.amount, transaction.member_history, transaction.device_id
+            not confident
+                give back 202 "Referred to manual review"
+        ai.decide: done
+
+        check is_fraud
+            when true
+                give back 403 "Transaction blocked"
+            otherwise
+                give back 200 "Transaction approved"
+        check: done
+    new: done
+listen: done
