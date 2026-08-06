@@ -25,11 +25,12 @@ only the 30 real roots are. The gate has a langmap pack called `miogscreen`.
 import os, sys
 os.environ['DATABASE_URL'] = ':memory:'
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 
 from lark import Lark
 from mohio_transformer_ast import transform
 
-_raw = open('mohio.lark', encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _P = Lark('\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//')),
           parser='earley', ambiguity='resolve', propagate_positions=True)
 
@@ -98,7 +99,7 @@ check("miogscreen (user pack name) is still a legal identifier",
 import re as _re
 from mohio_services import SERVICE_ROOTS, SERVICE_ROOTS_PLANNED, SERVICE_ROOTS_ACTIVE
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_g = open(os.path.join(_REPO, 'mohio.lark'), encoding='utf-8').read()
+_g = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _name_ex = set(_re.search(r'NAME: /\(\?!__USERVAR__\)\(\?!\(\?:([^)]*)\)', _g).group(1).split('|'))
 _svc_root = set(_re.search(r'MIO_SERVICE_ROOT\.1: /\(\?:([^)]*)\)', _g).group(1).split('|'))
 

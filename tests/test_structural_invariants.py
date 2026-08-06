@@ -18,6 +18,7 @@ import os, sys, re, ast
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
+import mohio_data
 
 _p = _f = 0
 def check(label, cond, detail=""):
@@ -48,7 +49,7 @@ def code(name):
 
 INTERP  = code('mohio_interpreter.py')
 SERVER  = code('mohio_server.py')
-GRAMMAR = src('mohio.lark')          # grammar comments are //, and the rules we scan are not in them
+GRAMMAR = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')  # grammar comments are //, and the rules we scan are not in them
 
 print("structural invariants (rules enforced against the source)")
 
@@ -285,7 +286,7 @@ check("the fingerprint globs the compiler's .py files rather than listing them",
       "glob.glob" in _fp_src)
 check("the fingerprint does NOT hand-list transformer/interpreter/ast",
       "'mohio_transformer.py'," not in _fp_src)
-check("the grammar is still fingerprinted", "mohio.lark" in _fp_src)
+check("the grammar is still fingerprinted", "GRAMMAR_PATH" in _fp_src)
 
 # The property, not the implementation: touching ANY compiler module must move the hash.
 import importlib

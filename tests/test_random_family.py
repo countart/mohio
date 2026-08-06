@@ -21,6 +21,7 @@ that need no database.
 """
 import os, sys, collections
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 # This is NOT an auth test. It used to gate its handler behind `require role "player"` and pass a
 # trusted client `_roles` payload (via MOHIO_TRUST_PROXY_ROLES=1) to reach the random code. Auth
 # rebuild Item 1 (2026-08-02) removed the client-roles path entirely -- roles are established
@@ -32,8 +33,7 @@ from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter, MockAiRuntime
 from mohio_ast import HoldDecl, RandomValue, Assignment, ListLiteral
 
-_RAW = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         'mohio.lark'), encoding='utf-8').read()
+_RAW = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _G = '\n'.join(l for l in _RAW.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_G, parser='earley', ambiguity='resolve', propagate_positions=True)
 

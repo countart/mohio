@@ -422,7 +422,10 @@ def preprocess_source(source: str, lang: str | None,
         return translated
     
     # Try to find the right langmap file
-    maps_dir = Path(maps_dir or './maps')
+    if maps_dir is None:
+        import mohio_data
+        maps_dir = mohio_data.MAPS_DIR
+    maps_dir = Path(maps_dir)
     lang_lower = lang.lower() if lang else ''
     
     # Try common filename patterns

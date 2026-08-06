@@ -54,6 +54,7 @@ if not (_PROJECT / "mio.py").exists():
             break
 
 sys.path.insert(0, str(_PROJECT))
+import mohio_data
 os.environ.setdefault("DATABASE_URL", ":memory:")
 
 # ── Imports (skip entire module if deps missing) ───────────────────────────────
@@ -68,7 +69,7 @@ except ImportError as e:
 
 
 # ── Grammar + parser (once per module) ─────────────────────────────────────────
-_grammar_path = _PROJECT / "mohio.lark"
+_grammar_path = mohio_data.GRAMMAR_PATH
 if not _grammar_path.exists():
     pytest.skip("mohio.lark not found", allow_module_level=True)
 

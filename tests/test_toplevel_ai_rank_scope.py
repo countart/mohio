@@ -28,6 +28,7 @@ _PROJECT = _THIS_DIR.parent
 if not (_PROJECT / "mio.py").exists():
     _PROJECT = _THIS_DIR
 sys.path.insert(0, str(_PROJECT))
+import mohio_data
 os.environ.setdefault("DATABASE_URL", ":memory:")
 
 try:
@@ -40,7 +41,7 @@ except ImportError as e:
     pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
 
 _clean = "\n".join(
-    l for l in (_PROJECT / "mohio.lark").read_text(encoding="utf-8").splitlines()
+    l for l in mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8").splitlines()
     if not l.strip().startswith("//")
 )
 _PARSER = Lark(_clean, parser="earley", ambiguity="resolve", propagate_positions=True)

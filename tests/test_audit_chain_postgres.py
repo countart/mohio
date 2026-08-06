@@ -22,6 +22,7 @@ Set MOHIO_TEST_PG_URL to point at a database, or it falls back to a local defaul
 import os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 URL = os.environ.get('MOHIO_TEST_PG_URL',
@@ -184,8 +185,7 @@ check("the compliance writer chains on Postgres",
 from lark import Lark as _Lark
 from mohio_transformer_ast import transform as _tf
 from mohio_interpreter import MockAiRuntime as _Mock
-_gp = '\n'.join(l for l in open(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'mohio.lark'), encoding='utf-8').read().splitlines()
+_gp = '\n'.join(l for l in mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8').splitlines()
     if not l.strip().startswith('//'))
 _Pp = _Lark(_gp, parser='earley', ambiguity='resolve', propagate_positions=True)
 T9 = 'phi_audit_log'

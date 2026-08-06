@@ -23,14 +23,15 @@ import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+import mohio_data
 os.chdir(ROOT)
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 from lark import Lark
 from mohio_transformer_ast import transform
-from mohio_interpreter import MohioInterpreter, Context, MohioValue
+from mohio_interpreter import MohioInterpreter, Context, MohioValue, _InMemorySessionStore
 
-_raw = open('mohio.lark', encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 H = 'connect db as sqlite from env.DATABASE_URL\n'
@@ -107,7 +108,7 @@ check("value persists across requests in same session", shown4 == ["yes"])
 def _e2e(prog_body, requests):
     prog = H + prog_body
     t = transform(P.parse(prog), prog)
-    sessions = {}
+    sessions = _InMemorySessionStore()
     bodies = []
     for req in requests:
         r = MohioInterpreter().run_with_session(t, req, "e2e", sessions)

@@ -9,7 +9,8 @@ import os
 os.environ.setdefault('DATABASE_URL', ':memory:')
 from lark import Lark
 from mohio_transformer import validate
-_raw = open('mohio.lark', encoding='utf-8').read()
+import mohio_data
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 def _fires(src):

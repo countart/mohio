@@ -276,9 +276,9 @@ def generate_schema(source, source_file=""):
     """
     from lark import Lark
     from mohio_transformer_ast import transform as ast_transform
+    import mohio_data
 
-    grammar_path = Path(__file__).parent / "mohio.lark"
-    grammar = grammar_path.read_text()
+    grammar = mohio_data.GRAMMAR_PATH.read_text()
     grammar_lines = [l for l in grammar.splitlines() if not l.strip().startswith("//")]
     parser = Lark("\n".join(grammar_lines), parser="earley", ambiguity="resolve")
 

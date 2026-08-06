@@ -14,6 +14,7 @@ Run: python3 tests/test_connect_idempotent.py
 import os, sys, re
 sys.argv = ['mio.py']
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 
 from types import SimpleNamespace
 from lark import Lark
@@ -29,7 +30,7 @@ def check(label, got, want):
         _failed += 1; print(f"  FAIL {label}: got {got!r} want {want!r}")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_raw = open(os.path.join(ROOT, 'mohio.lark'), encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 
@@ -104,6 +105,13 @@ os.environ.pop('DATABASE_URL', None)
 check("postgres target is None when unset", it3._connection_target('postgres'), ('postgres', None))
 check("sqlite target is the db_path", it3._connection_target('sqlite')[0], 'sqlite')
 
+# it2's `connect ... from env.DATABASE_URL` now genuinely opens /tmp/_ci_sqlite.db (the
+# connect-decl-source fix, 2026-08-05) instead of silently landing on :memory: -- so the
+# real file is held open by a live sqlite3 connection here, and removing it without
+# closing first fails loud on Windows (WinError 32) instead of just being a no-op like
+# it was when this file was never really touched.
+if getattr(it2, '_db', None) is not None and hasattr(it2._db, 'conn'):
+    it2._db.conn.close()
 if os.path.exists('/tmp/_ci_sqlite.db'):
     os.remove('/tmp/_ci_sqlite.db')
 

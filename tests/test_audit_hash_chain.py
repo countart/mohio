@@ -23,6 +23,7 @@ what the chain proves.
 import os, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 from mohio_interpreter import MohioInterpreter, DbRuntime, Context
@@ -311,8 +312,7 @@ check("writer and verifier share one payload definition",
 from lark import Lark as _Lark
 from mohio_transformer_ast import transform as _tf
 from mohio_interpreter import MockAiRuntime as _Mock
-_g2 = '\n'.join(l for l in open(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'mohio.lark'), encoding='utf-8').read().splitlines()
+_g2 = '\n'.join(l for l in mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8').splitlines()
     if not l.strip().startswith('//'))
 _P2 = _Lark(_g2, parser='earley', ambiguity='resolve', propagate_positions=True)
 _AI = ('connect db as sqlite from env.DATABASE_URL\namt 100\n'

@@ -11,6 +11,7 @@ Skips cleanly if pymongo/mongomock aren't installed, so CI without Mongo stays g
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 try:
     import mongomock, pymongo
     pymongo.MongoClient = mongomock.MongoClient    # patch the driver for an in-memory Mongo
@@ -27,7 +28,7 @@ def _run(src):
     from lark import Lark
     from mohio_transformer_ast import transform
     from mohio_interpreter import MohioInterpreter
-    raw = open(os.path.join(os.path.dirname(__file__), '..', 'mohio.lark'), encoding='utf-8').read()
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
     g = '\n'.join(l for l in raw.splitlines() if not l.strip().startswith('//'))
     P = Lark(g, parser='earley', ambiguity='resolve', propagate_positions=True)
     interp = MohioInterpreter()

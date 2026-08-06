@@ -14,6 +14,7 @@ Run: `python tests/test_miocookie_block_options.py`.
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 # Deliberately do NOT set MOHIO_COOKIE_SECURE: Secure must appear because the program declared
 # `secure` explicitly, not because of the transport default -- so dropping the clause removes it.
@@ -27,8 +28,7 @@ from mohio_ast import MioCookieSet
 from mohio_server import create_app, MohioServer
 from starlette.testclient import TestClient
 
-_RAW = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         'mohio.lark'), encoding='utf-8').read()
+_RAW = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _G = '\n'.join(l for l in _RAW.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_G, parser='earley', ambiguity='resolve', propagate_positions=True)
 

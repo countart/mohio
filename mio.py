@@ -32,7 +32,8 @@ from pathlib import Path
 _HERE = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_HERE))
 
-GRAMMAR_FILE = _HERE / "mohio.lark"
+import mohio_data
+GRAMMAR_FILE = mohio_data.GRAMMAR_PATH
 
 # One process compiles the grammar at most once. `mio serve` was compiling it THREE times
 # in a single startup: nothing held the compiled parser, so each caller paid ~20s again.
@@ -283,7 +284,6 @@ def _compiler_fingerprint() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
 
     files = [os.path.basename(p) for p in glob.glob(os.path.join(here, '*.py'))]
-    files.append('mohio.lark')
     for fn in sorted(set(files)):
         try:
             with open(os.path.join(here, fn), 'rb') as f:
@@ -292,6 +292,12 @@ def _compiler_fingerprint() -> str:
                 h.update(f.read())
         except Exception:
             pass  # missing file -> just contributes nothing
+    try:
+        h.update(mohio_data.GRAMMAR_PATH.name.encode())
+        h.update(h.digest())
+        h.update(mohio_data.GRAMMAR_PATH.read_bytes())
+    except Exception:
+        pass  # missing grammar -> just contributes nothing
     _COMPILER_FINGERPRINT = h.hexdigest()[:16]
     return _COMPILER_FINGERPRINT
 
@@ -924,11 +930,10 @@ def _parse_and_validate(source, filename, verbose=False):
         
         if _lang_hint:
             # Find maps directory relative to source file
-            _maps_dir = os.path.join(os.path.dirname(os.path.abspath(filename)), 
+            _maps_dir = os.path.join(os.path.dirname(os.path.abspath(filename)),
                                       '..', 'maps')
             if not os.path.isdir(_maps_dir):
-                _maps_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                          'maps')
+                _maps_dir = str(mohio_data.MAPS_DIR)
             # Validate langmap before translating
             try:
                 from mohio_langmap import LangmapLoader, LANGMAP_VERSION
@@ -1612,7 +1617,7 @@ def cmd_translate(args=None):
     maps_dir = os.path.join(os.path.dirname(os.path.abspath(str(source_file))),
                             '..', 'maps')
     if not os.path.isdir(maps_dir):
-        maps_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'maps')
+        maps_dir = str(mohio_data.MAPS_DIR)
 
     # Load source langmap (for from_lang -> canonical)
     # Load target langmap (for canonical -> to_lang)

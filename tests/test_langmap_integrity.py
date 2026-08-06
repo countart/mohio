@@ -27,8 +27,9 @@ import os, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
+import mohio_data
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_MAPS = os.path.join(_ROOT, 'maps')
+_MAPS = str(mohio_data.MAPS_DIR)
 _ENV = dict(os.environ, PYTHONPATH=_ROOT, DATABASE_URL=':memory:',
             MOHIO_ENCRYPTION_KEY='testkey')
 

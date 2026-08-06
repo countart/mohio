@@ -20,6 +20,7 @@ dotted-name speed). This guard proves:
 import os, sys, re
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+import mohio_data
 os.environ.setdefault("DATABASE_URL", ":memory:")
 os.environ.setdefault("MOHIO_ENCRYPTION_KEY", "testkey")
 
@@ -47,7 +48,7 @@ def check_true(label, val):
     else:
         _failed += 1; print(f"  FAIL {label}: expected truthy, got {val!r}")
 
-_raw = open(os.path.join(ROOT, "mohio.lark"), encoding="utf-8").read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
 _g = "\n".join(l for l in _raw.splitlines() if not l.strip().startswith("//"))
 _P = Lark(_g, parser="earley", ambiguity="resolve", propagate_positions=True)
 

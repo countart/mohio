@@ -14,14 +14,14 @@ via sys.modules -- exercising the real guard path. Run: `python tests/test_encry
 """
 import os, sys, unittest.mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter, MohioRuntimeError
 
-_RAW = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         'mohio.lark'), encoding='utf-8').read()
+_RAW = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _G = '\n'.join(l for l in _RAW.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_G, parser='earley', ambiguity='resolve', propagate_positions=True)
 def prog(src): return transform(_P.parse(src), src)

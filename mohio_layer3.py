@@ -182,7 +182,8 @@ if __name__ == "__main__":
     try:
         from lark import Lark
         from mohio_transformer_ast import transform
-        raw = open("mohio.lark", encoding="utf-8").read()
+        import mohio_data
+        raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
         g = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
         P = Lark(g, parser="earley", ambiguity="resolve", propagate_positions=True)
         a = repr(transform(P.parse(out_svo + "\n"), out_svo))

@@ -25,6 +25,7 @@ import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+import mohio_data
 os.chdir(ROOT)
 
 DSN = os.environ.get('MOHIO_PG_TEST_DSN')
@@ -51,7 +52,7 @@ except Exception as e:
     print(f"SKIP  test_postgres_backend: cannot connect ({str(e).splitlines()[0][:50]})")
     sys.exit(0)
 
-_raw = open('mohio.lark', encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 H = 'connect db as postgres from env.DATABASE_URL\n'

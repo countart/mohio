@@ -18,6 +18,7 @@ import os, sys
 from pathlib import Path
 from dataclasses import dataclass
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import mohio_data
 os.environ.setdefault("DATABASE_URL", ":memory:")
 
 from lark import Lark
@@ -100,7 +101,7 @@ def test_no_handler_reraises_but_always_runs():
 
 
 def _parser():
-    raw = Path("mohio.lark").read_text(encoding="utf-8")
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
     g = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
     return Lark(g, parser="earley", ambiguity="resolve", propagate_positions=True)
 _P = _parser()
@@ -141,7 +142,7 @@ def test_bare_try_and_always_forms_parse():
 
 def test_quietly_reserved():
     print("\n=== 'quietly' kept free (reserved, not implemented) ===")
-    raw = Path("mohio.lark").read_text(encoding="utf-8")
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
     check("'quietly' is not tokenized anywhere in the grammar", '"quietly"' not in raw)
 
 

@@ -17,6 +17,7 @@ import os, sys, subprocess, tempfile
 sys.argv = ['mio.py']
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 from types import SimpleNamespace
@@ -32,7 +33,7 @@ def check(label, got, want):
     else:
         _failed += 1; print(f"  FAIL {label}: got {got!r} want {want!r}")
 
-_raw = open(os.path.join(ROOT, 'mohio.lark'), encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

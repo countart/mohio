@@ -35,11 +35,12 @@ import sys
 
 os.environ.setdefault("DATABASE_URL", ":memory:")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 
 from lark import Lark, Token
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-raw = open(os.path.join(ROOT, "mohio.lark"), encoding="utf-8").read()
+raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
 parser = Lark(
     "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//")),
     parser="earley", ambiguity="resolve",

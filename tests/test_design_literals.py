@@ -16,6 +16,7 @@ These tests exist so the literals cannot silently revert to None.
 import os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 from lark import Lark
@@ -23,7 +24,7 @@ from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
 from mohio_ast import ColorLit, PercentLit, DimensionLit
 
-_raw = open(os.path.join(os.path.dirname(__file__), '..', 'mohio.lark'), encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

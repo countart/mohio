@@ -18,6 +18,7 @@ written for a single trusted app; these are the guarantees it needs before a pub
 import os, sys, pathlib, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 os.environ.pop('MOHIO_CORS_ORIGINS', None)
 os.environ.pop('MOHIO_ALLOW_SESSION_HEADER', None)
@@ -30,7 +31,7 @@ from mohio_server import create_app, MohioServer
 from starlette.testclient import TestClient
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_raw = open(os.path.join(_ROOT, 'mohio.lark'), encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

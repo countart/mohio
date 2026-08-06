@@ -19,11 +19,12 @@ import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+import mohio_data
 os.chdir(ROOT)
 from pathlib import Path
 from lark import Lark
 
-_raw = Path('mohio.lark').read_text()
+_raw = mohio_data.GRAMMAR_PATH.read_text()
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

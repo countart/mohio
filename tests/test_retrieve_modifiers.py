@@ -15,6 +15,7 @@ Run: python3 tests/test_retrieve_modifiers.py
 import os, sys, re
 sys.argv = ['mio.py']
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 
 from types import SimpleNamespace
 from lark import Lark
@@ -34,8 +35,7 @@ def check(label, got, want):
         print(f"  FAIL {label}: got {got!r} want {want!r}")
 
 # ── parser (shared) ──────────────────────────────────────────
-_raw = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         'mohio.lark'), encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 
@@ -140,6 +140,8 @@ def _run_single(retrieve_block_lines, dbfile):
     for nm, zn in [('hall', 'north'), ('den', 'north'), ('lab', 'south')]:
         it.run(prog, {'_method': 'POST', '_path': '/add', 'room': {'name': nm, 'zone': zn}})
     body = str(it.run(prog, {'_method': 'GET', '_path': '/p'}).get('body', ''))
+    if getattr(it, '_db', None) is not None and hasattr(it._db, 'conn'):
+        it._db.conn.close()
     m = re.search(r'\[(.*?)\]', body)
     return m.group(1) if m else body[:60]
 
@@ -165,6 +167,8 @@ def _run_collection(dbfile):
     for nm, zn in [('hall', 'north'), ('den', 'north'), ('lab', 'south')]:
         it.run(prog, {'_method': 'POST', '_path': '/add', 'room': {'name': nm, 'zone': zn}})
     body = str(it.run(prog, {'_method': 'GET', '_path': '/p'}).get('body', ''))
+    if getattr(it, '_db', None) is not None and hasattr(it._db, 'conn'):
+        it._db.conn.close()
     m = re.search(r'\[(.*?)\]', body)
     return m.group(1) if m else body[:60]
 check("retrieve.all collection .count -> 3", _run_collection('/tmp/_rm_all.db'), '3')
@@ -187,6 +191,8 @@ def _run_first(dbfile):
     for nm, zn in [('hall', 'north'), ('den', 'north'), ('lab', 'south')]:
         it.run(prog, {'_method': 'POST', '_path': '/add', 'room': {'name': nm, 'zone': zn}})
     body = str(it.run(prog, {'_method': 'GET', '_path': '/p'}).get('body', ''))
+    if getattr(it, '_db', None) is not None and hasattr(it._db, 'conn'):
+        it._db.conn.close()
     m = re.search(r'\[(.*?)\]', body)
     return m.group(1) if m else body[:60]
 check("retrieve.first -> first row name", _run_first('/tmp/_rm_first.db'), 'hall')

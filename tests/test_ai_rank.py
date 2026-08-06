@@ -11,6 +11,7 @@ import os, sys, re
 sys.argv = ['mio.py']
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 from lark import Lark
@@ -34,7 +35,7 @@ def check_true(label, val):
     else:
         _failed += 1; print(f"  FAIL {label}: expected truthy, got {val!r}")
 
-_raw = open(os.path.join(ROOT, 'mohio.lark'), encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 
@@ -260,7 +261,7 @@ check("is more than 100 (x=100) strict", unwrap(r), "not above")
 # PART 3 — Langmap (SKIP if maps/ not available)
 # ══════════════════════════════════════════════════════════════════════════════
 print("\n── langmap ──")
-maps_dir = os.path.join(ROOT, 'maps')
+maps_dir = str(mohio_data.MAPS_DIR)
 if not os.path.isdir(maps_dir):
     print("  SKIP maps/ not found")
 else:

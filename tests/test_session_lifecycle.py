@@ -29,11 +29,11 @@ os.environ.setdefault('DATABASE_URL', ':memory:')
 from pathlib import Path
 from lark import Lark
 from mohio_transformer_ast import transform
-from mohio_interpreter import MohioInterpreter
+from mohio_interpreter import MohioInterpreter, _InMemorySessionStore
 from mohio_sector_loader import SectorProfile, ExpireRule
 
-_RAW = Path(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         'mohio.lark')).read_text(encoding='utf-8')
+import mohio_data
+_RAW = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _G = '\n'.join(l for l in _RAW.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_G, parser='earley', ambiguity='resolve', propagate_positions=True)
 
@@ -54,7 +54,7 @@ SRC_WRITE = ('shape P\n    command as text\nshape: done\n'
              '        give back 200 "ok"\n    new: done\nlisten: done\n')
 prog = transform(_P.parse(SRC_WRITE), SRC_WRITE)
 r = MohioInterpreter().run_with_session(prog, {'_method': 'POST', '_path': '/p', 'command': 'x'},
-                                        'sess1', {})
+                                        'sess1', _InMemorySessionStore())
 check("miocookie.set on mio_session fails loud (was: silently accepted)",
       r.get('status') == 500 and 'mio_session' in str(r.get('body', '')), str(r))
 check("the fail-loud names the runtime-owned mechanism (sh. reservation parallel)",
@@ -67,7 +67,7 @@ SRC_OTHER = ('shape P\n    command as text\nshape: done\n'
              '        give back 200 "ok"\n    new: done\nlisten: done\n')
 prog_o = transform(_P.parse(SRC_OTHER), SRC_OTHER)
 r_o = MohioInterpreter().run_with_session(prog_o, {'_method': 'POST', '_path': '/p', 'command': 'x'},
-                                          None, {})
+                                          None, _InMemorySessionStore())
 check("regression: an unrelated cookie name is completely unaffected",
       r_o.get('status') == 200, str(r_o))
 
@@ -76,7 +76,7 @@ SRC_PLAIN = ('shape P\n    command as text\nshape: done\n'
              'listen for\n    new sh.P\n'
              '        give back 200 ("session=" & session.id)\n    new: done\nlisten: done\n')
 prog2 = transform(_P.parse(SRC_PLAIN), SRC_PLAIN)
-it2 = MohioInterpreter(); sessions2 = {}
+it2 = MohioInterpreter(); sessions2 = _InMemorySessionStore()
 r1 = it2.run_with_session(prog2, {'_method': 'POST', '_path': '/p', 'command': 'x'}, None, sessions2)
 sid1 = sid_of(r1)
 check("first request mints a session with no app code writing any cookie",
@@ -94,7 +94,7 @@ SRC_ZORK_SHAPED = ('shape P\n    command as text\nshape: done\n'
                    '        require role "player"\n'
                    '        give back 200 ("session=" & session.id)\n    new: done\nlisten: done\n')
 prog3 = transform(_P.parse(SRC_ZORK_SHAPED), SRC_ZORK_SHAPED)
-it3 = MohioInterpreter(); sessions3 = {}
+it3 = MohioInterpreter(); sessions3 = _InMemorySessionStore()
 r_a = it3.run_with_session(prog3, {'_method': 'POST', '_path': '/p', 'command': 'look'}, None, sessions3)
 sid_a = sid_of(r_a)
 r_b = it3.run_with_session(prog3, {'_method': 'POST', '_path': '/p', 'command': 'take'}, sid_a, sessions3)
@@ -115,7 +115,7 @@ SRC_ESCALATE = ('shape P\n    command as text\nshape: done\n'
                 '        grant role command\n'
                 '        give back 200 ("session=" & session.id)\n    new: done\nlisten: done\n')
 prog4 = transform(_P.parse(SRC_ESCALATE), SRC_ESCALATE)
-it4 = MohioInterpreter(); sessions4 = {}
+it4 = MohioInterpreter(); sessions4 = _InMemorySessionStore()
 r_guest = it4.run_with_session(prog4, {'_method': 'POST', '_path': '/p', 'command': 'guest'}, None, sessions4)
 sid_guest = sid_of(r_guest)
 r_admin = it4.run_with_session(prog4, {'_method': 'POST', '_path': '/p', 'command': 'admin'}, sid_guest, sessions4)
@@ -145,7 +145,7 @@ check("the NEW (post-rotation) id continues to work correctly",
 # just abandoned"). Prove the STRONGER guarantee: even if something else re-populates
 # an entry under the exact old id string, the invalidated set still wins and refuses
 # it, rather than silently accepting whatever happens to be sitting under that key.
-sessions4[sid_guest] = sessions4[sid_admin]   # force-repopulate the old key (paranoid case)
+sessions4.put(sid_guest, sessions4.get(sid_admin, None))   # force-repopulate the old key (paranoid case)
 r_forced = it4.run_with_session(prog4, {'_method': 'POST', '_path': '/p', 'command': 'admin'},
                                 sid_guest, sessions4)
 sid_forced = sid_of(r_forced)
@@ -155,19 +155,19 @@ check("the invalidated-id ban wins even over a re-populated entry under the same
 
 # ── 5. Idle timeout and absolute timeout are independent mechanisms ────────────────
 prog5 = transform(_P.parse(SRC_PLAIN), SRC_PLAIN)
-it5 = MohioInterpreter(); sessions5 = {}
+it5 = MohioInterpreter(); sessions5 = _InMemorySessionStore()
 r5a = it5.run_with_session(prog5, {'_method': 'POST', '_path': '/p', 'command': 'x'}, None, sessions5)
 sid5a = sid_of(r5a)
-sessions5[sid5a]._last_accessed = time.time() - 3600   # idle-expired (> 1800s default)
+sessions5.get(sid5a, None)._last_accessed = time.time() - 3600   # idle-expired (> 1800s default)
 r5b = it5.run_with_session(prog5, {'_method': 'POST', '_path': '/p', 'command': 'x'}, sid5a, sessions5)
 check("an idle-expired session is genuinely rejected (fresh, different id)",
       sid_of(r5b) != sid5a, sid_of(r5b))
 
-it5c = MohioInterpreter(); sessions5c = {}
+it5c = MohioInterpreter(); sessions5c = _InMemorySessionStore()
 r5c = it5c.run_with_session(prog5, {'_method': 'POST', '_path': '/p', 'command': 'x'}, None, sessions5c)
 sid5c = sid_of(r5c)
-sessions5c[sid5c]._created_at = time.time() - 50000     # absolute-expired (> 43200s default)
-sessions5c[sid5c]._last_accessed = time.time()          # but IDLE-fresh (just touched)
+sessions5c.get(sid5c, None)._created_at = time.time() - 50000     # absolute-expired (> 43200s default)
+sessions5c.get(sid5c, None)._last_accessed = time.time()          # but IDLE-fresh (just touched)
 r5d = it5c.run_with_session(prog5, {'_method': 'POST', '_path': '/p', 'command': 'x'}, sid5c, sessions5c)
 check("an absolute-expired session is rejected even when idle-fresh (independent mechanisms)",
       sid_of(r5d) != sid5c, sid_of(r5d))
@@ -209,7 +209,7 @@ check("Max-Age correctly switches to absolute-remaining when it becomes the shor
 # one route via asyncio.to_thread, confirmed by reading the actual server wiring, so a
 # threaded request and a non-threaded request CAN touch the same session dict at once.
 prog8 = transform(_P.parse(SRC_ESCALATE), SRC_ESCALATE)
-it8 = MohioInterpreter(); sessions8 = {}
+it8 = MohioInterpreter(); sessions8 = _InMemorySessionStore()
 r8_guest = it8.run_with_session(prog8, {'_method': 'POST', '_path': '/p', 'command': 'guest'},
                                 None, sessions8)
 sid8_guest = sid_of(r8_guest)
@@ -250,14 +250,15 @@ check("concurrent rotation + a racing request on the same id: NO crash in either
       len(errors) == 0, errors)
 check("concurrent access produced exactly 2 results (both threads completed)",
       len(results) == 2, results)
-# sessions dict must be internally consistent afterward: no orphaned/duplicate entries,
-# the invalidated set actually contains the old id, and exactly one CURRENT (non-base,
-# non-invalidated) session per distinct identity that ended up existing.
-_live_ids = [k for k in sessions8 if k not in ('__base__', '__invalidated__')]
-check("sessions dict is internally consistent after the race (no duplicate/orphaned live keys)",
+# The store must be internally consistent afterward: no orphaned/duplicate entries, and
+# the invalidated set actually contains the old id. __base__ and __invalidated__ are no
+# longer special keys sharing space with real sessions (2026-08-05 session-store-seam
+# build) -- every key under _sessions IS a live session now, no exclusion list needed.
+_live_ids = list(sessions8._sessions.keys())
+check("session store is internally consistent after the race (no duplicate/orphaned live keys)",
       len(_live_ids) == len(set(_live_ids)), _live_ids)
 check("the old guest id ended up in the invalidated set (rotation completed correctly under the race)",
-      sid8_guest in sessions8.get('__invalidated__', set()), sessions8.get('__invalidated__'))
+      sessions8.is_invalidated(sid8_guest), sessions8._invalidated)
 
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

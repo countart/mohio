@@ -16,6 +16,7 @@ is not.
 import os, sys, tempfile, shutil
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+import mohio_data
 os.environ.setdefault("DATABASE_URL", ":memory:")
 os.environ.setdefault("MOHIO_ENCRYPTION_KEY", "testkey")
 os.environ.setdefault("MOHIO_SECRET", "testsecret")
@@ -86,7 +87,7 @@ SRC = ('shape D\n'
        '        give back ok "stored"\n'
        '    new: done\n'
        'listen: done\n')
-_g = open(os.path.join(ROOT, "mohio.lark"), encoding="utf-8").read()
+_g = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
 _g = "\n".join(l for l in _g.splitlines() if not l.strip().startswith("//"))
 _P = Lark(_g, parser="earley", ambiguity="resolve", propagate_positions=True)
 interp = MohioInterpreter()

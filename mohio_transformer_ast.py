@@ -626,13 +626,30 @@ class MohioTransformer(Transformer):
         return SectorDecl(sector=sector)
 
     def connect_decl(self, children):
-        # CONNECT NAME AS NAME FROM value_expr
+        # CONNECT NAME AS conn_access? NAME FROM (ENV_REF | SECRET_REF)
+        # The grammar embeds ENV_REF/SECRET_REF as raw terminals directly in this rule
+        # rather than routing through the separate env_ref/secret_ref sub-rules (which
+        # DO build a real EnvRef/SecretRef below) -- so both arrive here as plain Lark
+        # Tokens, not transformed nodes. `value = [c for c in children if not
+        # isinstance(c, Token)]` was therefore always empty and `source` was always
+        # None, for every connect declaration ever parsed, regardless of driver.
+        # Verified live: node.source was None even for `connect db as sqlite from
+        # env.DATABASE_URL`, the canonical example. Build the same EnvRef/SecretRef
+        # shape env_ref/secret_ref build, from the raw token, so source is finally real.
         tokens = [c for c in children if isinstance(c, Token)]
         name_tokens = [t for t in tokens if t.type == 'NAME']
-        value = [c for c in children if not isinstance(c, Token)]
         alias = str(name_tokens[0]) if len(name_tokens) > 0 else ""
         driver = str(name_tokens[1]) if len(name_tokens) > 1 else ""
-        source = value[0] if value else None
+        env_tok = next((t for t in tokens if t.type == 'ENV_REF'), None)
+        secret_tok = next((t for t in tokens if t.type == 'SECRET_REF'), None)
+        if env_tok is not None:
+            source = EnvRef(key=str(env_tok).replace('env.', ''))
+        elif secret_tok is not None:
+            source = SecretRef(key=str(secret_tok).replace('secret.', ''))
+        else:
+            # Defensive only -- FROM (ENV_REF | SECRET_REF) is not optional in the
+            # grammar, so this should be unreachable from any real parse.
+            source = None
         return ConnectDecl(name=alias, driver=driver, source=source)
 
     # ── mioconnect declaration ──────────────────────────────────
@@ -5988,6 +6005,17 @@ class MohioTransformer(Transformer):
 
     def miopdf_decl(self, children): return self._not_built_service(children, "miopdf")
     def miopdf_with_body(self, children): return children
+
+    # miosearch had NO transformer method at all (verified live, 2026-08-05): it stayed a
+    # raw, untransformed Tree, so it fell into scan_unwired's generic "unwired construct"
+    # bucket -- a deliberate WARNING for genuinely-scaffolded features, not the ERROR its
+    # actual runtime behavior (a real crash, "No executor for 'miosearch_decl'") deserves.
+    # Routing it through _not_built_service, exactly like mioimage_decl/miopdf_decl above,
+    # moves it into scan_not_built_services' ERROR-level registry instead, matching its
+    # siblings and matching what mio run actually does.
+    def miosearch_decl(self, children): return self._not_built_service(children, "miosearch")
+    def miosearch_body(self, children): return children
+    def miosearch_embed_body(self, children): return children
 
     def load_pack_stmt(self, children): return None
 

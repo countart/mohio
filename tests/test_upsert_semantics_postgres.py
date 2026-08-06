@@ -21,6 +21,7 @@ import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT); os.chdir(ROOT)
+import mohio_data
 
 def _reachable(dsn):
     try:
@@ -46,7 +47,7 @@ from lark import Lark
 from mohio_interpreter import MohioInterpreter
 from mohio_transformer_ast import transform as ast_transform
 
-_raw = Path('mohio.lark').read_text(encoding='utf-8')
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

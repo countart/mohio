@@ -14,6 +14,7 @@ from pathlib import Path
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter, DbRuntime, Context
+import mohio_data
 
 _passed = 0
 _failed = 0
@@ -60,7 +61,7 @@ def test_backend_compound():
 
 def test_exec_passes_all_matches():
     print("\n=== exec: retrieve block passes ALL match clauses ===")
-    raw = Path("mohio.lark").read_text(encoding="utf-8")
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
     g = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
     parser = Lark(g, parser="earley", ambiguity="resolve", propagate_positions=True)
 
@@ -109,7 +110,7 @@ def test_or_not_blocks():
 
 def test_or_not_exec():
     print("\n=== exec builds AND/OR/NOT spec from blocks ===")
-    raw = Path("mohio.lark").read_text(encoding="utf-8")
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
     g = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
     parser = Lark(g, parser="earley", ambiguity="resolve", propagate_positions=True)
 
@@ -143,7 +144,7 @@ def test_find_or_not_exec():
     print("\n=== find honors AND/OR/NOT blocks (runtime) ===")
     import os
     os.environ.setdefault("DATABASE_URL", ":memory:")
-    raw = Path("mohio.lark").read_text(encoding="utf-8")
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
     g = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
     parser = Lark(g, parser="earley", ambiguity="resolve", propagate_positions=True)
     head = ("connect db as sqlite from env.DATABASE_URL\n"

@@ -18,6 +18,7 @@ import os, sys, unittest.mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT); os.chdir(ROOT)
+import mohio_data
 os.environ["DATABASE_URL"] = ":memory:"
 
 from pathlib import Path
@@ -26,7 +27,7 @@ from mohio_interpreter import MohioInterpreter, MockAiRuntime
 from mohio_transformer_ast import transform as ast_transform
 from mohio_ai import AnthropicAiRuntime
 
-_raw = Path("mohio.lark").read_text(encoding="utf-8")
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
 _g = "\n".join(l for l in _raw.splitlines() if not l.strip().startswith("//"))
 P = Lark(_g, parser="earley", ambiguity="resolve", propagate_positions=True)
 

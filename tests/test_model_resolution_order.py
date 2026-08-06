@@ -37,8 +37,8 @@ from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
 from mohio_ai import AnthropicAiRuntime
 
-_RAW = Path(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         'mohio.lark')).read_text(encoding='utf-8')
+import mohio_data
+_RAW = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _G = '\n'.join(l for l in _RAW.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_G, parser='earley', ambiguity='resolve', propagate_positions=True)
 

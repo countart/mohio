@@ -25,6 +25,7 @@ discards it. Every new construct with alternatives belongs in this test.
 import os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 from lark import Lark
@@ -32,7 +33,7 @@ from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_g = '\n'.join(l for l in open(os.path.join(_ROOT, 'mohio.lark'), encoding='utf-8').read().splitlines()
+_g = '\n'.join(l for l in mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8').splitlines()
                if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

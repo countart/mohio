@@ -20,6 +20,7 @@ Adversarial angles locked here:
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
@@ -29,7 +30,7 @@ from mohio_symbol_table import extract_symbols
 from mohio_transformer import MOHIO_RESERVED_EXACT, validate
 from mohio_pretokenizer import pretokenize
 
-_raw = Path('mohio.lark').read_text(encoding='utf-8')
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

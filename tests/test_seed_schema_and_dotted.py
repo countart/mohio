@@ -22,8 +22,9 @@ from lark import Lark
 from mohio_transformer_ast import transform, MohioCompileError
 from mohio_interpreter import MohioInterpreter, DbRuntime
 from mohio_sector_loader import is_known_sector_base, sector_tier
+import mohio_data
 
-_raw = open("mohio.lark", encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = "\n".join(l for l in _raw.splitlines() if not l.strip().startswith("//"))
 _P = Lark(_g, parser="earley", ambiguity="resolve", propagate_positions=True)
 

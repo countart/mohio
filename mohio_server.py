@@ -161,7 +161,7 @@ class MohioServer:
         self.program       = program
         self.interp        = interp
         self.verbose       = verbose
-        self.sessions      = {}
+        self._session_store = self._build_session_store()
         self.start_time    = datetime.datetime.utcnow()
         self.request_count = 0
         # Where this app's own static files live. Static serving is rooted HERE, never at the
@@ -170,6 +170,28 @@ class MohioServer:
         # meant the app's real assets were never on the search path at all.
         self.app_dir       = Path(app_dir).resolve() if app_dir else None
 
+    def _build_session_store(self):
+        """Choose the session store: an explicitly registered provider always wins (same
+        explicit-instruction-outranks-env-default precedent as the 2026-08-04 AI
+        model-resolution ruling); otherwise MOHIO_SESSION_STORE=postgres selects the
+        built-in Postgres-backed store (reusing DATABASE_URL, no new secret); otherwise
+        the in-memory default, unchanged from before this seam existed.
+        """
+        from mohio_interpreter import MohioInterpreter, _InMemorySessionStore, _PostgresSessionStore
+        provider = MohioInterpreter._session_store_provider
+        if provider is not None:
+            return provider()
+        backend = os.environ.get("MOHIO_SESSION_STORE", "memory").strip().lower()
+        if backend == "postgres":
+            database_url = os.environ.get("DATABASE_URL")
+            if not database_url:
+                raise RuntimeError(
+                    "MOHIO_SESSION_STORE=postgres requires DATABASE_URL to be set. "
+                    "Sessions cannot be made durable without a database to store them in."
+                )
+            return _PostgresSessionStore(database_url)
+        return _InMemorySessionStore()
+
     def stats(self):
         uptime = datetime.datetime.utcnow() - self.start_time
         return {
@@ -177,11 +199,11 @@ class MohioServer:
             "version":        VERSION,
             "uptime_seconds": int(uptime.total_seconds()),
             "requests":       self.request_count,
-            "sessions":       len(self.sessions),
+            "sessions":       self._session_store.count(),
         }
 
     def clear_session(self, session_id):
-        self.sessions.pop(session_id, None)
+        self._session_store.delete(session_id)
 
     def dispatch(self, payload, session_id=None):
         self.request_count += 1
@@ -200,7 +222,7 @@ class MohioServer:
                 self.program,
                 request=payload,
                 session_id=session_id,
-                sessions=self.sessions,
+                store=self._session_store,
             )
         except Exception as e:
             if self.verbose:

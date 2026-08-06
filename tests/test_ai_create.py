@@ -22,12 +22,13 @@ from pathlib import Path
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
+import mohio_data
 
 _passed = 0
 _failed = 0
 _skipped = 0
 
-_raw = Path("mohio.lark").read_text(encoding="utf-8")
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
 _GRAMMAR = "\n".join(l for l in _raw.splitlines() if not l.strip().startswith("//"))
 _PARSER = Lark(_GRAMMAR, parser="earley", ambiguity="resolve", propagate_positions=True)
 

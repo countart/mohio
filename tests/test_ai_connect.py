@@ -21,6 +21,7 @@ from mohio_ai import ResolvedChain, AnthropicAiRuntime
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
+import mohio_data
 
 _passed = 0
 _failed = 0
@@ -106,7 +107,7 @@ def test_provider_dispatch():
 def test_ai_connect_registration():
     print("\n=== Layer 2b: ai.connect registers chains ===")
 
-    raw = Path("mohio.lark").read_text(encoding="utf-8")
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
     grammar = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
     parser = Lark(grammar, parser="earley", ambiguity="resolve", propagate_positions=True)
 
@@ -171,7 +172,7 @@ def test_live_connections():
 
 def test_using_chain_end_to_end():
     print("\n=== Layer 2c: ai.decide `using <chain>` end-to-end ===")
-    raw = Path("mohio.lark").read_text(encoding="utf-8")
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
     grammar = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
     parser = Lark(grammar, parser="earley", ambiguity="resolve", propagate_positions=True)
 

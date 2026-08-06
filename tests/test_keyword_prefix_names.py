@@ -16,8 +16,9 @@ keywords are now anchored (`/hold(?![A-Za-z0-9_])/`).
 import os, sys
 os.environ.setdefault('DATABASE_URL', ':memory:')
 from lark import Lark, Token
+import mohio_data
 
-_raw = open('mohio.lark', encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 _p = _f = 0

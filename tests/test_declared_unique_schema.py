@@ -27,8 +27,8 @@ from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
 
-_RAW = Path(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         'mohio.lark')).read_text(encoding='utf-8')
+import mohio_data
+_RAW = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _G = '\n'.join(l for l in _RAW.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_G, parser='earley', ambiguity='resolve', propagate_positions=True)
 
@@ -44,6 +44,12 @@ CONN = 'connect db as sqlite from env.DATABASE_URL\n'
 def run_on_clean_db(src):
     """Run against a genuinely EMPTY database file -- the clean-deploy case."""
     path = tempfile.mktemp(suffix='.db')
+    # CONN declares `from env.DATABASE_URL`, and the connect-decl-source fix
+    # (2026-08-05) now makes that declared source win over the constructor's
+    # db_path= for a direct-Python caller. Point the env var at `path` too so
+    # the declared source and the constructor agree on where to write --
+    # otherwise the run lands in :memory: while this function inspects `path`.
+    os.environ['DATABASE_URL'] = path
     prog = transform(_P.parse(src), src)
     it = MohioInterpreter(db_path=path)
     err = None
@@ -86,6 +92,7 @@ check("clean-DB deploy CREATES the composite UNIQUE(session_id, flag_name) -- no
 # ── 2. The created constraint is REAL: the database itself now rejects a duplicate ─────────
 #     (proves it is an enforced constraint, not just text in the DDL)
 path = tempfile.mktemp(suffix='.db')
+os.environ['DATABASE_URL'] = path  # see note in run_on_clean_db above
 prog = transform(_P.parse(DECLARED), DECLARED)
 it = MohioInterpreter(db_path=path)
 it.run_declarations(prog); it.run(prog)

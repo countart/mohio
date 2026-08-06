@@ -79,6 +79,20 @@ def _duration_rule_to_seconds(duration, unit):
         return None
 
 
+def _is_session_expired(created, accessed, now, idle_ceiling, absolute_ceiling):
+    """Pure expiry check: (created_at, last_accessed, now, idle_ceiling, absolute_ceiling)
+    -> bool. The one source of truth for what 'expired' means, shared by the lazy
+    per-request check (MohioInterpreter._session_is_expired, below) and every session-store
+    backend's own sweep_expired -- an in-memory sweep and a Postgres-backed sweep (which
+    pushes this same comparison into a SQL WHERE clause) can never quietly disagree on the
+    definition, only on how cheaply they can evaluate it."""
+    if created is not None and (now - created) > absolute_ceiling:
+        return True
+    if accessed is not None and (now - accessed) > idle_ceiling:
+        return True
+    return False
+
+
 # ══════════════════════════════════════════════════════════════
 # STORAGE READ HELPERS — cast-on-read + Python-side ordering
 # Auto-created columns are TEXT affinity, so numbers round-trip as strings.
@@ -310,8 +324,8 @@ def _get_include_parser():
     global _INCLUDE_PARSER
     if _INCLUDE_PARSER is None:
         from lark import Lark
-        gpath = Path(__file__).resolve().parent / "mohio.lark"
-        raw = gpath.read_text(encoding="utf-8")
+        import mohio_data
+        raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
         grammar = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
         _INCLUDE_PARSER = Lark(grammar, parser="earley", ambiguity="resolve",
                                propagate_positions=True)
@@ -2263,6 +2277,295 @@ class AuditLog:
 
 
 # ══════════════════════════════════════════════════════════════
+# SESSION STORES — see MohioInterpreter.register_session_store_provider above for the seam
+# ══════════════════════════════════════════════════════════════
+
+# The durable fields of a session Context -- everything a `hold X in session` value or
+# runtime bookkeeping actually needs to survive a restart. Deliberately NOT included:
+# _connections, _connectors, _shapes, _tasks (all inherited from __base__, rebuilt from
+# source every cold start, never per-session), _sessions_store / _parent / _current_request
+# (runtime scaffolding, reattached on load, never stored), _audit_log (the real audit trail
+# is the durable record; this in-context list is a per-request convenience buffer, not a
+# second copy of truth).
+_SESSION_STATE_FIELDS = ('_locked', '_held', '_typed', '_roles', '_roles_verified',
+                          '_created_at', '_last_accessed', '_session_id')
+
+
+def _mohio_value_to_record(v):
+    """MohioValue -> a plain, JSON-safe dict carrying its FULL state, not just
+    .to_python(). MohioValue carries classification/formatting metadata beyond the raw
+    value -- data_class (e.g. [pci]/[phi] tagging), _purposes/_purpose_fields ([pii]
+    collection-purpose taint), _currency, _pad_places. A naive to_python() dump would
+    silently drop all of it on every restart-reload: a PCI-tagged held value would come
+    back unclassified after a process restart, the exact silent-default shape this
+    project treats as urgent everywhere else. Every field round-trips explicitly."""
+    return {
+        'value': v.to_python(), 'type': v.mohio_type,
+        'data_class': v.data_class, 'purposes': v._purposes,
+        'purpose_fields': v._purpose_fields, 'currency': v._currency,
+        'pad_places': v._pad_places,
+    }
+
+
+def _record_to_mohio_value(rec):
+    """Inverse of _mohio_value_to_record -- rebuild a MohioValue with every field
+    restored, not just the raw value."""
+    v = MohioValue(rec.get('value'), rec.get('type', 'any'))
+    v.data_class      = rec.get('data_class')
+    v._purposes       = rec.get('purposes')
+    v._purpose_fields = rec.get('purpose_fields')
+    v._currency       = rec.get('currency')
+    v._pad_places     = rec.get('pad_places')
+    return v
+
+
+def _session_context_to_state(ctx):
+    """Context -> a plain, JSON-serializable dict: the durable fields only (see
+    _SESSION_STATE_FIELDS), with _vars/_constants walked through
+    _mohio_value_to_record so classification metadata survives too. Both in-memory
+    and Postgres stores use this same function -- the in-memory store simply never
+    calls it (see below), so it is exercised only on the path that actually needs it,
+    but it is the ONE place this conversion is written."""
+    return {
+        'vars':       {k: _mohio_value_to_record(v) for k, v in ctx._vars.items()},
+        'constants':  {k: _mohio_value_to_record(v) for k, v in ctx._constants.items()},
+        'locked':     sorted(ctx._locked),
+        'held':       sorted(ctx._held),
+        'typed':      dict(ctx._typed),
+        'roles':      list(ctx._roles),
+        'roles_verified': bool(ctx._roles_verified),
+    }
+
+
+def _apply_state_to_context(ctx, state):
+    """Rehydrate a freshly-created child Context (ctx = base_ctx.child()) with a state
+    dict produced by _session_context_to_state. Only the durable fields are touched;
+    everything else on ctx (inherited shapes/tasks/connections via the parent chain,
+    runtime scaffolding set by the caller) is untouched."""
+    ctx._vars      = {k: _record_to_mohio_value(r) for k, r in state.get('vars', {}).items()}
+    ctx._constants = {k: _record_to_mohio_value(r) for k, r in state.get('constants', {}).items()}
+    ctx._locked    = set(state.get('locked', ()))
+    ctx._held      = set(state.get('held', ()))
+    ctx._typed     = dict(state.get('typed', {}))
+    ctx._roles     = list(state.get('roles', ()))
+    ctx._roles_verified = bool(state.get('roles_verified', False))
+    return ctx
+
+
+class _InMemorySessionStore:
+    """Default session store: a plain in-process dict, exactly what MohioServer.sessions
+    has always been. Does NOT survive a process restart -- this is the open-core default,
+    unchanged in every observable way from before this seam existed.
+
+    get/put operate on the LIVE Context object directly, never through
+    _session_context_to_state -- zero serialization cost on the default path. Serialization
+    is a Postgres-store concern only (see _PostgresSessionStore), never paid here.
+
+    __invalidated__ is its own explicit set, not a magic dict key sharing space with real
+    sessions (the old shape this replaces). __base__ is not part of this store at all --
+    it lives on MohioInterpreter._base_ctx instead (see run_with_session)."""
+
+    def __init__(self):
+        self._sessions = {}
+        self._invalidated = set()
+
+    def get(self, session_id, base_ctx):
+        return self._sessions.get(session_id)
+
+    def put(self, session_id, context):
+        self._sessions[session_id] = context
+
+    def delete(self, session_id):
+        self._sessions.pop(session_id, None)
+
+    def sweep_expired(self, now, idle_ceiling, absolute_ceiling):
+        stale = [sid for sid, ctx in self._sessions.items()
+                 if _is_session_expired(getattr(ctx, '_created_at', None),
+                                         getattr(ctx, '_last_accessed', None),
+                                         now, idle_ceiling, absolute_ceiling)]
+        for sid in stale:
+            self._sessions.pop(sid, None)
+        return stale
+
+    def is_invalidated(self, session_id):
+        return session_id in self._invalidated
+
+    def mark_invalidated(self, session_id):
+        self._invalidated.add(session_id)
+
+    def count(self):
+        """Live session count, for MohioServer.stats()."""
+        return len(self._sessions)
+
+
+class _PostgresSessionStore:
+    """Postgres-backed session store, built into open core (MOHIO_SESSION_STORE=postgres),
+    reusing the app's own DATABASE_URL -- no new secret, same precedent as every other
+    Mohio-managed table (lazy auto-create, matching save to / db.upsert; no separate
+    migration step).
+
+    Two tables, deliberately separate: mohio_sessions (live session state, deleted on
+    invalidation/expiry to free storage) and mohio_sessions_invalidated (the blocklist,
+    kept independently durable -- ruled 2026-08-05: losing it on restart reopens the
+    fixation risk rotation exists to close, so it is NOT deleted when a session is, and
+    is never swept by expiry).
+
+    A session's state is stored as a JSON blob built by _session_context_to_state /
+    restored by _apply_state_to_context -- the full MohioValue state per variable
+    (value, type, data_class, purposes, purpose_fields, currency, pad_places), not a
+    raw .to_python() dump, so a PCI/PII-classified held value survives a restart still
+    classified. created_at/last_accessed stay as real columns (not inside the JSON) so
+    sweep_expired can push the comparison into a SQL WHERE clause instead of hydrating
+    every row's full state just to check two timestamps.
+
+    Known, disclosed boundary: values that are not natively JSON-representable (Decimal,
+    datetime) round-trip through json.dumps(..., default=str) -- the same stringify-on-
+    write convention already used for audit-log serialization elsewhere in this file, not
+    a new one invented here. A Decimal held in session survives a restart as its string
+    form, not as a live Decimal.
+    """
+
+    def __init__(self, database_url):
+        import psycopg2
+        self._psycopg2 = psycopg2
+        self.conn = psycopg2.connect(database_url)
+        self.conn.autocommit = False
+        self._ensure_tables()
+
+    def _ensure_tables(self):
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                'CREATE TABLE IF NOT EXISTS mohio_sessions ('
+                '  session_id TEXT PRIMARY KEY,'
+                '  state TEXT NOT NULL,'
+                '  created_at DOUBLE PRECISION NOT NULL,'
+                '  last_accessed DOUBLE PRECISION NOT NULL'
+                ')'
+            )
+            cur.execute(
+                'CREATE TABLE IF NOT EXISTS mohio_sessions_invalidated ('
+                '  session_id TEXT PRIMARY KEY,'
+                '  invalidated_at DOUBLE PRECISION NOT NULL'
+                ')'
+            )
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            raise RuntimeError(
+                f"Could not build the session-store schema (mohio_sessions / "
+                f"mohio_sessions_invalidated).\n  database said: {e}"
+            ) from e
+        finally:
+            cur.close()
+
+    def get(self, session_id, base_ctx):
+        import json as _json
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                'SELECT state, created_at, last_accessed FROM mohio_sessions '
+                'WHERE session_id = %s', (session_id,))
+            row = cur.fetchone()
+        finally:
+            cur.close()
+        if row is None:
+            return None
+        state_json, created_at, last_accessed = row
+        ctx = base_ctx.child()
+        _apply_state_to_context(ctx, _json.loads(state_json))
+        ctx._created_at = created_at
+        ctx._last_accessed = last_accessed
+        ctx._session_id = session_id
+        return ctx
+
+    def put(self, session_id, context):
+        import json as _json, time as _time
+        state = _session_context_to_state(context)
+        state_json = _json.dumps(state, default=str)
+        created_at = getattr(context, '_created_at', None) or _time.time()
+        last_accessed = getattr(context, '_last_accessed', None) or created_at
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                'INSERT INTO mohio_sessions (session_id, state, created_at, last_accessed) '
+                'VALUES (%s, %s, %s, %s) '
+                'ON CONFLICT (session_id) DO UPDATE SET '
+                '  state = EXCLUDED.state, last_accessed = EXCLUDED.last_accessed',
+                (session_id, state_json, created_at, last_accessed))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cur.close()
+
+    def delete(self, session_id):
+        cur = self.conn.cursor()
+        try:
+            cur.execute('DELETE FROM mohio_sessions WHERE session_id = %s', (session_id,))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cur.close()
+
+    def sweep_expired(self, now, idle_ceiling, absolute_ceiling):
+        # Same comparison _is_session_expired makes, pushed into SQL: durable expiry
+        # (now - created_at > absolute_ceiling) OR idle expiry (now - last_accessed >
+        # idle_ceiling). DELETE ... RETURNING does the read and the removal atomically.
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                'DELETE FROM mohio_sessions WHERE '
+                '  (%s - created_at) > %s OR (%s - last_accessed) > %s '
+                'RETURNING session_id',
+                (now, absolute_ceiling, now, idle_ceiling))
+            freed = [r[0] for r in cur.fetchall()]
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cur.close()
+        return freed
+
+    def is_invalidated(self, session_id):
+        cur = self.conn.cursor()
+        try:
+            cur.execute('SELECT 1 FROM mohio_sessions_invalidated WHERE session_id = %s',
+                       (session_id,))
+            return cur.fetchone() is not None
+        finally:
+            cur.close()
+
+    def mark_invalidated(self, session_id):
+        import time as _time
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                'INSERT INTO mohio_sessions_invalidated (session_id, invalidated_at) '
+                'VALUES (%s, %s) ON CONFLICT (session_id) DO NOTHING',
+                (session_id, _time.time()))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cur.close()
+
+    def count(self):
+        """Live session count, for MohioServer.stats()."""
+        cur = self.conn.cursor()
+        try:
+            cur.execute('SELECT COUNT(*) FROM mohio_sessions')
+            return cur.fetchone()[0]
+        finally:
+            cur.close()
+
+
+# ══════════════════════════════════════════════════════════════
 # INTERPRETER
 # ══════════════════════════════════════════════════════════════
 
@@ -2288,6 +2591,13 @@ class MohioInterpreter:
         self._current_line = 0        # line of the innermost node being executed (for runtime errors)
         self.db_path     = db_path
         self.verbose     = verbose
+        # __base__ (shared declarations: shapes/tasks/connections) lives HERE, on the
+        # interpreter instance -- never in the pluggable session store. It is rebuilt from
+        # source (_exec_declarations) on every cold start, exactly like before this seam
+        # existed; a session-store provider is never consulted for it (2026-08-05 build,
+        # satisfies the durable session-store brief's acceptance criterion #5 by
+        # construction rather than by a special-case guard).
+        self._base_ctx   = None
         self._audit_logs = {}
         self._db         = None
         self._db_target  = None   # (driver, resolved-url/path) of the active connection
@@ -2842,7 +3152,24 @@ class MohioInterpreter:
         reuse = self._db is not None and (prev is None or prev == target)
         if not reuse:
             try:
-                self._db = _make_db_runtime(driver, self.db_path)
+                db_path = self.db_path
+                # sqlite used to ignore its own declared `from` source entirely --
+                # postgres/mysql/mongo already read os.environ themselves inside
+                # _make_db_runtime, but sqlite always used self.db_path (the interpreter
+                # constructor's own default) regardless of what env var the program
+                # named. Invisible through the CLI (mio.py resolves and passes db_path=
+                # before construction), but a real gap for any direct-Python caller.
+                # The declared source now wins when it resolves to something; an unset
+                # or empty var falls through to self.db_path unchanged, so the CLI's own
+                # persistent-default behavior (and a bare MohioInterpreter() with no
+                # source at all) is unaffected.
+                if driver in ('sqlite', 'sqlite3', '') and getattr(node, 'source', None) is not None:
+                    _declared = self._eval(node.source, ctx)
+                    _declared_path = (_declared.to_python()
+                                      if isinstance(_declared, MohioValue) else _declared)
+                    if _declared_path:
+                        db_path = str(_declared_path)
+                self._db = _make_db_runtime(driver, db_path)
                 if self.verbose:
                     print(f"  [connect] {node.name} as {driver} ({type(self._db).__name__})")
             except RuntimeError as e:
@@ -2977,6 +3304,53 @@ class MohioInterpreter:
     def unregister_alert_sink(cls):
         """Remove the alert sink (used by tests)."""
         cls._alert_sink = None
+
+    # ── Session-store seam ──────────────────────────────────────────────────
+    # WHERE session data lives is pluggable, same shape as the audit-sink and key-provider
+    # seams above. WHAT a session IS and how it is used -- creation, rotation, invalidation,
+    # expiry, all landed 2026-08-04 -- never changes; only physical storage does.
+    #
+    #   open core / self-host, no MOHIO_SESSION_STORE  -> in-memory (today's behavior,
+    #                                                       unchanged; does not survive a
+    #                                                       process restart)
+    #   MOHIO_SESSION_STORE=postgres                     -> built into open core (see
+    #                                                       _PostgresSessionStore below),
+    #                                                       reuses the app's own DATABASE_URL,
+    #                                                       survives a restart
+    #   commercial / custom backend (Redis, a client's own store)
+    #                                                     -> register_session_store_provider()
+    #
+    # A provider is a zero-arg callable returning a store object exposing:
+    #   get(session_id, base_ctx) -> Context | None
+    #   put(session_id, context)
+    #   delete(session_id)
+    #   sweep_expired(now, idle_ceiling, absolute_ceiling) -> list[freed session_ids]
+    #   is_invalidated(session_id) -> bool
+    #   mark_invalidated(session_id)
+    #   count() -> int   (live session count, MohioServer.stats() only)
+    # None means "use the in-memory default." An explicitly registered provider always wins
+    # over MOHIO_SESSION_STORE (same explicit-instruction-outranks-env-default precedent as
+    # the AI model-resolution ruling, 2026-08-04).
+    _session_store_provider = None   # class-level; set by register_session_store_provider()
+
+    @classmethod
+    def register_session_store_provider(cls, provider_fn):
+        """Register the session-store provider (zero-arg callable() -> store object).
+
+        Called by the managed platform, or a self-hosting commercial customer, at startup
+        so sessions survive a process restart or run behind a load balancer across multiple
+        instances, instead of living only in this process's memory. __base__ (shared
+        declarations) and the __invalidated__ blocklist are NOT part of this seam -- __base__
+        is rebuilt from source every cold start (see MohioInterpreter._base_ctx) and
+        __invalidated__ durability is the store's own is_invalidated/mark_invalidated pair,
+        not a session.
+        """
+        cls._session_store_provider = staticmethod(provider_fn).__func__
+
+    @classmethod
+    def unregister_session_store_provider(cls):
+        """Restore the default (in-memory) session store (used by tests)."""
+        cls._session_store_provider = None
 
     @staticmethod
     def _default_key_provider():
@@ -3189,7 +3563,8 @@ class MohioInterpreter:
     def _exec_RequireRoleDecl(self, node, ctx):
         # Auth rebuild Item 1 (2026-08-02): roles are now established SERVER-side by
         # `grant role` at login, stored on the session root (survives across requests
-        # via self.sessions[uuid]) and marked verified. The client `_roles` payload is
+        # via the session store -- in-memory or Postgres-backed, see
+        # register_session_store_provider) and marked verified. The client `_roles` payload is
         # no longer consulted anywhere -- the old forgeable path is gone. `require role`
         # simply reads the server-side session store.
         #
@@ -3220,7 +3595,7 @@ class MohioInterpreter:
         # role where `require role` can see it -- the client `_roles` payload is never
         # trusted anymore. The role value is resolved at runtime (a literal "admin", or a
         # looked-up field like user.role), then written onto the SESSION ROOT so it
-        # survives across requests via self.sessions[uuid], and marked verified.
+        # survives across requests via the session store, and marked verified.
         val = self._eval(node.value, ctx)
         if isinstance(val, MohioValue):
             val = val.to_python()
@@ -3277,11 +3652,11 @@ class MohioInterpreter:
         self._audit_logs.setdefault('security_audit_log', []).append(_evt)
         return None
 
-    # Serializes self.sessions mutation across concurrent requests. mio serve threads at
+    # Serializes session-store mutation across concurrent requests. mio serve threads at
     # least one route (the root GET) via asyncio.to_thread while the other two call
     # dispatch() directly in the event loop -- confirmed by reading the actual server
     # wiring, not assumed -- so a threaded and a non-threaded request CAN genuinely race
-    # on the SAME session dict. Mirrors _AUDIT_CHAIN_LOCK exactly (an RLock so a caller
+    # on the SAME session store. Mirrors _AUDIT_CHAIN_LOCK exactly (an RLock so a caller
     # already holding it, like _rotate_session, can call a sub-primitive that also
     # acquires it without deadlocking).
     _SESSIONS_LOCK = __import__('threading').RLock()
@@ -3296,14 +3671,20 @@ class MohioInterpreter:
         Nothing is copied: re-keying the live object is what makes every session-scoped
         variable (any hold-in-session-mode value, anything else set on this ctx) carry
         forward intact, with no field-by-field copy logic that could silently drop one.
+        Under the in-memory store this stays a pure re-key of the live Context object,
+        byte-identical to before the session-store seam existed. A durable-store backend
+        (e.g. Postgres) instead writes the state under new_id and removes old_id -- still
+        "nothing copied" from the caller's perspective (the same live session_ctx keeps
+        being mutated in place for the rest of this request either way).
         """
         import uuid as _uuid
-        sessions = session_ctx._sessions_store
+        store = session_ctx._sessions_store
         old_id = session_ctx._session_id
         new_id = _uuid.uuid4().hex
         with MohioInterpreter._SESSIONS_LOCK:
-            sessions[new_id] = sessions.pop(old_id, session_ctx)
-            sessions.setdefault('__invalidated__', set()).add(old_id)
+            store.put(new_id, session_ctx)
+            store.delete(old_id)
+            store.mark_invalidated(old_id)
         session_ctx._session_id = new_id
         session_ctx.set('session', MohioValue({'id': new_id}, 'shape'))
         # A rotation is a security-relevant state change, same footing as role_granted --
@@ -3317,14 +3698,17 @@ class MohioInterpreter:
         }, session_ctx)
         self._audit_logs.setdefault('security_audit_log', []).append(_evt)
 
-    def _invalidate_session(self, sessions, session_id):
+    def _invalidate_session(self, store, session_id):
         """Remove a session and permanently block its ID from being resurrected. The one
         shared primitive rotation and expiry both call -- built once, per the ruling,
         not duplicated per caller. Reentrant-safe to call while already holding
-        _SESSIONS_LOCK (rotation does, via the pop/add above; expiry acquires it itself)."""
+        _SESSIONS_LOCK (rotation does, via the put/delete/mark_invalidated above; expiry
+        acquires it itself). mark_invalidated is ruled durable (2026-08-05): losing the
+        blocklist on restart reopens the fixation risk rotation exists to close, so a
+        Postgres-backed store never drops this row the way it drops the session's own."""
         with MohioInterpreter._SESSIONS_LOCK:
-            sessions.pop(session_id, None)
-            sessions.setdefault('__invalidated__', set()).add(session_id)
+            store.delete(session_id)
+            store.mark_invalidated(session_id)
 
     def _session_timeout_ceilings(self, ctx):
         """(idle_seconds, absolute_seconds) -- the runtime default (2026-08-04 ruling: 30
@@ -3351,33 +3735,32 @@ class MohioInterpreter:
         return idle, absolute
 
     def _session_is_expired(self, session_ctx, now, idle_ceiling, absolute_ceiling):
-        created  = getattr(session_ctx, '_created_at', None)
-        accessed = getattr(session_ctx, '_last_accessed', None)
-        if created is not None and (now - created) > absolute_ceiling:
-            return True
-        if accessed is not None and (now - accessed) > idle_ceiling:
-            return True
-        return False
+        return _is_session_expired(getattr(session_ctx, '_created_at', None),
+                                    getattr(session_ctx, '_last_accessed', None),
+                                    now, idle_ceiling, absolute_ceiling)
 
-    def _opportunistic_expiry_sweep(self, sessions, now, idle_ceiling, absolute_ceiling):
+    def _opportunistic_expiry_sweep(self, store, now, idle_ceiling, absolute_ceiling):
         """A bounded scan for OTHER stale sessions, piggybacked on an ordinary request
         instead of a dedicated background task. This project has hit exactly this shape of
         concurrency bug before with an independent background thread touching shared state
         (the audit-chain DDL race, the duplicate-column flake) -- folding the sweep into a
         request that already holds _SESSIONS_LOCK avoids introducing a new one. Runs every
         Nth request (MOHIO_SESSION_SWEEP_INTERVAL, default 20), not every one, so a busy
-        app doesn't pay a full dict scan on every single request."""
+        app doesn't pay a full dict scan (in-memory) or a full table scan (Postgres, though
+        there sweep_expired pushes the comparison into an indexed-eligible SQL WHERE clause
+        rather than hydrating every row) on every single request. __base__ and
+        __invalidated__ are no longer special dict keys living alongside real sessions --
+        they are not part of the store at all (see _InMemorySessionStore /
+        _PostgresSessionStore), so store.sweep_expired() can never sweep either by
+        accident, no exclusion list needed here."""
         interval = int(os.environ.get("MOHIO_SESSION_SWEEP_INTERVAL", "20") or "20")
         self._session_sweep_counter = getattr(self, '_session_sweep_counter', 0) + 1
         if interval <= 0 or self._session_sweep_counter % interval != 0:
             return
         with MohioInterpreter._SESSIONS_LOCK:
-            stale = [sid for sid, sctx in sessions.items()
-                     if sid not in ('__base__', '__invalidated__')
-                     and self._session_is_expired(sctx, now, idle_ceiling, absolute_ceiling)]
-            for sid in stale:
-                sessions.pop(sid, None)
-                sessions.setdefault('__invalidated__', set()).add(sid)
+            freed = store.sweep_expired(now, idle_ceiling, absolute_ceiling)
+            for sid in freed:
+                store.mark_invalidated(sid)
 
     def _session_cookie_opts(self, sid, idle_ceiling, absolute_ceiling, created_at, now):
         """Cookie options for the runtime-owned session cookie. Max-Age reflects whichever
@@ -13613,7 +13996,7 @@ class MohioInterpreter:
                                     or 'application/octet-stream')
         return resp
 
-    def run_with_session(self, program, request, session_id, sessions):
+    def run_with_session(self, program, request, session_id, store):
         self._ai_call_count = 0   # reset per request
         self._saga_failed = False  # reset saga-failure flag per request
         self.shown = []           # reset show output per request (no cross-request leak)
@@ -13624,26 +14007,35 @@ class MohioInterpreter:
         The session context child survives between requests —
         variables set in one request are available in the next.
         Used for stateful apps like Zork.
+
+        `store` is a session-store object (in-memory by default; Postgres-backed when
+        MOHIO_SESSION_STORE=postgres, or whatever a registered provider returns -- see
+        MohioInterpreter.register_session_store_provider) exposing get/put/delete/
+        sweep_expired/is_invalidated/mark_invalidated. This method still owns every piece
+        of session MECHANICS (mint, invalidate-on-presentation, lazy expiry, the
+        opportunistic sweep) exactly as before the store became pluggable; only WHERE the
+        bytes live changed.
         """
         from mohio_interpreter import Context, MohioValue
         import uuid as _uuid
         now = _time.time()
 
         with MohioInterpreter._SESSIONS_LOCK:
-            # Build or retrieve base context (declarations run once)
-            base_key = "__base__"
-            if base_key not in sessions:
+            # __base__ (shared declarations: shapes/tasks/connects) lives on the
+            # interpreter instance, never in the pluggable store -- rebuilt from source on
+            # every cold start, exactly as before this seam existed (see __init__).
+            if self._base_ctx is None:
                 base_ctx = Context()
                 # Run declarations only (shapes, tasks, holds, connects)
                 self._exec_declarations(program, base_ctx)
                 self._register_ai_blocks(program)
-                sessions[base_key] = base_ctx
-            base_ctx = sessions[base_key]
+                self._base_ctx = base_ctx
+            base_ctx = self._base_ctx
 
             idle_ceiling, absolute_ceiling = self._session_timeout_ceilings(base_ctx)
 
             # `session_id` must be settled (never falsy) BEFORE either the invalidation or
-            # the dict lookup below -- this used to run in the other order, so a caller
+            # the store lookup below -- this used to run in the other order, so a caller
             # that reached here with an unset id (dispatch() always pre-mints, but this
             # method is also called directly in tests) would look up/create an entry keyed
             # by None first and only mint afterward, binding session_ctx to the WRONG
@@ -13652,46 +14044,53 @@ class MohioInterpreter:
             if not session_id:
                 session_id = _uuid.uuid4().hex
 
-            invalidated = sessions.setdefault('__invalidated__', set())
-
             # A presented ID that was deliberately invalidated -- rotated away by a real
             # privilege change, or expired -- must never be silently resurrected. Treat it
             # exactly like no session was presented at all: mint a fresh, anonymous one.
             # This is what makes "the old ID stops working immediately" true even for the
-            # attacker's own next request, not just eventually.
-            if session_id in invalidated:
+            # attacker's own next request, not just eventually. Ruled durable (2026-08-05):
+            # the blocklist survives a restart on a Postgres-backed store, same as the
+            # session data it protects.
+            if store.is_invalidated(session_id):
                 session_id = _uuid.uuid4().hex
 
             # Lazy expiry: checked on ACCESS, not by a background sweep (see
             # _opportunistic_expiry_sweep for why). An existing session that has gone idle
             # too long, or lived past its absolute ceiling, is invalidated right here,
-            # before it is ever handed back to the program as "the" session.
-            if session_id in sessions:
-                _existing = sessions[session_id]
-                if self._session_is_expired(_existing, now, idle_ceiling, absolute_ceiling):
-                    self._invalidate_session(sessions, session_id)
-                    session_id = _uuid.uuid4().hex
+            # before it is ever handed back to the program as "the" session. One store
+            # lookup covers both this check and the get-or-create below -- no double
+            # round trip to a durable backend for the same session_id.
+            session_ctx = store.get(session_id, base_ctx)
+            if session_ctx is not None and self._session_is_expired(
+                    session_ctx, now, idle_ceiling, absolute_ceiling):
+                self._invalidate_session(store, session_id)
+                session_id = _uuid.uuid4().hex
+                session_ctx = None
 
             # Bounded scan for OTHER stale sessions, piggybacked on this request+lock
             # rather than a dedicated background task.
-            self._opportunistic_expiry_sweep(sessions, now, idle_ceiling, absolute_ceiling)
+            self._opportunistic_expiry_sweep(store, now, idle_ceiling, absolute_ceiling)
 
             # Get or create session context
-            _is_new = session_id not in sessions
+            _is_new = session_ctx is None
             if _is_new:
-                sessions[session_id] = base_ctx.child()
-                sessions[session_id]._created_at = now
-
-            session_ctx = sessions[session_id]
+                session_ctx = base_ctx.child()
+                session_ctx._created_at = now
+                # Registered immediately, not only at the end of the request: a brand-new
+                # session that hits an unhandled exception before _attach_cookies runs
+                # still exists afterward, matching the in-memory dict's original semantics
+                # (sessions[session_id] = ... registered the entry the instant it was
+                # created, regardless of what happened for the rest of the request).
+                store.put(session_id, session_ctx)
 
             # Mark the per-session boundary so session-mode assignments persist here
             # (per session, survives across requests) instead of the shared base.
             session_ctx._session_root = True
             # Runtime-owned identity bookkeeping (2026-08-04): lets _rotate_session find
-            # its way back to this exact dict/key pair from inside _exec_GrantRoleDecl,
+            # its way back to this exact store/id pair from inside _exec_GrantRoleDecl,
             # and lets the lazy expiry check above find this session's own clock next time.
             session_ctx._session_id = session_id
-            session_ctx._sessions_store = sessions
+            session_ctx._sessions_store = store
             session_ctx._last_accessed = now
             if not hasattr(session_ctx, '_created_at'):
                 session_ctx._created_at = now
@@ -13734,7 +14133,15 @@ class MohioInterpreter:
             the runtime emits it here, unconditionally, on every response that reaches this
             point, reading whatever session.id ended up being after the listener ran (a
             rotation during the request changes it; this must reflect the FINAL identity,
-            not the one the request started with)."""
+            not the one the request started with).
+
+            Also the one funnel every return path in this method passes through (success,
+            halt, give-back, raise/authorization/jump, MohioRuntimeError) -- so it is where
+            the request's final session state gets written back to the store. For the
+            in-memory default this is a cheap, effectively-redundant dict write (session_ctx
+            was already the live object); for a durable store it is what actually persists
+            everything the request just did (hold-in-session values, role grants, the
+            updated _last_accessed clock) before the response goes out."""
             pending = session_ctx.get('__pending_cookies__')
             pend = (pending.to_python() if isinstance(pending, MohioValue) else pending) if pending else {}
             if not isinstance(pend, dict):
@@ -13747,6 +14154,7 @@ class MohioInterpreter:
                 getattr(session_ctx, '_created_at', now), now)
             if isinstance(result, dict):
                 result['__pending_cookies__'] = pend
+            store.put(_final_sid or session_id, session_ctx)
             return result
 
         # Run listener blocks only (not declarations again)

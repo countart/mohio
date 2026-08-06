@@ -24,6 +24,7 @@ import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+import mohio_data
 os.chdir(ROOT)
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
@@ -33,7 +34,7 @@ from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter, Context, MohioValue
 from mohio_ast import ShowBlock
 
-_raw = Path('mohio.lark').read_text()
+_raw = mohio_data.GRAMMAR_PATH.read_text()
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

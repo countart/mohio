@@ -22,8 +22,9 @@ auth = ["bcrypt>=4.0"]
 mio = "mio:main"
 
 [tool.setuptools]
-py-modules = ["mio", "mio_utils", "mohio_ai", "mohio_ast", "mohio_audit_grades", "mohio_enforce", "mohio_fmt", "mohio_html_sanitize", "mohio_interpreter", "mohio_langmap", "mohio_layer3", "mohio_mioscript", "mohio_pretokenizer", "mohio_reachability", "mohio_schema", "mohio_sector_loader", "mohio_server", "mohio_services", "mohio_symbol_table", "mohio_test_grammar", "mohio_transformer", "mohio_transformer_ast", "mohio_version", "seed_postgres", "walkthrough_test"]
+py-modules = ["mio", "mio_utils", "mohio_ai", "mohio_ast", "mohio_audit_grades", "mohio_enforce", "mohio_fmt", "mohio_html_sanitize", "mohio_interpreter", "mohio_langmap", "mohio_layer3", "mohio_mioscript", "mohio_pretokenizer", "mohio_reachability", "mohio_schema", "mohio_sector_loader", "mohio_server", "mohio_services", "mohio_symbol_table", "mohio_test_grammar", "mohio_transformer", "mohio_transformer_ast", "mohio_version"]
+packages = ["mohio_data"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-"*" = ["*.lark", "*.sector", "*.langmap"]
+mohio_data = ["*.lark", "sectors/*.sector", "maps/*.langmap"]

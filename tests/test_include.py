@@ -15,6 +15,7 @@ import os, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+import mohio_data
 os.chdir(ROOT)
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
@@ -105,7 +106,7 @@ except AiProviderError as e:
 # 7. grammar: not confident + on.failure coexist in one ai.decide block
 from lark import Lark
 from pathlib import Path
-_raw = Path('mohio.lark').read_text()
+_raw = mohio_data.GRAMMAR_PATH.read_text()
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 # `returns` is required on the ai.decide BLOCK form (`ai.decide NAME returns TYPE`).

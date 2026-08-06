@@ -453,11 +453,12 @@ def find_sector_profile(
     Returns the path if found, None otherwise.
     """
     if search_paths is None:
+        import mohio_data
         # Default search order
         search_paths = [
             "./sectors",
             os.path.expanduser("~/.mohio/sectors"),
-            os.path.join(os.path.dirname(__file__), "sectors"),
+            str(mohio_data.SECTORS_DIR),
         ]
 
     # Try exact name first, then base sector (education.us.nc -> education)

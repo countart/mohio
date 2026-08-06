@@ -16,6 +16,7 @@ Run: PYTHONPATH=$PWD DATABASE_URL=:memory: python3 tests/test_mioql.py
 import os, sys, re, tempfile
 sys.argv = ['mio.py']
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mohio_data
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
 from lark import Lark
@@ -40,7 +41,7 @@ def check_true(label, val):
         _failed += 1; print(f"  FAIL {label}: expected truthy, got {val!r}")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_raw = open(os.path.join(ROOT, 'mohio.lark'), encoding='utf-8').read()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

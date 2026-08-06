@@ -14,7 +14,8 @@ Change License: AGPL-3.0-or-later — match LICENSE
 Only files listed in this section are part of the Mohio Public Core Licensed Work for this release.
 
 ### Compiler, parser, and language core
-- `mohio.lark`
+- `mohio_data/mohio.lark`
+- `mohio_data/__init__.py` — resolves the installed location of the grammar, sector, and langmap files this package ships (mechanism, not content; added by the packaging relocation, commit `4d39d83`/`07d984c`).
 - `mohio_pretokenizer.py`
 - `mohio_transformer.py`
 - `mohio_transformer_ast.py`
@@ -71,15 +72,15 @@ Rationale: consistent with the open-core model, the *loader* is mechanism and is
 `examples/asseta/` is excluded from this release. Not public core, not yet in a shippable state. May be added to a future release's Files Included once ready.
 
 ### Demonstration langmaps (novelty/teaching)
-- `maps/en-emoji.langmap`
-- `maps/en-klingon.langmap`
+- `mohio_data/maps/en-emoji.langmap`
+- `mohio_data/maps/en-klingon.langmap`
 
 The Spanish, Portuguese, and Hindi language packs are excluded from this release. Confirmed paid commercial offerings; Spanish/Portuguese may run a limited-time free promotion, Hindi is paid as of this release. These are not part of Mohio Public Core and do not ship with the runtime. (They also do not currently reside in this repository.)
 
 ### Demonstration sector profiles (teaching the mechanism)
-- `sectors/sector-demo-low.sector`
-- `sectors/sector-demo-high.sector`
-- `sectors/sector-demo-regulated.sector`
+- `mohio_data/sectors/sector-demo-low.sector`
+- `mohio_data/sectors/sector-demo-high.sector`
+- `mohio_data/sectors/sector-demo-regulated.sector`
 
 Demo profiles, not certified ones. Included: they teach the mechanism without exposing certified content. Certified/official profiles remain excluded.
 
@@ -99,7 +100,8 @@ Demo profiles, not certified ones. Included: they teach the mechanism without ex
 
 Only the following may be redistributed in object-code form as Runtime Components incorporated into, and reasonably necessary to operate, an Application permitted by the LICENSE.
 
-- `mohio.lark`
+- `mohio_data/mohio.lark`
+- `mohio_data/__init__.py`
 - `mohio_pretokenizer.py`
 - `mohio_transformer.py`
 - `mohio_transformer_ast.py`

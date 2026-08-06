@@ -41,7 +41,8 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from lark import Lark, UnexpectedInput
 
-GRAMMAR_FILE = "mohio.lark"
+import mohio_data
+GRAMMAR_FILE = str(mohio_data.GRAMMAR_PATH)
 VERBOSE = "--verbose" in sys.argv
 SUITE   = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == "--suite"), "all")
 

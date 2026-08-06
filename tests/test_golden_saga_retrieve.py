@@ -42,6 +42,7 @@ if not (_PROJECT / "mio.py").exists():
             break
 
 sys.path.insert(0, str(_PROJECT))
+import mohio_data
 
 try:
     from lark import Lark
@@ -52,7 +53,7 @@ try:
 except ImportError as e:
     pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
 
-_grammar_path = _PROJECT / "mohio.lark"
+_grammar_path = mohio_data.GRAMMAR_PATH
 if not _grammar_path.exists():
     pytest.skip("mohio.lark not found", allow_module_level=True)
 

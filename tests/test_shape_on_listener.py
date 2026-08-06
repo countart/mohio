@@ -10,6 +10,7 @@ interpreter (parse-OK != runtime-OK).
 import os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import mohio_data
 os.environ.setdefault("DATABASE_URL", ":memory:")
 
 from lark import Lark
@@ -33,7 +34,7 @@ def parses(label, ok, detail=""):
 
 
 def _parser():
-    raw = Path("mohio.lark").read_text(encoding="utf-8")
+    raw = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8")
     g = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
     return Lark(g, parser="earley", ambiguity="resolve", propagate_positions=True)
 _P = _parser()
