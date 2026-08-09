@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """ai.decide audit records input NAMES + CLASSIFICATION, never raw values, never hashes.
 
 THE BUG (verified, real path): `_write_ai_audit` stored `inputs = {name: str(value)}`, so a fraud

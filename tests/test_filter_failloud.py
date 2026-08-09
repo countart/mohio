@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """An unknown where/find filter must FAIL LOUD, never silently match every row (_row_matches).
 
 A non-equality filter condition that `_row_matches` did not recognize fell through to `return True`

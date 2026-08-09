@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Tombstone reroute (D1, load-bearing) -- prove the erasure marker rides the ISOLATED path.
 
 D4 proved the audit-sink seam isolates a bound audit_writer from the tenant db. That isolation is

@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Check-time warning: `same site "none"` without `secure` (2026-08-02).
 
 SameSite=None is a hard browser rule -- a SameSite=None cookie with no Secure flag is silently

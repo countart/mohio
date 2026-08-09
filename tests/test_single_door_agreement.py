@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Single enforcement door: `mio check` and `mio run` must AGREE.
 
 Before this was closed, `mio run` enforced only Layer 1 (parse-tree validation) and skipped Layer 3

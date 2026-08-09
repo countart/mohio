@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Tasks and `call` in Mohio
 
 A **task** is a named, reusable piece of work — define it once, run it from anywhere with **`call`**. `call` and `task` are a pair: `task` makes the thing, `call` runs it. (`run` is reserved for async jobs and schedules, never for tasks.)

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 mio -- Mohio Language CLI
-Version: 0.3.8 | Language: v3.8 | May 2026 | Particular LLC
+Version: 4.8.2 | Language: v3.8 | August 2026 | Particular LLC
 
 Usage:
     mio run <file.mho> [options]
@@ -72,7 +72,7 @@ def _load_grammar():
     if not GRAMMAR_FILE.exists():
         _die(
             f"Grammar file not found: {GRAMMAR_FILE}\n"
-            f"Make sure mohio.lark is in the same directory as mio.py.",
+            f"Make sure mohio_data/mohio.lark exists alongside the mohio_data package.",
             exit_code=3,
         )
     raw = GRAMMAR_FILE.read_text(encoding="utf-8")
@@ -1427,10 +1427,22 @@ def cmd_run(args):
 
         # Run declarations first to establish real db connection
         interp.run_declarations(program)
-        if seed_data:
+        if not interp._db:
+            # No `connect` declaration succeeded, which for a program with none at all is
+            # simply "this app is database-free." It must stay that way regardless of what
+            # DATABASE_URL happens to be set to -- Railway/Fly/Heroku set it project-wide,
+            # so the simplest connect-less app would otherwise inherit a Postgres DSN and
+            # setup_test_db()/seed_db()'s raw sqlite3.connect() on that value crash-loops
+            # with SQLite's own "unable to open database file", on an app that never asked
+            # for a database at all (T0-2). A later save/find in a genuinely database-free
+            # program already fails loud on its own ("no database connected... declare one
+            # first") -- nothing here needs to pre-empt that.
+            if seed_data:
+                _die("--seed was given, but this program declares no `connect` -- there is "
+                     "no database to seed into. Add `connect db as sqlite` (or postgres / "
+                     "mysql / mongodb) to the program, or drop --seed.")
+        elif seed_data:
             interp.seed_db(seed_data)
-        elif not interp._db:
-            interp.setup_test_db()
         result = interp.run(program, request=request)
 
     except Exception as e:
@@ -2177,10 +2189,15 @@ def cmd_serve(args):
 
         # Run declarations first to establish real db connection
         interp.run_declarations(program)
-        if seed_data:
+        if not interp._db:
+            # See the identical guard + rationale in cmd_run (T0-2): no `connect` declared
+            # means database-free, unconditionally -- DATABASE_URL must not change that.
+            if seed_data:
+                _die("--seed was given, but this program declares no `connect` -- there is "
+                     "no database to seed into. Add `connect db as sqlite` (or postgres / "
+                     "mysql / mongodb) to the program, or drop --seed.")
+        elif seed_data:
             interp.seed_db(seed_data)
-        elif not interp._db:
-            interp.setup_test_db()
 
     except Exception as e:
         _die(f"Interpreter setup failed: {e}")
@@ -3220,14 +3237,21 @@ def cmd_audit(args):
     breaks the chain internally.
     """
     action = getattr(args, "audit_action", "verify") or "verify"
-    target = getattr(args, "file", None) or os.environ.get("DATABASE_URL", "")
+    explicit_file = getattr(args, "file", None)
+    target = explicit_file or os.environ.get("DATABASE_URL", "")
     if not target:
         _die("No database given. Pass a path (`mio audit verify app.db`) or set DATABASE_URL.",
              exit_code=3)
 
-    from mohio_interpreter import MohioInterpreter, DbRuntime
+    from mohio_interpreter import MohioInterpreter, _make_db_runtime, _sniff_driver
+    # A `--file`/positional argument is always a literal sqlite path (the documented form,
+    # `mio audit verify app.db`) -- only a DATABASE_URL-sourced target needs its scheme
+    # detected, since that is the one case with no explicit driver to read (T0-2: this used
+    # to open every target with a raw sqlite3.connect() regardless of scheme, which is the
+    # same "unable to open database file" crash the interpreter's own setup fallback had).
+    driver = 'sqlite' if explicit_file else _sniff_driver(target)
     try:
-        sink = DbRuntime(target)
+        sink = _make_db_runtime(driver, target)
     except Exception as e:
         _die(f"Could not open the audit store at {target}: {e}", exit_code=3)
 

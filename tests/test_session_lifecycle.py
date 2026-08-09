@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Session lifecycle: mio_session reservation, rotation, and expiry (2026-08-04 build,
 per BRIEF-session-lifecycle-rotation-expiry.md).
 
@@ -49,7 +49,7 @@ def sid_of(resp):
 
 # ── 1. mio_session reservation ──────────────────────────────────────────────────────
 SRC_WRITE = ('shape P\n    command as text\nshape: done\n'
-             'listen for\n    new sh.P\n'
+             'listen for\n    new sh.P at /p\n'
              '        miocookie.set "mio_session" to "hack"\n'
              '        give back 200 "ok"\n    new: done\nlisten: done\n')
 prog = transform(_P.parse(SRC_WRITE), SRC_WRITE)
@@ -62,7 +62,7 @@ check("the fail-loud names the runtime-owned mechanism (sh. reservation parallel
 
 # Regression: a DIFFERENT cookie name is completely unaffected.
 SRC_OTHER = ('shape P\n    command as text\nshape: done\n'
-             'listen for\n    new sh.P\n'
+             'listen for\n    new sh.P at /p\n'
              '        miocookie.set "preference" to "dark_mode"\n'
              '        give back 200 "ok"\n    new: done\nlisten: done\n')
 prog_o = transform(_P.parse(SRC_OTHER), SRC_OTHER)
@@ -73,7 +73,7 @@ check("regression: an unrelated cookie name is completely unaffected",
 
 # ── 2. Runtime auto-emits mio_session with no app code at all ──────────────────────
 SRC_PLAIN = ('shape P\n    command as text\nshape: done\n'
-             'listen for\n    new sh.P\n'
+             'listen for\n    new sh.P at /p\n'
              '        give back 200 ("session=" & session.id)\n    new: done\nlisten: done\n')
 prog2 = transform(_P.parse(SRC_PLAIN), SRC_PLAIN)
 it2 = MohioInterpreter(); sessions2 = _InMemorySessionStore()
@@ -89,7 +89,7 @@ check("second request with the SAME cookie returns the SAME session (persistence
 
 # ── 3. Rotation fires ONLY on an actual role-set change (the core finding) ─────────
 SRC_ZORK_SHAPED = ('shape P\n    command as text\nshape: done\n'
-                   'listen for\n    new sh.P\n'
+                   'listen for\n    new sh.P at /p\n'
                    '        grant role "player"\n'
                    '        require role "player"\n'
                    '        give back 200 ("session=" & session.id)\n    new: done\nlisten: done\n')
@@ -111,7 +111,7 @@ check("exactly THREE role_granted (every grant call is still audited, rotation o
 
 # ── 4. A genuine escalation DOES rotate, and the old id is genuinely refused ────────
 SRC_ESCALATE = ('shape P\n    command as text\nshape: done\n'
-                'listen for\n    new sh.P\n'
+                'listen for\n    new sh.P at /p\n'
                 '        grant role command\n'
                 '        give back 200 ("session=" & session.id)\n    new: done\nlisten: done\n')
 prog4 = transform(_P.parse(SRC_ESCALATE), SRC_ESCALATE)

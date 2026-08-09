@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 test_security_checks.py
 =======================
@@ -28,7 +28,7 @@ SYNTAX REFERENCE (from live mohio.lark + tests/zork_demo.mho):
   - connect NAME as TYPE from env.VAR    (grammar ONLY accepts ENV_REF — literal = parse error)
   - sector: demo_low
 
-HOW TO RUN (from mohio/ — the directory containing mio.py and mohio.lark):
+HOW TO RUN (from mohio/ — the directory containing mio.py and the mohio_data/ package):
     python -m pytest tests/test_security_checks.py -v
 """
 
@@ -58,7 +58,9 @@ if MIO_PY is None:
         returncode=2,
     )
 
-MIO_DIR = MIO_PY.parent   # must equal mio.py's parent so mohio.lark is found
+MIO_DIR = MIO_PY.parent   # temp .mho files are written next to mio.py so a subprocess run from
+                          # here resolves imports normally; the grammar itself now loads via
+                          # mohio_data.GRAMMAR_PATH regardless of this directory
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────

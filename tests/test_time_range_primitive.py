@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Section 1: the time-range primitive (`_period_range` / `_rolling_range`) -- standalone proof.
 
 A calendar/rolling period resolves to a half-open interval [start, end) of tz-aware datetimes,

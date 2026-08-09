@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """give back is XSS-safe by default; `trusted` opts out (2026-07-31, security sweep S8.2).
 
 give back HTML-escapes interpolated {{ }} VALUES so untrusted data reflected into an HTML response

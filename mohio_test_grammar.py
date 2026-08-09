@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 mohio_test_grammar.py
 Mohio Language — Grammar + Transformer Test Harness
-Version: 3.8.0 | May 2026 | Particular LLC
+Version: 3.8.0 | August 2026 | Particular LLC
 
 Three test suites:
   1. PARSE TESTS    — snippets that must parse cleanly

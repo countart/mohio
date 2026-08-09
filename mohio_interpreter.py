@@ -1,9 +1,9 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 mohio_interpreter.py
 Mohio Language — AST Interpreter
-Version: 0.3.8 | May 2026 | Particular LLC
+Version: 4.8.2 | August 2026 | Particular LLC
 
 Walks the AST produced by mohio_transformer_ast.py and executes it.
 
@@ -759,6 +759,30 @@ class Context:
                      scene.items.position.2.name
                      scene.items.first.name
         """
+        # T0-5: `random.token`/`random.hex`/`random.number` used BARE (no `length N` / `between
+        # N and N`) fail to match their dedicated intrinsic grammar rule (random_expr requires
+        # that clause for these three specifically -- random.uuid/random.color have no such
+        # requirement and are unaffected) and are silently re-parsed as an ordinary
+        # DottedName(['random', 'token'|'hex'|'number']) instead -- a ordinary field read on a
+        # variable named `random`, which nothing ever declared, so it silently resolved to None.
+        # A developer reaching for `random.token` is generating a session token, a reset link,
+        # or an API key; a silent None there is a security finding, not a completeness gap.
+        # Narrow to exactly this shape rather than "any undefined parts[0]" -- that broader
+        # check was tried and reverted: `request.cursor` with no real HTTP request is a real,
+        # tested, intentionally-tolerated pattern (test_find.py's cursor_fails; `request` itself
+        # is simply not bound outside a real request, and downstream code -- not this layer --
+        # is what fails loud for that case, e.g. cursor_pagination_unavailable). A general
+        # unknown-name check cannot tell that legitimate case apart from a genuine typo without
+        # false-positiving on it, so it stays out of scope; this stays scoped to the one
+        # confirmed, unambiguous shape that's always a mistake, never a legitimate read.
+        if len(parts) == 2 and str(parts[0]) == 'random' and str(parts[1]) in ('token', 'hex', 'number'):
+            _clause = 'length N' if str(parts[1]) in ('token', 'hex') else 'between N and N'
+            raise MohioRuntimeError(
+                f"random.{parts[1]} needs its required clause -- write `random.{parts[1]} "
+                f"{_clause}`. Used bare like this, it doesn't match that form and is silently "
+                f"read as a field access on a variable named `random`, which was never "
+                f"declared -- generating a token/number this way would have silently produced "
+                f"None instead of a real value.")
         root = self.get(parts[0])
 
         i = 1
@@ -813,6 +837,39 @@ class Context:
 
             # Standard field access
             if isinstance(root, MohioValue):
+                # T0-5 / FORK-5 (ruled): distinguish "this name was never defined" from "this
+                # name exists and is genuinely empty" -- only the first fails loud. A dict-
+                # backed value (a real record: a retrieved row, a shape instance) HAS a known
+                # key set, so a key that is not IN it is a typo/unknown field, not emptiness --
+                # a key that IS present, even holding None (a nullable column, a retrieve that
+                # matched but the field was never set), is legitimately empty and must stay
+                # None with no error (the retrieve-found-nothing pattern, and every genuinely
+                # optional field, depend on exactly this). A list-backed value reaching here
+                # skipped every recognized accessor above (first/last/count/position/pos), so
+                # `p` is definitionally not one. Anything else reaching here (None -- an unset
+                # `as map`/`as int`/etc. declaration, or a retrieve/grab that found no row at
+                # all -- or a plain scalar) carries no schema to check a field against, so it
+                # stays lenient: there is no way to tell a typo from "not populated yet"
+                # without one, and guessing would manufacture false positives on legitimate
+                # code (T0-6 reasoned the identical way about static held-source detection).
+                base_py = root.to_python()
+                if isinstance(base_py, dict) and p not in base_py:
+                    _base_path = '.'.join(str(x) for x in parts[:i])
+                    _known = sorted(base_py.keys())
+                    import difflib as _difflib
+                    _close = _difflib.get_close_matches(p, _known, n=1)
+                    _hint = f" Did you mean '{_close[0]}'?" if _close else ""
+                    raise MohioRuntimeError(
+                        f"'{p}' is not a field on '{_base_path}' -- known fields: "
+                        f"{', '.join(_known) if _known else '(none)'}.{_hint} A field that "
+                        f"exists but is empty stays None; a field that was never there fails "
+                        f"loud instead of silently returning None.")
+                if isinstance(base_py, list):
+                    raise MohioRuntimeError(
+                        f"'.{p}' is not a supported list operation on "
+                        f"'{'.'.join(str(x) for x in parts[:i])}' -- supported: first, last, "
+                        f"count, position.N (pos.N). Aggregates like .sum/.average/.total/"
+                        f".max/.min are not built yet.")
                 root = root.get(p)
             else:
                 root = MohioValue(None, 'null')
@@ -962,7 +1019,14 @@ class DbRuntime:
         for c in field_cols:
             if c not in existing:
                 self.conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" TEXT')
-        self.conn.commit()
+        # T0-4: this used to commit unconditionally, every save -- schema already existing or
+        # not. save() calls ensure_table() before every write, so the SECOND write inside an
+        # open `transaction` silently force-committed the FIRST write's still-pending INSERT
+        # right here, well before the transaction's own commit_transaction()/rollback_
+        # transaction() ever ran. A failure on the second write then had nothing left to roll
+        # back. Same rule save()/update()/etc. already follow: only commit outside a
+        # transaction; inside one, the transaction owns the commit/rollback decision.
+        if not self._in_transaction: self.conn.commit()
 
     def retrieve_one(self, table, match_field, match_value):
         try:
@@ -1216,7 +1280,11 @@ class PostgresRuntime:
                 if c == 'id':
                     continue
                 cur.execute(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS "{c}" TEXT')
-            self.conn.commit()
+            # T0-4: same fix as the SQLite runtime -- this used to commit unconditionally on
+            # every save(), which for Postgres (a transactional DDL backend, unlike SQLite)
+            # force-committed the FIRST write of an open `transaction` the moment the SECOND
+            # write's ensure_table() ran, well before the transaction's own commit/rollback.
+            if not self._in_transaction: self.conn.commit()
         except Exception as e:
             # This used to be a bare `except Exception: rollback()` -- it swallowed EVERY
             # schema failure without a word. A table that could not be created, or a
@@ -1561,7 +1629,8 @@ class MySQLRuntime:
         for c in columns:
             if c not in existing:
                 cur.execute(f'ALTER TABLE `{table}` ADD COLUMN `{c}` TEXT')
-        self.conn.commit()
+        # T0-4: same fix as the SQLite/Postgres runtimes -- see their ensure_table for why.
+        if not self._in_transaction: self.conn.commit()
         cur.close()
 
     def retrieve_one(self, table, match_field, match_value):
@@ -2083,6 +2152,26 @@ def _make_db_runtime(driver: str, db_path: str = ':memory:'):
     return DbRuntime(db_path)
 
 
+def _sniff_driver(target):
+    """Detect a database driver from a connection string's own URL scheme.
+
+    `connect ... as postgres` always names its driver explicitly, so _make_db_runtime
+    never needed to guess. A consumer with no such declaration to read from (mio audit
+    verify, pointed at a bare DATABASE_URL) has nothing else to go on -- this is that
+    one detection point, feeding the same _make_db_runtime everything else already
+    goes through. A value with no recognized scheme (a bare filesystem path, the
+    common case) is sqlite, unchanged from today.
+    """
+    s = str(target or '').strip().lower()
+    if s.startswith(('postgres://', 'postgresql://')):
+        return 'postgres'
+    if s.startswith(('mysql://', 'mariadb://')):
+        return 'mysql'
+    if s.startswith(('mongodb://', 'mongodb+srv://')):
+        return 'mongo'
+    return 'sqlite'
+
+
 # ══════════════════════════════════════════════════════════════
 # AI RUNTIME
 # ══════════════════════════════════════════════════════════════
@@ -2095,6 +2184,8 @@ class AiDecision:
     inputs:      dict
     explanation: Optional[str] = None
     fell_back:   bool = False
+    tokens:      int   = 0    # real usage for the boundary gate (2026-08-06, matches AgentTurn)
+    cost:        float = 0.0  # real USD cost for the boundary gate (2026-08-06, matches AgentTurn)
 
 
 @dataclass
@@ -2246,6 +2337,16 @@ class MockAiRuntime:
                                  tool_id=f"mock_{len(script)}", tokens=10, cost=0.0)
             return AgentTurn(kind='text', text=str(item), tokens=10, cost=0.0)
         return AgentTurn(kind='text', text="Done.", tokens=5, cost=0.0)
+
+    def estimate_input_tokens(self, model, messages, system=None, tools=None):
+        # Deterministic, offline, no network -- a mock run never spends real money, so a
+        # rough proxy is correct here (unlike the real runtime, where an inaccurate
+        # estimate would defeat the pre-call refusal's whole purpose). Character count / 4
+        # is the well-known rough English-text approximation; good enough to exercise the
+        # boundary-gate code path in tests without needing tiktoken or a real key.
+        text = (system or "") + " " + " ".join(
+            str(m.get('content', '') if isinstance(m, dict) else m) for m in (messages or []))
+        return max(1, len(text) // 4)
 
     def explain(self, decision, audience='developer', fmt='paragraph'):
         return (
@@ -4457,14 +4558,42 @@ class MohioInterpreter:
         if shape_name and (req_path is None or not any(l.path for l in candidates)):
             shape_hits = [l for l in candidates if l.shape == shape_name]
             if shape_hits:
-                return _dispatch(shape_hits[0])
+                candidate = shape_hits[0]
+                # T0-3 (shape-dispatch branch): a request carrying an explicit `_shape`
+                # field used to reach `candidate` here regardless of req_path -- with
+                # every candidate for this method pathless (the `not any(...)` disjunct
+                # above guarantees candidate.path is None whenever req_path is not
+                # None here), a client could put ANY `_shape` value in its JSON body
+                # and dispatch to a garbage path, the exact same unauthenticated-write
+                # shape the single-endpoint fallback below was fixed for, through this
+                # separate branch. Same rule, applied to the shape-selected candidate:
+                # pathless binds to `/` only; a path-pinned candidate (not reachable
+                # today given the guard above, but checked anyway rather than relying
+                # on that invariant) must match req_path exactly. `req_path is None`
+                # (caller pinned no path at all) is untouched, same as everywhere else.
+                if (req_path is None
+                        or (candidate.path is None and _norm(req_path) == '/')
+                        or (candidate.path is not None
+                            and _norm(candidate.path) == _norm(req_path))):
+                    return _dispatch(candidate)
 
         # 3. Single-endpoint fallback: one route for this method, so use it even if
         #    the caller didn't pin a path/shape (keeps simple one-page apps working).
         #    But only when no path was pinned, or the lone route declares no path --
         #    a pinned path that doesn't match the lone route's path is a 404, not a
         #    fallback to the wrong page.
-        if len(candidates) == 1 and (req_path is None or candidates[0].path is None):
+        # T0-3: `candidates[0].path is None` alone used to fire for ANY req_path,
+        #    garbage included -- a pathless listener (no `at`) matched every path as
+        #    long as it was the only candidate for that method. The ruling: pathless
+        #    is the designed ROOT handler (`GET /` / `POST /`), so it binds to `/`
+        #    exactly, not to everywhere. `req_path is None` (the caller pinned no path
+        #    at all, e.g. mio run --request-file) is a separate, still-correct case
+        #    and is untouched. A path-pinned candidate whose path does not match
+        #    req_path already falls through to the 404 below unchanged.
+        if len(candidates) == 1 and (
+            req_path is None
+            or (candidates[0].path is None and _norm(req_path) == '/')
+        ):
             return _dispatch(candidates[0])
 
         # 4. No path/shape pinned and several routes exist, or a path was given that
@@ -5020,6 +5149,7 @@ class MohioInterpreter:
     # ── MioQL — Data Operations ────────────────────────────────
 
     def _exec_RetrieveBlock(self, node, ctx):
+        self._refuse_held_source_query(node.source, ctx, 'retrieve')
         db, _early = self._db_or_fail(ctx, 'retrieve', node)
         if db is None: return _early
         table = self._resolve_source(node.source, ctx)
@@ -5164,6 +5294,7 @@ class MohioInterpreter:
             return _val
         import math as _math
 
+        self._refuse_held_source_query(node.source, ctx, 'find')
         db, _early = self._db_or_fail(ctx, 'find', node)
         if db is None: return _early
         table = self._resolve_source(node.source, ctx)
@@ -5764,10 +5895,19 @@ class MohioInterpreter:
     def audit_logs(self, sink):
         """Every audit log present in a sink, by name.
 
-        An audit table is identified by carrying the canonical chain columns, so this finds the
-        logs without knowing any app's schema. Works on SQLite and Postgres: the control plane
-        reads these from the tenant's own database, which is Postgres in production.
+        An audit table is identified by BOTH carrying the canonical chain columns AND matching
+        the compiler's audit-table naming convention (is_audit_table) -- name alone without a
+        column check would miss a real log stored under a name convention change, and columns
+        alone without a name check false-positives on any ordinary table that happens to define
+        columns literally named audit_id/prev_hash/entry_hash (seen with a table named `recs`:
+        three unrelated fields, coincidentally audit-shaped names, reported as a BROKEN chain --
+        it was never a chain at all). is_audit_table is the same predicate every audit writer in
+        the interpreter is held to (test_audit_table_contract), so nothing this method finds by
+        name could have been written to by anything other than a real audit writer. Works on
+        SQLite and Postgres: the control plane reads these from the tenant's own database, which
+        is Postgres in production.
         """
+        from mohio_audit_grades import is_audit_table
         names = []
         candidates = []
         try:                                    # SQLite
@@ -5789,6 +5929,8 @@ class MohioInterpreter:
         for t in candidates:
             if t.startswith('sqlite_') or t.startswith('pg_'):
                 continue                        # engine bookkeeping tables, not app logs
+            if not is_audit_table(t):
+                continue                        # not a name the compiler ever writes audit records under
             try:
                 # Probe for the chain columns rather than reading a driver-specific catalog.
                 # LIMIT 1 rather than WHERE 1=0: SQLite skips column resolution on a
@@ -7240,6 +7382,7 @@ class MohioInterpreter:
 
         result = None
         agent_error = None
+        agent_explanation = None
 
         # Turn the agent's tools grant into provider tool definitions, once,
         # before the loop. A grant to a connector/operation that does not exist
@@ -7289,7 +7432,7 @@ class MohioInterpreter:
                         ceiling=max_tokens,
                     )
 
-                # Cost ceiling check
+                # Cost ceiling check (post-call: the running total from calls already made)
                 if cost_ceiling and accumulated_cost >= cost_ceiling:
                     raise _AgentLimitExceeded(
                         "Cost ceiling reached",
@@ -7297,6 +7440,35 @@ class MohioInterpreter:
                         value=round(accumulated_cost, 4),
                         ceiling=cost_ceiling,
                     )
+
+                # Pre-call cost estimate (C, 2026-08-06): refuse the call ABOUT to fire if
+                # it would itself push the running total over the ceiling, rather than only
+                # ever catching a breach after the fact. Uses each provider's real token
+                # count for the messages that would actually be sent (self.ai's
+                # estimate_input_tokens -- Claude/Gemini via their own provider-native
+                # count endpoints, GPT via tiktoken; never a heuristic) plus the already-
+                # declared max_tokens as the worst-case output bound, since output length
+                # is never knowable before a call returns. If the estimate itself cannot be
+                # obtained (offline, no key, unsupported provider), this check is skipped
+                # for that iteration -- the post-call check above still catches a real
+                # breach after the fact, so skipping never opens a silent gap, only a less
+                # eager one.
+                if cost_ceiling:
+                    try:
+                        _est_in = self.ai.estimate_input_tokens(model, messages, tools=tool_schemas or None)
+                    except Exception:
+                        _est_in = None
+                    if _est_in is not None:
+                        from mohio_ai import _cost_for_tokens as _est_cost_fn
+                        _est_out = max_tokens or 1024
+                        _est_cost = _est_cost_fn(model, _est_in, _est_out)
+                        if accumulated_cost + _est_cost > cost_ceiling:
+                            raise _AgentLimitExceeded(
+                                "Cost ceiling would be exceeded by the next call",
+                                metric="cost_precall",
+                                value=round(accumulated_cost + _est_cost, 4),
+                                ceiling=cost_ceiling,
+                            )
 
                 # ── Provider call ─────────────────────────────────────────
                 if self.verbose:
@@ -7409,10 +7581,48 @@ class MohioInterpreter:
             # ── Deterministic Failover Path ───────────────────────────────
             # Boundary gate fired. Log the intercept and route to recovery.
             agent_error = str(limit_err)
+            # A distinct, self-describing explanation per metric (2026-08-06), so a coder
+            # inspecting either this context variable or the audit trail can always tell a
+            # cost-cap breach apart from any other boundary-gate cause, or from a genuine
+            # low-confidence result -- never the bare "Agent limit exceeded: metric v > c"
+            # text alone, and never shared wording across metrics. This is the ONLY place
+            # that classifies a boundary-gate breach; a provider failure (the other way
+            # agent_error gets set, in the except Exception branch above) keeps its own raw
+            # error text, which is naturally distinct from every string below.
+            _explanation_by_metric = {
+                'cost': (
+                    f"AI_COST_CAP_BREACH: agent '{node.name}' was stopped because its running "
+                    f"cost (${limit_err.value:.4f}) reached its declared cost ceiling "
+                    f"(${limit_err.ceiling:.4f}). This is a spend-safety stop, not a "
+                    f"low-confidence result -- the model was never asked to answer this step."),
+                'cost_precall': (
+                    f"AI_COST_CAP_PRECALL_REFUSAL: agent '{node.name}' was stopped BEFORE its "
+                    f"next call, because that call's estimated cost would have brought the "
+                    f"running total to ${limit_err.value:.4f}, over its declared cost ceiling "
+                    f"(${limit_err.ceiling:.4f}). Distinct from AI_COST_CAP_BREACH: no call "
+                    f"was ever sent for this step, so nothing beyond the estimate was spent."),
+                'steps': (
+                    f"AI_STEP_LIMIT_BREACH: agent '{node.name}' was stopped after "
+                    f"{limit_err.value} reasoning steps, its declared ceiling of "
+                    f"{limit_err.ceiling}."),
+                'tokens': (
+                    f"AI_TOKEN_LIMIT_BREACH: agent '{node.name}' was stopped after "
+                    f"{limit_err.value} tokens, its declared ceiling of {limit_err.ceiling}."),
+                'timeout': (
+                    f"AI_TIMEOUT_BREACH: agent '{node.name}' was stopped after "
+                    f"{limit_err.value}s, its declared timeout of {limit_err.ceiling}s."),
+            }
+            agent_explanation = _explanation_by_metric.get(
+                limit_err.metric,
+                f"AI_LIMIT_BREACH: agent '{node.name}' exceeded its declared "
+                f"{limit_err.metric} limit.")
             if self.verbose:
                 print(f"  [ai.agent] BOUNDARY GATE: {limit_err.metric} "
                       f"{limit_err.value} > {limit_err.ceiling}")
-            # ai.audit the limit breach
+            # ai.audit the limit breach -- carries the SAME distinct reason string as the
+            # context variable below (the "reason" field), not just the structured
+            # metric/value/ceiling fields, so the audit trail alone tells the story without
+            # needing to cross-reference this code.
             self._audit_logs.setdefault(f"{node.name}_limits_log", []).append(
                 self._audit_event(f"{node.name}_limits_log", {
                     "event":   "AGENT_LIMIT_EXCEEDED",
@@ -7420,6 +7630,7 @@ class MohioInterpreter:
                     "metric":  limit_err.metric,
                     "value":   limit_err.value,
                     "ceiling": limit_err.ceiling,
+                    "reason":  agent_explanation,
                 }, ctx))
         finally:
             if getattr(self, '_agent_gate_stack', None):
@@ -7430,6 +7641,7 @@ class MohioInterpreter:
         ctx.set(f"_agent_{node.name}_tokens", MohioValue(token_count,     'number'))
         ctx.set(f"_agent_{node.name}_cost",   MohioValue(accumulated_cost,'number'))
         ctx.set(f"_agent_{node.name}_error",  MohioValue(agent_error or '', 'text'))
+        ctx.set(f"_agent_{node.name}_explanation", MohioValue(agent_explanation or '', 'text'))
 
         if result is not None:
             ctx.set(node.name, MohioValue(result, 'text'))
@@ -7471,6 +7683,7 @@ class MohioInterpreter:
         matches (the fetch-or-404 pattern). A miss without on.failure simply
         binds nothing — checking `if <name> is none` stays valid.
         """
+        self._refuse_held_source_query(node.source, ctx, 'grab')
         db, _early = self._db_or_fail(ctx, 'grab', node)
         if db is None: return _early
         table = self._resolve_source(node.source, ctx)
@@ -7669,6 +7882,11 @@ class MohioInterpreter:
                 row_id = db.save_if_not_exists(table, fields, dedupe_fields)
             except Exception as e:
                 if any(isinstance(h, OnFailure) for h in node.handlers):
+                    # T0-4/FORK-8: on.failure catches this locally (returns instead of
+                    # raising), so an enclosing transaction would never see the failure on
+                    # its own -- flag it so _exec_TransactionBlock still rolls back.
+                    if getattr(db, '_in_transaction', False):
+                        self._transaction_write_failed = True
                     return self._handle_failure(node.handlers, ctx, str(e))
                 raise _Raise(error_name='db_error', message=str(e))
             self._audit_data_change('save', table, ctx, record_id=row_id,
@@ -7685,6 +7903,9 @@ class MohioInterpreter:
             row_id = db.save(table, fields)
         except Exception as e:
             if any(isinstance(h, OnFailure) for h in node.handlers):
+                # T0-4/FORK-8: see the identical comment on the unless-exists path above.
+                if getattr(db, '_in_transaction', False):
+                    self._transaction_write_failed = True
                 return self._handle_failure(node.handlers, ctx, str(e))
             raise _Raise(error_name='db_error', message=str(e))
 
@@ -7877,6 +8098,9 @@ class MohioInterpreter:
                 count = db.update_multi(table, updates, conditions)
             except Exception as e:
                 if any(isinstance(h, OnFailure) for h in node.handlers):
+                    # T0-4/FORK-8: see the identical comment on save's error path.
+                    if getattr(db, '_in_transaction', False):
+                        self._transaction_write_failed = True
                     return self._handle_failure(node.handlers, ctx, str(e))
                 raise _Raise(error_name='db_error', message=str(e))
             self._audit_data_change('update', table, ctx,
@@ -7913,6 +8137,9 @@ class MohioInterpreter:
                 count = db.remove_multi(table, conditions)
             except Exception as e:
                 if any(isinstance(h, OnFailure) for h in node.handlers):
+                    # T0-4/FORK-8: see the identical comment on save's error path.
+                    if getattr(db, '_in_transaction', False):
+                        self._transaction_write_failed = True
                     return self._handle_failure(node.handlers, ctx, str(e))
                 raise _Raise(error_name='db_error', message=str(e))
             self._audit_data_change('remove', table, ctx,
@@ -7938,6 +8165,9 @@ class MohioInterpreter:
             count = db.remove(table, field, match_val)
         except Exception as e:
             if any(isinstance(h, OnFailure) for h in node.handlers):
+                # T0-4/FORK-8: see the identical comment on save's error path.
+                if getattr(db, '_in_transaction', False):
+                    self._transaction_write_failed = True
                 return self._handle_failure(node.handlers, ctx, str(e))
             raise _Raise(error_name='db_error', message=str(e))
         self._audit_data_change('remove', table, ctx,
@@ -7983,14 +8213,32 @@ class MohioInterpreter:
         # not pretend; it must refuse.
         db, _early = self._db_or_fail(ctx, 'transaction', node)
         if db is None: return _early
+        # FORK-8 (ruled) / T0-4: a write with its OWN on.failure inside this block catches its
+        # exception locally and RETURNS instead of raising (save/update/remove all do this), so
+        # this block's own except below never fires and commit_transaction() would run as if
+        # nothing had gone wrong. Same pattern saga already uses (_saga_failed): the write sets
+        # a shared flag when it takes that branch, this block checks it after running its body
+        # in addition to catching a real exception. Saved/restored around the body so a nested
+        # call (a transaction inside a task called from within another transaction) cannot leak
+        # its flag into the outer one, mirroring saga's own prev_saga_failed handling.
+        prev_txn_write_failed = getattr(self, '_transaction_write_failed', False)
+        self._transaction_write_failed = False
         db.begin_transaction()
         try:
             result = self._exec_block(node.body, ctx)
+            if self._transaction_write_failed:
+                raise MohioRuntimeError(
+                    "a write inside this transaction failed. Its on.failure handler ran, but "
+                    "on.failure cannot rescue a partial transaction -- the whole block still "
+                    "rolls back, completed writes included, because a transaction is atomic "
+                    "regardless of a caught failure inside it.")
             db.commit_transaction()
             return result
         except Exception:
             db.rollback_transaction()
             raise
+        finally:
+            self._transaction_write_failed = prev_txn_write_failed
 
     def _exec_CheckMioqlBlock(self, node, ctx):
         # A1 MioQL: check exists -> boolean, check count -> integer, check unique ->
@@ -8156,6 +8404,20 @@ class MohioInterpreter:
             # (saga-compensation status propagation; plain-task give back stays value-only).
             if status in ('COMPENSATED', 'FAILED_COMPENSATION'):
                 self._saga_failed = True
+                # T0-4: this used to be reported ONLY via the `if self.verbose:` prints above,
+                # so a compensated saga was completely invisible in a normal (non-verbose) run
+                # -- the request can still end in a plain 200 with nothing in the output naming
+                # that a step failed and the rest had to be undone. `saga.status` was always
+                # readable, but only if the program itself goes looking for it; nothing made a
+                # compensation VISIBLE on its own. Unconditional (not gated behind --verbose),
+                # since a compensated saga is inherently noteworthy, unlike the routine
+                # per-step progress prints above it stays paired with.
+                import sys as _sys
+                _failed_step = next((o['step'] for o in outcomes if o.get('outcome') == 'failed'),
+                                     '?')
+                print(f"  [saga] '{getattr(node, 'name', '?')}' did not commit -- {status} "
+                      f"(step '{_failed_step}' failed, {len(completed)} step(s) compensated)",
+                      file=_sys.stderr)
             saga_result = MohioValue({'status': status, 'steps': outcomes}, 'shape')
             # Bind the status object to the saga's name in the ENCLOSING scope, the
             # same way find/retrieve/grab bind their result. A caller then reads
@@ -9619,8 +9881,10 @@ class MohioInterpreter:
         return result
 
     def _exec_JourneyDecl(self, node, ctx):
-        # Journey = the app's root scope + routing container.
-        # See Docs/journey-page-design-2026-06-17.md.
+        # Journey = the app's root scope + routing container. (The doc this
+        # comment used to cite, Docs/journey-page-design-2026-06-17.md, has never
+        # existed in this repo's git history -- confirmed 2026-08-06, removed the
+        # dead reference rather than leave a pointer to nothing.)
         if getattr(node, 'name', None):
             ctx._journey_name = node.name
 
@@ -9630,6 +9894,31 @@ class MohioInterpreter:
         if not getattr(self, '_scope_prewired', False):
             self._exec_journey_scope(node, ctx)
 
+        # flow:/serves: (2026-08-06) -- both were previously silent no-ops (flow:
+        # captured and ignored; serves: discarded to None before even becoming a
+        # node). private:/public: are now genuinely enforced (below), but flow:
+        # and serves: still cannot be: flow's intended runtime behavior has no
+        # documented source of truth anywhere in this repo, and serves: multiple
+        # tenants needs a request-scoped tenant-identity primitive that does not
+        # exist in the language yet (no grant-tenant-shaped verb). Rather than
+        # silently do nothing -- the exact shape this fix exists to close -- fail
+        # loud, matching the house pattern for a not-yet-built feature (see
+        # _exec_RateLimitDecl). Fires on every execution of a declaring journey,
+        # same timing as that precedent. Deferrals tracked in CLAUDE-CODE-BACKLOG.md.
+        from mohio_ast import JourneyMeta as _JM
+        for _m in node.body:
+            if isinstance(_m, _JM) and _m.kind == 'flow':
+                raise MohioRuntimeError(
+                    "flow is declared but not yet interpreted in this build (it would "
+                    "silently do nothing) -- no documented source of truth exists in this "
+                    "repo for its intended runtime behavior. Tracked for a future release.")
+            if isinstance(_m, _JM) and _m.kind == 'serves' and _m.value == 'multiple tenants':
+                raise MohioRuntimeError(
+                    "serves is declared but not yet enforced in this build (it would "
+                    "silently do nothing) -- serves: multiple tenants needs a request-scoped "
+                    "tenant-identity primitive that does not exist in this language yet. "
+                    "Tracked for a future release.")
+
         # 2. Route the current request: pages (GET) first, then nested listeners.
         req = getattr(ctx, '_current_request', None)
         if not req:
@@ -9638,9 +9927,57 @@ class MohioInterpreter:
                 self._debug_write(ctx, '\nCompleted: success')
             return None
 
-        from mohio_ast import PageDecl, ListenBlock
+        from mohio_ast import PageDecl, ListenBlock, JourneyMeta
         pages         = [b for b in node.body if isinstance(b, PageDecl)]
         listen_blocks = [b for b in node.body if isinstance(b, ListenBlock)]
+
+        # private:/public: access control (2026-08-06). Was previously built-but-
+        # never-read JourneyMeta (see path_list's old comment, "folded into A8
+        # security/access design") -- the interpreter carried the node and ignored
+        # it, so every path was silently open regardless of what was declared.
+        # private: now genuinely refuses a request with no server-verified role,
+        # reusing require role's exact mechanism/403 shape so there is only one
+        # place in the codebase that decides what "authenticated" means. public:
+        # is an explicit override for a path that would otherwise fall under a
+        # private: entry. Matching is segment-boundary prefix (private: /admin
+        # also covers /admin/users) -- exact-only matching would silently leave a
+        # subpage unprotected, the same "looks protected, isn't" shape this fix
+        # exists to close.
+        req_path = req.get('_path')
+        if req_path is not None:
+            norm_req = self._norm_path(req_path)
+            metas = [b for b in node.body if isinstance(b, JourneyMeta)]
+            is_public  = any(self._journey_path_matches(p, norm_req)
+                              for m in metas if m.kind == 'public' for p in (m.value or []))
+            is_private = any(self._journey_path_matches(p, norm_req)
+                              for m in metas if m.kind == 'private' for p in (m.value or []))
+            if is_private and not is_public:
+                if not (ctx.has_any_roles() and ctx.roles_verified()):
+                    raise _Raise(
+                        error_name='authorization_error',
+                        message=(f"private: {norm_req} requires an authenticated session -- "
+                                 f"no server-verified role is present for this session. "
+                                 f"Establish one at login with grant role."))
+        else:
+            # No path was pinned on this request at all (e.g. `mio run --request-file` with
+            # no `_path` key). _serve_pages's single-page fallback below serves whatever one
+            # page exists with no path to check against private:/public: -- so there is no
+            # way to know whether the page about to be served falls under a private: entry.
+            # Deny by default: if this journey declares ANY private: entry, refuse unless the
+            # session already has a server-verified role. Same _Raise/authorization_error
+            # shape as the path-present check above, so "authenticated" still has exactly one
+            # definition in the codebase. A journey with no private: entries at all is
+            # unaffected -- this branch is a no-op for it, same as before.
+            metas = [b for b in node.body if isinstance(b, JourneyMeta)]
+            if any(m.kind == 'private' for m in metas):
+                if not (ctx.has_any_roles() and ctx.roles_verified()):
+                    raise _Raise(
+                        error_name='authorization_error',
+                        message=("this request carried no path, and the journey declares "
+                                 "private: paths -- refusing by default because there is no "
+                                 "path to check against them. No server-verified role is "
+                                 "present for this session. Establish one at login with "
+                                 "grant role."))
 
         served = self._serve_pages(pages, ctx, req)
         if served is not None:
@@ -9686,6 +10023,15 @@ class MohioInterpreter:
             return p
         p = str(p).split('?', 1)[0]
         return p[:-1] if len(p) > 1 and p.endswith('/') else p
+
+    def _journey_path_matches(self, entry, norm_req_path):
+        """private:/public: path matching: an entry covers itself and any deeper
+        path under it (segment-boundary prefix), so private: /admin also covers
+        /admin/users without every subpage needing to be listed individually."""
+        e = self._norm_path(entry)
+        if not e:
+            return False
+        return norm_req_path == e or norm_req_path.startswith(e + '/')
 
     def _serve_pages(self, pages, ctx, req):
         """Route a GET request to a matching page by path. Mirrors _exec_ListenBlock:
@@ -13848,6 +14194,45 @@ class MohioInterpreter:
             return False
 
     # ── Helpers ───────────────────────────────────────────────
+
+    def _refuse_held_source_query(self, source, ctx, verb):
+        """find / retrieve / grab run against a database today -- querying a held (non-DB)
+        value, `held_source_query`, is real, wanted, NOT YET BUILT work (PRODUCTION-BUILD-PLAN.md
+        Tier 1, item T1-QUERY-HELD; CLAUDE-CODE-BACKLOG.md).
+
+        `source` for these three verbs is always a DbRef (`db.X`) or a DottedName (a bare
+        NAME, or a dotted chain like `cache.settings`) -- see source_ref's transformer.
+        A single-part DottedName whose name resolves to an already-held Mohio variable
+        (`colors as list ...`, or the raw text `miofile.read` returns) is not a database
+        table, but nothing downstream can tell the difference: `_resolve_source` maps ANY
+        source to a table-name string with no other branch, and `_db_or_fail` (called
+        first, when there is no db) reports "no database connection" -- true of the
+        process, but not the actual problem, since a database would not have helped a
+        held-list source either. Left alone, the held-list case is only loud (if
+        misleadingly worded) when no db happens to be connected, and completely SILENT --
+        no error, an empty/None result -- the moment one is (T0-6). Refuse here, before
+        either of those runs, rather than let either failure mode occur.
+
+        This is deliberately a RUNTIME check, not a check-time (mio check) one: whether a
+        given name is currently a held variable at this exact point in the program is a
+        live question about the scope chain (ctx.exists, walking parent scopes) -- it
+        depends on conditional assignment, loop-local and task-local bindings, and session
+        state, none of which a static, per-file "was this name ever assigned anywhere"
+        scan can answer soundly. Approximating it unsoundly would risk the opposite bug:
+        wrongly refusing a legitimate `find X in db.colors` merely because some unrelated
+        held variable named `colors` exists elsewhere in the same file. ctx.exists()
+        already resolves this correctly and is reused as-is, not reimplemented.
+        """
+        if isinstance(source, DottedName) and len(source.parts or []) == 1:
+            name = source.parts[0]
+            if ctx.exists(name):
+                raise MohioRuntimeError(
+                    f"`{verb}` cannot query '{name}' -- it is a held value (a list, or file "
+                    f"content), not a database table. Querying a held list/variable with "
+                    f"find/retrieve/grab is not built yet in this release.\n"
+                    f"    What works today: `repeat each item in {name}` to iterate it, "
+                    f"`X random from {name}` to pick one at random, or connect a real "
+                    f"database and run `{verb} ... in db.<table>` against it.")
 
     def _resolve_source(self, source, ctx):
         if isinstance(source, DbRef):        table = source.table

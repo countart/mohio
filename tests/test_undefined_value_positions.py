@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Workstream A / Unit A3 -- an undefined bare variable used as a VALUE fails loud
 instead of silently resolving to None, in the three positions where that silence bites:
 
@@ -9,9 +9,16 @@ instead of silently resolving to None, in the three positions where that silence
 
 It reuses the same unknown_variable rule `show` and interpolation already enforce, and ONLY
 catches a lone undefined name. The load-bearing exemptions are proven too: a defined value
-(even empty), a dotted field access (which may legitimately be null), a `default`, and a
-`when empty` check on an undefined subject all keep working -- ctx.get and its None are
-untouched.
+(even empty), a dotted field access that is a real key holding None (legitimately null,
+not missing), a `default`, and a `when empty` check on an undefined subject all keep working --
+ctx.get and its None are untouched.
+
+T0-5 update: `_require_defined` itself never checked dotted access -- it always let evaluation
+handle it, and `Context.get_dotted` (mohio_interpreter.py:751) is where T0-5 later drew the
+real distinction FORK-5 ruled for: a field that is a real key (even holding None) stays exempt;
+a field that was NEVER a key at all now fails loud there instead of silently returning None.
+This file's "dotted field access is exempt" case was updated accordingly -- see the save-field
+block below.
 
 Run as a script: `python tests/test_undefined_value_positions.py` (exit 0 = pass).
 """
@@ -55,10 +62,22 @@ runs_ok("save: a defined value writes it", 'hold who "Bo"\n' + CONN +
 runs_ok("save: a defined-but-EMPTY value still writes (defined passes)", 'hold who ""\n' + CONN +
         'save to db.t\n    n who\nsave: done\n', "'n': ''")
 runs_ok("save: a literal writes", CONN + 'save to db.t\n    n "Aria"\nsave: done\n', "'n': 'Aria'")
-# dotted field access is EXEMPT (a field may legitimately be null); must NOT fail loud.
-runs_ok("save: a dotted field access is exempt (may be null), still saves",
-        'create obj\n    a "x"\ncreate: done\n' + CONN +
-        'save to db.t\n    v obj.missing\nsave: done\n', "'v': None")
+# T0-5 (FORK-5, ruled): this assertion locked in the exact bug T0-5 fixed and is corrected here,
+# not weakened -- `obj.missing` where `obj` is a REAL dict (`{'a': 'x'}`) and `missing` was never
+# one of its keys is the unknown-field case get_dotted now fails loud on (mohio_interpreter.py:
+# 751), same as `p.nmae` on a retrieved row. `_require_defined` (Workstream A/A3, this file's own
+# subject) never checked dotted access itself -- it always punted to evaluation, and evaluation is
+# exactly what T0-5 changed. The load-bearing claim this test exists to prove -- a field that
+# GENUINELY holds None (not one that never existed) does not block a save -- still holds; the case
+# below proves that with a field that IS a real key, holding None, instead of one that was never a
+# key at all.
+fails_loud("save: a dotted access to a field that never existed (unknown, not empty) fails loud",
+           'create obj\n    a "x"\ncreate: done\n' + CONN +
+           'save to db.t\n    v obj.missing\nsave: done\n', "not a field on 'obj'")
+runs_ok("save: a dotted access to a field that IS a real key, holding None, is exempt (may "
+        "legitimately be null), still saves",
+        'create obj\n    a "x"\n    b none\ncreate: done\n' + CONN +
+        'save to db.t\n    v obj.b\nsave: done\n', "'v': None")
 
 # ---- hold source ----
 fails_loud("hold: undefined source fails loud", 'hold x nobody\nshow x\n')

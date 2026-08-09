@@ -1,5 +1,5 @@
 // Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 // MOHIO ZORK v1.0 — The database IS the game. [current as of 2026-08-03 :: grant role + score-farming guards + escalation mechanism + canon corrections + ejection_rooms create-list fix]
 // 113 rooms, 166 items, 43 puzzles — all in seed_zork.json
 // This file is the router. Add content in the database, not here.
@@ -15,7 +15,7 @@ shape: done
 include "_cheats.mho"   // easter eggs + extractable cheats (see _cheats.mho)
 
 listen for
-    new sh.GameCommand
+    new sh.GameCommand at /gamecommand
         // Zork is a public game: every visitor is a player. Establish that role
         // SERVER-side so `require role` is satisfied by a verified grant, not by a
         // client-asserted `_roles` payload (which the auth rebuild stopped trusting).

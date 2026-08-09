@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Section 2: `is.in <time period>` filters rows by a half-open date RANGE (end-to-end via mio run).
 
 Before this build the whole `is.in <period>` where-clause filter parsed clean and died at runtime

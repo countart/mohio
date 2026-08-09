@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Non-ASCII langmap path: the ASCII gate must run AFTER Layer-1 translation, not before.
 
 Locked pipeline (langmap reference S2): Layer 3 -> Layer 1 -> parser; the parser only ever

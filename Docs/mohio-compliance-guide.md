@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Compliance in Mohio: the `cm.*` verbs
 
 Mohio treats data-handling compliance as first-class language verbs. The free tier gives

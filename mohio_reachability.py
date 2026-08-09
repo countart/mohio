@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 mohio_reachability.py — compile-time unreachable-code detection for `mio check`.
 
@@ -1113,6 +1113,122 @@ def scan_give_destination(program):
     return errors
 
 
+def scan_bare_random_intrinsic(program):
+    """`random.token`/`random.hex`/`random.number` used bare (no `length N` / `between N and
+    N`) fail to match their dedicated grammar rule and are silently re-parsed as a field read
+    on an undefined variable named `random` -- see get_dotted's identical runtime guard
+    (mohio_interpreter.py, T0-5) for the full mechanism. This is the check-time half: catch it
+    before the program ever runs, not only when it happens to execute that line.
+    """
+    from dataclasses import fields, is_dataclass
+    from mohio_ast import DottedName
+    errors = []
+    _needs_clause = {'token': 'length N', 'hex': 'length N', 'number': 'between N and N'}
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+            return
+        if not is_dataclass(node):
+            return
+        if isinstance(node, DottedName):
+            parts = getattr(node, 'parts', None) or []
+            if len(parts) == 2 and str(parts[0]) == 'random' and str(parts[1]) in _needs_clause:
+                clause = _needs_clause[str(parts[1])]
+                errors.append(CompileError(
+                    f"random.{parts[1]} needs its required clause -- write `random.{parts[1]} "
+                    f"{clause}`. Used bare, it does not match that form and silently reads as "
+                    f"a field on an undefined variable named `random` instead.",
+                    getattr(node, 'line', 0) or 0,
+                    f"Add the clause: `random.{parts[1]} {clause}`.",
+                ))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    walk(getattr(program, 'statements', None) or [])
+    return errors
+
+
+def scan_mixed_connector_chain(program):
+    """CR (ruled): a mixed `and`/`or` chain in the general `condition` rule has no defined
+    grouping in Mohio and must be a check-time error, not silently resolved.
+
+    `condition: ... | NOT condition -> cond_not | condition AND condition -> cond_and |
+    condition OR condition -> cond_or | value_expr -> cond_bool` (mohio_data/mohio.lark:2727-2730)
+    is one self-recursive rule with no precedence declared between AND and OR, so a flat mixed
+    chain like `a and b or c` has multiple valid derivations and Earley's ambiguity resolution
+    picks ONE silently (confirmed by direct AST dump this session: `a AND (b OR c)`, the OPPOSITE
+    of the C-family convention every language this reads like uses). Mohio has no
+    developer-writable grouping for conditions (parens are math-only), so there is no way to WRITE
+    the grouping you meant -- the fix is to split into a check/when block, not to add parens.
+
+    This is the single general `condition` rule reached everywhere `AndCondition`/`OrCondition`
+    nodes appear -- `if`/`unless`/`while` guards, `check ... when` guards, trailing `IF condition`
+    qualifiers, `modify`'s `WHERE condition` (T0-1's fix site: confirmed the SAME `_eval_condition`
+    evaluator), `rerun until`, `stop`/`skip ... when`, and more -- so walking the AST for the node
+    SHAPE (rather than special-casing each statement type that can carry one) catches all of them
+    uniformly, matching how `_eval_condition` evaluates all of them uniformly at runtime.
+
+    MioQL's `where`/`match` clauses are a COMPLETELY SEPARATE grammar path (block form:
+    `match`/`match any`/`no.match`, or repeated `where` lines) that never produces an
+    AndCondition/OrCondition node at all (confirmed by reading the grammar and by this session's
+    connector-reach survey) -- so a legitimate `find`/`retrieve` query is structurally unreachable
+    by this scanner, not just untested.
+    """
+    from dataclasses import fields, is_dataclass
+    from mohio_ast import AndCondition, OrCondition, NotCondition
+    errors = []
+
+    def connector_types(node, seen):
+        """Every connector type ('and'/'or') anywhere in this condition subtree, transparent
+        through NOT (a bare `not (a and b)` is not itself mixed -- only a real and+or chain is)."""
+        if node is None or id(node) in seen:
+            return set()
+        seen.add(id(node))
+        if isinstance(node, AndCondition):
+            return {'and'} | connector_types(node.left, seen) | connector_types(node.right, seen)
+        if isinstance(node, OrCondition):
+            return {'or'} | connector_types(node.left, seen) | connector_types(node.right, seen)
+        if isinstance(node, NotCondition):
+            return connector_types(node.condition, seen)
+        return set()
+
+    def walk(node, seen):
+        if node is None or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item, seen)
+            return
+        if not is_dataclass(node):
+            return
+        if isinstance(node, (AndCondition, OrCondition)):
+            # The first AndCondition/OrCondition reached walking top-down is always the ROOT of
+            # its chain (a root can't be a descendant of another connector in one recursive
+            # tree), so checking it here and NOT descending further avoids re-examining --
+            # and re-reporting -- the same chain again from an inner node's own perspective.
+            if len(connector_types(node, set())) > 1:
+                errors.append(CompileError(
+                    "a mixed and/or chain has no defined grouping in Mohio -- the block "
+                    "structure is the logic, there is no operator precedence between `and` and "
+                    "`or`. Use all-`and` or all-`or` in one chain, or split the logic into a "
+                    "check/when block.",
+                    getattr(node, 'line', 0) or 0,
+                    "Rewrite as `a and b and c` / `a or b or c`, or use `check ... when a and b "
+                    "/ when c / otherwise ...` to write the grouping you actually mean.",
+                ))
+            return
+        for f in fields(node):
+            walk(getattr(node, f.name, None), seen)
+
+    walk(getattr(program, 'statements', None) or [], set())
+    return errors
+
+
 ERROR_SCANS = (
     scan_give_destination,
     scan_orphan_it,
@@ -1127,6 +1243,8 @@ ERROR_SCANS = (
     scan_undeclared_shapes,
     scan_miofile_dangerous_accept,
     scan_upload_accept_groups,
+    scan_bare_random_intrinsic,
+    scan_mixed_connector_chain,
 )
 
 def scan_audit_grade_requirement(program):
@@ -1465,6 +1583,65 @@ def scan_cookie_samesite_none_insecure(program):
     return warnings
 
 
+def scan_transaction_onfailure_futile(program):
+    """Warn when `on.failure` appears on a write inside a `transaction` block.
+
+    T0-4 / FORK-8 (ruled): a transaction is atomic regardless of a caught failure inside it.
+    A write's own `on.failure` may still run -- the handler fires as written -- but it does NOT
+    rescue the transaction: any failed write still rolls back the WHOLE block, completed writes
+    included. Written this way, `on.failure` reads like local damage control, and it is not one;
+    surfacing that at check time is considerably better than a developer discovering it from a
+    partial-write incident.
+    """
+    from dataclasses import fields, is_dataclass
+    from mohio_ast import TransactionBlock, OnFailure
+    warnings = []
+
+    def find_onfailure(node, seen):
+        if node is None or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                find_onfailure(item, seen)
+            return
+        if not is_dataclass(node):
+            return
+        if isinstance(node, OnFailure):
+            warnings.append(CompileWarning(
+                "on.failure inside a transaction cannot rescue it -- the handler may run, but "
+                "the whole transaction still rolls back if any write inside it fails. This is "
+                "intentional (a transaction is atomic): a caught failure here does not mean "
+                "the transaction survived.",
+                getattr(node, 'line', 0) or 0,
+                "Move failure handling outside the transaction if you need to react to the "
+                "rollback, or remove on.failure -- the transaction's own rollback already "
+                "covers the failure.",
+                'transaction_onfailure_futile',
+            ))
+        for f in fields(node):
+            find_onfailure(getattr(node, f.name, None), seen)
+
+    def find_transactions(node, seen):
+        if node is None or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                find_transactions(item, seen)
+            return
+        if not is_dataclass(node):
+            return
+        if isinstance(node, TransactionBlock):
+            find_onfailure(node.body, set())
+            return   # do not also scan for nested transactions inside this one
+        for f in fields(node):
+            find_transactions(getattr(node, f.name, None), seen)
+
+    find_transactions(getattr(program, 'statements', None) or [], set())
+    return warnings
+
+
 WARNING_SCANS = (
     scan_sector_route_unauthenticated,
     scan_unreachable,
@@ -1474,6 +1651,7 @@ WARNING_SCANS = (
     scan_miofile_zone_coverage,
     scan_grant_role_client_source,
     scan_cookie_samesite_none_insecure,
+    scan_transaction_onfailure_futile,
 )
 
 

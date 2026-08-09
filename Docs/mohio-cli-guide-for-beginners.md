@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # The `mio` command line — a starter guide
 
 Written for someone who has never used a command line before. If you already know what a

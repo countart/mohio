@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Audit persistence: framework-driven grade, and NEVER halt the institution on a blip.
 
 The audit guarantee is keyed on the activated compliance FRAMEWORKS (profile.compliance), not the

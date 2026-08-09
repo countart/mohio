@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """AI hard failure vs genuine low confidence must never share a behavior (2026-08-04).
 
 Ruling: `ai.decide`'s "no failure ever escapes" guarantee conflated two different
@@ -33,7 +33,7 @@ from pathlib import Path
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
-from mohio_ai import AnthropicAiRuntime, AiProviderError, _parse_response
+from mohio_ai import AnthropicAiRuntime, AiProviderError, _parse_response, CompletionResult
 
 import mohio_data
 _RAW = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
@@ -99,7 +99,7 @@ except AiProviderError:
 rt3 = AnthropicAiRuntime.__new__(AnthropicAiRuntime)
 rt3._overrides = {}; rt3._chains = {}; rt3._verbose = False; rt3._model = "claude-sonnet-4-6"
 rt3._calls = 0; rt3._call_cap = 0
-rt3._complete = lambda *a, **k: '{"result": true, "confidence": 0.40, "explanation": "unsure"}'
+rt3._complete = lambda *a, **k: CompletionResult(text='{"result": true, "confidence": 0.40, "explanation": "unsure"}')
 decision = rt3.decide(name="x", inputs={}, threshold=0.85, return_type="boolean")
 check("a genuine low-confidence answer returns normally (unchanged, does not raise)",
       decision.fell_back is True and decision.result is True and decision.confidence == 0.40,

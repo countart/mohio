@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Regression for three gaps surfaced by dogfooding the world validator:
   GAP 1 — the object builder was dead at runtime (no transformer emitted the
           node) and the grammar greedily nested sibling fields. Now: flat

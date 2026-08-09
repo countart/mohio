@@ -1,9 +1,9 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 mohio_transformer.py
 Mohio Language -- Parse Tree Validator + Compile-Time Enforcement
-Version: 3.8.0 | May 2026 | Particular LLC
+Version: 3.8.0 | August 2026 | Particular LLC
 """
 
 from __future__ import annotations

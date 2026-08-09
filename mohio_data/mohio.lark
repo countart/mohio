@@ -1,5 +1,5 @@
 // Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 // ============================================================================
 // GRAMMAR CHANGES REQUIRE RONNIE'S APPROVAL. NO EXCEPTIONS.
 //
@@ -40,8 +40,8 @@
 
 // ═══════════════════════════════════════════════════════════════
 // Mohio Grammar — v3.8
-// LDD source: v3.8 | MioQL source: v1.0 | May 2026
-// Particular LLC · Apache 2.0
+// LDD source: v3.8 | MioQL source: v1.0 | August 2026
+// Particular LLC · BSL 1.1
 //
 // CRITICAL RULES (from design-decisions.md and LDD v3.8):
 //   1. `if` is RETIRED as a block opener — trailing qualifier ONLY
@@ -951,10 +951,16 @@ debug_checkpoint: DEBUG_KW "." CHECKPOINT_KW STRING debug_log_stmt* closer
 
 journey_decl: JOURNEY NAME? journey_body* closer
 
-journey_body: _SERVES ":" ("single tenant" | "multiple tenants")
-            | _PUBLIC   ":" path_list
-            | _PRIVATE  ":" path_list
-            | _FLOW     ":" path_list
+// The four alternatives below are aliased (-> ...) so the transformer can tell them
+// apart: `_PUBLIC`/`_PRIVATE`/`_FLOW` are all underscore-filtered terminals, so
+// `public: /a` and `private: /a` and `flow: /a` would otherwise reduce to an
+// identical `path_list` tree with no trace of which keyword produced it (found
+// 2026-08-06, same shape as ai_agent_body's max-steps/max-cost collision, same fix).
+journey_body: _SERVES ":" "single tenant"    -> journey_serves_single
+            | _SERVES ":" "multiple tenants" -> journey_serves_multiple
+            | _PUBLIC   ":" path_list -> journey_public
+            | _PRIVATE  ":" path_list -> journey_private
+            | _FLOW     ":" path_list -> journey_flow
             | languages_block
             | enterprise_block
             | debug_decl
@@ -1985,9 +1991,18 @@ ai_agent_body: ai_prompt_opts
              | _GOAL    STRING               // what the agent is trying to accomplish
              | _TOOLS   name_list            // tools the agent can use
              | _MEMORY  NAME                 // persistent memory source
-             | _MAX _STEPS NUMBER           // iteration limit
-             | _MAX _COST NUMBER            // cost ceiling in USD
-             | _MAX _TIME NUMBER time_unit  // time limit
+             // RETIRED (2026-08-06): these three inline clauses were a whole abandoned
+             // shorthand -- never wired to anything, and mio check's own required-limits
+             // validation never recognized them as satisfying that requirement either, so
+             // no developer could ever have used them successfully. The `limits` block
+             // (limits_block below) is the one real, working form; each alternative here
+             // gets its own -> alias (same technique limits_body already uses) so the
+             // transformer can tell "max steps" from "max cost" apart, since both would
+             // otherwise reduce to an indistinguishable bare NUMBER after the underscore-
+             // filtered _MAX/_STEPS/_COST terminals are dropped.
+             | _MAX _STEPS NUMBER           -> ai_agent_max_steps_shorthand
+             | _MAX _COST NUMBER            -> ai_agent_max_cost_shorthand
+             | _MAX _TIME NUMBER time_unit  -> ai_agent_max_time_shorthand
              | on_failure_handler
              | on_success_handler
              | tools_block

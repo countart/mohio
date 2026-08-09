@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """The acceptance test the durable session-store seam brief actually asks for
 (design-brief-durable-session-store-seam.md, acceptance criterion 1) -- not a unit test,
 not a mocked interpreter call. Kill a REAL `mio serve` process mid-session, start a FRESH
@@ -83,7 +83,7 @@ shape LoginRequest
 shape: done
 
 listen for
-    new sh.LoginRequest
+    new sh.LoginRequest at /l
         check command
             when "login"
                 grant role "admin"

@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Talking to the Outside World: mioconnect
 
 Most real programs need to reach an external service at some point. Charge a card,

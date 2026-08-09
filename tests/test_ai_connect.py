@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 ai.connect multi-provider test suite.
 
@@ -89,7 +89,7 @@ def test_provider_dispatch():
     rt._complete_gemini = lambda model, *a, **k: routed.update(gemini=model) or "gemini-resp"
 
     a = rt._complete("claude-sonnet-4-6", "s", "u")
-    check("claude-* -> anthropic", a.startswith("{"), True)
+    check("claude-* -> anthropic", a.text.startswith("{"), True)
     rt._complete("gpt-4o", "s", "u")
     check("gpt-4o -> openai", routed.get("openai"), "gpt-4o")
     rt._complete("gemini-1.5-pro", "s", "u")

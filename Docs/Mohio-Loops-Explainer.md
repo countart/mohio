@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Loops in Mohio
 
 A loop repeats a piece of work. Mohio has four loop shapes, each named for the thing that controls it, plus a flexible `stop` for breaking out. Every example here is verified against the current compiler.

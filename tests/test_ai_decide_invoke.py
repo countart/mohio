@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Bare `ai.decide <name>` invocation runs a previously-defined ai.decide block and
 binds the result to a variable named <name>. This is Zork's define-at-top /
 invoke-deep pattern (the self-healing noun resolver). Regression guard for the

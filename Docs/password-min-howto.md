@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Setting and changing a password minimum
 
 The password rule lives on the field in the shape. There is no hidden global
@@ -66,3 +66,6 @@ save: done
 
 `bcrypt` is in requirements for production. `pbkdf2` is also supported and uses
 only the standard library.
+
+For the other half — checking a login attempt against that stored hash and
+granting a role on success — see `password-login-howto.md`.

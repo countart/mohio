@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """`miocookie.set` emits Set-Cookie on EVERY serving path, identically (2026-08-01 fix).
 
 It worked on the `new sh.X` listener path but SILENTLY DROPPED the cookie on the

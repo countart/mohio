@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 Postgres backend verification — pagination, writes, and single-record fetch run
 against a REAL Postgres server (the production database engine), not sqlite.

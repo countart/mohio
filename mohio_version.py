@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """The version. ONE source.
 
 `mio serve` bannered v0.3.8 while /mio/health reported "version": "0.4.4" -- two
@@ -12,7 +12,7 @@ tests/test_structural_invariants.py fails loud if anything starts to.
 """
 
 # The compiler/CLI release.
-VERSION = "0.4.8"
+VERSION = "4.8.2"
 
 # The LANGUAGE spec this build implements. A different thing, deliberately: the toolchain
 # ships faster than the language changes.

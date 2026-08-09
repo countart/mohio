@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """`save or update` (upsert) UPDATES an existing row, it does NOT insert a duplicate.
 
 Locks the upsert idempotency invariant explicitly: N upserts on one match key leave ONE row holding

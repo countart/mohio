@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Check-time warning: `grant role` from a client-controlled value (auth sweep item 5, 2026-08-02).
 
 `grant role` writes a VERIFIED server-side role. If the role value comes straight from the

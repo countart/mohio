@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Tombstone row_ref rule (D2) -- identify WHICH row was erased, never reversibly.
 
 Ratified rule: the row reference in a TOMBSTONE is the PK `id` in the clear (a surrogate key, not

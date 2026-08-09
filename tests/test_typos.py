@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Regression guard for scan_typos: statement-leading assignments one edit from
 an action verb should warn ('did you mean show?'), while clean code and real
 variable names must not. Locks both the edit-distance helper and the AST pass."""

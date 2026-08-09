@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """ai.agent's tool-enabled path (agent_turn) now shares mohio_ai.DEFAULT_ANTHROPIC_MODEL as its
 undeclared-model fallback instead of a second, independently hardcoded copy
 ("claude-sonnet-4-20250514", confirmed dead against the live API 2026-08-05 -- a real

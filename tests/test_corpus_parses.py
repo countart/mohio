@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Corpus-parse gate: every shipped, pioneer-facing .mho must parse (mio check exit 0).
 
 Why this exists: two cookbook recipes once shipped with committed git merge-conflict markers

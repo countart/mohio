@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """The audit trail is hash-chained, and the chain is verifiable.
 
 Before this, every audit record carried `audit_id` -- a digest of its OWN contents. That proves a
@@ -151,8 +151,29 @@ check("the chaining helper is the only writer of audit rows",
 # "detects an outsider editing records" into "detects the owner truncating or restarting the
 # log" -- neither of which breaks the chain internally.
 it, db = build(4)
-check("audit logs are discoverable without knowing the app's schema",
-      it.audit_logs(db) == ['log'], str(it.audit_logs(db)))
+# T0-2: discovery now requires BOTH the chain-column shape AND the compiler's audit-table
+# naming convention (is_audit_table) -- a bare 'log' (this file's own fixture name, chosen
+# for brevity, not a name any real Mohio program's _audit_event call site ever uses) is no
+# longer enough by itself; that gap is exactly what let an ordinary, unrelated table named
+# `recs` get reported as a broken hash chain. Discovery is proven here against a real
+# canonical name instead -- 'data_audit_log', the actual name every general-purpose audit
+# write in the interpreter uses (mohio_interpreter.py:7044 etc).
+_disc_db = DbRuntime(':memory:')
+it._audit_event('data_audit_log', {'event': 'e0', 'agent': 'a'},
+                 type('C', (Context,), {'get_connection': lambda self, _n: _disc_db})())
+# Decoy: an ordinary table, never written by any audit writer, with the same three column
+# names the chain-column probe looks for (the exact `recs` shape) but a name that matches no
+# audit-table convention. Without this decoy present, discovery could pass by proving only
+# under-detection is guarded (a real log is still found) while over-detection (a look-alike
+# wrongly admitted) goes untested -- which is exactly how the `recs` false positive shipped.
+_disc_db.conn.execute(
+    'CREATE TABLE recs (id INTEGER PRIMARY KEY, audit_id TEXT, prev_hash TEXT, entry_hash TEXT)')
+_disc_db.conn.execute(
+    "INSERT INTO recs (audit_id, prev_hash, entry_hash) VALUES ('r1','not-a-hash-1','not-a-hash-2')")
+_disc_db.conn.commit()
+check("audit logs are discoverable by the compiler's real naming convention, not just column "
+      "shape -- AND a column-shape-only look-alike under a non-audit name is excluded",
+      it.audit_logs(_disc_db) == ['data_audit_log'], str(it.audit_logs(_disc_db)))
 h1 = it.audit_chain_head(db, 'log')
 check("chain head is exposed", len(h1['head']) == 64 and h1['entries'] == 4, str(h1))
 db.conn.execute("DELETE FROM log WHERE rowid=(SELECT MAX(rowid) FROM log)"); db.conn.commit()

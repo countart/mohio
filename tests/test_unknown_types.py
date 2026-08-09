@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """A type slot takes a known type or a declared shape. Nothing else.
 
 THE DRIFT GENERATOR: `type_name` accepts a bare NAME (it must -- `sh.Order` arrives that

@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Model resolution order: explicit call > active chain > app default (2026-08-04 ruling,
 Stage 3 of the model-selection sequence).
 
@@ -35,7 +35,7 @@ from pathlib import Path
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
-from mohio_ai import AnthropicAiRuntime
+from mohio_ai import AnthropicAiRuntime, CompletionResult
 
 import mohio_data
 _RAW = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
@@ -58,7 +58,7 @@ def make_rt():
 # ── (a) explicit override wins over an active, RESOLVED chain ──────────────────────
 rt_a = make_rt()
 rt_a._complete = lambda model, s, u, temperature=None, max_tokens=None: (
-    "ok" if u == "ping" else '{"result": true, "confidence": 0.9, "explanation": "x"}')
+    "ok" if u == "ping" else CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "x"}'))
 chain_a = rt_a.register_chain("chain_a", ["gpt-4o"])
 rt_a.resolve_chain("chain_a")
 check("chain_a resolved successfully (precondition)",
@@ -71,7 +71,7 @@ check("(a) explicit model_override WINS over a resolved chain (was: chain won, b
 # ── (b) chain still works normally when no override is given (regression) ──────────
 rt_b = make_rt()
 rt_b._complete = lambda model, s, u, temperature=None, max_tokens=None: (
-    "ok" if u == "ping" else '{"result": true, "confidence": 0.9, "explanation": "x"}')
+    "ok" if u == "ping" else CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "x"}'))
 chain_b = rt_b.register_chain("chain_b", ["gpt-4o"])
 rt_b.resolve_chain("chain_b")
 d_b = rt_b.decide(name="x", inputs={}, threshold=0.85, return_type="boolean",
@@ -82,7 +82,7 @@ check("(b) a resolved chain is still used normally when NO override is given",
 # Regression: no override, no chain -> app default (self._model) used, unaffected.
 rt_b2 = make_rt()
 rt_b2._complete = lambda model, s, u, temperature=None, max_tokens=None: (
-    '{"result": true, "confidence": 0.9, "explanation": "x"}')
+    CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "x"}'))
 d_b2 = rt_b2.decide(name="x", inputs={}, threshold=0.85, return_type="boolean")
 check("regression: no override, no chain -> app default (self._model) used",
       d_b2.model == "claude-sonnet-4-6", d_b2.model)

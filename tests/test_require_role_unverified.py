@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """require role ignores the client `_roles` payload entirely (auth rebuild Item 1, 2026-08-02).
 
 History: the caller's roles used to arrive in the request `_roles` field, which the client fully

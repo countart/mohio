@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 test_session_id_decision.py
 
@@ -67,7 +67,7 @@ PROGRAM = '''shape P
 shape: done
 
 listen for
-    new sh.P
+    new sh.P at /p
         first  session.id
         second session.id
         player_session session.id

@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Check-time fail-loud guards: orphan `it` (§3) and plain `miopublish` (§1) must make
 `mio check` exit 1, not pass silently or only fail at runtime."""
 import subprocess, sys, os, tempfile

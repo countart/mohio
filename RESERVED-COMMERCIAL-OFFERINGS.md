@@ -1,7 +1,7 @@
 # Reserved Commercial Offerings
 
 Copyright © 2026 Particular LLC. All rights reserved.
-Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 
 This file identifies MOHIO-related products, services, features, and offering categories that are reserved commercial offerings of Particular LLC.
 

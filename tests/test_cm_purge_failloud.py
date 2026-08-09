@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """cm.purge must fail loud on a failed delete and never write a false/empty tombstone (triage #1).
 
 Right-to-be-forgotten silently reporting success on a delete that did not happen -- and then writing

@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Shape-on-listener: `listen for sh.X [at /path]` binds the shape directly.
 
 Decision 1: the shape binds on the listener; the body IS the handler; `listen: done`
@@ -61,8 +61,12 @@ def test_shape_on_listener_with_path():
 
 def test_shape_on_listener_no_path():
     print("\n=== listen for sh.X (no path) routes by shape ===")
+    # T0-3: a pathless listener binds to `/` exactly, not any path -- this test's own _run()
+    # default posts to /x, which is now correctly refused for a pathless listener. Route the
+    # dispatch to / (the real path a pathless listener answers) rather than pin `at /x` on the
+    # source, since this case is specifically testing the pathless (shape-only) form.
     p = _SHAPE + 'listen for sh.S\n    give back 200 "by-shape"\nlisten: done\n'
-    check("routes by shape", _run(p), "by-shape")
+    check("routes by shape", _run(p, path="/"), "by-shape")
 
 def test_new_wrapper_back_compat():
     print("\n=== new wrapper still routes (back-compat until Zork migrates) ===")

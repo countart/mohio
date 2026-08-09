@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Language — Primitives & Modifiers Reference
 
 >> **Deprecated (2026).** This v3.6 reference is superseded by the generated
@@ -678,6 +678,6 @@ The prefix system never translates — it is the structural guarantee. Vocabular
 ---
 
 *Mohio Language — Primitives & Modifiers Reference*
-*Version 3.6 · April 2026 · Particular LLC · Apache 2.0*
+*Version 3.6 · April 2026 · Particular LLC · BSL 1.1*
 *LDD v3.6 is the authoritative source. When this document and the LDD conflict, the LDD wins.*
 *Full service appendices and design decisions available via the Pioneer Program — mohio.io*

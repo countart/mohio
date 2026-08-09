@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Zork plays end to end after the session-lifecycle migration (2026-08-04), over a
 real `mio serve` subprocess with a real Postgres-backed, seeded world -- not a unit
 test, not a mocked interpreter call. This is the adversarial proof the brief and the

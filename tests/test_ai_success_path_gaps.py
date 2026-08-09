@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Two confirmed success-path gaps closed (2026-08-04), found during the AI success-path
 rigor audit -- both had zero test coverage of any kind before this file, confirmed by a
 live mutation against the real code that nothing in the 219-file suite caught.

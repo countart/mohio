@@ -235,7 +235,7 @@ sector: healthcare   // aspirational: HIPAA, HITECH, PHI fields, 6-year retentio
 
 `sector: healthcare` would know what `mrn`, `npi`, `diagnosis`, and `prescription` are. Would know clinical AI requires 0.95 confidence and human review. Would know PHI is retained 6 years.
 
-The enforcement *mechanism* is wired and demonstrated above with the community profile. **Certified** sector profiles — legally reviewed and maintained, with rules like the ones sketched above — are a separate, commercial tier arriving after formal compliance review. See [Current state](#current-state--v421).
+The enforcement *mechanism* is wired and demonstrated above with the community profile. **Certified** sector profiles — legally reviewed and maintained, with rules like the ones sketched above — are a separate, commercial tier arriving after formal compliance review. See [Current state](#current-state).
 
 ### 3 — The code reads like you wrote it in English
 
@@ -385,7 +385,9 @@ held back pending a provisional patent filing.)
 
 ---
 
-## Current state — v4.2.1
+## Current state
+
+Current release: 4.8.2
 
 Mohio is built in the open and moving fast — the compiler updates multiple times a
 day. The core language is solid and tested; the surface around it is filling in.
@@ -538,6 +540,6 @@ For licensing: **hello@mohio.io**
 
 **Mohio Language Project · Particular LLC · BSL 1.1**
 
-*v4.8 · Write intent. Execute reason. See everything.*
+*4.8.2 · Write intent. Execute reason. See everything.*
 
 </div>

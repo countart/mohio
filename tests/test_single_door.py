@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Single-door enforcement: prove `mio check` goes THROUGH mohio_enforce.enforce() (audit #2).
 
 The audit's point: a test that only shells out to `mio.py check` proves nothing about the

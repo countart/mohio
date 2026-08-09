@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """AST-cache lifecycle: a file that passes Layer 1 but fails a later layer must NEVER create a
 reusable clean cache that bypasses the failing layer on the next `mio check` (audit finding #3).
 

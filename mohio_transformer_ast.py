@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 mohio_transformer.py
 Mohio Language -- Parse Tree -> AST Transformer
@@ -1752,19 +1752,53 @@ class MohioTransformer(Transformer):
     # everything the journey declared. See Docs/journey-page-design-2026-06-17.md.
 
     def path_list(self, children):
-        # public:/private:/flow: path lists. The leading keyword is a bare string
-        # terminal that Lark drops, so the three cannot be told apart after parse
-        # (folded into A8 security/access design). Carry the paths as inert
-        # metadata the executor ignores -- never a raw Tree (which would fail loud)
-        # and never something executable.
-        paths = [str(c) for c in children
-                 if isinstance(c, Token) and c.type in ('PATH_LIT', 'STRING')]
-        return JourneyMeta(kind='path_list', value=paths)
+        # Just the raw path strings. Which keyword (public:/private:/flow:) this
+        # list belongs to is now told apart at the journey_body alias level (each
+        # of the three got its own -> alias, 2026-08-06) -- path_list itself no
+        # longer needs to guess, it only ever builds the list.
+        return [str(c) for c in children
+                if isinstance(c, Token) and c.type in ('PATH_LIT', 'STRING')]
+
+    # journey-level access-control metadata (2026-08-06). Each of the five aliased
+    # journey_body alternatives now produces a correctly-tagged JourneyMeta -- never
+    # silently collapsed into the same 'path_list' kind the way all three used to be,
+    # and never dropped to None the way serves: used to be. private:/public: are read
+    # and enforced by _exec_JourneyDecl (real, server-verified-session-based). flow:
+    # is captured but still not interpreted -- no documented source of truth for its
+    # intended behavior exists anywhere in this repo (the design doc _exec_JourneyDecl
+    # itself cites, Docs/journey-page-design-2026-06-17.md, has never existed in git
+    # history), so building a guessed runtime meaning for it was deliberately not done
+    # here; only "no longer indistinguishable from public:/private:" was in scope.
+    # serves: is captured with its real declared value but likewise not yet enforced --
+    # real tenant isolation needs a way to establish a request's tenant identity that
+    # does not exist anywhere in the language today (no grant-tenant-shaped primitive),
+    # which is new grammar, not a wiring fix, so it stops here pending that ruling.
+    def journey_public(self, children):
+        paths = next((c for c in children if isinstance(c, list)), [])
+        return JourneyMeta(kind='public', value=paths)
+
+    def journey_private(self, children):
+        paths = next((c for c in children if isinstance(c, list)), [])
+        return JourneyMeta(kind='private', value=paths)
+
+    def journey_flow(self, children):
+        paths = next((c for c in children if isinstance(c, list)), [])
+        return JourneyMeta(kind='flow', value=paths)
+
+    def journey_serves_single(self, children):
+        return JourneyMeta(kind='serves', value='single tenant')
+
+    def journey_serves_multiple(self, children):
+        return JourneyMeta(kind='serves', value='multiple tenants')
 
     def journey_body(self, children):
         # Each journey_body wraps exactly one item (declaration / statement /
-        # path_list) already transformed by the time we get here. `serves:` and the
-        # like drop to empty -> None (filtered out by journey_decl).
+        # JourneyMeta) already transformed by the time we get here. Historical note:
+        # serves:/public:/private:/flow: used to drop to empty -> None here (serves:)
+        # or collapse into an indistinguishable generic 'path_list' kind (the other
+        # three) -- fixed 2026-08-06 via the five journey_body aliases above, which
+        # now each produce their own correctly-tagged JourneyMeta before reaching
+        # this generic wrapper.
         return children[0] if children else None
 
     def journey_decl(self, children):
@@ -5551,6 +5585,43 @@ class MohioTransformer(Transformer):
             model=ai_opts['model'],
         )
 
+    # RETIRED (2026-08-06): the inline `max steps`/`max cost`/`max time` shorthand inside
+    # ai.agent's body. Confirmed empirically before retiring: not a small gap, a whole
+    # abandoned syntax family -- none of the three had any transformer handling at all
+    # (a raw, untransformed Tree fell through to the generic unwired-construct scan), and
+    # mio check's own required-limits validation never recognized the shorthand as
+    # satisfying "ai.agent needs a limits declaration" either, so no developer could ever
+    # have used it successfully. The `limits` block is the one real, working form.
+    # Grammar productions are KEPT (aliased via -> so the transformer can tell the three
+    # apart, since the underscore-filtered terminals leave an otherwise-identical bare
+    # NUMBER for steps vs cost) so each message is precise, not a raw parse failure --
+    # tested directly: removing the grammar alternatives instead produces a bare
+    # "No terminal matches" error with no redirect at all, the wrong outcome here.
+    def ai_agent_max_steps_shorthand(self, children):
+        n = next((str(c) for c in children if isinstance(c, Token)), "N")
+        raise MohioCompileError(
+            f"`max steps {n}` written directly in an ai.agent body is retired: it was never "
+            f"wired to anything. Declare it in the limits block instead:\n"
+            f"    limits\n        max steps {n}\n    limits: done")
+
+    def ai_agent_max_cost_shorthand(self, children):
+        n = next((str(c) for c in children if isinstance(c, Token)), "N")
+        raise MohioCompileError(
+            f"`max cost {n}` written directly in an ai.agent body is retired: it was never "
+            f"wired to anything. Declare it in the limits block instead:\n"
+            f"    limits\n        cost ceiling {n}\n    limits: done")
+
+    def ai_agent_max_time_shorthand(self, children):
+        toks = [str(c) for c in children if isinstance(c, Token)]
+        n = toks[0] if toks else "N"
+        unit_node = _first_tree(children, 'time_unit')
+        unit = _token_str(unit_node) if unit_node else (toks[1] if len(toks) > 1 else "seconds")
+        raise MohioCompileError(
+            f"`max time {n} {unit}` written directly in an ai.agent body is retired: it was "
+            f"never wired to anything. The limits block's equivalent is `timeout`, not "
+            f"`max time`:\n"
+            f"    limits\n        timeout {n} {unit}\n    limits: done")
+
     def ai_agent_block(self, children):
         from mohio_ast import AiAgentBlock, ToolsBlock
         name_tok = next((c for c in children
@@ -5840,7 +5911,7 @@ class MohioTransformer(Transformer):
         content = vals[1] if (op == 'write' and len(vals) > 1) else None
         dest    = vals[1] if (op in ('move', 'copy') and len(vals) > 1) else None
         return MiofileStmt(op=op, path=path, content=content, dest=dest, alias=alias, line=line)
-    def mioauth_stmt(self, children):   return None
+    def mioauth_stmt(self, children):   return self._not_built_service(children, "mioauth")
     def mioauth_body(self, children):   return children
     def mioresponse_stmt(self, children): return self._not_built_service(children, "mioresponse")
     def miostream_stmt(self, children): return self._not_built_service(children, "miostream")
@@ -5958,7 +6029,7 @@ class MohioTransformer(Transformer):
     def miomail_sender_body(self, children): return children
     def miomail_sender_ref(self, children): return children
 
-    def mioauth_decl(self, children): return None
+    def mioauth_decl(self, children): return self._not_built_service(children, "mioauth")
     def mioauth_provider_body(self, children): return children
     def mioauth_password_body(self, children): return children
     def mioauth_mfa_body(self, children): return children
@@ -6031,7 +6102,7 @@ class MohioTransformer(Transformer):
         collection = None
         condition = None
         field_changes = []
-        cond_types = ('Condition', 'And', 'Or', 'Not')
+        cond_types = ('Condition', 'AndCondition', 'OrCondition', 'NotCondition')
         for c in children:
             if isinstance(c, (Token, Closer)):
                 continue

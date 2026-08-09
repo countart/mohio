@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """3a: a declared `save ... unless a, b exists` CREATES the real composite UNIQUE constraint.
 
 Ruled 2026-08-04. One source of truth: the key is stated once, at the write site, and the

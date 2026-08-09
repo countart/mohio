@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """A8 provider seam: the runtime activates on ANY provider key and routes ai.* to it (2026-07-31).
 
 Adversarial proof (no real network -- urllib is mocked, so it runs anywhere):

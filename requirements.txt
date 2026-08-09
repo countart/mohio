@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 # Mohio Language Compiler — Python dependencies
 # Install with: pip install -r requirements.txt
 
@@ -11,8 +11,19 @@ lark>=1.1.0
 # ai.create text. Bring your own key: set ANTHROPIC_API_KEY=sk-ant-...
 anthropic>=0.96.0
 
+# GPT's client-side tokenizer, for ai.agent's pre-call cost-cap estimate
+# (2026-08-06). OpenAI has no countTokens-style API the way Claude
+# (messages.count_tokens) and Gemini (:countTokens) do, so this is the
+# only accurate way to estimate a GPT call's input cost before it fires.
+# A character-count heuristic was considered and rejected: pre-call
+# refusal exists specifically to catch a breach before it happens, and an
+# inaccurate estimate defeats that either direction (wrongly refuses a
+# valid call, or wrongly lets a real breach through).
+tiktoken>=0.13.0
+
 # OpenAI and Gemini providers (used in ai.connect chains and ai.create
-# image/video) are called over plain HTTP — NO SDK install required.
+# image/video) are called over plain HTTP — NO extra SDK install required
+# for the calls themselves (tiktoken above is a tokenizer, not an SDK).
 # Just set the env keys when you actually use those providers:
 #   OPENAI_API_KEY   — gpt-*, o-series, gpt-image/dall-e, sora
 #   GEMINI_API_KEY   (or GOOGLE_API_KEY) — gemini-*, imagen, veo

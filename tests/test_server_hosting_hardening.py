@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Hosting hardening: this runtime serves OTHER PEOPLE'S apps on shared infrastructure.
 
 Everything here was a real finding in the 2026-07-18 hosting-readiness review. The server was
@@ -76,7 +76,12 @@ check("C1 session-id header is opt-in (off by default)",
 
 # ── C2 ────────────────────────────────────────────────────────────────────────────────
 check("C2 the app's own stylesheet is served", c.get('/style.css').status_code == 200)
-for src_file in ('mohio_server.py', 'mohio_interpreter.py', 'mohio.lark'):
+# 'mohio.lark' at repo root no longer exists (v4.8.1 moved it under mohio_data/), so that
+# check alone would pass even if C2 were broken -- there'd be nothing there to serve either
+# way. The real current-day grammar path is included too, derived from mohio_data.GRAMMAR_PATH
+# (never hardcoded) so this test keeps exercising a file that actually exists on disk.
+_grammar_rel = os.path.relpath(str(mohio_data.GRAMMAR_PATH), _ROOT).replace(os.sep, '/')
+for src_file in ('mohio_server.py', 'mohio_interpreter.py', 'mohio.lark', _grammar_rel):
     check(f"C2 compiler source /{src_file} is not served",
           c.get('/' + src_file).status_code != 200)
 

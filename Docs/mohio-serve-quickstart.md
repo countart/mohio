@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Running a Mohio App Locally
 ## One-Card Developer Guide
 ### mohio.io | github.com/countart/mohio
@@ -51,7 +51,7 @@ python mio.py serve tests/zork_demo.mho
 ```
 You should see:
 ```
-mio serve  v0.4.6
+mio serve  v4.8.2
 Loading tests/zork_demo.mho
 ...
 v  Server ready
@@ -185,4 +185,4 @@ python mio.py --help              # All commands
 
 ---
 
-*Mohio CLI v0.4.6 -- mohio.io*
+*Mohio CLI v4.8.2 -- mohio.io*

@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Outbound HTTP does not chase 3xx redirects into internal hosts (SSRF, S9, 2026-08-01).
 
 `urllib.urlopen` follows redirects by default, so an allowlisted public URL that returns

@@ -1,22 +1,27 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mohio"
-version = "0.4.8"
+version = "4.8.2"
 description = "Mohio, an AI-native language where AI reasoning and compliance are compiler-enforced primitives."
 requires-python = ">=3.10"
-dependencies = ["lark>=1.1.0", "anthropic>=0.96.0", "cryptography>=49.0.0"]
+dependencies = ["lark>=1.1.0", "anthropic>=0.96.0", "cryptography>=49.0.0", "tiktoken>=0.13.0", "bcrypt>=4.0", "nh3>=0.2.0"]
 
 [project.optional-dependencies]
-serve = ["fastapi>=0.110.0", "uvicorn>=0.30.0", "starlette>=0.37.0", "python-multipart>=0.0.9", "nh3>=0.2.0"]
+# RH-2: bcrypt and nh3 moved to base dependencies above -- a bare `pip install mohio` needs both
+# (a login program hashing a password, and any HTML the runtime sanitizes, work on install day
+# one). auth/serve stay declared, now empty/lighter, so `pip install mohio[auth]` /
+# `mohio[serve]` from an existing requirements file still resolves rather than erroring on an
+# unknown extra.
+serve = ["fastapi>=0.110.0", "uvicorn>=0.30.0", "starlette>=0.37.0", "python-multipart>=0.0.9"]
 postgres = ["psycopg2-binary>=2.9.0"]
 mongo = ["pymongo>=4.0.0"]
 mysql = ["pymysql>=1.1.0"]
-auth = ["bcrypt>=4.0"]
+auth = []
 
 [project.scripts]
 mio = "mio:main"

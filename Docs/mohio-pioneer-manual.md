@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Pioneer Program — Developer Manual
 **For Pioneers only · Pre-launch · mohio.io**
 
@@ -417,4 +417,4 @@ You'll be first to know. That's the deal.
 
 ---
 
-*MOHIO™ · Patent pending · Open core (Apache 2.0 base compiler) · Particular LLC · Mooresville, NC*
+*MOHIO™ · Patent pending · Open core (BSL 1.1 base compiler) · Particular LLC · Mooresville, NC*

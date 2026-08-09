@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """min/max shape-field enforcement (OQ-006) -- type-dependent dispatch guard.
 
 OQ-006 locked "one word, one job, different context" for min/max: the SAME two words mean whatever

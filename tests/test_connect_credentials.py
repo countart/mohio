@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """A connect source must be env.X or secret.X, never a literal string. A literal
 hardcodes a credential (e.g. a postgres URL with user:pass) and the string form also
 silently mis-parses into junk assignments so the connection never opens.

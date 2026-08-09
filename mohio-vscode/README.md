@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Language — VS Code extension
 
 Syntax highlighting for `.mho` files. Highlights keywords, the `ai.`/`mio*`/`cm.` namespaces, casts (`as.int`, `as.text`, ...), types, `{{ }}` interpolation, strings, numbers, `//` and `/* */` comments, and named closers (`task: done`).

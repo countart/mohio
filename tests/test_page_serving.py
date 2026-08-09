@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Endpoints that end in a `render` block serve the page as a proper HTTP response
 ({status, body:html-string, content_type:text/html}), not a raw MohioValue. API
 endpoints that `give back` keep returning {status, body}. Guards the page half of

@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """The CLI SQLite default must be a persistent file, with :memory: reachable only on purpose.
 
 Locks _resolve_sqlite_db_path: --memory -> throwaway, --db -> explicit, DATABASE_URL ->

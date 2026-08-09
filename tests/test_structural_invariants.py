@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """STRUCTURAL INVARIANTS -- the rules, enforced against the SOURCE, not against behaviour.
 
 WHY THIS FILE EXISTS
@@ -179,6 +179,43 @@ from mohio_version import VERSION as _V
 import mohio_server as _srv
 check("mohio_server takes its version from the single source",
       getattr(_srv, 'VERSION', None) == _V)
+
+# RH-4: pyproject.toml is a real THIRD source of the version string (setuptools reads it
+# directly to build the wheel/sdist metadata; mohio_version.py has no way to enforce it at
+# import time the way it enforces mio.py/mohio_server.py above). They agreed only because both
+# were hand-edited together at the same past point -- exactly how the published 0.4.8 wheel
+# shipped correctly-labeled while the source tree had already moved on, and how a FUTURE bump
+# could silently do the same in the other direction if this file only bumps one of the two.
+import tomllib as _tomllib
+with open(os.path.join(_ROOT, 'pyproject.toml'), 'rb') as _pf:
+    _pyproject_version = _tomllib.load(_pf)['project']['version']
+check("pyproject.toml's version matches mohio_version.VERSION (the one real source)",
+      _pyproject_version == _V,
+      f"pyproject.toml: {_pyproject_version!r}  vs  mohio_version.VERSION: {_V!r}")
+
+# The quoted-string scan above (check 6) looks for `"X.Y.Z"` next to the word "version" --
+# it never catches an UNQUOTED docstring banner like "Version: 0.3.8 | Language: v3.8 |
+# May 2026". That exact shape is how mio.py, mohio_interpreter.py, and mohio_ast.py drifted
+# two releases behind mohio_version.VERSION: nothing imports a docstring, so nothing forced
+# it to update when RH-1 bumped the real source. Scanned with src(), not code(), because
+# mohio_ast.py's banner is a full-line `#` comment that code() strips outright.
+#
+# Deliberately NOT a tree-wide scan. mohio_test_grammar.py/mohio_transformer.py carry a
+# "Version: 3.8.0" banner that tracks LANGUAGE_VERSION ("v3.8"), not VERSION -- a correct,
+# different axis, matching mio.py's own line which pairs "Version:" against a separate
+# "Language:" field on purpose. mohio_langmap.py/mohio_transformer_ast.py carry a
+# "Version: 0.1.0" banner that maps to neither axis -- an unresolved third number, flagged
+# for Ronnie, not silently fixed here. A blanket "any Version: X.Y.Z anywhere" scan would
+# false-positive on both and needed to be declined, not forced -- see PRODUCTION-BUILD-PLAN.md.
+_banner_files = ('mio.py', 'mohio_interpreter.py', 'mohio_ast.py')
+_stale_banners = []
+for f in _banner_files:
+    for i, line in enumerate(src(f).splitlines()):
+        m = re.search(r'Version:\s*(\d+\.\d+\.\d+)', line)
+        if m and m.group(1) != _V:
+            _stale_banners.append(f"{f}:{i+1}: {line.strip()}")
+check("no stale hardcoded 'Version:' docstring banner in the known release-axis files",
+      not _stale_banners, "\n".join(_stale_banners))
 
 # ---------------------------------------------------------------------------
 # 7. THE PARSER CACHE NEVER LEAVES A PARTIAL FILE.

@@ -1,8 +1,8 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 # mohio_ast.py
 # Mohio AST Node Types -- v3.8
-# Version: 0.3.8 | May 2026 | Particular LLC
+# Version: 4.8.2 | August 2026 | Particular LLC
 #
 # Every grammar rule that produces a meaningful semantic unit
 # maps to exactly one AST node class. The transformer emits
@@ -474,9 +474,15 @@ class JourneyDecl(Node):
 
 @dataclass
 class JourneyMeta(Node):
-    """Inert journey config/metadata (public/private/flow path lists). Carried so it
-    is never a raw Tree, but the interpreter ignores it. public/private/flow access
-    control is deferred to A8 (needs named grammar terminals)."""
+    """Journey-level config/metadata. kind is one of 'public'/'private'/'flow'
+    (value: a path list) or 'serves' (value: 'single tenant'/'multiple tenants').
+    public/private are read and enforced by _exec_JourneyDecl (2026-08-06, reusing
+    require role's server-verified-session mechanism). flow is captured but not
+    yet interpreted -- no documented source of truth for its intended runtime
+    behavior exists in this repo. serves is captured but not yet enforced -- real
+    tenant isolation needs a request-scoped tenant-identity primitive that does
+    not exist anywhere in the language today; both are open questions, not silent
+    no-ops (see the journey_body comment in mohio.lark)."""
     kind: str = ""
     value: object = None
 

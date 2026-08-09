@@ -1,10 +1,10 @@
 # LICENSE-SCOPE.md
 
-Release: 4.8
-Source-control tag: [insert the actual tag once cut, e.g. v4.8]
-First public distribution date: 2026-08-05
+Release: 4.8.2
+Source-control tag: v4.8.2
+First public distribution date: 2026-08-08
 License: Business Source License 1.1
-Change Date: 2030-08-05 (four years from first public distribution)
+Change Date: 2030-08-08 (four years from first public distribution)
 Change License: AGPL-3.0-or-later — match LICENSE
 
 ---
@@ -90,9 +90,50 @@ Demo profiles, not certified ones. Included: they teach the mechanism without ex
 **Rationale, and this one matters:** the LICENSE defines a Compliance-Reduced Build by reference to Normative Control Tests. If a licensee cannot run those tests, they cannot determine whether their modified build complies. Withholding the tests would make the central restriction unverifiable by the party bound by it.
 
 ### Documentation
-- `Docs/` — licensed under BSL, same as code. One license to manage rather than splitting code and docs across two license regimes.
+- `Docs/` — licensed under BSL, same as code, **for the files actually distributed in this
+  repository.** One license to manage rather than splitting code and docs across two license
+  regimes. This does NOT reach the private guides carved out below, and does NOT reach
+  `Docs/archive/` — see "Private docs excluded from the `Docs/` statement" and "`Docs/archive/`
+  excluded from the `Docs/` statement," both below.
 - `start-here/` — licensed under BSL, same as code.
 - `README.md`, `NOTICE`, `LICENSE`, `LICENSE-SCOPE.md`, `VERSIONS.md`, `TRADEMARKS.md`, `RESERVED-COMMERCIAL-OFFERINGS.md`
+
+#### `Docs/archive/` excluded from the `Docs/` statement
+
+`Docs/archive/` is internal development history — retired build logs and investigation records
+(`BUILD-LOG.md`, `BUILD-LOG-PROD.md`, `RECONCILIATION-2026-08-07.md` and similar) kept for our own
+reference, not authored as user-facing documentation and not part of the distributed Licensed Work.
+Unlike the private docs below, these files ARE git-tracked and DO ship in a clone or archive built
+from this repository — the exclusion here is a scope decision, not a distribution mechanism, and is
+stated explicitly for that reason rather than left to be inferred from `.gitignore`. Any release
+archive built from the `Docs/` statement should exclude `Docs/archive/` accordingly.
+
+#### Private docs excluded from the `Docs/` statement
+
+We license what we ship, not what we keep private. A file that is gitignored / private-repo-only
+never reaches a clone, a tag, or the wheel — the `Docs/` statement above cannot cover it no matter
+how it reads, so this section makes the exclusion explicit instead of leaving it implied by an
+untracked-file lookup nobody would think to do. If a file under `Docs/` is not in this
+repository's git history, it is not part of the Licensed Work, regardless of the blanket statement
+above. Applies to the following classes, all currently enforced by `.gitignore`:
+
+- **Private sector guides.** `Docs/sector-financial.md`, `Docs/sector-healthcare.md`. The
+  certified/official sector guides, distinct from the public demo profiles below.
+- **Private langmap working docs.** `Docs/*langmap*` — currently
+  `Docs/feature-langmap-layer2-resolver-2026-06-28.md`, `Docs/fix-langmap-direction-2026-06-26.md`,
+  `Docs/langmap-chat-hindi-grammar-prompt-2026-06-29.md`. Internal langmap design/debugging notes,
+  distinct from the public demo langmaps below.
+- **Private services.** Any documentation of hosted platform services, managed integrations, or
+  service backends — matching the existing "Files Excluded" categories below — is excluded from
+  `Docs/` on the same basis, whether or not a specific file exists in this repository today.
+- **Patent-status docs.** `Docs/patent-*` — currently `Docs/patent-implementation-status.md`.
+
+**What DOES ship, named explicitly so the line is not implied:** the demonstration langmaps
+(`mohio_data/maps/en-emoji.langmap`, `mohio_data/maps/en-klingon.langmap`) and demonstration
+sector profiles (`mohio_data/sectors/sector-demo-low.sector`,
+`mohio_data/sectors/sector-demo-high.sector`, `mohio_data/sectors/sector-demo-regulated.sector`),
+listed in full above under "Demonstration langmaps" and "Demonstration sector profiles." Those are
+tracked, public, and Licensed Work. Everything in this section is not.
 
 ---
 
@@ -147,6 +188,9 @@ The following are not included unless expressly listed above:
 - `examples/asseta/` — not shippable yet. Excluded, see above.
 - the local design spine and any pre-filing IP documents (gitignored, never distributed)
 - `.claude/` session configuration
+- private sector guides, private langmap working docs, private patent-status docs, and any private
+  service documentation under `Docs/` — gitignored, never distributed. Full detail and current
+  file list under "Private docs excluded from the `Docs/` statement," above.
 
 ---
 

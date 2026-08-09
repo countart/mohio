@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 test_miocookie_roundtrip.py
 
@@ -40,7 +40,7 @@ PROGRAM = '''shape Probe
 shape: done
 
 listen for
-    new sh.Probe
+    new sh.Probe at /probe
         check miocookie.exists "probe_cookie"
             when true
                 give back 200 "COOKIE SEEN"

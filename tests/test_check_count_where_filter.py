@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """`check count` (and `check exists`) honor a `where` filter, not just `match` (2026-08-03).
 
 Found during the overnight cross-dialect sweep: `check count as n in db.t / where grp is "a"`

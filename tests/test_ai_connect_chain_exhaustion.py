@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """ai.connect: a chain that produces no usable provider must never be silently
 discarded in favor of the runtime's own default model (2026-08-04, Unit 1).
 
@@ -41,7 +41,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('DATABASE_URL', ':memory:')
 
-from mohio_ai import AnthropicAiRuntime, AiProviderError, ResolvedChain
+from mohio_ai import AnthropicAiRuntime, AiProviderError, ResolvedChain, CompletionResult
 
 _p = _f = 0
 def check(label, cond, detail=""):
@@ -63,7 +63,7 @@ def tracking_complete(model, system, user, temperature=None, max_tokens=None):
     calls.append((model, user))
     if user == "ping":
         raise ConnectionError(f"{model} unreachable")
-    return '{"result": true, "confidence": 0.93, "explanation": "should never be reached"}'
+    return CompletionResult(text='{"result": true, "confidence": 0.93, "explanation": "should never be reached"}')
 rt._complete = tracking_complete
 chain = rt.register_chain("fraud_providers", ["claude-a", "claude-b", "claude-c"])
 rt.resolve_chain("fraud_providers")
@@ -81,7 +81,7 @@ check("the runtime's OWN default model was NEVER contacted for a real decision "
 
 # ── 2. chain_name refers to a chain that was never registered -> raises, names it ──
 rt2 = make_rt()
-rt2._complete = lambda *a, **k: '{"result": true, "confidence": 0.9, "explanation": "x"}'
+rt2._complete = lambda *a, **k: CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "x"}')
 try:
     rt2.decide(name="x", inputs={}, threshold=0.85, return_type="boolean",
               chain_name="typo_chain_name")
@@ -126,7 +126,7 @@ check("the default model claude-sonnet-4-6 was never contacted across either cal
 # ── 4. Regression: a chain that DOES resolve still wins normally ───────────────────
 rt4 = make_rt()
 rt4._complete = lambda model, s, u, temperature=None, max_tokens=None: (
-    "ok" if u == "ping" else '{"result": true, "confidence": 0.9, "explanation": "fine"}')
+    "ok" if u == "ping" else CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "fine"}'))
 chain4 = rt4.register_chain("good_chain", ["claude-good"])
 rt4.resolve_chain("good_chain")
 d4 = rt4.decide(name="x", inputs={}, threshold=0.85, return_type="boolean", chain_name="good_chain")
@@ -135,7 +135,7 @@ check("a chain that resolves successfully is used normally (regression guard, un
 
 # ── 5. Regression: no chain_name at all -> self._model used exactly as before ──────
 rt5 = make_rt()
-rt5._complete = lambda model, s, u, temperature=None, max_tokens=None: '{"result": true, "confidence": 0.9, "explanation": "fine"}'
+rt5._complete = lambda model, s, u, temperature=None, max_tokens=None: CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "fine"}')
 d5 = rt5.decide(name="x", inputs={}, threshold=0.85, return_type="boolean")
 check("no chain_name declared -> self._model used, no raise (this fix must not "
       "touch the ordinary no-chain case)", d5.model == "claude-sonnet-4-6", str(d5))
@@ -148,7 +148,7 @@ def override_complete(model, system, user, temperature=None, max_tokens=None):
     calls6.append((model, user))
     if user == "ping":
         raise ConnectionError("unreachable")
-    return '{"result": true, "confidence": 0.9, "explanation": "used the override"}'
+    return CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "used the override"}')
 rt6._complete = override_complete
 rt6.register_chain("dead_chain", ["claude-dead"])
 rt6.resolve_chain("dead_chain")

@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
-<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md. -->
+<!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Language Reference — Pioneer Edition
 
 Welcome to Mohio. This is everything you need to start writing real programs: the words,
@@ -402,6 +402,11 @@ listen: done
 These are planned but **fail loud** if you try them today (they never silently do nothing):
 `pattern`, `miomap`, `miotranslate`, `mioagent`, `miotest`, `miosms`, `miostream`, `miosys`,
 `mioenv`, and the auth/pdf/search/image helpers (`mioauth`, `miopdf`, `miosearch`, `mioimage`).
+
+`mioauth` specifically only became true here as of 2026-08-06 — before that fix, a
+`mioauth` declaration or `mioauth.login` call silently produced no AST node at all and
+vanished from the program with no error, the opposite of what this line claimed. See
+`CLAUDE-CODE-BACKLOG.md`'s mioauth entry for the finding and the fix.
 
 Working `mio*` helpers you *can* use: `miohttp`, `miomail`, `miocache`, `miolog`, `miofile`, and
 `mioschedule`. For `mioschedule`, the working form is the **declaration** —

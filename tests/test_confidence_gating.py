@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Runtime confidence gating (patent P1 'confidence threshold' + not_confident).
 Proves the visible behavior: when an ai.decide falls back (confidence below
 threshold), the `not confident` block fires and its give-back is the response;

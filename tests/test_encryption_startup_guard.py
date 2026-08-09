@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """OQ-025: the encryption startup guard -- refuse to boot an app that must encrypt but cannot.
 
 The backends (`cryptography`, `bcrypt`) are imported LAZILY at the point of use, so before this

@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Two-role audit isolation (D4, tombstone dependency) -- the adversarial bar.
 
 A tombstone is only trustworthy if the tenant whose data was erased cannot forge or scrub it.

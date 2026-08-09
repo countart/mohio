@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """Every unbuilt fail-loud MUST have a backlog entry (family-enumeration gate, 2026-07-31).
 
 A fail-loud for a not-yet-built feature is a DEFERRAL, not a resolution (CLAUDE.md standing rule).
@@ -73,8 +73,16 @@ def sites():
     return out
 
 # backticked identifiers/phrases in the backlog -> the set of words deliberately referenced.
+# Triple-backtick fenced code blocks must be stripped FIRST: the inline-span regex below
+# pairs backticks strictly left-to-right with no fence awareness, so a ``` fence (an odd
+# number of backtick characters on its own) desyncs every single-backtick pairing for the
+# rest of the file, silently corrupting real inline `word` references into one giant garbage
+# span. Found 2026-08-06: this made `miosearch` (a real, backtick-quoted, covered candidate)
+# register as untracked purely because of where a fenced example happened to fall relative to
+# it -- a false failure with nothing wrong in the backlog content itself.
 backlog = open("CLAUDE-CODE-BACKLOG.md", encoding="utf-8").read()
-_bt_phrases = re.findall(r"`([^`]+)`", backlog)
+backlog_no_fences = re.sub(r"```.*?```", " ", backlog, flags=re.DOTALL)
+_bt_phrases = re.findall(r"`([^`]+)`", backlog_no_fences)
 BT_WORDS = set()
 for ph in _bt_phrases:
     for w in re.findall(r"[A-Za-z_][\w.]*", ph):

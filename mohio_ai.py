@@ -1,5 +1,5 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
-# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE.md and LICENSE-SCOPE.md.
+# Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 mohio_ai.py
 Mohio Language — AI Runtime
@@ -54,6 +54,66 @@ DEFAULT_AUDIO_MODEL = _envval("MOHIO_AI_AUDIO_MODEL") or "tts-1"      # OpenAI T
 MAX_TOKENS      = int(_envval("MOHIO_AI_MAX_TOKENS", "512"))
 DEFAULT_THRESHOLD = 0.85
 CALL_CAP        = int(_envval("MOHIO_AI_CALL_CAP", "0"))              # 0 = unlimited; classroom sets a cap
+
+# ── Per-model USD pricing (A8 cost-cap fix, 2026-08-06) ───────────────────────────────
+# $ per 1,000,000 tokens, input and output priced separately -- output is usually pricier.
+# Sourced from each provider's own published pricing as of 2026-08-06. This table WILL
+# drift as providers change pricing; it is the one place to update, not scattered across
+# call sites. Longest-prefix match against the model name (same style as the existing
+# claude*/gpt*/gemini* routing). An unrecognized model within a known vendor family falls
+# back to that family's most expensive listed rate, and a totally unknown model falls back
+# to the most expensive rate overall -- a cost cap must never silently under-count an
+# unrecognized model as free or cheap; the safe direction to be wrong is "counts as more."
+MODEL_PRICING_PER_1M = {
+    "claude-opus":      (15.00, 75.00),
+    "claude-sonnet":    (3.00, 15.00),
+    "claude-haiku":     (0.80, 4.00),
+    "gpt-4o":           (2.50, 10.00),
+    "gpt-4":            (30.00, 60.00),
+    "gpt-3.5":          (0.50, 1.50),
+    "o1":               (15.00, 60.00),
+    "o3":               (2.00, 8.00),
+    "gemini-1.5-pro":   (1.25, 5.00),
+    "gemini-1.5-flash": (0.075, 0.30),
+    "gemini-2":         (1.25, 5.00),
+}
+_FALLBACK_PRICING_PER_1M = {
+    "claude": (15.00, 75.00),   # opus rate -- worst case for an unrecognized claude model
+    "gpt":    (30.00, 60.00),   # gpt-4 rate -- worst case for an unrecognized gpt model
+    "o":      (15.00, 60.00),   # o1 rate -- worst case for an unrecognized o-series model
+    "gemini": (1.25, 5.00),     # 1.5-pro rate -- worst case for an unrecognized gemini model
+}
+
+def _price_for_model(model):
+    """(input_$_per_1M, output_$_per_1M) for a model name. Longest matching prefix wins,
+    so 'claude-opus-4' matches 'claude-opus' rather than a shorter 'claude-' entry."""
+    m = (model or "").lower()
+    best = None
+    for prefix, rate in MODEL_PRICING_PER_1M.items():
+        if m.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+            best = (prefix, rate)
+    if best:
+        return best[1]
+    for prefix, rate in _FALLBACK_PRICING_PER_1M.items():
+        if m.startswith(prefix):
+            return rate
+    return _FALLBACK_PRICING_PER_1M["claude"]  # totally unknown model -- worst case, never free
+
+def _cost_for_tokens(model, input_tokens, output_tokens):
+    """Real USD cost for one call's real token usage, using the pricing table above."""
+    in_rate, out_rate = _price_for_model(model)
+    return (input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate
+
+@dataclass
+class CompletionResult:
+    """_complete()'s real return shape (2026-08-06). Every provider's raw response DOES
+    carry real usage/token counts -- _complete() used to discard all of it and return bare
+    text, which is why the cost-cap boundary gate in ai.agent's `limits` block could never
+    fire: nothing upstream ever had a real number to check. Text-only callers still work
+    unchanged (CompletionResult.text), callers that need cost now have it too."""
+    text: str
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class AiProviderError(RuntimeError):
@@ -427,8 +487,9 @@ class AnthropicAiRuntime:
 
     def _complete(self, model, system, user, temperature=None, max_tokens=None):
         """Dispatch a completion to the right provider based on model name.
-        Returns raw text. Reads each provider's key from env. This is the
-        single seam that makes ai.connect multi-provider work."""
+        Returns a CompletionResult (text + real input/output token counts, 2026-08-06 --
+        see CompletionResult's docstring for why). Reads each provider's key from env.
+        This is the single seam that makes ai.connect multi-provider work."""
         self._tick()
         mt = max_tokens or MAX_TOKENS
         m = (model or "").lower()
@@ -440,7 +501,12 @@ class AnthropicAiRuntime:
             )
             if not msg.content:
                 raise ValueError("Anthropic returned empty content")
-            return msg.content[0].text
+            usage = getattr(msg, 'usage', None)
+            return CompletionResult(
+                text=msg.content[0].text,
+                input_tokens=(getattr(usage, 'input_tokens', 0) or 0) if usage else 0,
+                output_tokens=(getattr(usage, 'output_tokens', 0) or 0) if usage else 0,
+            )
         if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3") or m.startswith("openai"):
             return self._complete_openai(model, system, user, temperature, mt)
         if m.startswith("gemini") or m.startswith("google"):
@@ -469,7 +535,12 @@ class AnthropicAiRuntime:
                      "Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=60) as r:
             data = _json.loads(r.read().decode())
-        return data["choices"][0]["message"]["content"]
+        usage = data.get("usage") or {}
+        return CompletionResult(
+            text=data["choices"][0]["message"]["content"],
+            input_tokens=usage.get("prompt_tokens", 0) or 0,
+            output_tokens=usage.get("completion_tokens", 0) or 0,
+        )
 
     def _complete_gemini(self, model, system, user, temperature, max_tokens):
         import os, json as _json, urllib.request
@@ -490,7 +561,97 @@ class AnthropicAiRuntime:
             headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=60) as r:
             data = _json.loads(r.read().decode())
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        # Field names per Gemini's documented generateContent response shape
+        # (usageMetadata.promptTokenCount / .candidatesTokenCount). NOT live-verified
+        # against a real Gemini response in this build (no key available) -- flagging
+        # that explicitly rather than overclaiming; verify against a real call before
+        # relying on Gemini cost figures specifically.
+        usage = data.get("usageMetadata") or {}
+        return CompletionResult(
+            text=data["candidates"][0]["content"]["parts"][0]["text"],
+            input_tokens=usage.get("promptTokenCount", 0) or 0,
+            output_tokens=usage.get("candidatesTokenCount", 0) or 0,
+        )
+
+    # ── Pre-call token estimation (C, 2026-08-06 -- the cost-cap fix's second slice) ──
+    # Real per-provider token counting, no heuristic, ever: a character-count guess was
+    # considered and rejected (requirements.txt has the full reasoning) because pre-call
+    # refusal exists specifically to catch a breach before it happens, and an inaccurate
+    # estimate defeats that in either direction -- wrongly refusing a valid call, or
+    # wrongly letting a real breach through. Each provider gets its own accurate method:
+    # Claude has messages.count_tokens (SDK-native), Gemini has its own :countTokens REST
+    # endpoint (confirmed 2026-08-06 against ai.google.dev -- NOT the same bucket as GPT,
+    # checked rather than assumed), GPT has neither, so it genuinely needs tiktoken.
+    def estimate_input_tokens(self, model, messages, system=None, tools=None):
+        m = (model or "").lower()
+        if m.startswith("claude") or "sonnet" in m or "haiku" in m or "opus" in m:
+            return self._estimate_tokens_claude(model, messages, system, tools)
+        if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3") or m.startswith("openai"):
+            return self._estimate_tokens_openai(model, messages, system)
+        if m.startswith("gemini") or m.startswith("google"):
+            return self._estimate_tokens_gemini(model, messages, system)
+        raise RuntimeError(
+            f"ai.agent pre-call cost estimate: unknown provider/model '{model}'. "
+            f"Supported prefixes: claude*, gpt*/o1*/o3*, gemini*.")
+
+    def _estimate_tokens_claude(self, model, messages, system=None, tools=None):
+        """Real, exact input-token count via the Anthropic SDK's own count_tokens --
+        the same call agent_turn() and _complete() would send, so the estimate reflects
+        the real upcoming request, not an approximation of it."""
+        kwargs = dict(model=model, messages=messages or [])
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = tools
+        result = self._anthropic_client().messages.count_tokens(**kwargs)
+        return result.input_tokens
+
+    def _estimate_tokens_openai(self, model, messages, system=None):
+        """GPT has no count-tokens API call -- tiktoken is the accurate, offline
+        alternative (network-free, so this adds no latency to the boundary-gate check).
+        Falls back to a modern general encoding for a model tiktoken does not
+        recognize by name, rather than failing the estimate outright."""
+        import tiktoken
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except KeyError:
+            enc = tiktoken.get_encoding("o200k_base")
+        total = len(enc.encode(system)) if system else 0
+        for msg in (messages or []):
+            content = msg.get("content", "") if isinstance(msg, dict) else msg
+            total += len(enc.encode(str(content)))
+        return total
+
+    def _estimate_tokens_gemini(self, model, messages, system=None):
+        """Real, exact input-token count via Gemini's own :countTokens REST endpoint --
+        confirmed to exist 2026-08-06 (ai.google.dev/api/tokens), same class of real
+        provider-native method as Claude's count_tokens, not a GPT-style tiktoken
+        workaround. Response field is totalTokens (distinct from generateContent's own
+        usageMetadata.promptTokenCount -- a different endpoint, a different response
+        shape). NOT live-verified against a real Gemini response in this build (no key
+        available) -- flagging rather than overclaiming, same as _complete_gemini's own
+        usage-field note."""
+        import os, json as _json, urllib.request
+        key = ((os.environ.get("GEMINI_API_KEY", "") or
+                os.environ.get("GOOGLE_API_KEY", "")) or "").strip().strip('"').strip("'")
+        if not key:
+            raise RuntimeError("GEMINI_API_KEY (or GOOGLE_API_KEY) not set")
+        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:countTokens?key={key}")
+        contents = [{"role": "user", "parts": [{"text": str(
+            msg.get("content", "") if isinstance(msg, dict) else msg)}]}
+            for msg in (messages or [])]
+        if system:
+            body = {"generateContentRequest": {
+                "contents": contents,
+                "systemInstruction": {"parts": [{"text": system}]}}}
+        else:
+            body = {"contents": contents}
+        req = urllib.request.Request(url, data=_json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = _json.loads(r.read().decode())
+        return data.get("totalTokens", 0) or 0
 
     # ── ai.create generators: text / image / video (multi-provider) ──────────
     def generate_text(self, *, goal, persona="", context="", style="",
@@ -507,7 +668,7 @@ class AnthropicAiRuntime:
         user = goal or ""
         if context:
             user = f"{user}\n\nContext: {context}"
-        return self._complete(model, system, user, temperature, max_tokens)
+        return self._complete(model, system, user, temperature, max_tokens).text
 
     def generate_image(self, *, goal, style="", negative="", size="1024x1024",
                        model=None, n=1):
@@ -708,11 +869,13 @@ class AnthropicAiRuntime:
             try:
                 _user = "\n".join(str(x.get("content", "")) if isinstance(x, dict) else str(x)
                                   for x in (messages or []))
-                _text = self._complete(m, "You are an agent. Answer the request directly.",
-                                       _user, temperature, mt)   # _complete ticks the cap
+                _res = self._complete(m, "You are an agent. Answer the request directly.",
+                                      _user, temperature, mt)   # _complete ticks the cap
             except Exception as e:
                 raise AiProviderError(f"ai.agent provider call failed: {type(e).__name__}: {e}")
-            return AgentTurn(kind='text', text=_text or "Done.")
+            _tokens = _res.input_tokens + _res.output_tokens
+            _cost = _cost_for_tokens(m, _res.input_tokens, _res.output_tokens)
+            return AgentTurn(kind='text', text=_res.text or "Done.", tokens=_tokens, cost=_cost)
         # Claude: the full tool-capable path.
         self._tick()
         kwargs = dict(model=m, max_tokens=mt, messages=messages,
@@ -724,17 +887,19 @@ class AnthropicAiRuntime:
         except Exception as e:
             raise AiProviderError(f"ai.agent provider call failed: {type(e).__name__}: {e}")
         usage  = getattr(msg, 'usage', None)
-        tokens = ((getattr(usage, 'input_tokens', 0) or 0) +
-                  (getattr(usage, 'output_tokens', 0) or 0)) if usage else 0
+        in_tok  = (getattr(usage, 'input_tokens', 0) or 0) if usage else 0
+        out_tok = (getattr(usage, 'output_tokens', 0) or 0) if usage else 0
+        tokens = in_tok + out_tok
+        cost = _cost_for_tokens(m, in_tok, out_tok)
         if getattr(msg, 'stop_reason', None) == 'tool_use':
             for block in (getattr(msg, 'content', None) or []):
                 if getattr(block, 'type', None) == 'tool_use':
                     return AgentTurn(kind='tool', tool_name=block.name,
                                      tool_input=dict(block.input or {}),
-                                     tool_id=block.id, tokens=tokens)
+                                     tool_id=block.id, tokens=tokens, cost=cost)
         text = "".join(getattr(b, 'text', '') for b in (getattr(msg, 'content', None) or [])
                        if getattr(b, 'type', None) == 'text')
-        return AgentTurn(kind='text', text=text or "Done.", tokens=tokens)
+        return AgentTurn(kind='text', text=text or "Done.", tokens=tokens, cost=cost)
 
     def decide(self, name: str, inputs: dict,
                threshold: float = DEFAULT_THRESHOLD,
@@ -871,9 +1036,11 @@ class AnthropicAiRuntime:
             print(f"  Prompt:\n{user}")
 
         raw = None
+        res = None
         try:
-            raw = self._complete(model, system, user, temperature,
+            res = self._complete(model, system, user, temperature,
                                  max_tokens_override or MAX_TOKENS)
+            raw = res.text
             print(f"  Raw response: {raw}")  # Always print — critical for debugging
 
         except Exception as e:
@@ -894,10 +1061,10 @@ class AnthropicAiRuntime:
                     # Retry once with the next provider in the chain (any vendor)
                     print(f"  [ai.connect] Retrying with {new_provider}...")
                     try:
-                        raw = self._complete(new_provider, system, user,
+                        retry_res = self._complete(new_provider, system, user,
                                              temperature, max_tokens_override or MAX_TOKENS)
-                        print(f"  Raw response (retry): {raw}")
-                        result, confidence, explanation = _parse_response(raw, return_type)
+                        print(f"  Raw response (retry): {retry_res.text}")
+                        result, confidence, explanation = _parse_response(retry_res.text, return_type)
                         fell_back = confidence < threshold
                         return AiDecision(
                             result=result,
@@ -906,6 +1073,8 @@ class AnthropicAiRuntime:
                             inputs=inputs,
                             explanation=explanation,
                             fell_back=fell_back,
+                            tokens=retry_res.input_tokens + retry_res.output_tokens,
+                            cost=_cost_for_tokens(new_provider, retry_res.input_tokens, retry_res.output_tokens),
                         )
                     except Exception as retry_e:
                         print(f"  [ai.connect] Retry also failed: {retry_e}")
@@ -935,6 +1104,8 @@ class AnthropicAiRuntime:
             inputs=inputs,
             explanation=explanation,
             fell_back=fell_back,
+            tokens=res.input_tokens + res.output_tokens,
+            cost=_cost_for_tokens(model, res.input_tokens, res.output_tokens),
         )
 
     def explain(self, decision: AiDecision,
