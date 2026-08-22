@@ -1,7 +1,16 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
 # Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
-"""T0-6: find / retrieve / grab over a held (non-DB) source must refuse loudly and clearly,
-never silently.
+"""T0-6, NARROWED by T1-QUERY-HELD (2026-08-09): find / retrieve / grab over a held (non-DB)
+source must refuse loudly and clearly, never silently -- for the shapes that still refuse.
+
+WHAT CHANGED: T0-6 originally made this refusal UNCONDITIONAL for any held source. T1-QUERY-HELD
+made it CONDITIONAL: a held source that is a LIST now routes to `_filter_held_list` instead (real
+filtering, proven in `tests/test_held_list_mixed_data_ruling.py`, real .mho path). This file's
+original "held list refuses" assertions were about `colors as list "red", "blue", "green"` -- that
+is exactly the shape that no longer refuses. Those assertions are UPDATED below to match, not
+removed -- the historical narrative (THE BUG, below) is unchanged and still true for every held
+source that ISN'T a list. What this file now guarantees: a non-list held source (a scalar, file
+content) still refuses exactly as T0-6 built it.
 
 THE BUG (found by this session's MioQL survey): `_resolve_source` (mohio_interpreter.py) maps
 EVERY source -- a real `db.table`, or a bare NAME that happens to be a held list/variable -- into
@@ -13,13 +22,18 @@ never created, the query runs against it, and the result comes back silently unb
 no warning, `mio check` clean -- which is exactly the failure mode CLAUDE.md calls out as the
 worst kind: it looks finished and the gap surfaces later somewhere expensive.
 
-THE FIX: `_refuse_held_source_query` (mohio_interpreter.py, next to `_resolve_source`) runs at the
-top of `_exec_FindBlock` / `_exec_RetrieveBlock` / `_exec_GrabBlock`, before `_db_or_fail` or
-`_resolve_source` ever see the source. If the source is a single-part DottedName (a bare NAME --
+THE FIX (T0-6): `_refuse_held_source_query` (mohio_interpreter.py, next to `_resolve_source`) runs
+at the top of `_exec_FindBlock` / `_exec_RetrieveBlock` / `_exec_GrabBlock`, before `_db_or_fail`
+or `_resolve_source` ever see the source. If the source is a single-part DottedName (a bare NAME --
 what a held-variable source always parses to; see source_ref's transformer) AND that name
 currently resolves to a real held variable (`ctx.exists`), it refuses immediately with a message
 that names the real problem, points at what already works (`repeat each`, `random from`), and
 does not blame database connectivity.
+
+THE NARROWING (T1-QUERY-HELD): `_resolve_held_list_source` now runs FIRST, ahead of
+`_refuse_held_source_query`. If the held value is a list, that function is never reached at all --
+`_filter_held_list`'s ruling handles it. `_refuse_held_source_query` still runs, and still
+refuses, for every other held-source shape.
 
 RUNTIME-ONLY, DELIBERATELY: whether a given name is a held variable at this exact point in a
 program is a live question about the scope chain (conditionals, loops, task-local and session
@@ -62,6 +76,17 @@ def run_src(src):
     return it.run(transform(P.parse(src), src)), it
 
 
+def run_src_error(src):
+    """REAL path, expect a raised MohioRuntimeError. Returns (True, message) or (False, why-not)."""
+    try:
+        run_src(src)
+        return False, "no exception raised"
+    except MohioRuntimeError as e:
+        return True, str(e)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 def refuses_as_held_source(src, verb, name='colors'):
     """The verb refused with the NEW held-source message, not any other error."""
     try:
@@ -83,37 +108,61 @@ CONNECT = 'connect db as sqlite from env.DATABASE_URL\n'
 HELD    = 'colors as list "red", "blue", "green"\n'
 
 
-print("=== find / retrieve / grab over a held list: NO db connected ===")
+print("=== find / retrieve / grab over a held LIST: NO db connected -- NOW FILTERS (T1-QUERY-HELD) ===")
+print("    (STALE as of T1-QUERY-HELD, updated in place -- see the module docstring's WHAT CHANGED)")
 
-ok, detail = refuses_as_held_source(
-    HELD + 'find matches in colors\nfind: done\nshow matches\n', 'find')
-check("find: refuses with the held-source message, not no_db_connection", ok, detail)
+res, it = run_src(HELD + 'find matches in colors\nfind: done\nshow matches\n')
+check("find: a held LIST with no WHERE now returns the list itself, not a refusal",
+      it.shown == [['red', 'blue', 'green']], it.shown)
 
-ok, detail = refuses_as_held_source(
-    HELD + 'retrieve item from colors\n    match item to "blue"\nretrieve: done\nshow item\n',
-    'retrieve')
-check("retrieve: refuses with the held-source message, not no_db_connection", ok, detail)
+# `match item to "blue"` names the field "item", not the special `it` self-reference a
+# scalar-only list needs (case 2 of test_held_list_mixed_data_ruling.py) -- so this specific
+# program still fails loud, just with the NEW, more precise message, not the old held-source one.
+ok, detail = run_src_error(
+    HELD + 'retrieve item from colors\n    match item to "blue"\nretrieve: done\nshow item\n')
+check("retrieve: a field-named match against a scalar list still fails loud, with the NEW message",
+      ok and "holds plain values, not records" in detail, detail)
 
-ok, detail = refuses_as_held_source(
-    HELD + 'grab item from colors\ngrab: done\nshow item\n', 'grab')
-check("grab: refuses with the held-source message, not no_db_connection", ok, detail)
+res, it = run_src(HELD + 'grab item from colors\ngrab: done\nshow item\n')
+check("grab: no match clause at all binds None, same rule as the db path (unrelated to T1-QUERY-HELD)",
+      it.shown == [None], it.shown)
 
 
-print("\n=== find / retrieve / grab over a held list: WITH a db connected (the silent case) ===")
+print("\n=== find / retrieve / grab over a held LIST: WITH a db connected -- same new behavior ===")
+print("    (proves the routing happens before _db_or_fail, db connection state is irrelevant)")
 
-ok, detail = refuses_as_held_source(
-    CONNECT + HELD + 'find matches in colors\nfind: done\ngive back 200 matches\n', 'find')
-check("find: refuses loudly instead of silently binding None", ok, detail)
+res, it = run_src(CONNECT + HELD + 'find matches in colors\nfind: done\nshow matches\n')
+check("find: identical result with a db connected -- the held-list route never reaches _db_or_fail",
+      it.shown == [['red', 'blue', 'green']], it.shown)
 
-ok, detail = refuses_as_held_source(
+ok, detail = run_src_error(
     CONNECT + HELD +
-    'retrieve item from colors\n    match item to "blue"\nretrieve: done\ngive back 200 item\n',
-    'retrieve')
-check("retrieve: refuses loudly instead of silently binding None", ok, detail)
+    'retrieve item from colors\n    match item to "blue"\nretrieve: done\nshow item\n')
+check("retrieve: same new fail-loud message with a db connected",
+      ok and "holds plain values, not records" in detail, detail)
+
+res, it = run_src(CONNECT + HELD + 'grab item from colors\ngrab: done\nshow item\n')
+check("grab: same None-with-no-match result with a db connected",
+      it.shown == [None], it.shown)
+
+
+print("\n=== find / retrieve / grab over a held SCALAR (non-list): T0-6's refusal STILL applies ===")
+print("    (the part of T0-6 this file never actually covered before -- it only ever tested lists)")
+
+HELD_SCALAR = 'hold total 5\n'
 
 ok, detail = refuses_as_held_source(
-    CONNECT + HELD + 'grab item from colors\ngrab: done\ngive back 200 item\n', 'grab')
-check("grab: refuses loudly instead of silently binding None", ok, detail)
+    HELD_SCALAR + 'find x in total\nfind: done\nshow x\n', 'find', name='total')
+check("find over a held SCALAR still refuses with the T0-6 held-source message", ok, detail)
+
+ok, detail = refuses_as_held_source(
+    HELD_SCALAR + 'retrieve x from total\n    match id to "1"\nretrieve: done\nshow x\n',
+    'retrieve', name='total')
+check("retrieve over a held SCALAR still refuses with the T0-6 held-source message", ok, detail)
+
+ok, detail = refuses_as_held_source(
+    HELD_SCALAR + 'grab x from total\n    match id to "1"\ngrab: done\nshow x\n', 'grab', name='total')
+check("grab over a held SCALAR still refuses with the T0-6 held-source message", ok, detail)
 
 
 print("\n=== find / retrieve / grab over a REAL db table: unchanged ===")

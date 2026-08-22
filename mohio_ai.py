@@ -348,12 +348,30 @@ def _parse_response(raw: str, return_type: str) -> tuple[Any, float, str]:
                     f"{result!r}. Expected true/false, yes/no, 1/0, or approved/denied.")
         elif isinstance(result, (int, float)):
             result = bool(result)
+        else:
+            # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): a missing "result" key (None) or a
+            # non-scalar value (list/dict) fell through every branch above unchanged and was
+            # returned as-is -- a wrong-type value passed through masquerading as a real
+            # boolean decision, indistinguishable from the model genuinely deciding. Same
+            # disease the 2026-08-04 string-coercion fix above already closed for strings;
+            # this closes the sibling gap for every other non-boolean type.
+            raise AiProviderError(
+                f"Model returned a boolean decision as an unusable value: {result!r} "
+                f"(type {type(result).__name__}). Expected true/false, yes/no, 1/0, or "
+                f"approved/denied.")
 
     elif return_type == "number":
         try:
             result = float(result)
         except (TypeError, ValueError):
-            result = 0.0
+            # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): a malformed/missing "result" used to
+            # silently become 0.0 -- indistinguishable from the model genuinely computing
+            # zero. A real 0/0.0 result converts via float() without ever reaching this
+            # except, so the legitimate case is untouched; this only fires when the value
+            # truly cannot be read as a number.
+            raise AiProviderError(
+                f"Model returned a number decision as an unusable value: {result!r} "
+                f"(type {type(result).__name__}). Expected a numeric value.")
 
     elif return_type == "text":
         result = str(result) if result is not None else ""
@@ -704,7 +722,16 @@ class AnthropicAiRuntime:
         with urllib.request.urlopen(req, timeout=120) as r:
             data = _json.loads(r.read().decode())
         item = data["data"][0]
-        return item.get("url") or item.get("b64_json")
+        handle = item.get("url") or item.get("b64_json")
+        if not handle:
+            # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): a response with neither field used to
+            # return None, silently treated by the caller as a valid image handle -- an image
+            # that structurally does not exist looked like a successful generation.
+            raise RuntimeError(
+                f"ai.create image (OpenAI, {model}): the API call succeeded but the response "
+                f"contains neither 'url' nor 'b64_json' -- no image data was returned. "
+                f"Raw item keys: {list(item.keys())}")
+        return handle
 
     def _image_google(self, model, prompt):
         import os, json as _json, urllib.request
@@ -721,7 +748,16 @@ class AnthropicAiRuntime:
         with urllib.request.urlopen(req, timeout=120) as r:
             data = _json.loads(r.read().decode())
         preds = data.get("predictions", [{}])
-        return preds[0].get("bytesBase64Encoded") or preds[0].get("image")
+        handle = preds[0].get("bytesBase64Encoded") or preds[0].get("image")
+        if not handle:
+            # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): same sibling gap as the OpenAI image
+            # path above -- a response with neither field used to return None as if it were
+            # a valid handle.
+            raise RuntimeError(
+                f"ai.create image (Google, {model}): the API call succeeded but the response "
+                f"contains neither 'bytesBase64Encoded' nor 'image' -- no image data was "
+                f"returned. Raw prediction keys: {list(preds[0].keys()) if preds else []}")
+        return handle
 
     def generate_video(self, *, goal, style="", duration=None, size=None, model=None):
         """Video generation (async create + poll). Routes by model:
@@ -766,7 +802,22 @@ class AnthropicAiRuntime:
                 f"https://api.openai.com/v1/videos/{job_id}", headers=hdr)
             with urllib.request.urlopen(preq, timeout=30) as r:
                 job = _json.loads(r.read().decode())
-        return job.get("url") or job_id
+        # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): the loop used to fall through with no
+        # timeout check, `return job.get("url") or job_id` then silently returned the BARE
+        # JOB ID as if it were a completed video URL -- an unfinished job looked identical
+        # to a real one downstream. Checked here rather than relying on for/else so a job
+        # that completes exactly on the final poll (no further status re-check) is also
+        # caught, not just the exhausted-loop case.
+        if job.get("status") not in ("completed", "succeeded"):
+            raise RuntimeError(
+                f"video job {job_id} did not complete within the poll window (~10 min); "
+                f"last known status: {job.get('status')!r}")
+        url = job.get("url")
+        if not url:
+            raise RuntimeError(
+                f"video job {job_id} reports status={job.get('status')!r} but the response "
+                f"has no 'url' -- no video was actually returned.")
+        return url
 
     def _video_google(self, model, prompt, duration):
         import os, json as _json, time as _t, urllib.request
@@ -793,10 +844,21 @@ class AnthropicAiRuntime:
             preq = urllib.request.Request(f"{base}/{op_name}?key={key}")
             with urllib.request.urlopen(preq, timeout=30) as r:
                 op = _json.loads(r.read().decode())
+        # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): sibling of the OpenAI video fix above --
+        # the loop used to fall through with no timeout check, and the final `or op_name`
+        # silently returned the bare OPERATION NAME as if it were a completed video URI.
+        if not op.get("done"):
+            raise RuntimeError(
+                f"video operation {op_name} did not complete within the poll window "
+                f"(~10 min).")
         resp = op.get("response", {})
         vids = resp.get("generatedVideos") or resp.get("videos") or [{}]
-        return (vids[0].get("video", {}).get("uri")
-                or vids[0].get("uri") or op_name)
+        uri = vids[0].get("video", {}).get("uri") or vids[0].get("uri")
+        if not uri:
+            raise RuntimeError(
+                f"video operation {op_name} reports done=True but the response has no "
+                f"video uri -- no video was actually returned.")
+        return uri
 
     def generate_audio(self, *, goal, voice="", pace=None, style="", model=None, **kw):
         """Text-to-speech. A8 (2026-07-31): OpenAI TTS by default (reuses the existing OpenAI seam,
@@ -814,8 +876,15 @@ class AnthropicAiRuntime:
         key = _envval("OPENAI_API_KEY")
         if not key:
             raise RuntimeError("OPENAI_API_KEY not set (needed for OpenAI TTS audio).")
-        payload = {"model": model if str(model).startswith("tts") else "tts-1",
-                   "input": text, "voice": voice or "alloy"}
+        # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): used to silently replace an explicit model
+        # override with "tts-1" whenever it didn't happen to start with the literal string
+        # "tts" -- contradicts this file's own "an explicit override wins outright"
+        # principle, and this code has no business guessing at OpenAI's model-naming scheme.
+        # `model` is never unset here -- generate_audio() already resolved it to
+        # DEFAULT_AUDIO_MODEL before calling in, so there is no missing-value case left to
+        # protect against; a genuinely wrong model name is the real API's to reject, loudly,
+        # not this code's to silently "fix".
+        payload = {"model": model, "input": text, "voice": voice or "alloy"}
         if pace:
             try: payload["speed"] = float(pace)
             except Exception: pass

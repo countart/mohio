@@ -59,11 +59,24 @@ if not pg_reachable():
 
 clean_postgres()
 
+# The Zork seed is third-party game content used only as a fixture. It moved to `_private/`
+# (gitignored, not distributed -- LICENSE-SCOPE.md's Control tests entry), so it is ABSENT in
+# any public clone. Resolve it there and SKIP cleanly when missing, the same way this file
+# already skips when Postgres is unreachable: a fixture deliberately not shipped must not read
+# as a failing test to whoever clones the repo.
+SEED = next((p for p in (
+    os.path.join(ROOT, "_private", "zork_seed_zork.json"),
+    "_private/zork_seed_zork.json") if os.path.exists(p)), None)
+if SEED is None:
+    print("RESULTS: 0 passed, 0 failed (skipped -- private Zork seed fixture not present)")
+    sys.exit(0)
+
+
 env = dict(os.environ, PYTHONPATH=ROOT, DATABASE_URL=POSTGRES_URL,
           MOHIO_AI="mock")  # no live model calls needed for this play-through
 server = subprocess.Popen(
     [sys.executable, "mio.py", "serve", "tests/zork/index.mho",
-     "--seed", "tests/zork/seed_zork.json",
+     "--seed", SEED,
      "--port", str(PORT), "--host", "127.0.0.1"],
     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 )

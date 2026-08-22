@@ -54,7 +54,17 @@ def candidates(fn, lines, i):
     if m: c.add(m.group(1).lower())
     for ph in re.findall(r"'([a-z][\w. ]{2,40})'", l):                      # 'change to sh.X', 'cursor pagination'
         c.update(re.findall(r"[a-z_][\w.]{2,}", ph.lower()))
-    for ph in re.findall(r"`([^`]{2,40})`", l):                            # `X with` backticked in the source
+    # project backlog tag convention (T1-QUERY-HELD, T1-CHECK-UNIQUE-REDESIGN, ...). BT_WORDS
+    # below splits a backticked `T1-QUERY-HELD` on the hyphen (its regex uses \w, which excludes
+    # "-") into separate words {"t1","query","held"} -- mirror that same split here so the two
+    # sides compare on identical tokens instead of one whole tag vs three fragments.
+    for tag in re.findall(r"T1-[A-Z0-9]+(?:-[A-Z0-9]+)*", ctx):
+        c.update(w.lower() for w in re.findall(r"[A-Za-z0-9]+", tag))
+    # `ctx` (this line + the 3 lines above), not just `l` -- a wrapped f-string message often
+    # carries its backtick-quoted identifier on an ADJACENT physical line from the "NOT YET
+    # BUILT" phrase that triggered the site match (T1-QUERY-HELD's own sites are exactly this
+    # shape: the phrase is on one wrapped line, `save`/`update`/etc. backticked on another).
+    for ph in re.findall(r"`([^`]{2,40})`", ctx):                          # `X with` backticked in the source
         ph2 = re.sub(r"\{[^}]*\}", " ", ph).lower()                        # drop {placeholder} parts
         c.update(re.findall(r"[a-z_][\w.]{2,}", ph2))
     if "export as" in l.lower(): c.add("export")

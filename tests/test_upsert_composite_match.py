@@ -13,6 +13,23 @@ silently dropped a multi-field match to None. Now:
 
 Proven three ways: the AST carries both fields; the Postgres SQL is generated correctly (fake
 cursor, no live PG); and a composite upsert runs end-to-end on SQLite (the fallback path).
+
+**SUPERSESSION (2026-08-20, T1-UPSERT-NO-CONSTRAINT, ruled Option A).** The Postgres SQL-shape
+assertions in section 2 originally required `ON CONFLICT ("c1","c2")` + `DO UPDATE SET`. Postgres
+no longer emits that form at all: ON CONFLICT hard-requires a UNIQUE constraint on the conflict
+target, which Mohio's own auto-created tables never have on non-`id` columns, so upsert 500'd on
+exactly the tables Mohio makes. It now emits UPDATE, then an INSERT guarded by `WHERE NOT EXISTS`
+naming every key column -- correct with or without a constraint. Recorded as a documented
+supersession, not a red test quietly edited to pass.
+
+What this file EXISTS to prove is unchanged and still proven: a composite match must reach the
+generated SQL as BOTH key columns (it used to be silently dropped to None in the transformer),
+and must update only the matching row. Section 2's assertions were re-pointed at the new shape;
+section 3's end-to-end SQLite block is UNTOUCHED -- it never depended on the Postgres SQL form,
+it passed before and after, and it is the strongest evidence here that the real intent holds.
+The composite case was additionally re-verified on a live Postgres 18 the day of the change
+(3 upserts across two composite keys -> 2 rows, the repeated key updated in place).
+
 Run: `python tests/test_upsert_composite_match.py`.
 """
 import os, sys
@@ -52,9 +69,13 @@ def pg_sql(fields, match):
     pg = PostgresRuntime.__new__(PostgresRuntime)
     pg._in_transaction = False
     pg.ensure_table = lambda *a, **k: None
-    cap = {}
+    cap = {'all': []}
     class _Cur:
-        def execute(self, sql, params): cap['sql'] = sql
+        # rowcount added 2026-08-20: the constraint-free upsert reads it to decide whether the
+        # UPDATE matched (the old ON CONFLICT one-shot never needed it). 0 = nothing matched, so
+        # the guarded INSERT branch is the one captured below.
+        rowcount = 0
+        def execute(self, sql, params): cap['sql'] = sql; cap['all'].append(sql)
         def close(self): pass
     class _Conn:
         def cursor(self): return _Cur()
@@ -62,18 +83,34 @@ def pg_sql(fields, match):
         def rollback(self): pass
     pg.conn = _Conn()
     pg.upsert('items', fields, match)
-    return cap['sql']
+    return ' | '.join(cap['all'])
 
+# SUPERSEDED 2026-08-02 -> 2026-08-20 (T1-UPSERT-NO-CONSTRAINT, ruled Option A): these assertions
+# used to require `ON CONFLICT("session_id", "id")` + `DO UPDATE SET ... EXCLUDED."name"`. That
+# form is gone -- it hard-required a unique constraint the target table need not have. What this
+# block still proves is UNCHANGED and is the whole point of the file: a composite match reaches
+# the SQL as BOTH key columns, and the non-key column is the one carried as data. See the
+# docstring for why the mechanism changed.
 comp = pg_sql({'id': 'i', 'session_id': 's', 'name': 'lamp'}, ['session_id', 'id'])
-check('composite: ON CONFLICT names BOTH columns', 'ON CONFLICT("session_id", "id")' in comp, comp)
-check('composite: DO UPDATE SET updates the non-key column', 'EXCLUDED."name"' in comp, comp)
-check('composite: DO UPDATE SET excludes EVERY conflict column (not session_id, not id)',
-      'EXCLUDED."session_id"' not in comp and 'EXCLUDED."id"' not in comp, comp)
+check('composite: the guarded form replaced ON CONFLICT entirely',
+      'ON CONFLICT' not in comp.upper(), comp)
+check('composite: the insert is guarded by WHERE NOT EXISTS', 'WHERE NOT EXISTS' in comp.upper(), comp)
+check('composite: the guard names BOTH key columns',
+      '"session_id" = %s' in comp and '"id" = %s' in comp, comp)
+check('composite: the non-key column is still carried as data', '"name"' in comp, comp)
 
 one = pg_sql({'id': 'i', 'session_id': 's', 'name': 'lamp'}, 'session_id')
-check('single-column upsert unaffected: ON CONFLICT("session_id")', 'ON CONFLICT("session_id")' in one, one)
-check('single-column: non-conflict columns still updated (id, name)',
-      'EXCLUDED."name"' in one and 'EXCLUDED."id"' in one, one)
+check('single-column upsert unaffected: guarded, no ON CONFLICT',
+      'ON CONFLICT' not in one.upper() and 'WHERE NOT EXISTS' in one.upper(), one)
+# Assert on the GUARD clause specifically, not the whole statement: in the single-column case
+# `id` is an ordinary DATA column, so `SET "id" = %s` legitimately appears in the UPDATE. Only
+# the WHERE NOT EXISTS predicate should be restricted to the key column.
+# Cut at the guard's own closing paren: everything after it is the NEXT statement (step 3's
+# compensating UPDATE), which legitimately mentions the data columns again.
+_one_guard = (one.upper().split('WHERE NOT EXISTS', 1)[1].split(')', 1)[0]
+              if 'WHERE NOT EXISTS' in one.upper() else '')
+check('single-column: the GUARD predicate names ONLY the single key column',
+      '"SESSION_ID" = %S' in _one_guard and '"ID" = %S' not in _one_guard, _one_guard or one)
 
 # ── 3. End-to-end on SQLite (fallback path): a composite upsert updates the matching row only ─
 def run(src):

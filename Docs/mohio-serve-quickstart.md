@@ -51,7 +51,7 @@ python mio.py serve tests/zork_demo.mho
 ```
 You should see:
 ```
-mio serve  v4.8.2
+mio serve  v4.9.0
 Loading tests/zork_demo.mho
 ...
 v  Server ready
@@ -185,4 +185,4 @@ python mio.py --help              # All commands
 
 ---
 
-*Mohio CLI v4.8.2 -- mohio.io*
+*Mohio CLI v4.9.0 -- mohio.io*

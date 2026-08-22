@@ -170,9 +170,215 @@ def test_live_generation():
         _skipped += 1
 
 
+def test_image_missing_handle_fails_loud():
+    """T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): a successful API response carrying neither
+    'url'/'b64_json' (OpenAI) nor 'bytesBase64Encoded'/'image' (Google) used to return None,
+    silently indistinguishable from a real image handle. Verified offline via a mocked HTTP
+    layer -- no real network call, no real API key needed; only the response-parsing logic
+    (not provider behavior) is under test."""
+    global _passed, _failed
+    print("\n=== Layer 1b: image generation with a response missing url/b64_json fails loud ===")
+    import json as _json
+    import urllib.request
+    from mohio_ai import AnthropicAiRuntime
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._payload = _json.dumps(payload).encode()
+        def read(self):
+            return self._payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(payload):
+        def _f(req, timeout=None):
+            return _FakeResponse(payload)
+        return _f
+
+    rt = AnthropicAiRuntime.__new__(AnthropicAiRuntime)
+    rt._tick = lambda: None
+    orig_urlopen = urllib.request.urlopen
+    os.environ.setdefault('OPENAI_API_KEY', 'fake-key-offline-mock-only')
+    os.environ.setdefault('GEMINI_API_KEY', 'fake-key-offline-mock-only')
+    try:
+        urllib.request.urlopen = _fake_urlopen({"data": [{"revised_prompt": "x"}]})
+        try:
+            rt._image_openai("dall-e-3", "x", "1024x1024", 1)
+            print("  [FAIL] OpenAI: no exception on a response missing url/b64_json")
+            _failed += 1
+        except RuntimeError as e:
+            ok = 'neither' in str(e).lower()
+            print(f"  [{'PASS' if ok else 'FAIL'}] OpenAI raises RuntimeError on missing handle")
+            _passed += ok; _failed += (not ok)
+
+        urllib.request.urlopen = _fake_urlopen({"data": [{"url": "https://x/y.png"}]})
+        r = rt._image_openai("dall-e-3", "x", "1024x1024", 1)
+        ok = r == "https://x/y.png"
+        print(f"  [{'PASS' if ok else 'FAIL'}] OpenAI regression: a real url is unaffected")
+        _passed += ok; _failed += (not ok)
+
+        urllib.request.urlopen = _fake_urlopen({"predictions": [{"safetyAttributes": {}}]})
+        try:
+            rt._image_google("imagen-3.0-generate", "x")
+            print("  [FAIL] Google: no exception on a response missing both fields")
+            _failed += 1
+        except RuntimeError as e:
+            ok = 'neither' in str(e).lower()
+            print(f"  [{'PASS' if ok else 'FAIL'}] Google raises RuntimeError on missing handle")
+            _passed += ok; _failed += (not ok)
+
+        urllib.request.urlopen = _fake_urlopen({"predictions": [{"bytesBase64Encoded": "AAAA"}]})
+        r = rt._image_google("imagen-3.0-generate", "x")
+        ok = r == "AAAA"
+        print(f"  [{'PASS' if ok else 'FAIL'}] Google regression: real bytesBase64Encoded unaffected")
+        _passed += ok; _failed += (not ok)
+    finally:
+        urllib.request.urlopen = orig_urlopen
+
+
+def test_video_timeout_and_missing_handle_fails_loud():
+    """T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): a polling loop that never sees
+    completed/succeeded (OpenAI) or done=True (Google) used to fall through with no timeout
+    check, then `return job.get("url") or job_id` / `... or op_name` silently returned the
+    BARE JOB ID / OPERATION NAME as if it were a finished video. Verified offline via a
+    mocked HTTP layer + a stubbed time.sleep (no real 10-minute wait, no real API key)."""
+    global _passed, _failed
+    print("\n=== Layer 1c: video polling timeout / missing-handle fails loud ===")
+    import json as _json
+    import time as _time
+    import urllib.request
+    from mohio_ai import AnthropicAiRuntime
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._payload = _json.dumps(payload).encode()
+        def read(self):
+            return self._payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _never_finishes(create_payload, poll_payload):
+        calls = {'n': 0}
+        def _f(req, timeout=None):
+            calls['n'] += 1
+            return _FakeResponse(create_payload if calls['n'] == 1 else poll_payload)
+        return _f
+
+    rt = AnthropicAiRuntime.__new__(AnthropicAiRuntime)
+    rt._tick = lambda: None
+    orig_urlopen = urllib.request.urlopen
+    orig_sleep = _time.sleep
+    os.environ.setdefault('OPENAI_API_KEY', 'fake-key-offline-mock-only')
+    os.environ.setdefault('GEMINI_API_KEY', 'fake-key-offline-mock-only')
+    _time.sleep = lambda *a, **k: None
+    try:
+        urllib.request.urlopen = _never_finishes(
+            {"id": "job-123", "status": "queued"}, {"id": "job-123", "status": "processing"})
+        try:
+            rt._video_openai("sora-2", "x", 4, None)
+            print("  [FAIL] OpenAI: no exception when the job never completes")
+            _failed += 1
+        except RuntimeError as e:
+            ok = 'did not complete' in str(e)
+            print(f"  [{'PASS' if ok else 'FAIL'}] OpenAI raises on poll timeout")
+            _passed += ok; _failed += (not ok)
+
+        urllib.request.urlopen = _never_finishes(
+            {"id": "job-456", "status": "queued"},
+            {"id": "job-456", "status": "completed", "url": "https://x/y.mp4"})
+        r = rt._video_openai("sora-2", "x", 4, None)
+        ok = r == "https://x/y.mp4"
+        print(f"  [{'PASS' if ok else 'FAIL'}] OpenAI regression: a real completed url is unaffected")
+        _passed += ok; _failed += (not ok)
+
+        urllib.request.urlopen = _never_finishes(
+            {"name": "op-789", "done": False}, {"name": "op-789", "done": False})
+        try:
+            rt._video_google("veo-3.0-generate", "x", 4)
+            print("  [FAIL] Google: no exception when the operation never completes")
+            _failed += 1
+        except RuntimeError as e:
+            ok = 'did not complete' in str(e)
+            print(f"  [{'PASS' if ok else 'FAIL'}] Google raises on poll timeout")
+            _passed += ok; _failed += (not ok)
+
+        urllib.request.urlopen = _never_finishes(
+            {"name": "op-xyz", "done": False}, {"name": "op-xyz", "done": True, "response": {}})
+        try:
+            rt._video_google("veo-3.0-generate", "x", 4)
+            print("  [FAIL] Google: no exception when done=True but no uri is present")
+            _failed += 1
+        except RuntimeError as e:
+            ok = 'no video was actually returned' in str(e)
+            print(f"  [{'PASS' if ok else 'FAIL'}] Google raises when done but unusable payload")
+            _passed += ok; _failed += (not ok)
+
+        urllib.request.urlopen = _never_finishes(
+            {"name": "op-abc", "done": False},
+            {"name": "op-abc", "done": True,
+             "response": {"generatedVideos": [{"video": {"uri": "https://x/y2.mp4"}}]}})
+        r = rt._video_google("veo-3.0-generate", "x", 4)
+        ok = r == "https://x/y2.mp4"
+        print(f"  [{'PASS' if ok else 'FAIL'}] Google regression: a real completed uri is unaffected")
+        _passed += ok; _failed += (not ok)
+    finally:
+        urllib.request.urlopen = orig_urlopen
+        _time.sleep = orig_sleep
+
+
+def test_tts_explicit_model_wins():
+    """T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): an explicit TTS model override that didn't
+    start with the literal string 'tts' used to be silently replaced with 'tts-1' --
+    contradicts the file's own 'an explicit override wins outright' principle. Verified
+    offline by inspecting the actual outbound request payload via a mocked HTTP layer."""
+    global _passed, _failed
+    print("\n=== Layer 1d: TTS explicit model override is respected, not silently replaced ===")
+    import json as _json
+    import urllib.request
+    from mohio_ai import AnthropicAiRuntime
+
+    captured = {}
+
+    class _FakeResponse:
+        def read(self):
+            return b"FAKE-MP3-BYTES"
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        captured['payload'] = _json.loads(req.data.decode())
+        return _FakeResponse()
+
+    rt = AnthropicAiRuntime.__new__(AnthropicAiRuntime)
+    orig_urlopen = urllib.request.urlopen
+    os.environ.setdefault('OPENAI_API_KEY', 'fake-key-offline-mock-only')
+    urllib.request.urlopen = _fake_urlopen
+    try:
+        rt._audio_openai("hello", "alloy", "gpt-4o-mini-tts")
+        ok = captured['payload']['model'] == "gpt-4o-mini-tts"
+        print(f"  [{'PASS' if ok else 'FAIL'}] non-'tts'-prefixed explicit model is preserved")
+        _passed += ok; _failed += (not ok)
+
+        rt._audio_openai("hello", "alloy", "tts-1-hd")
+        ok = captured['payload']['model'] == "tts-1-hd"
+        print(f"  [{'PASS' if ok else 'FAIL'}] regression: 'tts'-prefixed model still works")
+        _passed += ok; _failed += (not ok)
+    finally:
+        urllib.request.urlopen = orig_urlopen
+
+
 if __name__ == "__main__":
     test_dispatch_and_attributes()
     test_alias_and_fallback()
+    test_image_missing_handle_fails_loud()
+    test_video_timeout_and_missing_handle_fails_loud()
+    test_tts_explicit_model_wins()
     test_live_generation()
     print(f"\nRESULTS: {_passed} passed, {_failed} failed, {_skipped} skipped")
     sys.exit(1 if _failed else 0)

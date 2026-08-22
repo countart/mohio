@@ -40,8 +40,14 @@ def run(src):
 
 
 def fails(src):
+    # A value-evaluation error carried in `give back`'s VALUE (e.g. reading a forgotten name) is
+    # a _Raise that run() catches and formats into a {'status', 'body'} response, matching real
+    # end-to-end `mio run` behavior -- so both a raised exception and an error-status dict count.
+    # (This replaces a prior version that only caught raised exceptions -- it missed the dict
+    # shape, so it silently reported "did not fail" for a value error caught inside run().)
     try:
-        run(src); return False
+        result = MohioInterpreter().run(transform(P.parse(src), src))
+        return isinstance(result, dict) and result.get('status', 200) >= 400
     except Exception:
         return True
 
@@ -74,7 +80,8 @@ check("USD negative displays -$5.00", run('p as USD\np -5\ngive back 200 ("" & p
 # ── state operators work on currency (it is a typed state) ────────────────────────────
 check("release drops the currency contract",
       run('p as USD\np 5\nrelease p\np "x"\ngive back 200 p') == "x")
-check("forget removes a currency variable", run('p as USD\np 5\nforget p\ngive back 200 p') is None)
+check("forget removes a currency variable (reading it after now fails loud, not silently empty)",
+      fails('p as USD\np 5\nforget p\ngive back 200 p'))
 
 # ── shape field currency (asset MVP) ──────────────────────────────────────────────────
 S = 'shape Asset\n    name as text\n    price as USD\nshape: done\n'

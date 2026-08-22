@@ -95,11 +95,12 @@ listen for
         activity_count  recent_activity.count
         last_active_at  member.last_active_at
 
-        // Update last_active_at. Member doesn't wait for this.
-        update db.members
-            last_active_at now()
-            match id to request.member_id
-        update: done
+        // (Removed 2026-08-15: this block used to write `last_active_at` as a side
+        // effect of viewing the dashboard -- a GET must be safe/idempotent, and a
+        // write here would fire on every unauthenticated-or-not GET to this route,
+        // real DB round-trip confirmed. Tracking "last active" belongs on a real
+        // write action instead, e.g. a `new sh.X` (POST) endpoint the client calls
+        // deliberately, not bundled into a read.)
 
         give back 200 member
 

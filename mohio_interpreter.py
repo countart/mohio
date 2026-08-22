@@ -3,7 +3,7 @@
 """
 mohio_interpreter.py
 Mohio Language — AST Interpreter
-Version: 4.8.2 | August 2026 | Particular LLC
+Version: see mohio_version.VERSION | August 2026 | Particular LLC
 
 Walks the AST produced by mohio_transformer_ast.py and executes it.
 
@@ -37,7 +37,7 @@ Architecture:
 from __future__ import annotations
 import os, sys, json, sqlite3, datetime, traceback, re, uuid, math, statistics
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, InvalidOperation
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as _dc_fields
 from typing import Any, Optional
 from pathlib import Path
 
@@ -989,6 +989,56 @@ class DbRuntime:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._in_transaction = False
+        self._column_cache = {}
+
+    def _table_columns(self, table):
+        """Real column names for `table`, or None if the table does not exist yet.
+
+        T1-FIELD-VALIDATION (the check-unique bug's third mechanism, batch-2 finding): SQLite
+        silently reads a double-quoted identifier that isn't a real column as a STRING LITERAL
+        instead of erroring -- `WHERE "emial" = ?` becomes `WHERE 'emial' = ?`, always false,
+        no exception, `check unique` on a typo'd field silently reads "available". No
+        catch-and-re-raise can catch this (SQLite never throws), so the field must be validated
+        against the real schema BEFORE the SQL is built. Cached per (connection, table);
+        ensure_table invalidates the entry whenever it touches the schema, so a newly-added
+        column is picked up on the very next validation.
+        """
+        # Not every DbRuntime reaches here via __init__ -- some test harnesses build one with
+        # DbRuntime.__new__(DbRuntime) and set .conn directly, bypassing the constructor.
+        # Lazily create the cache rather than assume __init__ ran, matching this class's own
+        # existing defensive style (see remove_all's getattr(self, '_in_transaction', False)).
+        cache = getattr(self, '_column_cache', None)
+        if cache is None:
+            cache = self._column_cache = {}
+        if table in cache:
+            return cache[table]
+        try:
+            rows = self.conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        except sqlite3.OperationalError as e:
+            # The introspection query itself failing must not silently pass validation --
+            # that would just move the T1-GUARD-FAILOPEN class into the validator itself.
+            raise MohioRuntimeError(
+                f"could not read the schema for table '{table}' to validate a field "
+                f"reference ({e}).")
+        cols = {r[1] for r in rows} if rows else None   # empty PRAGMA result = table absent
+        self._column_cache[table] = cols
+        return cols
+
+    def _validate_fields(self, table, field_names):
+        """Fail loud if any of `field_names` is not a real column on `table`. A missing TABLE
+        is a separate, already-handled case (retrieve_one's own "no such table" carve-out,
+        find_many/count's fail-loud) -- this validator skips silently when the table itself
+        doesn't exist yet, so it never fights that existing distinction."""
+        cols = self._table_columns(table)
+        if cols is None:
+            return
+        import difflib
+        for f in field_names:
+            if f not in cols:
+                suggestion = difflib.get_close_matches(f, cols, n=1)
+                hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
+                raise MohioRuntimeError(
+                    f"Field '{f}' does not exist in db.{table}.{hint}")
 
     def ensure_table(self, table, columns, id_value=None):
         # Universal record id: every table gets a primary-key "id". When the app or a
@@ -1019,6 +1069,11 @@ class DbRuntime:
         for c in field_cols:
             if c not in existing:
                 self.conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" TEXT')
+        # Invalidate the field-validation cache: this table's real schema may have just
+        # widened (a new column added), and a stale cached set would fail loud on a field
+        # that genuinely exists now. getattr guards a DbRuntime built via __new__() that
+        # bypassed __init__ (a legitimate lightweight test-harness pattern elsewhere).
+        getattr(self, '_column_cache', {}).pop(table, None)
         # T0-4: this used to commit unconditionally, every save -- schema already existing or
         # not. save() calls ensure_table() before every write, so the SECOND write inside an
         # open `transaction` silently force-committed the FIRST write's still-pending INSERT
@@ -1029,6 +1084,7 @@ class DbRuntime:
         if not self._in_transaction: self.conn.commit()
 
     def retrieve_one(self, table, match_field, match_value):
+        self._validate_fields(table, [match_field])
         try:
             cur = self.conn.execute(
                 f'SELECT * FROM "{table}" WHERE "{match_field}" = ? LIMIT 1',
@@ -1036,11 +1092,22 @@ class DbRuntime:
             )
             row = cur.fetchone()
             return _cast_row(dict(row)) if row else None
-        except sqlite3.OperationalError:
-            return None
+        except sqlite3.OperationalError as e:
+            # T1-GUARD-FAILOPEN (2026-08-19, carve-out removed): "no row matched" is the
+            # plain `row = None` fall-through above, which never reaches this except block --
+            # so ANY exception here, missing table included, is a genuine operational failure
+            # and must fail loud, same as find_many/count already do. A missing table used to
+            # be carved out as "genuinely not found" because retrieve_one also serves the
+            # `save ... unless X exists` dedupe check, which runs before that table is
+            # created -- but that is collateral to THIS function, not a property of "no such
+            # table" in general. The dedupe check now catches that one specific condition
+            # itself (see _exec_SaveBlock), so this function no longer needs to guess which
+            # caller it's serving.
+            raise
 
     def find_many(self, table, where=None, limit=None,
                   order_by=None, order_dir='asc', offset=0):
+        self._validate_fields(table, list((where or {}).keys()))
         try:
             clauses, params = [], []
             for f, v in (where or {}).items():
@@ -1067,6 +1134,7 @@ class DbRuntime:
 
     def count(self, table, where=None):
         """COUNT(*) honoring equality filters — used for pagination totals."""
+        self._validate_fields(table, list((where or {}).keys()))
         try:
             clauses, params = [], []
             for f, v in (where or {}).items():
@@ -1076,7 +1144,16 @@ class DbRuntime:
             cur = self.conn.execute(sql, params)
             row = cur.fetchone()
             return int(row[0]) if row else 0
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            # T1-GUARD-FAILOPEN: a MISSING TABLE is an operational failure, NOT a zero-row
+            # result -- the exact distinction find_many (above) already makes, that this sibling
+            # skipped. check unique/exists/count all read count()'s return value directly as the
+            # row count, so a missing table silently returning 0 read as "available"/"not found"
+            # regardless of whether the value actually existed -- the T1-CHECK-UNIQUE-REDESIGN
+            # bug shape, reproduced through a different code path. Other operational errors keep
+            # the prior lenient 0 here, mirroring find_many's own documented policy.
+            if 'no such table' in str(e).lower():
+                raise
             return 0
 
     def save(self, table, fields):
@@ -1092,6 +1169,42 @@ class DbRuntime:
         if not self._in_transaction: self.conn.commit()
         return cur.lastrowid
 
+    def table_identity(self, table):
+        """The columns that identify a row here, from SQLite's own catalogue -- the same question
+        `PostgresRuntime.table_identity` answers, asked in this dialect. See that method for why
+        the DATABASE is the single identity source rather than a copy of the seeder's map
+        (T1-AUDIT-COMPOSITE-KEY-IDENTITY, 2026-08-21).
+
+        Prefers a declared PRIMARY KEY, else the narrowest UNIQUE index. Returns () when the table
+        guarantees no uniqueness, so a caller can say "unknown" instead of inventing one. SQLite's
+        implicit rowid is deliberately NOT treated as an identity: it is invisible to the program
+        and meaningless to a compliance reader."""
+        cache = getattr(self, '_identity_cache', None)
+        if cache is None:
+            cache = {}
+            self._identity_cache = cache
+        if table not in cache:
+            best = ()
+            try:
+                pk = [r[1] for r in self.conn.execute(f'PRAGMA table_info("{table}")')
+                      if r[5]]                      # r[5] = pk position, 0 when not part of it
+                if pk:
+                    best = tuple(pk)
+                else:
+                    for idx in self.conn.execute(f'PRAGMA index_list("{table}")'):
+                        if not idx[2]:              # idx[2] = "unique"
+                            continue
+                        cols = tuple(r[2] for r in
+                                     self.conn.execute(f'PRAGMA index_info("{idx[1]}")'))
+                        if cols and (not best or len(cols) < len(best)):
+                            best = cols
+            except Exception:
+                # A table that does not exist yet has no identity to report; that is a real
+                # answer, not an error to raise from an audit path.
+                best = ()
+            cache[table] = best
+        return cache[table]
+
     def update(self, table, updates, match_field, match_value):
         try:
             set_clause = ', '.join(f'"{k}" = ?' for k in updates)
@@ -1103,9 +1216,17 @@ class DbRuntime:
             if not self._in_transaction: self.conn.commit()
             return cur.rowcount
         except sqlite3.OperationalError:
-            return 0
+            # T1-GUARD-FAILOPEN: "0 rows matched" is the normal successful-execution
+            # outcome (cur.rowcount == 0), which never reaches this except block. ANY
+            # exception here is a genuine write failure -- indistinguishable from a benign
+            # no-op if swallowed to 0, which corrupts on.success/on.failure branching.
+            raise
 
     def retrieve_one_multi(self, table, conditions):
+        # T1-FIELD-VALIDATION: same shared validator as retrieve_one/find_many/count/remove --
+        # a composite match's field set is exactly as vulnerable to the SQLite quoting quirk
+        # (a bad field silently matches nothing, no exception) as a single-field match is.
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return None
@@ -1115,22 +1236,35 @@ class DbRuntime:
                 list(conditions.values()))
             row = cur.fetchone()
             return _cast_row(dict(row)) if row else None
-        except sqlite3.OperationalError:
-            return None
+        except sqlite3.OperationalError as e:
+            # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed, same reasoning):
+            # any exception here is a real operational failure and must not read as a clean
+            # miss. The dedupe-check caller handles its own pre-table-creation case.
+            raise
 
     def retrieve_one_spec(self, table, spec):
+        # T1-FIELD-VALIDATION: spec = list of (kind, [(field, value), ...]) across and/or/not
+        # groups -- validate every field named anywhere in the spec, same reasoning as
+        # retrieve_one_multi above.
+        self._validate_fields(table, [f for _kind, pairs in spec for f, _v in pairs])
         try:
             where, params = _spec_to_sql(spec, '?', '"')
             cur = self.conn.execute(
                 f'SELECT * FROM "{table}" WHERE {where} LIMIT 1', params)
             row = cur.fetchone()
             return _cast_row(dict(row)) if row else None
-        except sqlite3.OperationalError:
-            return None
+        except sqlite3.OperationalError as e:
+            # T1-GUARD-FAILOPEN sibling of retrieve_one/retrieve_one_multi (carve-out
+            # removed, same reasoning) -- every exception here fails loud.
+            raise
 
     def retrieve_all_spec(self, table, spec):
         """Multi-row retrieve (retrieve.all/.every/.count/.first/.last). Empty
         spec means every row. Returns a list of cast row dicts (possibly empty)."""
+        # T1-FIELD-VALIDATION: same as retrieve_one_spec above. An empty spec means "every
+        # row" (no fields referenced), so there is nothing to validate in that case.
+        if spec:
+            self._validate_fields(table, [f for _kind, pairs in spec for f, _v in pairs])
         try:
             if spec:
                 where, params = _spec_to_sql(spec, '?', '"')
@@ -1139,10 +1273,19 @@ class DbRuntime:
             else:
                 cur = self.conn.execute(f'SELECT * FROM "{table}"')
             return [_cast_row(dict(r)) for r in cur.fetchall()]
-        except sqlite3.OperationalError:
-            return []
+        except sqlite3.OperationalError as e:
+            # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): retrieve_all_spec
+            # now follows find_many's policy too -- a missing table is an operational failure,
+            # never a silent empty list.
+            raise
 
     def update_multi(self, table, updates, conditions):
+        # T1-FIELD-VALIDATION: validates the WHERE-side field set (conditions) -- that's where
+        # the quoting quirk lives. The SET-side fields (updates) already fail loud via a real
+        # SQLite "no such column" error (UPDATE's SET clause validates columns natively; see
+        # the T1-GUARD-FAILOPEN comment on update() above), so no redundant check is needed
+        # there.
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return 0
@@ -1153,8 +1296,22 @@ class DbRuntime:
                 f'UPDATE "{table}" SET {set_clause} WHERE {where}', params)
             if not self._in_transaction: self.conn.commit()
             return cur.rowcount
-        except sqlite3.OperationalError:
-            return 0
+        except sqlite3.OperationalError as e:
+            # CORRECTED (not update()'s policy): _exec_SaveOrUpdateBlock's sqlite fallback
+            # path (no native upsert on this backend) calls update_multi and reads `count
+            # == 0` as "no matching row, fall through to save/create" -- including on the
+            # very FIRST save-or-update call against a table that does not exist yet. That
+            # is genuinely "not found," the same pre-table-creation case retrieve_one/
+            # retrieve_one_multi already carve out, not an ambiguous one -- making this
+            # raise unconditionally broke that fallback's very first call on a fresh table
+            # (caught by test_upsert_semantics/test_upsert_composite_match/
+            # test_upsert_table_resolution). update()/_exec_UpdateBlock's OWN composite
+            # caller already wraps this in its own try/except and handles a raise
+            # correctly, so the carve-out costs it nothing. Every other operational error
+            # still fails loud.
+            if 'no such table' in str(e).lower():
+                return 0
+            raise
 
     def remove_all(self, table):
         cur = self.conn.execute(f'DELETE FROM "{table}"')
@@ -1162,6 +1319,7 @@ class DbRuntime:
         return getattr(cur, 'rowcount', 0)
 
     def remove(self, table, match_field, match_value):
+        self._validate_fields(table, [match_field])
         try:
             cur = self.conn.execute(
                 f'DELETE FROM "{table}" WHERE "{match_field}" = ?',
@@ -1170,9 +1328,16 @@ class DbRuntime:
             if not self._in_transaction: self.conn.commit()
             return cur.rowcount
         except sqlite3.OperationalError:
-            return 0
+            # T1-GUARD-FAILOPEN: same distinction as update() above -- "0 rows matched" is
+            # the normal outcome, never this except block. Any exception here is a real
+            # delete failure and must not read as "matched nothing."
+            raise
 
     def remove_multi(self, table, conditions):
+        # T1-FIELD-VALIDATION: same shared validator, same reasoning as remove()/
+        # retrieve_one_multi above -- a composite delete's field set is exactly as
+        # vulnerable to the SQLite quoting quirk as a single-field one.
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return 0
@@ -1182,7 +1347,10 @@ class DbRuntime:
             if not self._in_transaction: self.conn.commit()
             return cur.rowcount
         except sqlite3.OperationalError:
-            return 0
+            # T1-GUARD-FAILOPEN sibling of remove(): "0 rows matched" is the normal
+            # outcome, never this except block. A real delete failure must not read as
+            # "matched nothing."
+            raise
 
     def save_if_not_exists(self, table, fields, key_cols):
         """Insert only if no row already matches key_cols -- `save ... unless a, b exists`.
@@ -1313,9 +1481,17 @@ class PostgresRuntime:
             row = cur.fetchone()
             cur.close()
             return _cast_row(dict(row)) if row else None
-        except Exception:
+        except Exception as e:
+            # T1-GUARD-FAILOPEN (carve-out removed, same reasoning as the SQLite runtime):
+            # "no row matched" is the plain `row = None` fall-through above, which never
+            # reaches this except block -- so ANY exception here, missing table included, is
+            # a genuine operational failure and must fail loud. The old carve-out also
+            # string-matched the broad "does not exist" (not just pgcode 42P01/UndefinedTable),
+            # which silently swallowed a missing COLUMN too -- a real, separate bug this
+            # removal also closes. The dedupe-check caller handles its own pre-table-creation
+            # case. Roll back to heal the connection, then fail loud.
             self.conn.rollback()
-            return None
+            raise
 
     def find_many(self, table, where=None, limit=None,
                   order_by=None, order_dir='asc', offset=0):
@@ -1337,8 +1513,13 @@ class PostgresRuntime:
                                   order_by, order_dir, limit, offset)
             cur.close()
             return rows
-        except Exception:
+        except Exception as e:
             self.conn.rollback()
+            # T1-GUARD-FAILOPEN sibling of count()/sqlite find_many: a MISSING TABLE is an
+            # operational failure, not an empty result -- every other operational error
+            # keeps the prior lenient [].
+            if getattr(e, 'pgcode', None) == '42P01' or 'does not exist' in str(e).lower():
+                raise
             return []
 
     def count(self, table, where=None):
@@ -1362,6 +1543,42 @@ class PostgresRuntime:
                 return 0
             raise
 
+    def _table_has_id(self, table):
+        """Does this table actually have an `id` column?
+
+        T1-SAVE-IDLESS-TABLE (2026-08-21). Postgres is the only backend whose insert asks for the
+        new key back BY NAME -- `RETURNING id` -- rather than through the driver (SQLite/MySQL use
+        `lastrowid`, Mongo uses `inserted_id`), so it is the only one that breaks when the table
+        has no such column. It broke live: `save to db.flags` returned
+        `db_error: column "id" does not exist ... RETURNING id`.
+
+        The assumption held for as long as the RUNTIME created every table, because `_col_defs`
+        always adds `id ... PRIMARY KEY`. It stopped holding when the seeder began creating each
+        table with its REAL identity (T1-SEEDER-SCHEMA-CORRECTNESS, be29057): `flags` is
+        UNIQUE(session_id, flag_name) with no id at all, by design, and a pre-existing table is
+        never given one afterwards (`ensure_table` skips `id`). The shape the seeder now correctly
+        produces is exactly the shape this path could not write to.
+
+        Asked once per table and remembered: `ensure_table` always runs before the callers below,
+        so the table exists by the time this is asked, and its id-ness does not change within a
+        run. The cache is built lazily rather than in __init__ so a runtime constructed with
+        `object.__new__` (as the guard tests do) behaves identically."""
+        cache = getattr(self, '_id_col_cache', None)
+        if cache is None:
+            cache = {}
+            self._id_col_cache = cache
+        if table not in cache:
+            cur = self.conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = %s "
+                    "AND column_name = 'id' LIMIT 1", (table,))
+                cache[table] = cur.fetchone() is not None
+            finally:
+                cur.close()
+        return cache[table]
+
     def save(self, table, fields):
         from mohio_audit_grades import assert_write_allowed as _awa
         _awa(table)          # audit relations only via the chaining path
@@ -1369,12 +1586,16 @@ class PostgresRuntime:
         cols = ', '.join(f'"{k}"' for k in fields)
         phs  = ', '.join('%s' for _ in fields)
         cur  = self.conn.cursor()
+        # An id-less table has no generated key to hand back, and asking for one by name is
+        # exactly what failed. The row's identity there is the values just written, which the
+        # caller already holds -- so there is nothing to return and nothing lost by not asking.
+        _ret = ' RETURNING id' if self._table_has_id(table) else ''
         try:
             cur.execute(
-                f'INSERT INTO "{table}" ({cols}) VALUES ({phs}) RETURNING id',
+                f'INSERT INTO "{table}" ({cols}) VALUES ({phs}){_ret}',
                 list(fields.values())
             )
-            result = cur.fetchone()
+            result = cur.fetchone() if _ret else None
             if not self._in_transaction: self.conn.commit()
             cur.close()
             return result[0] if result else None
@@ -1385,6 +1606,57 @@ class PostgresRuntime:
             try: cur.close()
             except Exception: pass
             raise   # re-raise so the executor routes to on.failure as before
+
+    def table_identity(self, table):
+        """The columns that identify a row in this table, straight from the database.
+
+        T1-AUDIT-COMPOSITE-KEY-IDENTITY (2026-08-21). ONE source of "what identifies a row here",
+        and it is deliberately the DATABASE ITSELF -- its declared PRIMARY KEY, or its narrowest
+        UNIQUE constraint. That is not a second spelling of the seeder's TABLE_IDENTITY map: it is
+        the very thing that map WRITES (T1-SEEDER-SCHEMA-CORRECTNESS created each table with the
+        constraint its identity requires). Asking the catalogue means the audit renders the same
+        identity the schema declares and the upsert matches on, cannot drift from it, and still
+        works for a table the seeder never touched.
+
+        Copying the seeder's map in here was the obvious-looking alternative and is exactly what
+        must not happen: seed_postgres.py is a Zork seeding script that does its work at import,
+        the compiler cannot depend on it, and a duplicated map is two truths waiting to disagree.
+
+        Returns a tuple of column names, or () when the table declares no uniqueness at all -- in
+        which case callers must say so rather than invent an identity."""
+        cache = getattr(self, '_identity_cache', None)
+        if cache is None:
+            cache = {}
+            self._identity_cache = cache
+        if table not in cache:
+            cur = self.conn.cursor()
+            try:
+                cur.execute(
+                    """SELECT (SELECT array_agg(a.attname::text ORDER BY k.ord)
+                                 FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                                 JOIN pg_attribute a
+                                   ON a.attrelid = c.oid AND a.attnum = k.attnum) AS cols,
+                              i.indisprimary
+                         FROM pg_class c
+                         JOIN pg_namespace n
+                           ON n.oid = c.relnamespace AND n.nspname = current_schema()
+                         JOIN pg_index i ON i.indrelid = c.oid AND i.indisunique
+                        WHERE c.relname = %s""", (table,))
+                rows = [r for r in cur.fetchall() if r[0]]
+            finally:
+                cur.close()
+            # The PRIMARY KEY is the row's identity when one is declared; otherwise the narrowest
+            # unique constraint is the closest thing the table actually guarantees.
+            best = ()
+            for cols, is_pk in rows:
+                cand = tuple(cols)
+                if is_pk:
+                    best = cand
+                    break
+                if not best or len(cand) < len(best):
+                    best = cand
+            cache[table] = best
+        return cache[table]
 
     def update(self, table, updates, match_field, match_value):
         try:
@@ -1400,8 +1672,11 @@ class PostgresRuntime:
             cur.close()
             return count
         except Exception:
+            # T1-GUARD-FAILOPEN: "0 rows matched" is the normal successful-execution
+            # outcome, which never reaches this except block. Any exception here is a
+            # genuine write failure and must not read as "matched nothing."
             self.conn.rollback()
-            return 0
+            raise
 
     def retrieve_one_multi(self, table, conditions):
         try:
@@ -1414,9 +1689,11 @@ class PostgresRuntime:
             row = cur.fetchone()
             cur.close()
             return _cast_row(dict(row)) if row else None
-        except Exception:
+        except Exception as e:
             self.conn.rollback()   # heal aborted-transaction state; don't brick the session
-            return None
+            # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): every exception
+            # here fails loud.
+            raise
 
     def retrieve_one_spec(self, table, spec):
         try:
@@ -1426,9 +1703,11 @@ class PostgresRuntime:
             row = cur.fetchone()
             cur.close()
             return _cast_row(dict(row)) if row else None
-        except Exception:
+        except Exception as e:
             self.conn.rollback()   # heal aborted-transaction state; don't brick the session
-            return None
+            # T1-GUARD-FAILOPEN sibling of retrieve_one/retrieve_one_multi (carve-out
+            # removed): every exception here fails loud.
+            raise
 
     def retrieve_all_spec(self, table, spec):
         """Multi-row retrieve. Empty spec means every row."""
@@ -1442,9 +1721,11 @@ class PostgresRuntime:
             rows = cur.fetchall()
             cur.close()
             return [_cast_row(dict(r)) for r in rows]
-        except Exception:
+        except Exception as e:
             self.conn.rollback()
-            return []
+            # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): a missing table
+            # is an operational failure, never a silent empty list.
+            raise
 
     def update_multi(self, table, updates, conditions):
         try:
@@ -1460,33 +1741,67 @@ class PostgresRuntime:
             cur.close()
             return count
         except Exception:
+            # T1-GUARD-FAILOPEN sibling of update(): "0 rows matched" is the normal
+            # outcome, never this except block.
             self.conn.rollback()
-            return 0
+            raise
 
     def upsert(self, table, fields, match_field):
-        """Postgres native upsert — INSERT ON CONFLICT DO UPDATE. `match_field` is a single
-        column name or a list of columns (a composite unique constraint, e.g. UNIQUE(a, b))."""
+        """Constraint-free upsert -- UPDATE the matching row, else INSERT it with the insert
+        guarded by WHERE NOT EXISTS. `match_field` is a single column name or a list.
+
+        T1-UPSERT-NO-CONSTRAINT (2026-08-20, ruled Option A). This was
+        `INSERT ... ON CONFLICT(col) DO UPDATE`, which HARD-REQUIRES a unique/exclusion
+        constraint on the conflict column. Mohio's auto-created tables only ever get one on
+        `id`, so an upsert matching any other column (`upsert db.saved_games match session_id`)
+        raised InvalidColumnReference and 500'd EVERY time -- on exactly the tables Mohio makes.
+        `save_if_not_exists` (mohio_interpreter.py:1319) had already ruled this identical
+        question the identical way, in this same file, with the reasoning spelled out; upsert
+        simply contradicted its own sibling. This form is correct WITH or WITHOUT a constraint,
+        so a table that DOES have a unique on the match column keeps working unchanged.
+
+        Deliberately NOT the naive read-then-write: step 2 is a single guarded statement, so a
+        concurrent insert landing between steps cannot produce a duplicate row.
+        """
         match_cols = [match_field] if isinstance(match_field, str) else list(match_field)
         self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
-        cols     = ', '.join(f'"{k}"' for k in fields)
-        phs      = ', '.join('%s' for _ in fields)
-        conflict = ', '.join(f'"{c}"' for c in match_cols)
-        # DO UPDATE SET excludes EVERY conflict column, not just the first (a conflict column
-        # cannot be reassigned from EXCLUDED). If nothing is left to set, DO NOTHING.
         set_cols = [k for k in fields if k not in match_cols]
-        do = ('DO NOTHING' if not set_cols
-              else 'DO UPDATE SET ' + ', '.join(f'"{k}" = EXCLUDED."{k}"' for k in set_cols))
+        where    = ' AND '.join(f'"{c}" = %s' for c in match_cols)
+        key_vals = [fields.get(c) for c in match_cols]
         try:
             cur = self.conn.cursor()
+            # 1. UPDATE the existing row. Nothing left to SET (every field IS a key) means a
+            #    pure-existence upsert -- skip to the guarded insert, exactly what the old
+            #    `ON CONFLICT ... DO NOTHING` branch did for that case.
+            if set_cols:
+                set_clause = ', '.join(f'"{k}" = %s' for k in set_cols)
+                cur.execute(f'UPDATE "{table}" SET {set_clause} WHERE {where}',
+                            [fields[k] for k in set_cols] + key_vals)
+                if cur.rowcount:
+                    if not self._in_transaction: self.conn.commit()
+                    cur.close()
+                    return 1
+            # 2. Nothing matched -> INSERT, guarded in ONE statement.
+            cols = ', '.join(f'"{k}"' for k in fields)
+            phs  = ', '.join('%s' for _ in fields)
             cur.execute(
-                f'INSERT INTO "{table}" ({cols}) VALUES ({phs}) '
-                f'ON CONFLICT({conflict}) {do}',
-                list(fields.values())
+                f'INSERT INTO "{table}" ({cols}) SELECT {phs} '
+                f'WHERE NOT EXISTS (SELECT 1 FROM "{table}" WHERE {where})',
+                list(fields.values()) + key_vals
             )
+            inserted = cur.rowcount
+            # 3. The guard refused the insert, so a concurrent writer created the row after
+            #    step 1 looked for it. Apply this upsert's values to that row -- without this
+            #    the write would be silently LOST, which ON CONFLICT DO UPDATE would not have
+            #    done, and a silent lost write is exactly what this codebase refuses to ship.
+            if not inserted and set_cols:
+                set_clause = ', '.join(f'"{k}" = %s' for k in set_cols)
+                cur.execute(f'UPDATE "{table}" SET {set_clause} WHERE {where}',
+                            [fields[k] for k in set_cols] + key_vals)
             if not self._in_transaction: self.conn.commit()
             cur.close()
             return 1
-        except Exception as e:
+        except Exception:
             self.conn.rollback()
             raise
 
@@ -1509,8 +1824,11 @@ class PostgresRuntime:
             cur.close()
             return count
         except Exception:
+            # T1-GUARD-FAILOPEN: same distinction as update() above -- "0 rows matched" is
+            # the normal outcome, never this except block. A real delete failure must not
+            # read as "matched nothing."
             self.conn.rollback()
-            return 0
+            raise
 
     def remove_multi(self, table, conditions):
         try:
@@ -1524,8 +1842,10 @@ class PostgresRuntime:
             cur.close()
             return count
         except Exception:
+            # T1-GUARD-FAILOPEN sibling of remove(): "0 rows matched" is the normal
+            # outcome, never this except block.
             self.conn.rollback()
-            return 0
+            raise
 
     def save_if_not_exists(self, table, fields, key_cols):
         """Insert only if no row matches key_cols -- `save ... unless a, b exists`. One atomic
@@ -1540,15 +1860,21 @@ class PostgresRuntime:
         where = ' AND '.join(f'"{c}" = %s' for c in key_cols)
         cur = self.conn.cursor()
         try:
+            # Same id-less case as save() above, and more likely to be hit here: `save ...
+            # unless a, b exists` is aimed squarely at composite-key tables, which are the ones
+            # least likely to carry an id. Without an id the honest answer to "was a row put in"
+            # is the rowcount, not a key -- and the caller only ever tests it for truthiness.
+            _ret = ' RETURNING id' if self._table_has_id(table) else ''
             cur.execute(
                 f'INSERT INTO "{table}" ({cols}) SELECT {phs} '
-                f'WHERE NOT EXISTS (SELECT 1 FROM "{table}" WHERE {where}) RETURNING id',
+                f'WHERE NOT EXISTS (SELECT 1 FROM "{table}" WHERE {where}){_ret}',
                 list(fields.values()) + [fields.get(c) for c in key_cols]
             )
-            row = cur.fetchone()
+            row = cur.fetchone() if _ret else None
+            _inserted = cur.rowcount
             if not self._in_transaction: self.conn.commit()
             cur.close()
-            return row[0] if row else None
+            return (row[0] if row else None) if _ret else (_inserted or None)
         except Exception:
             self.conn.rollback()
             try: cur.close()
@@ -1623,9 +1949,20 @@ class MySQLRuntime:
         cur.execute(f'CREATE TABLE IF NOT EXISTS `{table}` ({cols})')
         # Reconcile columns: widen an existing narrow table. MySQL lacks a portable
         # ADD COLUMN IF NOT EXISTS, so diff against information_schema first.
-        cur.execute("SELECT column_name FROM information_schema.columns "
+        # Connection uses DictCursor, so fetchall() yields dicts; read by alias -- the same
+        # spelling `count_rows` already uses a few methods below, not a second one invented here.
+        # This read used to be `r[0]`, a POSITIONAL index into a dict, which raised
+        # `KeyError: 0` on EVERY MySQL write: ensure_table runs before every save/update/upsert/
+        # retrieve, so the whole MySQL backend could not create or introspect a table at all
+        # (T1-MYSQL-DICTCURSOR-INDEX, 2026-08-20). Pre-existing, not introduced by the upsert
+        # work that found it: the identical program run at the parent commit 4b55369 with this
+        # fix absent gives `500 db_error: 0`. The explicit `AS col` alias is load-bearing, not
+        # cosmetic -- it makes the key deterministic --
+        # MySQL 8 reports information_schema column labels in upper case, so reading
+        # `r['column_name']` unaliased would work on some servers and KeyError on others.
+        cur.execute("SELECT column_name AS col FROM information_schema.columns "
                     "WHERE table_schema = DATABASE() AND table_name = %s", (table,))
-        existing = {r[0] for r in cur.fetchall()}
+        existing = {(r['col'] if isinstance(r, dict) else r[0]) for r in cur.fetchall()}
         for c in columns:
             if c not in existing:
                 cur.execute(f'ALTER TABLE `{table}` ADD COLUMN `{c}` TEXT')
@@ -1643,9 +1980,14 @@ class MySQLRuntime:
             row = cur.fetchone()
             cur.close()
             return _cast_row(dict(row)) if row else None
-        except Exception:
+        except Exception as e:
+            # T1-GUARD-FAILOPEN (carve-out removed, same reasoning as the SQLite runtime):
+            # "no row matched" is the plain `row = None` fall-through above, which never
+            # reaches this except block -- so ANY exception here, missing table included, is
+            # a genuine operational failure and must fail loud. The dedupe-check caller
+            # handles its own pre-table-creation case. Roll back to heal the connection.
             self.conn.rollback()
-            return None
+            raise
 
     def find_many(self, table, where=None, limit=None,
                   order_by=None, order_dir='asc', offset=0):
@@ -1666,8 +2008,13 @@ class MySQLRuntime:
                                   order_by, order_dir, limit, offset)
             cur.close()
             return rows
-        except Exception:
+        except Exception as e:
             self.conn.rollback()
+            # T1-GUARD-FAILOPEN sibling of count()/sqlite find_many: a MISSING TABLE is an
+            # operational failure, not an empty result -- every other operational error
+            # keeps the prior lenient [].
+            if getattr(e, 'args', [None])[0] == 1146 or "doesn't exist" in str(e).lower():
+                raise
             return []
 
     def count(self, table, where=None):
@@ -1725,8 +2072,11 @@ class MySQLRuntime:
             cur.close()
             return count
         except Exception:
+            # T1-GUARD-FAILOPEN: "0 rows matched" is the normal successful-execution
+            # outcome, which never reaches this except block. Any exception here is a
+            # genuine write failure and must not read as "matched nothing."
             self.conn.rollback()
-            return 0
+            raise
 
     def retrieve_one_multi(self, table, conditions):
         try:
@@ -1739,8 +2089,11 @@ class MySQLRuntime:
             row = cur.fetchone()
             cur.close()
             return _cast_row(dict(row)) if row else None
-        except Exception:
-            return None
+        except Exception as e:
+            self.conn.rollback()   # heal aborted-transaction state; don't brick the session
+            # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): every exception
+            # here fails loud.
+            raise
 
     def retrieve_one_spec(self, table, spec):
         try:
@@ -1750,8 +2103,11 @@ class MySQLRuntime:
             row = cur.fetchone()
             cur.close()
             return _cast_row(dict(row)) if row else None
-        except Exception:
-            return None
+        except Exception as e:
+            self.conn.rollback()   # heal aborted-transaction state; don't brick the session
+            # T1-GUARD-FAILOPEN sibling of retrieve_one/retrieve_one_multi (carve-out
+            # removed): every exception here fails loud.
+            raise
 
     def retrieve_all_spec(self, table, spec):
         """Multi-row retrieve. Empty spec means every row."""
@@ -1765,8 +2121,11 @@ class MySQLRuntime:
             rows = cur.fetchall()
             cur.close()
             return [_cast_row(dict(r)) for r in rows]
-        except Exception:
-            return []
+        except Exception as e:
+            self.conn.rollback()
+            # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): a missing table
+            # is an operational failure, never a silent empty list.
+            raise
 
     def update_multi(self, table, updates, conditions):
         try:
@@ -1782,31 +2141,68 @@ class MySQLRuntime:
             cur.close()
             return count
         except Exception:
+            # T1-GUARD-FAILOPEN sibling of update(): "0 rows matched" is the normal
+            # outcome, never this except block.
             self.conn.rollback()
-            return 0
+            raise
 
     def upsert(self, table, fields, match_field):
-        """MySQL/MariaDB native upsert — INSERT ON DUPLICATE KEY UPDATE. `match_field` is a
-        single column or a list; ON DUPLICATE KEY uses the table's unique keys, so the columns
-        only need excluding from the SET (every conflict column, not just the first)."""
+        """Constraint-free upsert -- UPDATE the matching row, else INSERT it with the insert
+        guarded by WHERE NOT EXISTS. `match_field` is a single column or a list.
+
+        T1-UPSERT-NO-CONSTRAINT (2026-08-20, ruled Option A). This was `INSERT ... ON DUPLICATE
+        KEY UPDATE`, and its old docstring claimed that was fine because "ON DUPLICATE KEY uses
+        the table's unique keys." That premise is exactly the bug: when the match column has NO
+        unique key -- which is every non-`id` column on a Mohio auto-created table -- MySQL does
+        not error, it simply INSERTS. So `upsert db.saved_games match session_id` silently
+        appended a duplicate row on every call instead of updating, forever. That is a WORSE
+        failure than the Postgres sibling's loud crash: wrong data, no signal. Same fix, same
+        form as `save_if_not_exists` (mohio_interpreter.py:2041), which had already ruled this.
+
+        MySQL cannot SELECT from the table it inserts into without an alias, hence the
+        `FROM DUAL` + derived-table wrapper -- mirrored from that sibling, not invented here.
+        """
         match_cols = [match_field] if isinstance(match_field, str) else list(match_field)
         self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
-        cols   = ', '.join(f'`{k}`' for k in fields)
-        phs    = ', '.join('%s' for _ in fields)
         set_cols = [k for k in fields if k not in match_cols]
-        update = ', '.join(f'`{k}` = VALUES(`{k}`)' for k in set_cols) or '`id` = `id`'
+        where    = ' AND '.join(f'`{c}` = %s' for c in match_cols)
+        key_vals = [fields.get(c) for c in match_cols]
         try:
             cur = self.conn.cursor()
+            # 1. UPDATE the existing row (see the Postgres sibling for the step-by-step).
+            if set_cols:
+                set_clause = ', '.join(f'`{k}` = %s' for k in set_cols)
+                cur.execute(f'UPDATE `{table}` SET {set_clause} WHERE {where}',
+                            [fields[k] for k in set_cols] + key_vals)
+                if cur.rowcount:
+                    if not self._in_transaction: self.conn.commit()
+                    cur.close()
+                    return 1
+            # 2. Nothing matched -> guarded INSERT, one statement.
+            cols = ', '.join(f'`{k}`' for k in fields)
+            phs  = ', '.join('%s' for _ in fields)
             cur.execute(
-                f'INSERT INTO `{table}` ({cols}) VALUES ({phs}) '                f'ON DUPLICATE KEY UPDATE {update}',
-                list(fields.values())
+                f'INSERT INTO `{table}` ({cols}) SELECT {phs} FROM DUAL '
+                f'WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM `{table}`) AS _chk '
+                f'WHERE {where})',
+                list(fields.values()) + key_vals
             )
+            inserted = cur.rowcount
+            # 3. A concurrent writer beat the guard -- apply this upsert's values rather than
+            #    silently losing the write.
+            if not inserted and set_cols:
+                set_clause = ', '.join(f'`{k}` = %s' for k in set_cols)
+                cur.execute(f'UPDATE `{table}` SET {set_clause} WHERE {where}',
+                            [fields[k] for k in set_cols] + key_vals)
             if not self._in_transaction: self.conn.commit()
             cur.close()
             return 1
         except Exception:
+            # T1-GUARD-FAILOPEN sibling of Postgres upsert()/Mongo upsert(): an upsert
+            # either succeeds (inserted or updated) or it doesn't -- there is no
+            # legitimate "upsert produced nothing" outcome to protect here.
             self.conn.rollback()
-            return 0
+            raise
 
     def remove_all(self, table):
         cur = self.conn.cursor()
@@ -1827,8 +2223,11 @@ class MySQLRuntime:
             cur.close()
             return count
         except Exception:
+            # T1-GUARD-FAILOPEN: same distinction as update() above -- "0 rows matched" is
+            # the normal outcome, never this except block. A real delete failure must not
+            # read as "matched nothing."
             self.conn.rollback()
-            return 0
+            raise
 
     def remove_multi(self, table, conditions):
         try:
@@ -1842,8 +2241,10 @@ class MySQLRuntime:
             cur.close()
             return count
         except Exception:
+            # T1-GUARD-FAILOPEN sibling of remove(): "0 rows matched" is the normal
+            # outcome, never this except block.
             self.conn.rollback()
-            return 0
+            raise
 
     def save_if_not_exists(self, table, fields, key_cols):
         """Insert only if no row matches key_cols -- `save ... unless a, b exists`. One atomic
@@ -1936,7 +2337,10 @@ class MongoRuntime:
                 doc['id'] = str(doc.pop('_id', ''))
             return doc
         except Exception:
-            return None
+            # T1-GUARD-FAILOPEN: "no document matched" is the plain `doc is None`
+            # fall-through above, which never reaches this except block. ANY exception
+            # here is a genuine operational failure, never a legitimate "not found."
+            raise
 
     def find_many(self, table, where=None, limit=None,
                   order_by=None, order_dir='asc', offset=0):
@@ -1958,13 +2362,19 @@ class MongoRuntime:
                 rows.append(doc)
             return rows
         except Exception:
-            return []
+            # T1-GUARD-FAILOPEN: unlike a SQL backend, Mongo has no "missing table"
+            # ambiguity to carve out -- a nonexistent collection legitimately returns an
+            # empty cursor with no exception, so reaching this block always means a real
+            # operational failure (matches retrieve_one/save/update/remove's own policy).
+            raise
 
     def count(self, table, where=None):
         try:
             return self._mongo_db[table].count_documents(_mongo_id_filter(where or {}))
         except Exception:
-            return 0
+            # T1-GUARD-FAILOPEN sibling of find_many above -- same reasoning, same fix
+            # missed for this backend when count() was hardened elsewhere.
+            raise
 
     def save(self, table, fields):
         try:
@@ -1972,7 +2382,11 @@ class MongoRuntime:
             result = col.insert_one(fields)
             return str(result.inserted_id)
         except Exception:
-            return None
+            # T1-GUARD-FAILOPEN: an insert either succeeds (returns a real inserted_id) or
+            # it doesn't -- there is no legitimate "insert produced nothing" outcome here to
+            # protect. Swallowing to None made a genuine write failure unreportable to the
+            # caller, identical to a value that was silently never saved.
+            raise
 
     def update(self, table, updates, match_field, match_value):
         try:
@@ -1983,7 +2397,11 @@ class MongoRuntime:
             )
             return result.modified_count
         except Exception:
-            return 0
+            # T1-GUARD-FAILOPEN: "0 documents matched" is the normal successful-execution
+            # outcome (modified_count == 0), which never reaches this except block. Any
+            # exception here is a genuine write failure and must not read as "matched
+            # nothing."
+            raise
 
     def retrieve_one_multi(self, table, conditions):
         try:
@@ -1993,7 +2411,9 @@ class MongoRuntime:
                 doc['id'] = str(doc.pop('_id', ''))
             return doc
         except Exception:
-            return None
+            # T1-GUARD-FAILOPEN sibling of retrieve_one: no missing-collection ambiguity
+            # to carve out in Mongo, so any exception here is a real failure.
+            raise
 
     def retrieve_one_spec(self, table, spec):
         try:
@@ -2002,7 +2422,7 @@ class MongoRuntime:
                 doc['id'] = str(doc.pop('_id', ''))
             return doc
         except Exception:
-            return None
+            raise
 
     def retrieve_all_spec(self, table, spec):
         """Multi-row retrieve. Empty spec means every document."""
@@ -2014,7 +2434,7 @@ class MongoRuntime:
                 out.append(doc)
             return out
         except Exception:
-            return []
+            raise
 
     def update_multi(self, table, updates, conditions):
         try:
@@ -2022,7 +2442,9 @@ class MongoRuntime:
             result = col.update_many(_mongo_id_filter(dict(conditions)), {'$set': updates})
             return result.modified_count
         except Exception:
-            return 0
+            # T1-GUARD-FAILOPEN sibling of update(): "0 documents matched" is the normal
+            # outcome, never this except block.
+            raise
 
     def upsert(self, table, fields, match_field):
         """MongoDB native upsert — update_one with upsert=True. `match_field` is a single field
@@ -2039,13 +2461,18 @@ class MongoRuntime:
             )
             return 1
         except Exception:
-            return 0
+            # T1-GUARD-FAILOPEN: upsert=True either matches-and-updates or inserts -- there
+            # is no legitimate "upsert produced nothing" outcome to protect here. Swallowing
+            # to 0 made a genuine write failure indistinguishable from "nothing changed."
+            raise
 
     def remove_all(self, table):
         try:
             return self._mongo_db[table].delete_many({}).deleted_count
         except Exception:
-            return 0
+            # T1-GUARD-FAILOPEN sibling of remove(): "0 documents matched" is the normal
+            # outcome, never this except block.
+            raise
 
     def remove(self, table, match_field, match_value):
         try:
@@ -2053,7 +2480,9 @@ class MongoRuntime:
             result = col.delete_many(_mongo_id_filter({match_field: match_value}))
             return result.deleted_count
         except Exception:
-            return 0
+            # T1-GUARD-FAILOPEN: "0 documents matched" is the normal outcome, never this
+            # except block. A real delete failure must not read as "matched nothing."
+            raise
 
     def remove_multi(self, table, conditions):
         try:
@@ -2061,7 +2490,9 @@ class MongoRuntime:
             result = col.delete_many(_mongo_id_filter(dict(conditions)))
             return result.deleted_count
         except Exception:
-            return 0
+            # T1-GUARD-FAILOPEN sibling of remove_all()/remove(): "0 documents matched"
+            # is the normal outcome, never this except block.
+            raise
 
     def save_if_not_exists(self, table, fields, key_cols):
         """Insert only if no doc matches key_cols -- `save ... unless a, b exists`. update_one
@@ -2074,7 +2505,10 @@ class MongoRuntime:
                                     {'$setOnInsert': dict(fields)}, upsert=True)
             return str(result.upserted_id) if result.upserted_id is not None else None
         except Exception:
-            return None
+            # T1-GUARD-FAILOPEN sibling of upsert(): upsert=True either matches-and-
+            # updates or inserts -- there is no legitimate "produced nothing" outcome to
+            # protect here, matching Postgres/MySQL save_if_not_exists's own fixed policy.
+            raise
 
     def begin_transaction(self):    pass   # MongoDB transactions need replica set
     def commit_transaction(self):   pass
@@ -2709,6 +3143,11 @@ class MohioInterpreter:
         self._encrypted_fields = set() # field names marked sec.encrypt (per run)
         self._pci_fields       = set() # [pci] field names -> masked to last-4 on output
         self._phi_fields       = set() # [phi] field names -> audit-on-access (HIPAA)
+        self._pii_fields       = set() # T1-AUDIT-COVERAGE-GAPS Part C: [pii] field names ->
+                                        # audit-on-access (GDPR Art. 30 records-of-processing).
+                                        # [pii] was previously tracked ONLY via _field_purposes
+                                        # (an explicit `purpose` wrapper), so a plain [pii] read
+                                        # with no purpose block was silently unaudited.
         self._tagged_tables    = set() # tables ever written with a sensitive field -> writes stay trailed
         self._field_purposes   = {}    # [pii] field name -> set of collection purposes
         self._purpose_scope    = []    # stack of asserted purposes (purpose "x" ... purpose: done)
@@ -3142,6 +3581,20 @@ class MohioInterpreter:
                 "request outbound is retired -- use miohttp.get / miohttp.post / "
                 "miohttp.put / miohttp.delete / miohttp.patch for outbound HTTP (or "
                 "mioconnect for named services, which compiles to miohttp).")
+        # APPLANG-FAILLOUD: applang (Patent #2) was built in chat bb0e1aa9, then LOST in a
+        # refactor (Zork chat 93d68928) -- applang_decl has no transformer method, so this is
+        # the real, reachable point a program hits it today. This is a REGRESSION, not an
+        # ordinary gap: distinguishing "declared but not yet built" from "genuinely regressed"
+        # matters here, so the message says so plainly rather than reading like every other
+        # not-yet-built construct. Recovery is a dedicated future session, not available yet,
+        # tracked as the T1-APPLANG-RECOVERY follow-on (PRODUCTION-BUILD-PLAN.md, top of
+        # Tier 1; CLAUDE-CODE-BACKLOG.md, top of file).
+        if construct == 'applang_decl':
+            raise MohioRuntimeError(
+                "applang is not currently wired in this build (it regressed in a refactor, "
+                "it is not simply unbuilt) -- the grammar and the applang_map table survive, "
+                "but the live resolution cascade and its executor do not. Recovery is "
+                "tracked as the T1-APPLANG-RECOVERY follow-on and is not available yet.")
         raise MohioRuntimeError(
             f"No executor for '{construct}' -- this construct is not executable "
             f"in this build (it parsed and validated, but nothing runs it). "
@@ -3193,18 +3646,31 @@ class MohioInterpreter:
             _seen.add(node.sector)
             if _first and _empty:
                 from mohio_sector_loader import sector_requires_license as _srl
+                # T1-AUDIT-COVERAGE-GAPS Part G (2026-08-17): before this, the ONLY trace that
+                # an app ran with zero sector enforcement was a stderr line -- gone the moment
+                # nobody was watching the console, and never durable. This is a compliance
+                # EVENT (the app served real traffic unenforced), so it gets the same durable
+                # trail as any other compliance-relevant fact -- alongside the stderr warning,
+                # not instead of it (the warning is for the developer watching right now; the
+                # audit record is for the reviewer asking later).
+                _reason = 'private_sector_no_key' if _srl(node.sector) else 'sector_not_found'
+                _evt = self._audit_event('security_audit_log', {
+                    'event': 'sector_unenforced', 'reason': _reason, 'sector': node.sector,
+                }, ctx)
+                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
                 if _srl(node.sector):
-                    print(f"  [mohio.sector] note{_where}: '{node.sector}' is a licensed sector "
-                          f"profile and is not bundled with the open compiler. The sector is "
-                          f"active but enforces nothing until its licensed profile is present.\n"
+                    print(f"  [mohio.sector] WARNING{_where}: private sector requires a commercial "
+                          f"key -- no compliance, governance, or tools applied.\n"
+                          f"                 '{node.sector}' is a licensed sector profile and is not "
+                          f"bundled with the open compiler.\n"
                           f"                 provide the profile on the search path "
                           f"(~/.mohio/sectors) or run the licensed runtime.",
                           file=_sys.stderr)
                 else:
-                    print(f"  [mohio.sector] WARNING{_where}: no profile found for sector "
-                          f"'{node.sector}'. Sector rules will NOT be enforced.\n"
-                          f"                 fix: check the sector name, or place a profile file on the "
-                          f"search path (./sectors, ~/.mohio/sectors).\n"
+                    print(f"  [mohio.sector] WARNING{_where}: sector name incorrect or not found "
+                          f"-- no compliance, governance, or tools applied.\n"
+                          f"                 fix: check the sector name '{node.sector}', or place a "
+                          f"profile file on the search path (./sectors, ~/.mohio/sectors).\n"
                           f"                 '.sector' = certified profile; '.mho' = community/uncertified.",
                           file=_sys.stderr)
             elif _first and not profile.field_types:
@@ -3274,15 +3740,23 @@ class MohioInterpreter:
                 if self.verbose:
                     print(f"  [connect] {node.name} as {driver} ({type(self._db).__name__})")
             except RuntimeError as e:
-                # A declared database must FAIL LOUD, whether its URL is set and the
-                # connection fails (bad credentials, unreachable host, missing driver)
-                # or the URL is not set at all. Silently running on SQLite would send
-                # production data to the wrong database, and the old no-URL fallback
-                # used an in-memory one, so the data vanished at the next restart while
-                # the app kept answering normally.
+                # T1-RUN3-CONNECTION-HANDLER (2026-08-19): a declared database still FAILS
+                # LOUD by default (bad credentials, unreachable host, missing driver, no URL
+                # set) -- that baseline is unchanged. A connection-level on.failure is the
+                # DECLARE-ONCE OVERRIDE: if one is declared, it runs instead of raising (e.g.
+                # route to a maintenance page); with none declared, the original fail-loud is
+                # untouched. Either way this is a genuine operational failure and is audited.
+                _reason = (f"Database connection failed for '{node.name}' (declared as "
+                           f"{driver}): {e}")
+                self._audit_logs.setdefault('security_audit_log', []).append(self._audit_event(
+                    'security_audit_log', {
+                        'event': 'connection_failed', 'connection': node.name,
+                        'driver': driver, 'reason': str(e)[:300],
+                    }, ctx))
+                if any(isinstance(h, OnFailure) for h in node.handlers):
+                    return self._handle_failure(node.handlers, ctx, _reason, operational_failure=True)
                 raise MohioRuntimeError(
-                    f"Database connection failed for '{node.name}' (declared as {driver}):\n"
-                    f"    {e}\n"
+                    f"{_reason}\n"
                     f"Mohio does not fall back to SQLite when a database is declared. "
                     f"Fix the connection, or declare `as sqlite` if that is what you want.")
         self._db_target = target
@@ -3290,6 +3764,17 @@ class MohioInterpreter:
         # constraint the source already declares (3a: schema derived from the write sites).
         self._db._declared_unique = getattr(self, '_declared_unique', {}) or {}
         ctx.set_connection(node.name, self._db)
+        # T1-RUN3-CONNECTION-HANDLER: remembered so every later operation on THIS connection
+        # can fall back to it when the operation itself declares no on.failure of its own --
+        # see _handle_failure's conn_name fallback. Every query verb already resolves the
+        # connection via ctx.get_connection('db') (the hardcoded default every call site
+        # uses -- confirmed, no call site passes any other name), so keying on node.name here
+        # and defaulting the fallback lookup to 'db' matches the codebase's own existing,
+        # single-connection convention rather than inventing a new one.
+        if not hasattr(self, '_connection_handlers'):
+            self._connection_handlers = {}
+        self._connection_handlers[node.name] = node.handlers
+        self._handle_success(node.handlers, ctx)
         if self.verbose and hasattr(self._db, 'conn'):
             print(f"  [connect] {node.name} → {type(self._db).__name__} ready")
 
@@ -3318,6 +3803,8 @@ class MohioInterpreter:
                         self._pci_fields.add(f.name)
                     if m.value == 'phi':
                         self._phi_fields.add(f.name)
+                    if m.value == 'pii':
+                        self._pii_fields.add(f.name)
                 elif mt == 'purpose' and m.value:
                     self._field_purposes.setdefault(f.name, set()).update(
                         pp.strip() for pp in str(m.value).split(',') if pp.strip())
@@ -3614,13 +4101,27 @@ class MohioInterpreter:
             # A3: `hold x nobody` bound x to None silently. Fail loud on a bare undefined
             # source -- UNLESS a `default` is declared, which is exactly the sanctioned way
             # to say "if the source is missing, use this" and must keep working.
-            if getattr(node, 'default', None) is None:
+            _has_default = getattr(node, 'default', None) is not None
+            if not _has_default:
                 self._require_defined(node.value, ctx, f"hold {node.name}")
-            val = self._eval(node.value, ctx)
+                val = self._eval(node.value, ctx)
+            else:
+                # T1-EVAL-SIMPLE-FAILLOUD Piece 2 (2026-08-17): the source now fails loud at
+                # `_eval`'s user-facing DottedName check when it's a genuinely undeclared name --
+                # exactly the case `default` exists to handle. Catch it here and treat it the
+                # same as the pre-existing None/empty fallback below, instead of letting it
+                # propagate and defeat the documented `default` mechanism.
+                try:
+                    val = self._eval(node.value, ctx)
+                except _Raise as _undecl:
+                    if getattr(_undecl, 'error_name', None) == 'undeclared_variable':
+                        val = MohioValue(None)
+                    else:
+                        raise
             val_py = val.to_python() if isinstance(val, MohioValue) else val
             # value-level fallback: `hold x source default Y` -- if the source is
             # missing/null/empty, use the default instead.
-            if (val_py is None or val_py == '') and getattr(node, 'default', None) is not None:
+            if (val_py is None or val_py == '') and _has_default:
                 val = self._eval(node.default, ctx)
             held_val = val
             ctx.set(node.name, held_val, immutable=True)
@@ -3674,6 +4175,15 @@ class MohioInterpreter:
         # verified=True), so it never fires falsely; if a future path ever introduced an
         # unverified role, this fails loud rather than trusting it.
         if ctx.has_any_roles() and not ctx.roles_verified():
+            # T1-AUDIT-COVERAGE-GAPS Part B (2026-08-17): a denial is a security-relevant event
+            # exactly like the grant it mirrors (_exec_GrantRoleDecl's 'role_granted' below) --
+            # only the grant was being logged, every denial was silent. Same _audit_event seam,
+            # same log, same append-to-memory shape.
+            _evt = self._audit_event('security_audit_log', {
+                'event': 'access_denied', 'reason': 'unverified_roles',
+                'required_roles': list(node.roles),
+            }, ctx)
+            self._audit_logs.setdefault('security_audit_log', []).append(_evt)
             raise _Raise(
                 error_name='authorization_error',
                 message=("require role: the caller's roles are NOT server-verified -- refusing "
@@ -3684,6 +4194,11 @@ class MohioInterpreter:
         # Self-diagnosing refusal: name the missing role AND the fix. Without the pointer, an
         # app that suddenly 403s after the auth rebuild (roles no longer read from the client)
         # looks like a mystery outage -- this is exactly the shape Zork hit in production.
+        _evt = self._audit_event('security_audit_log', {
+            'event': 'access_denied', 'reason': 'role_not_present',
+            'required_roles': list(node.roles),
+        }, ctx)
+        self._audit_logs.setdefault('security_audit_log', []).append(_evt)
         raise _Raise(
             error_name='authorization_error',
             message=(f"Role required: {' or '.join(node.roles)}. No server-verified role is "
@@ -3709,6 +4224,12 @@ class MohioInterpreter:
         if not new_roles:
             # Fail loud at the source: a login that grants an empty role would silently
             # leave the session with no authority, surfacing later as a confusing 403.
+            # T1-AUDIT-COVERAGE-GAPS Part B: a failed login attempt is a security-relevant
+            # event, same as a successful one (audited below).
+            _evt = self._audit_event('security_audit_log', {
+                'event': 'grant_denied', 'reason': 'empty_role',
+            }, ctx)
+            self._audit_logs.setdefault('security_audit_log', []).append(_evt)
             raise _Raise(
                 error_name='authorization_error',
                 message=("grant role: the role value resolved to empty -- refusing to establish "
@@ -3799,17 +4320,29 @@ class MohioInterpreter:
         }, session_ctx)
         self._audit_logs.setdefault('security_audit_log', []).append(_evt)
 
-    def _invalidate_session(self, store, session_id):
+    def _invalidate_session(self, store, session_id, ctx=None):
         """Remove a session and permanently block its ID from being resurrected. The one
         shared primitive rotation and expiry both call -- built once, per the ruling,
         not duplicated per caller. Reentrant-safe to call while already holding
         _SESSIONS_LOCK (rotation does, via the put/delete/mark_invalidated above; expiry
         acquires it itself). mark_invalidated is ruled durable (2026-08-05): losing the
         blocklist on restart reopens the fixation risk rotation exists to close, so a
-        Postgres-backed store never drops this row the way it drops the session's own."""
+        Postgres-backed store never drops this row the way it drops the session's own.
+
+        T1-AUDIT-COVERAGE-GAPS Part E1 (2026-08-17): a session going away is a
+        security-relevant state change exactly like a rotation (audited in _rotate_session
+        above) -- only rotation was being logged, expiry/invalidation was silent. `ctx` is
+        optional (a caller invalidating before any session context exists, e.g. an
+        unresurrectable stale ID with no live Context to hand _audit_event, has nothing
+        to audit against) -- when absent, the audit step is skipped, not synthesized."""
         with MohioInterpreter._SESSIONS_LOCK:
             store.delete(session_id)
             store.mark_invalidated(session_id)
+        if ctx is not None:
+            _evt = self._audit_event('security_audit_log', {
+                'event': 'session_invalidated', 'reason': 'expired',
+            }, ctx)
+            self._audit_logs.setdefault('security_audit_log', []).append(_evt)
 
     def _session_timeout_ceilings(self, ctx):
         """(idle_seconds, absolute_seconds) -- the runtime default (2026-08-04 ruling: 30
@@ -3840,7 +4373,7 @@ class MohioInterpreter:
                                     getattr(session_ctx, '_last_accessed', None),
                                     now, idle_ceiling, absolute_ceiling)
 
-    def _opportunistic_expiry_sweep(self, store, now, idle_ceiling, absolute_ceiling):
+    def _opportunistic_expiry_sweep(self, store, now, idle_ceiling, absolute_ceiling, ctx=None):
         """A bounded scan for OTHER stale sessions, piggybacked on an ordinary request
         instead of a dedicated background task. This project has hit exactly this shape of
         concurrency bug before with an independent background thread touching shared state
@@ -3853,7 +4386,13 @@ class MohioInterpreter:
         __invalidated__ are no longer special dict keys living alongside real sessions --
         they are not part of the store at all (see _InMemorySessionStore /
         _PostgresSessionStore), so store.sweep_expired() can never sweep either by
-        accident, no exclusion list needed here."""
+        accident, no exclusion list needed here.
+
+        T1-AUDIT-COVERAGE-GAPS Part E1: each swept session is the same security-relevant
+        expiry event _invalidate_session now audits for the single lazy-expiry case -- `ctx`
+        here is the REQUEST's base context (the swept sessions' own contexts are not
+        individually available from the store's bulk sweep return value, just their ids), so
+        each entry is audited against the sweeping request, not the expired session itself."""
         interval = int(os.environ.get("MOHIO_SESSION_SWEEP_INTERVAL", "20") or "20")
         self._session_sweep_counter = getattr(self, '_session_sweep_counter', 0) + 1
         if interval <= 0 or self._session_sweep_counter % interval != 0:
@@ -3862,6 +4401,12 @@ class MohioInterpreter:
             freed = store.sweep_expired(now, idle_ceiling, absolute_ceiling)
             for sid in freed:
                 store.mark_invalidated(sid)
+        if ctx is not None:
+            for _sid in freed:
+                _evt = self._audit_event('security_audit_log', {
+                    'event': 'session_invalidated', 'reason': 'expired_sweep',
+                }, ctx)
+                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
 
     def _session_cookie_opts(self, sid, idle_ceiling, absolute_ceiling, created_at, now):
         """Cookie options for the runtime-owned session cookie. Max-Age reflects whichever
@@ -4044,7 +4589,6 @@ class MohioInterpreter:
             return None
         raise MohioRuntimeError(f"unknown variable state operation: {op!r}")
 
-    def _exec_LoadPackDecl(self, node, ctx):    raise MohioRuntimeError("load pack is declared but not yet executable in this build (the pack would silently not load). Tracked for a future release.")
     def _exec_PatternDecl(self, node, ctx):
         raise MohioRuntimeError(
             "pattern is declared but not yet executable in this build (it would silently "
@@ -4175,6 +4719,9 @@ class MohioInterpreter:
             'auth_header_name': node.auth_header_name,  # custom header name
             'operations': ops,
             'timeout':    node.timeout,
+            'retry':      node.retry,        # T1-RUN3: retries on a genuine connectivity
+                                              # failure only, never on an HTTP error response
+            'handlers':   node.handlers,      # T1-RUN3: OnFailure/OnSuccess, now real
         }
         self._connectors[node.name] = record
         if node.alias:
@@ -4240,8 +4787,26 @@ class MohioInterpreter:
                             for _k in _bp.keys():
                                 for _cls in _sector.get_field_classifications(str(_k)):
                                     _touched.add(str(_cls).lower())
-                except Exception:
-                    _touched = set()  # cannot inspect -> data-class rules just don't match
+                except Exception as e:
+                    # T1-GUARD-FAILOPEN: this profile has a data-class rule (`any operation
+                    # touching [pci]`), which means the sector ceiling depends on knowing what
+                    # this call's payload touches. A scan that can't complete used to default
+                    # to "touches nothing," which let an operation that a data-class rule was
+                    # meant to catch silently pass governance and reach the wire -- the sector
+                    # ceiling exists precisely so nothing slips past it unverified. An
+                    # unanswerable scan must BLOCK, never assume "nothing regulated here."
+                    raise _Raise(
+                        error_name='sector_scan_failed',
+                        message=(f"{node.connector}.{node.operation}: could not verify this "
+                                 f"call's data against the "
+                                 f"'{getattr(_sector, 'name', '')}' sector profile's "
+                                 f"data-classification rules ({e}), so it cannot be confirmed "
+                                 f"safe. Refusing rather than assuming it touches nothing "
+                                 f"regulated."),
+                        line=getattr(node, 'line', None),
+                        hint=("Fix whatever made the payload unreadable, or remove the "
+                              "data-class rule if this operation genuinely carries no such "
+                              "payload."))
             verdict, reason, audit_log = _sector.get_operation_verdict(
                 node.connector, node.operation, touched_classes=_touched)
             if verdict in ('forbidden', 'review'):
@@ -4414,35 +4979,77 @@ class MohioInterpreter:
             except Exception:
                 pass
 
-        try:
-            req = urllib.request.Request(url, data=body_bytes, headers=req_headers, method=method)
-            with _http_open(req, 30, method, url) as resp:   # SSRF: no auto-redirect (S9)
-                status   = resp.status
-                raw_body = resp.read().decode("utf-8", errors="replace")
-                try:    parsed = _json.loads(raw_body)
-                except: parsed = raw_body
-                result = {"status": status, "ok": 200 <= status < 300,
-                          "body": raw_body, "json": parsed, "headers": dict(resp.headers)}
-                if self.verbose: print(f"  [mioconnect] → {status}")
-                _cc_response(status)
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8", errors="replace") if e.fp else ""
-            result = {"status": e.code, "ok": False, "body": raw, "json": None, "headers": {}, "error": str(e)}
-            _cc_response(e.code, e)
-        except MohioRuntimeError as e:
-            # A refused redirect (SSRF guard) fails loud -- audit it, then propagate; never
-            # swallow it into a benign-looking result the way the generic handler below would.
-            _cc_response(0, e)
-            raise
-        except Exception as e:
-            result = {"status": 0, "ok": False, "body": "", "json": None, "headers": {}, "error": str(e)}
-            _cc_response(0, e)
+        # T1-RUN3-CONNECTION-HANDLER (2026-08-19): retry/on.failure/on.success used to parse
+        # and be silently discarded (MioconnectDecl had no field for any of them -- confirmed,
+        # mohio_transformer_ast.py's old mioconnect_decl comment literally said "no node field
+        # in MVP"). Routed through the real shared mechanism now, scoped precisely: an
+        # HTTPError (a real response came back, just not 2xx) and a successful response are
+        # BOTH legitimate outcomes -- the op ran fine, the result is checkable via
+        # `.status`/`.ok` exactly as before (test_mioconnect_patterns.py's "ERROR RESPONSE"
+        # case locks this, unchanged). Only a genuine connectivity failure (DNS, refused,
+        # timeout -- caught below, never an HTTPError) is a STATE break: that's what retry
+        # attempts, and what on.failure/fail-loud now cover, matching every other verb.
+        attempts = 1 + (conn.get('retry') or 0)
+        last_exc = None
+        for _attempt in range(1, attempts + 1):
+            try:
+                req = urllib.request.Request(url, data=body_bytes, headers=req_headers, method=method)
+                with _http_open(req, 30, method, url) as resp:   # SSRF: no auto-redirect (S9)
+                    status   = resp.status
+                    raw_body = resp.read().decode("utf-8", errors="replace")
+                    try:    parsed = _json.loads(raw_body)
+                    except: parsed = raw_body
+                    result = {"status": status, "ok": 200 <= status < 300,
+                              "body": raw_body, "json": parsed, "headers": dict(resp.headers)}
+                    if self.verbose: print(f"  [mioconnect] → {status}")
+                    _cc_response(status)
+                last_exc = None
+                break
+            except urllib.error.HTTPError as e:
+                raw = e.read().decode("utf-8", errors="replace") if e.fp else ""
+                result = {"status": e.code, "ok": False, "body": raw, "json": None, "headers": {}, "error": str(e)}
+                _cc_response(e.code, e)
+                last_exc = None
+                break
+            except MohioRuntimeError as e:
+                # A refused redirect (SSRF guard) fails loud -- audit it, then propagate; never
+                # swallow it into a benign-looking result, and never retry a security refusal.
+                _cc_response(0, e)
+                raise
+            except Exception as e:
+                last_exc = e
+                if _attempt < attempts:
+                    if self.verbose:
+                        print(f"  [mioconnect] attempt {_attempt}/{attempts} failed ({e}), retrying")
+                    continue
+                _cc_response(0, e)
+
+        if last_exc is not None:
+            _reason = f"{node.connector}.{node.operation}: connection failed ({last_exc})"
+            self._audit_logs.setdefault('security_audit_log', []).append(self._audit_event(
+                'security_audit_log', {
+                    'event': 'connection_failed', 'connector': node.connector,
+                    'operation': node.operation, 'reason': str(last_exc)[:300],
+                    'attempts': attempts,
+                }, ctx))
+            for h in conn.get('handlers') or []:
+                if isinstance(h, OnFailure):
+                    if self.verbose: print(f"  [mioconnect on.failure] {_reason}")
+                    return self._exec_block(h.body, ctx)
+            raise _Raise(error_name='mioconnect_error', message=_reason,
+                        line=getattr(node, 'line', None),
+                        hint="Add `on.failure` to the mioconnect declaration to handle this "
+                             "instead of failing loud, or `retry N times` to retry first.")
+
+        for h in conn.get('handlers') or []:
+            if isinstance(h, OnSuccess):
+                self._exec_block(h.body, ctx)
+                break
 
         mv = MohioValue(result, "shape")
         if node.result:
             ctx.set(node.result, mv)
         return mv
-    def _exec_MiosearchDecl(self, node, ctx):   raise MohioRuntimeError("miosearch is declared but not yet executable in this build (it would silently do nothing). Tracked for a future release.")
     def _exec_MiotestDecl(self, node, ctx):
         """`miotest "suite"` / `miotest.unit` / `miotest.unit.ai` -- grammar and transformer
         are wired (mohio.lark:1253-1258, mohio_transformer_ast.py:miotest_block), so this
@@ -4717,7 +5324,51 @@ class MohioInterpreter:
         if isinstance(pd, dict) and pd:
             parent.set('__pending_cookies__', MohioValue(dict(pd), 'shape'))
 
+    # T0-issue-2 (2026-08-15): GET-only-dispatched bodies (`request for` here, `page` in
+    # _serve_page) must never contain a write -- GET must be safe/idempotent. Reproduced
+    # live: a `save` inside a `request for` block fired on every plain unauthenticated GET
+    # (row count grew 0->1->2 across successive requests), same shape inside a `page` block.
+    # Generic dataclass-field walk, not a hand-picked list of container attributes (check/
+    # when/otherwise, try/on.failure/on.success/always/catch, repeat/loop/while/each,
+    # section, purpose, ...) -- a hand-picked list is exactly the kind of enumeration this
+    # project's own sibling-sweep discipline warns will miss the next block type added.
+    _GET_UNSAFE_WRITE_TYPES = (SaveBlock, SaveOrUpdateBlock, SaveAllBlock, UpdateBlock, RemoveBlock)
+
+    def _find_write_in_body(self, body):
+        seen = set()
+        def walk(node):
+            if node is None:
+                return None
+            if isinstance(node, self._GET_UNSAFE_WRITE_TYPES):
+                return node
+            if isinstance(node, list):
+                for item in node:
+                    hit = walk(item)
+                    if hit is not None:
+                        return hit
+                return None
+            if isinstance(node, Node):
+                if id(node) in seen:
+                    return None
+                seen.add(id(node))
+                for f in _dc_fields(node):
+                    hit = walk(getattr(node, f.name, None))
+                    if hit is not None:
+                        return hit
+            return None
+        return walk(body)
+
+    def _refuse_write_on_get(self, body, route_kind):
+        write = self._find_write_in_body(body)
+        if write is not None:
+            raise MohioRuntimeError(
+                f"a '{route_kind}' block (GET-only route) contains a "
+                f"{type(write).__name__.replace('Block', '').lower()} statement at line "
+                f"{write.line} -- GET must be safe/idempotent, a write must never execute "
+                f"on it. Move the write into a 'new sh.X' (POST) handler instead.")
+
     def _exec_request_listener(self, node, ctx, req):
+        self._refuse_write_on_get(node.body, 'request for')
         child = ctx.child()
         shape_var = node.shape[0].lower() + node.shape[1:]
         child.set(shape_var, MohioValue(req, 'shape'))
@@ -4829,7 +5480,21 @@ class MohioInterpreter:
             v = self._eval(n, ctx)
             return v.to_python() if isinstance(v, MohioValue) else v
 
-        left = _py(non_tok[0]) if non_tok else raw
+        # T1-EVAL-SIMPLE-FAILLOUD FORK 2: `when SUBJECT is ...` re-evaluates SUBJECT itself here
+        # (the clause's own left-hand side), independent of `check`'s already-exempted subject
+        # read. Same exemption applies for the same reason -- `check nobody / when nobody is
+        # empty` is the canonical look-and-test form (A3), and this is still the subject, not a
+        # nested body read.
+        if non_tok:
+            try:
+                left = _py(non_tok[0])
+            except _Raise as _undecl:
+                if getattr(_undecl, 'error_name', None) == 'undeclared_variable':
+                    left = None
+                else:
+                    raise
+        else:
+            left = raw
 
         def _rhs():
             # RHS may be a value node (non_tok[1]) or a STRING / NAME token.
@@ -4885,10 +5550,17 @@ class MohioInterpreter:
         # `<statement> if <condition>` -- run the statement IF the condition is true.
         # The positive counterpart of `unless`. Same condition evaluator, so it supports
         # bare booleans, comparisons, and and/or/not compounds.
+        # T1-GUARD-FAILOPEN: a guard exists to gate whether the statement runs. A broken
+        # condition used to silently default to run=False, which happened to be the safe
+        # direction for `if` (the statement is skipped) but masked a real bug as ordinary
+        # "condition false" -- no different from every other silent-default in this class.
+        # Fail loud instead: never guess what the guard would have decided.
         try:
             run = bool(self._eval_condition(node.condition, ctx))
-        except Exception:
-            run = False
+        except Exception as e:
+            raise MohioRuntimeError(
+                f"`if` guard condition failed to evaluate ({e}) -- the guarded statement was "
+                f"NOT run. A broken condition is a bug to fix, not a reason to silently skip.")
         if not run:
             return None
         return self._exec(node.stmt, ctx)
@@ -4897,10 +5569,18 @@ class MohioInterpreter:
         # `<statement> unless <condition>` -- run the statement UNLESS the
         # condition is true. Reuses the full condition evaluator, so `unless`
         # supports bare booleans, comparisons, and and/or/not compounds.
+        # T1-GUARD-FAILOPEN: `unless` exists to PREVENT the statement when its condition
+        # holds. A broken condition used to silently default to skip=False, which let the
+        # guarded action (a save, a write, anything) PROCEED -- fail-OPEN, the unsafe
+        # direction for a guard whose entire job is to block something. Fail loud instead:
+        # the guarded action must never run on a condition that couldn't be answered.
         try:
             skip = bool(self._eval_condition(node.condition, ctx))
-        except Exception:
-            skip = False
+        except Exception as e:
+            raise MohioRuntimeError(
+                f"`unless` guard condition failed to evaluate ({e}) -- the guarded statement "
+                f"was NOT run. A broken condition must block the action, never silently let "
+                f"it proceed.")
         if skip:
             return None
         return self._exec(node.stmt, ctx)
@@ -4911,7 +5591,19 @@ class MohioInterpreter:
         give back inside when/otherwise sets the block result rather than
         propagating up. The result is bound to as_name in context.
         """
-        value = self._eval(node.value, ctx)
+        # T1-EVAL-SIMPLE-FAILLOUD FORK 2 (2026-08-17): `check`'s SUBJECT is deliberately exempt
+        # from the never-declared fail-loud -- A3 already ruled an undefined subject takes the
+        # `when X is empty` branch rather than erroring, and `check` is fundamentally a
+        # look-and-test verb (`check x / when x is empty / ... / check: done` is the canonical
+        # form for "does this even exist"). Only the SUBJECT is exempt here; anything read inside
+        # a when/otherwise BODY still goes through the normal fail-loud path unchanged.
+        try:
+            value = self._eval(node.value, ctx)
+        except _Raise as _undecl:
+            if getattr(_undecl, 'error_name', None) == 'undeclared_variable':
+                value = MohioValue(None)
+            else:
+                raise
         raw   = value.to_python() if isinstance(value, MohioValue) else value
 
         # Verbose trace: show what is being checked
@@ -4991,12 +5683,31 @@ class MohioInterpreter:
                     matched = True
                 else:
                     matched = self._loose_eq(raw, when_raw)
-            elif condition == 'above':
-                try: matched = float(raw or 0) > float(when_raw or 0)
-                except: matched = False
-            elif condition == 'below':
-                try: matched = float(raw or 0) < float(when_raw or 0)
-                except: matched = False
+            elif condition in ('above', 'below'):
+                # T1-GUARD-FAILOPEN: `raw or 0` coerced a value that FAILED to resolve (None)
+                # into the same 0 a genuine zero legitimately produces, so an unresolvable
+                # value silently compared as if it really were zero -- and the bare `except:`
+                # then swallowed any OTHER incomparable pairing (e.g. text vs number) into
+                # "false" too, masking a real TypeError as an ordinary non-match. Converges on
+                # the same _n/compare pattern _eval_condition already uses for `above`/`below`
+                # in control-flow: coerce what looks numeric, leave anything else AS-IS (never
+                # force it to 0), and let a genuine incomparable pairing fail loud instead of
+                # guessing false.
+                def _n(x):
+                    if isinstance(x, bool):
+                        return x
+                    try:
+                        return float(x)
+                    except (TypeError, ValueError):
+                        return x
+                a, b = _n(raw), _n(when_raw)
+                try:
+                    matched = (a > b) if condition == 'above' else (a < b)
+                except TypeError:
+                    raise MohioRuntimeError(
+                        f"`{condition}` cannot compare {raw!r} and {when_raw!r} -- they are "
+                        f"not comparable values, so this condition cannot be answered (it "
+                        f"would otherwise be silently false).")
             elif condition == 'contains':
                 matched = str(when_raw or '') in str(raw or '')
             elif condition == 'is_in':
@@ -5054,7 +5765,18 @@ class MohioInterpreter:
         return result
 
     def _exec_RepeatBlock(self, node, ctx):
-        n = int(self._eval_simple(node.count, ctx) or 0)
+        # T1-SILENT-SWEEP-BATCH7 (2026-08-15): `int(... or 0)` silently turned an UNDEFINED
+        # count reference (ctx.get_dotted's deliberate None-for-undefined policy) into a
+        # genuine `repeat 0 times` -- ran zero iterations, no error, no warning. A real
+        # `repeat 0 times` still evaluates to the Python int 0 (never None), so this only
+        # fires on a genuinely unresolvable reference (e.g. a typo'd variable name).
+        _count_val = self._eval_simple(node.count, ctx)
+        if _count_val is None:
+            _name = '.'.join(node.count.parts) if hasattr(node.count, 'parts') else str(node.count)
+            raise MohioRuntimeError(
+                f"repeat count '{_name}' could not be evaluated -- it is not a defined "
+                f"value. Check the spelling, or declare it before this repeat block.")
+        n = int(_count_val)
         if self._loop_iter_limit > 0 and n > self._loop_iter_limit:
             raise _Raise(error_name='loop_limit_exceeded',
                 message=f"repeat count {n} exceeds the iteration limit {self._loop_iter_limit}.",
@@ -5149,10 +5871,16 @@ class MohioInterpreter:
     # ── MioQL — Data Operations ────────────────────────────────
 
     def _exec_RetrieveBlock(self, node, ctx):
-        self._refuse_held_source_query(node.source, ctx, 'retrieve')
-        db, _early = self._db_or_fail(ctx, 'retrieve', node)
-        if db is None: return _early
-        table = self._resolve_source(node.source, ctx)
+        held_list = self._resolve_held_list_source(node.source, ctx)
+        if held_list is None:
+            self._refuse_held_source_query(node.source, ctx, 'retrieve')
+            db, _early = self._db_or_fail(ctx, 'retrieve', node)
+            if db is None: return _early
+            table = self._resolve_source(node.source, ctx)
+        else:
+            db = None
+            table = None
+            _held_name = node.source.parts[0]
 
         # Raw-SQL escape hatch, first-class inside the query block:
         #     retrieve results from db.members
@@ -5196,34 +5924,130 @@ class MohioInterpreter:
             self._handle_success(node.handlers, ctx)
             return value
 
+        if held_list is not None:
+            # T1-QUERY-HELD: same ruling as find, applied to retrieve's simpler equality-only
+            # spec. 'and' groups become the `where` dict `_filter_held_list` already knows how
+            # to apply (missing-field exclude+warn included); 'or'/'not' groups are applied in
+            # memory afterward, same shape as find's post-fetch block filtering.
+            and_where = {}
+            for f, v in [pair for kind, pairs in spec if kind == 'and' for pair in pairs]:
+                and_where[f.split('.')[-1]] = v
+            or_groups  = [[(f.split('.')[-1], v) for f, v in pairs] for kind, pairs in spec if kind == 'or']
+            not_groups = [[(f.split('.')[-1], v) for f, v in pairs] for kind, pairs in spec if kind == 'not']
+            _rows, _w = self._filter_held_list(held_list, and_where, [], 'retrieve', _held_name)
+            if or_groups:
+                _rows = [r for r in _rows if all(any(str(r.get(f)) == str(v) for f, v in grp) for grp in or_groups)]
+            if not_groups:
+                _rows = [r for r in _rows if all(all(str(r.get(f)) != str(v) for f, v in grp) for grp in not_groups)]
+
+            # T1-AUDIT-COVERAGE-GAPS Part A (2026-08-17): every branch that returns real row
+            # data must audit-on-access exactly like the .one branch below already does --
+            # .all/.count/.first/.last were silently skipping it (confirmed live: .all over a
+            # [phi]-tagged table produced zero audit rows while .one over the same table
+            # produced one). `_audit_data_access` is a no-op when nothing PHI/PCI-tagged is in
+            # scope, so this is safe to call unconditionally.
+            if mod in ('all', 'every'):
+                self._audit_data_access('retrieve', _held_name, _rows, ctx)
+                return _bind_and_succeed(MohioValue(_rows, 'list'))
+            if mod == 'count':
+                self._audit_data_access('retrieve', _held_name, _rows, ctx)
+                return _bind_and_succeed(MohioValue(len(_rows), 'number'))
+            # T1-EVAL-SIMPLE-FAILLOUD FORK 1 (2026-08-17): "no record found" is a legitimate
+            # EMPTY result, not an operational failure -- on.failure is the query-BROKE channel
+            # (T1-OUTCOME-STRUCTURE), and a clean query that simply matched nothing must still
+            # bind its name to a real null so `when`/`otherwise` and a plain dotted read both see
+            # a genuinely declared, empty value instead of a name that was never bound at all
+            # (the bug: reading it after relied entirely on Context.get()'s old leniency).
+            # `_bind_and_succeed` runs on.success + when/otherwise, exactly the right channel for
+            # a legitimate outcome. "no match clause" (missing required syntax, not a data
+            # question) is a genuinely different case and is untouched.
+            if mod in ('first', 'last'):
+                if not _rows:
+                    return _bind_and_succeed(MohioValue(None, 'null'))
+                row = _rows[0] if mod == 'first' else _rows[-1]
+                self._audit_data_access('retrieve', _held_name, row, ctx)
+                return _bind_and_succeed(MohioValue(row, 'shape'))
+            if not spec:
+                return self._handle_failure(node.handlers, ctx, "retrieve: no match clause")
+            if not _rows:
+                return _bind_and_succeed(MohioValue(None, 'null'))
+            self._audit_data_access('retrieve', _held_name, _rows[0], ctx)
+            return _bind_and_succeed(MohioValue(_rows[0], 'shape'))
+
         # ── multi-row: .all / .every -> collection (each-iterable), .count -> number ──
         # An empty spec is valid for these: it means "every row".
-        if mod in ('all', 'every'):
-            rows = db.retrieve_all_spec(table, spec)
-            if self.verbose: print(f"  [retrieve.{mod}] {len(rows)} from {table}")
-            return _bind_and_succeed(MohioValue(rows, 'list'))
-        if mod == 'count':
-            n = len(db.retrieve_all_spec(table, spec))
-            if self.verbose: print(f"  [retrieve.count] {n} in {table}")
-            return _bind_and_succeed(MohioValue(n, 'number'))
-        if mod in ('first', 'last'):
-            rows = db.retrieve_all_spec(table, spec)
-            if not rows:
-                return self._handle_failure(node.handlers, ctx, f"retrieve.{mod}: no record in {table}")
-            row = rows[0] if mod == 'first' else rows[-1]
-            if self.verbose: print(f"  [retrieve.{mod}] from {table}")
-            return _bind_and_succeed(MohioValue(row, 'shape'))
-
-        # ── single-row: .one (default) -- requires a match clause ──
-        if not spec:
+        # T1-AUDIT-COVERAGE-GAPS Part A: audit-on-access, same rationale as the held-list
+        # branch above -- these were the confirmed-live gap (retrieve.all over a
+        # [phi]-tagged table produced zero audit rows).
+        # T1-GUARD-FAILOPEN (2026-08-19): retrieve_all_spec/retrieve_one_spec no longer
+        # swallow a missing table/column -- they raise like find_many does. Catch it here
+        # the same way _exec_FindBlock already does: on.failure gets first refusal (a
+        # genuine error IS the on.failure channel, T1-OUTCOME-STRUCTURE), and with none
+        # declared this raises a real db_error instead of an uncaught driver exception.
+        if not spec and mod not in ('all', 'every', 'count', 'first', 'last'):
             return self._handle_failure(node.handlers, ctx, "retrieve: no match clause")
-        row = db.retrieve_one_spec(table, spec)
-        row = self._decrypt_row(row) if row else row
-        if row is None:
-            return self._handle_failure(node.handlers, ctx, f"retrieve: no record in {table}")
-        if self.verbose: print(f"  [retrieve] {node.name} from {table}")
-        self._audit_data_access('retrieve', table, row, ctx)
-        return _bind_and_succeed(MohioValue(row, 'shape'))
+        # T1-RETRIEVE-HANDLER-IN-TRY (2026-08-20). The `try` below guards the DATABASE CALL and
+        # NOTHING ELSE. It used to also wrap `_bind_and_succeed`, which runs the program's own
+        # `when`/`otherwise`/`on.success` BODIES -- so ordinary user code inside a branch was
+        # executing inside a `except Exception` meant for driver errors. Two real failures came
+        # out of that, both reported from a live Zork probe (probe7.mho, cases A/B/D):
+        #   1. `give back` inside a branch raises `_GiveBack`, the interpreter's own control
+        #      flow, NOT an error. It got caught and degraded into `db_error: ` -- with an EMPTY
+        #      detail, because `str(_GiveBack())` is "". A route that answered correctly reported
+        #      a database failure that never happened, and named nothing.
+        #   2. A NESTED retrieve inside a branch reports its own failure as `_Raise('db_error')`.
+        #      The outer `try` caught that too and wrapped it a second time, producing the
+        #      doubled `db_error: db_error: ...` prefix.
+        # `on.failure` never had either problem because it runs from the `except` clause, i.e.
+        # OUTSIDE this try -- which is exactly why nesting worked there and broke here. The fix
+        # is to give the CONDITION channel the same footing as the STATE channel: resolve the
+        # value inside the try, dispatch handlers after it. Same shared mechanism, no parallel
+        # path -- `_bind_and_succeed` is unchanged, it is only called one scope further out.
+        try:
+            if mod in ('all', 'every'):
+                rows = db.retrieve_all_spec(table, spec)
+                if self.verbose: print(f"  [retrieve.{mod}] {len(rows)} from {table}")
+                self._audit_data_access('retrieve', table, rows, ctx)
+                _result = MohioValue(rows, 'list')
+            elif mod == 'count':
+                rows = db.retrieve_all_spec(table, spec)
+                n = len(rows)
+                if self.verbose: print(f"  [retrieve.count] {n} in {table}")
+                self._audit_data_access('retrieve', table, rows, ctx)
+                _result = MohioValue(n, 'number')
+            elif mod in ('first', 'last'):
+                rows = db.retrieve_all_spec(table, spec)
+                if not rows:
+                    # T1-EVAL-SIMPLE-FAILLOUD FORK 1: no record is a legitimate empty result, not a
+                    # failure -- see the held-list branch above for the full rationale.
+                    _result = MohioValue(None, 'null')
+                else:
+                    row = rows[0] if mod == 'first' else rows[-1]
+                    if self.verbose: print(f"  [retrieve.{mod}] from {table}")
+                    self._audit_data_access('retrieve', table, row, ctx)
+                    _result = MohioValue(row, 'shape')
+            else:
+                # ── single-row: .one (default) -- requires a match clause ──
+                row = db.retrieve_one_spec(table, spec)
+                row = self._decrypt_row(row) if row else row
+                if row is None:
+                    # T1-EVAL-SIMPLE-FAILLOUD FORK 1: no record is a legitimate empty result, not a
+                    # failure -- see the held-list branch above for the full rationale.
+                    _result = MohioValue(None, 'null')
+                else:
+                    if self.verbose: print(f"  [retrieve] {node.name} from {table}")
+                    self._audit_data_access('retrieve', table, row, ctx)
+                    _result = MohioValue(row, 'shape')
+        except (_GiveBack, _Raise, _Stop, _Skip):
+            # Control flow, never a driver error. Nothing in the block above should raise these
+            # now that handler bodies run outside the try, but re-raising is what makes that
+            # guarantee explicit instead of dependent on the code above staying arranged this way.
+            raise
+        except Exception as e:
+            return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
+        # Handlers run OUT here, on the same footing as `on.failure`: a `give back` in a branch
+        # is control flow that leaves the block, and a nested verb's own error is its own.
+        return _bind_and_succeed(_result)
 
     def _write_export(self, rows, spec, ctx):
         # Wire the `export as.FORMAT to PATH` egress. csv and json are wired;
@@ -5294,10 +6118,16 @@ class MohioInterpreter:
             return _val
         import math as _math
 
-        self._refuse_held_source_query(node.source, ctx, 'find')
-        db, _early = self._db_or_fail(ctx, 'find', node)
-        if db is None: return _early
-        table = self._resolve_source(node.source, ctx)
+        held_list = self._resolve_held_list_source(node.source, ctx)
+        if held_list is None:
+            self._refuse_held_source_query(node.source, ctx, 'find')
+            db, _early = self._db_or_fail(ctx, 'find', node)
+            if db is None: return _early
+            table = self._resolve_source(node.source, ctx)
+        else:
+            db = None
+            table = None
+            _held_name = node.source.parts[0]
 
         from mohio_ast import MatchBlock, MatchAnyBlock, NoMatchBlock, TimespanRef
         where      = {}
@@ -5354,6 +6184,16 @@ class MohioInterpreter:
                 not_groups.append([(f.split('.')[-1], self._eval_filter_value(v, ctx))
                                    for f, v in clause.pairs])
             elif isinstance(clause, LimitClause):
+                # T1-SILENT-SWEEP-BATCH7 (2026-08-15): investigated as a claimed "same shape"
+                # sibling of repeat's undefined-count bug (mohio_data/mohio.lark's own doc
+                # flagged this claim as "not independently run-verified"). Reproduction showed
+                # the claim does not hold: `limit_clause: UP TO NUMBER (FROM source_ref)? |
+                # LIMIT NUMBER` -- count is a grammar-enforced literal NUMBER token, never a
+                # variable/expression, so `up to someUndefinedVar` is a hard PARSE error, not
+                # a runtime one. The undefined-reference failure mode this code defends
+                # against cannot occur through any real Mohio syntax. Left as `or 0` --
+                # validating an unreachable case was reverted after failing to reproduce it,
+                # per this project's own "don't add checks for scenarios that can't happen."
                 limit = int(self._eval_simple(clause.count, ctx) or 0)
             elif isinstance(clause, OrderClause):
                 order_by  = clause.field
@@ -5374,10 +6214,14 @@ class MohioInterpreter:
                 except (TypeError, ValueError):
                     skip_offset = 0
             elif hasattr(clause, '__class__') and 'Cursor' in clause.__class__.__name__:
-                # cursor from request.cursor  (designed, not yet wired)
+                # cursor from request.cursor  (designed, not yet wired). The source is never
+                # actually read -- cursor pagination fails loud unconditionally below the moment
+                # has_cursor is set -- so evaluating it here was dead work that only risked a
+                # premature, less specific error: `request` is legitimately unbound outside a
+                # real HTTP call (test_find.py's cursor_fails), and the user-facing undeclared-
+                # variable fail-loud (T1-EVAL-SIMPLE-FAILLOUD) would now raise on that eval before
+                # the correct, specific cursor_pagination_unavailable ever got the chance to.
                 has_cursor = True
-                src = getattr(clause, 'source', None) or getattr(clause, 'value', None)
-                cursor_val = self._eval_simple(src, ctx) if src else None
 
         # Cursor (keyset) pagination is designed but not yet wired in the db
         # layer. Fail loud the moment it's used, before the query try-block, so
@@ -5398,7 +6242,27 @@ class MohioInterpreter:
                 hint=("Use 'up to N' alone with match any / no.match, or switch the "
                       "filter to a 'match' (AND) block, which paginates correctly."))
 
-        try:
+        if held_list is not None and page_num is not None:
+            raise MohioRuntimeError(
+                f"`find` over the held list '{_held_name}' cannot paginate by page -- "
+                f"offset pagination needs a real COUNT from a database. Use 'up to N' / "
+                f"'skip N' instead, or connect a real database for page-based pagination.")
+
+        if held_list is not None:
+            # T1-QUERY-HELD: the held-list path. `_filter_held_list` is the ruling (Ronnie's
+            # call) -- uniform records with a missing field are excluded + warned, genuinely
+            # mixed records+scalars fail loud, a scalar-only list with a field filter fails
+            # loud. Reuses the SAME post-fetch machinery the db path uses below (or_groups/
+            # not_groups/skip/limit/random_n/calculate/summarize/return-clause all operate on
+            # `rows` alone, never on `db`/`table`, so they run unchanged for both paths).
+            rows, _warning = self._filter_held_list(held_list, where, post_filters, 'find', _held_name)
+            page_meta = None
+            _blk = bool(or_groups or not_groups)
+            if not _blk:
+                if skip_offset: rows = rows[skip_offset:]
+                if limit: rows = rows[:limit]
+        else:
+          try:
             # ── Offset pagination ─────────────────────────────────
             if page_num is not None and limit:
                 offset     = skip_offset + (page_num - 1) * limit
@@ -5434,11 +6298,13 @@ class MohioInterpreter:
                 rows = [self._decrypt_row(r) for r in rows]
                 page_meta = None
 
-        except Exception as e:
-            return self._handle_failure(node.handlers, ctx, str(e))
+          except Exception as e:
+            return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
 
-        # PHI audit-on-access: a read that returned [phi] data is logged (HIPAA).
-        self._audit_data_access('find', table, rows, ctx)
+        # PHI audit-on-access: a read that returned [phi] data is logged (HIPAA). Nothing to
+        # audit for a held list -- it isn't a persisted table a compliance rule attaches to.
+        if table is not None:
+            self._audit_data_access('find', table, rows, ctx)
 
         # Export egress: write the result set to a file if `export ... to` was given.
         if export_spec is not None:
@@ -5563,7 +6429,11 @@ class MohioInterpreter:
                 line=getattr(node, 'line', None),
                 hint=f'If you meant the literal text, quote it:  is "{name}"  — '
                      f'otherwise define {name} first.')
-        return self._eval_simple(node, ctx)
+        # `where field is empty` / `where field is not empty` (wc_empty/wc_not_empty) carry no
+        # value operand at all -- `node` is None by construction, not a missed extraction. Only
+        # a real node needs evaluating; _eval_simple now fails loud on a bare None (T1-CHECK-
+        # UNIQUE-REDESIGN follow-on), which this legitimate no-operand case must not reach.
+        return self._eval_simple(node, ctx) if node is not None else None
 
     def _apply_summarize(self, summ, rows, group_by):
         """Grouped aggregation that collapses rows. With a group_by, returns one
@@ -5724,6 +6594,34 @@ class MohioInterpreter:
         if not isinstance(row, dict):
             return True
         raw = row.get(field)
+        # Raw symbolic comparison (`where score >= 80`) -- `cond` is the CMP_OP symbol itself
+        # (>=, <=, >, <, ==, !=), the same leaf `_eval_condition`'s cond_cmp path already
+        # evaluates for control-flow (`while score >= 80`). Converge on that WORKING
+        # implementation here instead of leaving this leaf unhandled: >= and <= used to reach
+        # this function as the literal condition string 'cmp' (a transformer extraction bug,
+        # fixed separately) and fall through to the "unknown filter condition" fail-loud below
+        # -- so a where-filter that PARSED never actually ran.
+        if cond in ('>=', '<=', '>', '<', '==', '!='):
+            def _n(x):
+                if isinstance(x, bool):
+                    return x
+                try:
+                    return float(x)
+                except (TypeError, ValueError):
+                    return x
+            a, b = _n(raw), _n(value)
+            if cond == '==': return a == b
+            if cond == '!=': return a != b
+            try:
+                if cond == '>=': return a >= b
+                if cond == '<=': return a <= b
+                if cond == '>':  return a > b
+                if cond == '<':  return a < b
+            except TypeError:
+                raise MohioRuntimeError(
+                    f"`{cond}` cannot compare {raw!r} and {value!r} on field '{field}' -- they "
+                    f"are not comparable values, so this where-filter cannot be answered (it "
+                    f"would otherwise be silently excluded).")
         def _num(x):
             return float(x)
         try:
@@ -5924,8 +6822,19 @@ class MohioInterpreter:
                     "ORDER BY table_name")
                 candidates = [r['table_name'] if hasattr(r, 'keys') else r[0]
                               for r in cur.fetchall()]
-            except Exception:
-                return []
+            except Exception as e:
+                # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): used to `return []` here, silently
+                # indistinguishable from "this sink genuinely has zero audit tables" -- a
+                # compliance officer running `mio audit verify` against a sink whose
+                # enumeration itself is broken (or a non-SQL backend -- Mongo already raises
+                # its own clear message inside _audit_query, previously swallowed right here)
+                # got "No audit logs found", a false all-clear. FAIL LOUD instead: legitimate
+                # zero-tables still reaches the `for t in candidates` loop below with an empty
+                # list, unaffected -- only a genuine enumeration FAILURE now raises.
+                raise MohioRuntimeError(
+                    f"could not enumerate audit tables in this sink: {e}. This is not the "
+                    f"same as 'no audit logs exist' -- the enumeration itself failed, so "
+                    f"audit visibility cannot be confirmed until this is fixed.") from e
         for t in candidates:
             if t.startswith('sqlite_') or t.startswith('pg_'):
                 continue                        # engine bookkeeping tables, not app logs
@@ -6305,17 +7214,77 @@ class MohioInterpreter:
                 'row_ref': ref, 'reason': reason}
 
     def _audit_chain_seed(self, sink, log_name):
-        """The head of an existing log, or None if empty. Read once per process per log so a
-        restart continues the durable chain instead of silently beginning a second one."""
+        """The head of an existing log, or None if the log genuinely does not exist yet. Read
+        once per process per log so a restart continues the durable chain instead of silently
+        beginning a second one.
+
+        T1-GUARD-FAILOPEN: the caller falls back to AUDIT_GENESIS when this returns None, so a
+        REAL read failure (locked db, dropped connection, permissions) must never be reported
+        the same way as "log is empty" -- doing so silently forked a second chain from genesis
+        instead of linking to the real head, destroying the exact tamper-evidence guarantee the
+        chain exists to provide. Only a missing-table read (the log has never been written to)
+        is a legitimate "no seed yet"; every other failure fails loud, same distinction already
+        made for tombstone adjudication a few methods above this one.
+        """
         try:
             rows = self._audit_rows(sink, log_name)
-            if not rows:
-                return None
-            referenced = {r['prev_hash'] for r in rows}
-            tips = [r['entry_hash'] for r in rows if r['entry_hash'] not in referenced]
-            return tips[0] if len(tips) == 1 else (sorted(tips)[0] if tips else None)
-        except Exception:
+        except Exception as e:
+            _es = str(e).lower()
+            if 'no such table' in _es or 'does not exist' in _es:
+                return None   # genuinely no log yet -- correct to seed from genesis
+            raise MohioRuntimeError(
+                f"could not read the audit chain head for '{log_name}' to seed a write ({e}). "
+                f"Refusing to guess -- treating this as an empty log would silently start a "
+                f"second chain from genesis instead of linking to the real head.")
+        if not rows:
             return None
+        referenced = {r['prev_hash'] for r in rows}
+        tips = [r['entry_hash'] for r in rows if r['entry_hash'] not in referenced]
+        return tips[0] if len(tips) == 1 else (sorted(tips)[0] if tips else None)
+
+    @staticmethod
+    def _sink_is_sql_queryable(sink):
+        """True if `sink` exposes a real connection `_audit_query` can read the chain through."""
+        conn = getattr(sink, 'conn', None)
+        return conn is not None and hasattr(conn, 'cursor')
+
+    def _seed_chain_head(self, sink, log_name):
+        """The head to link this sink's next write to.
+
+        FINDING A (post-FIX-3): a SQL-queryable sink reads its real head as before -- FIX-3's
+        fix (fail loud on a genuine read failure instead of silently seeding genesis) is
+        unchanged for that case. But the audit-sink-provider seam is deliberately
+        backend-agnostic (WORM object storage, a compliance SaaS -- see
+        test_audit_sink_seam.py's own docstring): a LEGITIMATE graded provider sink has no
+        queryable connection BY DESIGN, not by error, so treating "cannot read the head" as a
+        hard failure for it is the wrong end state -- FIX-3 closed the silent-fork hole but
+        over-corrected into refusing every provider write outright. WORM/append-only storage
+        is tamper-evident by construction (immutability is its own guarantee), so it does not
+        need -- and structurally cannot support -- the local read-head hash chain.
+        The two cases are told apart by INSPECTION (classify_sink), the same authority the
+        grade itself already uses -- a sink cannot assert its own eligibility for this branch.
+        A sink that is neither SQL-queryable nor a recognized graded provider is the genuine
+        error case FIX-3 exists to catch, and still fails loud here, unchanged.
+        """
+        if MohioInterpreter._sink_is_sql_queryable(sink):
+            return self._audit_chain_seed(sink, log_name) or self.AUDIT_GENESIS
+        from mohio_audit_grades import classify_sink as _classify
+        grade, durable, reason = _classify(sink)
+        if grade in ('durable', 'append_only', 'worm'):
+            if not getattr(sink, '_mohio_unchained_logged', False):
+                print(f"  [audit] '{log_name}' written to a {type(sink).__name__} sink with no "
+                      f"queryable connection -- recorded UNCHAINED. Provider-verified {grade} "
+                      f"storage ({reason}) is this record's tamper-evidence guarantee instead "
+                      f"of the local hash chain.")
+                try: sink._mohio_unchained_logged = True
+                except Exception: pass
+            return self.AUDIT_UNCHAINED_PROVIDER
+        raise MohioRuntimeError(
+            f"could not read the audit chain head for '{log_name}' to seed a write: "
+            f"{type(sink).__name__} exposes no queryable connection and is not a recognized "
+            f"graded provider sink ({reason}). Refusing to guess -- treating this as an empty "
+            f"log would silently start a second chain from genesis instead of linking to the "
+            f"real head, and this sink has not been verified durable any other way either.")
 
     # Serializes the chain head read-modify-write WITHIN a process. Across processes the
     # database enforces it -- see _ensure_chain_uniqueness.
@@ -6655,8 +7624,7 @@ class MohioInterpreter:
             self._audit_chain_head = {}
         head_key = (id(sink), log_name)
         if head_key not in self._audit_chain_head:
-            self._audit_chain_head[head_key] = (
-                self._audit_chain_seed(sink, log_name) or self.AUDIT_GENESIS)
+            self._audit_chain_head[head_key] = self._seed_chain_head(sink, log_name)
         self._ensure_chain_uniqueness(sink, log_name)
         # Retry against the head that actually won. The database refuses a second record claiming
         # the same predecessor, so a loser here has not failed -- it has been told the chain moved
@@ -6682,7 +7650,7 @@ class MohioInterpreter:
                 if 'unique' not in str(_e).lower() and 'duplicate' not in str(_e).lower():
                     raise
                 self._audit_rollback(sink)
-                fresh = self._audit_chain_seed(sink, log_name)
+                fresh = self._seed_chain_head(sink, log_name)
                 if fresh is None or fresh == prev_hash:
                     raise
                 self._audit_chain_head[head_key] = fresh
@@ -6747,6 +7715,13 @@ class MohioInterpreter:
     # The genesis predecessor for an empty log. A fixed, recognisable value so a verifier can
     # tell "this is the first record" apart from "the predecessor is missing".
     AUDIT_GENESIS = "0" * 64
+
+    # The predecessor marker for a legitimate provider-graded sink with no queryable
+    # connection (WORM/append-only storage, a compliance SaaS -- see _seed_chain_head).
+    # Deliberately NOT a valid sha256 hex string (unlike AUDIT_GENESIS) so it can never be
+    # mistaken for a real chain link by a verifier or a human reading the row: this record is
+    # not part of the local hash chain at all, on purpose, by design, every time.
+    AUDIT_UNCHAINED_PROVIDER = "UNCHAINED-PROVIDER-DURABLE"
 
     def _audit_scope_statement(self, log_name, ctx):
         """Write, once per log, a record saying what this chain does and does not cover.
@@ -7029,8 +8004,19 @@ class MohioInterpreter:
                 print(f"  [audit] note: unrecognized compliance framework(s) {unknown}; "
                       f"their audit-grade requirement is unknown and not enforced. Add them to "
                       f"mohio_audit_grades.FRAMEWORK_AUDIT_GRADE.", file=_sys.stderr)
-        except Exception:
-            grade = 'none'
+        except Exception as _e:
+            # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): used to swallow to `grade = 'none'` with
+            # NO log at all -- unlike the sink-provider fallback three lines below, which does
+            # warn. A no-compliance app never reaches this except (required_grade(None/[])
+            # returns cleanly), so this only fires on a genuine computation failure -- and
+            # collapsing to 'none' there is the least-safe direction possible: it silently
+            # switches OFF every downstream audit-grade enforcement Finding A/B depend on, for
+            # an app that may have declared a real compliance framework (HIPAA/PCI/...). Fail
+            # loud instead of guessing the weakest grade.
+            raise MohioRuntimeError(
+                f"could not compute the required audit grade: {_e}. Refusing to silently fall "
+                f"back to 'none' -- that would disable compliance enforcement for any declared "
+                f"framework without saying so.") from _e
         # Sinks: a registered audit-sink provider (managed/commercial: dedicated graded, governed
         # sinks -- e.g. a Postgres `audit` schema with append-only grants, or WORM storage) takes
         # precedence. Open core falls back to the tenant's app db, unchanged. The provider is where
@@ -7145,22 +8131,26 @@ class MohioInterpreter:
         return enriched
 
     def _audit_data_access(self, operation, table, rows, ctx):
-        """Audit-on-access: log a read that RETURNED a [phi] or [pci] field to the same
-        durable, hash-chained trail the writes use. HIPAA requires logging every access to
-        health data; PCI DSS requirement 10 requires logging every access to cardholder
-        data. Field NAMES only, never values; the row count, the actor, and the time. The
-        tag carries this on its own, sector or not; a sector adds the certified claim and
-        org-wide breadth, it is not what turns the access log on. No tagged field in the
-        result, no entry."""
+        """Audit-on-access: log a read that RETURNED a [phi], [pci], or [pii] field to the
+        same durable, hash-chained trail the writes use. HIPAA requires logging every access
+        to health data; PCI DSS requirement 10 requires logging every access to cardholder
+        data; GDPR Art. 30 requires a record of processing activities, which a plain [pii]
+        read (no explicit `purpose` wrapper) was previously missing entirely -- only a use
+        inside a declared purpose scope was audited (_audit_purpose_use, above). Field NAMES
+        only, never values; the row count, the actor, and the time. The tag carries this on
+        its own, sector or not; a sector adds the certified claim and org-wide breadth, it is
+        not what turns the access log on. No tagged field in the result, no entry."""
         phi_set = self._phi_fields or set()
         pci_set = self._pci_fields or set()
-        if not phi_set and not pci_set:
+        pii_set = self._pii_fields or set()
+        if not phi_set and not pci_set and not pii_set:
             return None
         row_list = rows if isinstance(rows, list) else ([rows] if rows else [])
         keys = {k for r in row_list if isinstance(r, dict) for k in r.keys()}
         phi_accessed = sorted(keys & phi_set)
         pci_accessed = sorted(keys & pci_set)
-        if not phi_accessed and not pci_accessed:
+        pii_accessed = sorted(keys & pii_set)
+        if not phi_accessed and not pci_accessed and not pii_accessed:
             return None
         session_id, member_id = self._audit_actor(ctx)
         entry = {
@@ -7175,12 +8165,112 @@ class MohioInterpreter:
             entry['phi_fields'] = phi_accessed
         if pci_accessed:
             entry['pci_fields'] = pci_accessed
+        if pii_accessed:
+            entry['pii_fields'] = pii_accessed
         enriched = self._audit_event('data_audit_log', entry, ctx)
         self._audit_logs.setdefault('data_audit_log', []).append(enriched)
         return enriched
 
+    def _audit_egress(self, channel, destination, ctx, **extra):
+        """T1-AUDIT-COVERAGE-GAPS Part E2 (2026-08-17): record a boundary crossing -- data
+        leaving this app via a channel other than mioconnect (which already records this,
+        see _exec_FromConnectorBlock's boundary_send/boundary_response). Same shape, same
+        log, same rule: destination/method/status only, NEVER the payload/credentials/body
+        values. Never blocks the call it's recording (matching mioconnect's own
+        try/except-and-continue around its own boundary record)."""
+        try:
+            entry = {'event': 'boundary_send',
+                     'meaning': 'data left this app for an outside destination',
+                     'channel': channel, 'destination': destination}
+            entry.update(extra)
+            self._audit_logs.setdefault('data_audit_log', []).append(
+                self._audit_event('data_audit_log', entry, ctx))
+        except Exception:
+            pass
+
+    def _audit_identity(self, table, values=None, ctx=None):
+        """How this table identifies a row, and (when the values are to hand) WHICH row.
+
+        T1-AUDIT-COMPOSITE-KEY-IDENTITY (2026-08-21). A composite/id-less table used to audit with
+        `record_id=None` -- a data-change record that could not say which row changed, which for a
+        compliance-positioned release is the one thing the record exists to do.
+
+        Identity comes from the DATABASE (`table_identity`), the same declaration the seeder wrote
+        and the upsert matches on -- never a second map maintained here.
+
+        Returns (record_id, shape):
+          keyed      -> ("42", "id")
+          composite  -> ("session_id=abc,flag_name=window_open", "composite(session_id,flag_name)")
+          unknown    -> (None, "unknown") when the table declares no uniqueness at all -- said
+                        plainly rather than guessed.
+
+        REDACTION, and why it is not optional. `_audit_data_change`'s own contract is that the log
+        records field NAMES and a surrogate id, "never the written values" -- precisely so the
+        audit trail cannot become a second, unguarded copy of the data it protects. A natural
+        composite key IS written data, so rendering it heads straight at that guarantee: on a
+        table keyed by, say, (clinic_id, ssn) the naive rendering would file an SSN in the audit
+        log in clear text. Any identity column carrying a [phi]/[pii]/[pci] tag is therefore
+        rendered as `col=<redacted>` -- the row stays identifiable by shape and by its untagged
+        parts, and the tagged value never lands here. See this unit's boundary note: whether a
+        fully-tagged composite should instead be recorded as a one-way digest is Ronnie's call,
+        not one this method should make silently."""
+        try:
+            db = ctx.get_connection('db') if ctx is not None else None
+        except Exception:
+            db = None
+        if db is None:
+            db = getattr(self, '_db', None)
+        ident = ()
+        if db is not None and hasattr(db, 'table_identity'):
+            try:
+                ident = db.table_identity(table) or ()
+            except Exception:
+                ident = ()
+        if not ident:
+            return None, 'unknown'
+        if len(ident) == 1 and ident[0] == 'id':
+            # Keyed. When the PROGRAM supplied the id, that is the identity and every backend
+            # should record the same thing -- Postgres already does, via RETURNING id, but
+            # SQLite's save() hands back `lastrowid`, so `save ... id "p1"` audited as "1": the
+            # implicit rowid again, wearing an id's name. Same masquerade as the composite case
+            # one branch down, and the same answer: the declared identity wins. When the program
+            # did NOT supply one (a generated SERIAL), there is no declared value to prefer and
+            # the driver's returned id is exactly right, so it is left alone.
+            if values and 'id' in values:
+                return str(values['id']), 'id'
+            return None, 'id'
+        if not values:
+            # update/remove know the SHAPE of the identity without holding a whole row.
+            return None, 'composite(' + ','.join(ident) + ')'
+        tagged = getattr(self, '_encrypted_fields', set()) or set()
+        shape = 'composite(' + ','.join(ident) + ')'
+        parts = []
+        for col in ident:
+            if col not in values:
+                parts.append(f'{col}=<absent>')
+            elif col in tagged:
+                parts.append(f'{col}=<redacted>')
+            else:
+                parts.append(f'{col}={values[col]}')
+        # ALL-SENSITIVE IDENTITY (ruled 2026-08-21). When every identity column is tagged, the
+        # rendering above is `a=<redacted>,b=<redacted>` -- which identifies NO row, yet reads
+        # exactly like an ordinary partial redaction that still names one. That is the shape a
+        # sector implementation could unknowingly ship on. So the record says so, in the record
+        # itself, and names the capability that will close it: reading the audit log shows
+        # precisely where row-level identification is not yet available and which ticket owns it.
+        #
+        # Deliberately NOT a surrogate hash today: sector identity columns are low-entropy
+        # (an SSN, an MRN, an account number), and a naive deterministic hash of one is
+        # re-identifiable -- potentially regulated PII in its own right. Salting, keyed HMAC,
+        # rotation, and the re-identification story are a design session, not a rushed build.
+        # T1-AUDIT-SURROGATE-IDENTITY drops into exactly this branch when it lands.
+        if ident and all(col in tagged for col in ident):
+            return (','.join(parts),
+                    shape + ' row-identification pending: T1-AUDIT-SURROGATE-IDENTITY')
+        return ','.join(parts), shape
+
     def _audit_data_change(self, operation, table, ctx, record_id=None,
-                           match_fields=None, fields=None, count=None):
+                           match_fields=None, fields=None, count=None, values=None):
         """Under an active sector, record a data mutation in the durable audit
         trail: which operation, which table, which record or match, which fields
         were touched, by whom, and when. Only field NAMES and a surrogate record
@@ -7206,8 +8296,22 @@ class MohioInterpreter:
             'session_id': session_id,
             'member_id':  member_id,
         }
+        # T1-AUDIT-COMPOSITE-KEY-IDENTITY (2026-08-21): every data-change record now says HOW
+        # the row is identified, and -- for a composite/id-less table, which previously recorded
+        # nothing at all -- WHICH row. `record_identity` is additive: a keyed table's `record_id`
+        # keeps its existing value and format exactly, it simply gains the shape alongside.
+        _ident_id, _ident_shape = self._audit_identity(table, values, ctx)
+        if _ident_id is not None:
+            # The DECLARED identity wins over whatever the driver handed back. On SQLite an
+            # id-less insert still returns `lastrowid` -- the implicit rowid -- so without this
+            # a composite table audited `record_id: "1"`: a plausible-looking number that
+            # identifies nothing the program can query and reads exactly like an id. That is
+            # worse than the None it replaced, and it is the same silent-default shape this
+            # codebase refuses elsewhere. A composite row is identified by its composite.
+            record_id = _ident_id
         if record_id is not None:
             entry['record_id'] = str(record_id)
+        entry['record_identity'] = _ident_shape
         if match_fields:
             entry['match_fields'] = sorted(str(f) for f in match_fields)
         if fields:
@@ -7683,10 +8787,16 @@ class MohioInterpreter:
         matches (the fetch-or-404 pattern). A miss without on.failure simply
         binds nothing — checking `if <name> is none` stays valid.
         """
-        self._refuse_held_source_query(node.source, ctx, 'grab')
-        db, _early = self._db_or_fail(ctx, 'grab', node)
-        if db is None: return _early
-        table = self._resolve_source(node.source, ctx)
+        held_list = self._resolve_held_list_source(node.source, ctx)
+        if held_list is None:
+            self._refuse_held_source_query(node.source, ctx, 'grab')
+            db, _early = self._db_or_fail(ctx, 'grab', node)
+            if db is None: return _early
+            table = self._resolve_source(node.source, ctx)
+        else:
+            db = None
+            table = None
+            _held_name = node.source.parts[0]
         # No match clause is NOT a failure -- a grab with nothing to match on simply binds
         # nothing, and `if <name> is none` stays the way you check. Missing CONNECTION is a
         # failure; missing MATCH is a result. Two different things, kept apart.
@@ -7698,22 +8808,46 @@ class MohioInterpreter:
         # (isinstance check against a list of MatchClause never matched), so `grab`/`get`
         # silently bound nothing -- no error, indistinguishable from "record not found".
         match_clauses = node.match if isinstance(node.match, list) else [node.match]
-        if len(match_clauses) == 1:
-            mc = match_clauses[0]
-            match_val = self._eval_simple(mc.value, ctx)
-            row = db.retrieve_one(table, mc.field, match_val)
+        if held_list is not None:
+            # T1-QUERY-HELD: grab's match is always equality (AND across all clauses) --
+            # maps directly onto _filter_held_list's `where` dict, same missing-field ruling.
+            # Not wrapped in the driver try/except below: a held list never touches a real
+            # driver, and _filter_held_list's own fail-louds (mixed records/scalars, etc.)
+            # are genuine usage errors, not operational failures on.failure should intercept.
+            _where = {mc.field.split('.')[-1]: self._eval_simple(mc.value, ctx) for mc in match_clauses}
+            _matches, _w = self._filter_held_list(held_list, _where, [], 'grab', _held_name)
+            row = _matches[0] if _matches else None
         else:
-            conditions = {mc.field: self._eval_simple(mc.value, ctx) for mc in match_clauses}
-            row = db.retrieve_one_multi(table, conditions)
-        row = self._decrypt_row(row) if row else row
-        self._audit_data_access('grab', table, row, ctx)
-        result = MohioValue(row, 'shape') if row else MohioValue(None)
-        ctx.set(node.name, result)
-        if row:
+            # T1-GUARD-FAILOPEN (2026-08-19): retrieve_one/retrieve_one_multi no longer
+            # swallow a missing table/column -- they raise. Route a genuine driver error
+            # through on.failure/fail loud, exactly like retrieve/find already do.
+            try:
+                if len(match_clauses) == 1:
+                    mc = match_clauses[0]
+                    match_val = self._eval_simple(mc.value, ctx)
+                    row = db.retrieve_one(table, mc.field, match_val)
+                else:
+                    conditions = {mc.field: self._eval_simple(mc.value, ctx) for mc in match_clauses}
+                    row = db.retrieve_one_multi(table, conditions)
+            except Exception as e:
+                return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
+        row = self._decrypt_row(row) if (row and table is not None) else row
+        if table is not None:
+            self._audit_data_access('grab', table, row, ctx)
+
+        def _bind_and_succeed(value):
+            ctx.set(node.name, value)
             self._handle_success(node.handlers, ctx)
-        elif any(isinstance(h, OnFailure) for h in node.handlers):
-            return self._handle_failure(node.handlers, ctx, "record not found")
-        return result
+            return value
+
+        if row is None:
+            # RUN-1 sibling fix: a genuine miss is a legitimate empty result, not a failure --
+            # on.failure is reserved for a real operational error (caught above), never "not
+            # found" (see _exec_RetrieveBlock's FORK 1 comment for the full rationale). Bind
+            # null and run the normal success path so when/otherwise actually evaluate,
+            # instead of the prior silent "neither fires" gap.
+            return _bind_and_succeed(MohioValue(None, 'null'))
+        return _bind_and_succeed(MohioValue(row, 'shape'))
 
     def _exec_GetBlock(self, node, ctx):
         """get — assertive retrieval, same as grab at runtime."""
@@ -7738,6 +8872,9 @@ class MohioInterpreter:
             and str(node.source.parts[0]) == 'db'
         )
 
+        _pull_source_name = ('.'.join(str(p) for p in node.source.parts)
+                             if isinstance(node.source, DottedName)
+                             else str(getattr(node.source, 'table', node.source)))
         if is_db and not is_random:
             # Ordered DB pull — keep DB-side limit (bounded batch retrieval).
             # A missing connection used to yield an empty list, which is a LIE: it told
@@ -7748,6 +8885,7 @@ class MohioInterpreter:
             table = self._resolve_source(node.source, ctx)
             rows  = db.find_many(table, limit=n)
             result = MohioValue(rows, 'list')
+            _pull_source_name = table
         else:
             # Random, or a non-db source (held list / find-result): resolve the
             # whole collection, then sample or slice in-process.
@@ -7771,15 +8909,18 @@ class MohioInterpreter:
         if self.verbose:
             print(f"  [pull]{' random' if is_random else ''} {count} items")
 
+        # T1-AUDIT-COVERAGE-GAPS Part A: pull was the confirmed-live gap alongside
+        # retrieve.all/.first/.last/.count -- no-op when nothing PHI/PCI-tagged is in scope.
+        self._audit_data_access('pull', _pull_source_name, result.to_python(), ctx)
+
         # Bind to the closer's `as` name, if present.
         if getattr(node, 'as_name', None):
             ctx.set(node.as_name, result)
 
-        # Run on.success handler if one was declared.
-        for h in (node.handlers or []):
-            if isinstance(h, OnSuccess):
-                self._exec_block(h.body, ctx)
-                break
+        # T1-RUN3 Part B3 (2026-08-19): was on.success-only (never dispatched when/otherwise,
+        # the same STAGE-2-missing shape check_exists had before RUN 1/2). _handle_success
+        # runs on.success AND when/otherwise now, consistent with retrieve/grab/find/save.
+        self._handle_success(node.handlers, ctx)
 
         return result
 
@@ -7815,6 +8956,20 @@ class MohioInterpreter:
         return name
 
     def _exec_SaveBlock(self, node, ctx):
+        # STOPGAP (2026-08-09): `save` had NO held-source guard at all. With a db connected,
+        # `save to <held-list-variable>` silently wrote a real row into a real db table named
+        # after the variable (_resolve_source just takes the last dotted part, no type check) --
+        # worse than the update/remove holes, since it doesn't just no-op, it corrupts an
+        # unintended table. Refuse loudly instead. Not real list-mutation support -- that is the
+        # T1-QUERY-HELD follow-on (same as update/remove). Real db.* targets are unaffected:
+        # _resolve_held_list_source only fires for a single bare NAME that is currently a held
+        # list in scope.
+        if self._resolve_held_list_source(node.target, ctx) is not None:
+            raise MohioRuntimeError(
+                "`save` over a list isn't built yet -- refusing rather than writing to an "
+                "unintended table. Mutating a held list (save/update/remove/modify) is real, "
+                "wanted, NOT YET BUILT work, tracked as the T1-QUERY-HELD follow-on. Connect a "
+                "real database and `save to db.<table>` to write rows today.")
         db, _early = self._db_or_fail(ctx, 'save', node)
         if db is None: return _early
         table = self._resolve_source(node.target, ctx)
@@ -7860,18 +9015,37 @@ class MohioInterpreter:
                      "`save to db.flags unless session_id, flag_name exists`.")
         if dedupe_fields:
             conditions = {f: fields[f] for f in dedupe_fields}
-            existing = (db.retrieve_one_multi(table, conditions)
-                        if len(conditions) > 1
-                        else db.retrieve_one(table, dedupe_fields[0], fields[dedupe_fields[0]]))
+            # T1-GUARD-FAILOPEN (2026-08-19): retrieve_one/retrieve_one_multi no longer carve
+            # out a missing table -- they fail loud like every other genuine error, for their
+            # real callers (retrieve, grab). THIS caller is the one genuine exception: this
+            # dedupe check runs BEFORE save_if_not_exists (below) creates the table, so a
+            # missing table here really does mean "nothing can exist yet," not an ambiguous
+            # operational failure. Catch that ONE specific, per-backend condition here instead
+            # of asking the shared retrieve functions to guess which caller they're serving;
+            # anything else propagates.
+            try:
+                existing = (db.retrieve_one_multi(table, conditions)
+                            if len(conditions) > 1
+                            else db.retrieve_one(table, dedupe_fields[0], fields[dedupe_fields[0]]))
+            except Exception as e:
+                _backend = type(db).__name__
+                _missing_table = (
+                    (_backend == 'DbRuntime' and 'no such table' in str(e).lower()) or
+                    (_backend == 'PostgresRuntime' and getattr(e, 'pgcode', None) == '42P01') or
+                    (_backend == 'MySQLRuntime' and getattr(e, 'args', [None])[0] == 1146))
+                if not _missing_table:
+                    raise
+                existing = None
             if existing:
                 dup = MohioValue(self._decrypt_row(existing) or existing, 'shape')
                 if getattr(node, 'alias', None):
                     ctx.set(node.alias, dup)
                 if self.verbose:
                     print(f"  [save] skipped duplicate on {conditions!r}")
-                for h in node.handlers:
-                    if isinstance(h, OnSuccess):
-                        self._exec_block(h.body, ctx); break
+                # T1-RUN3 Part B3 (2026-08-19): was on.success-only -- when/otherwise never
+                # dispatched on the "duplicate found, skipped" branch specifically (the
+                # insert-path below this one already used _handle_success correctly).
+                self._handle_success(node.handlers, ctx)
                 return dup
             # No existing row: insert ATOMICALLY (INSERT ... WHERE NOT EXISTS) rather than a
             # bare insert, so a concurrent writer between the check above and the write here
@@ -7890,7 +9064,7 @@ class MohioInterpreter:
                     return self._handle_failure(node.handlers, ctx, str(e))
                 raise _Raise(error_name='db_error', message=str(e))
             self._audit_data_change('save', table, ctx, record_id=row_id,
-                                    fields=list(fields.keys()))
+                                    fields=list(fields.keys()), values=fields)
             result = MohioValue({'id': row_id, **fields}, 'shape')
             if getattr(node, 'alias', None):
                 ctx.set(node.alias, result)
@@ -7910,7 +9084,7 @@ class MohioInterpreter:
             raise _Raise(error_name='db_error', message=str(e))
 
         self._audit_data_change('save', table, ctx, record_id=row_id,
-                                fields=list(fields.keys()))
+                                fields=list(fields.keys()), values=fields)
         result = MohioValue({'id': row_id, **fields}, 'shape')
         if getattr(node, 'alias', None):
             ctx.set(node.alias, result)
@@ -7922,14 +9096,27 @@ class MohioInterpreter:
 
     def _exec_SaveOrUpdateBlock(self, node, ctx):
         """
-        save or update / upsert — atomic upsert using native db support.
-        All four runtimes have a native upsert method:
-          SQLite   → INSERT OR REPLACE / ON CONFLICT DO UPDATE
-          Postgres → INSERT ON CONFLICT DO UPDATE
-          MySQL    → INSERT ON DUPLICATE KEY UPDATE
-          MongoDB  → update_one with upsert=True
-        Falls back to try-update-then-insert for any runtime without .upsert().
+        save or update / upsert.
+
+        THREE of the four runtimes expose a native `.upsert()`; SQLite deliberately does not,
+        and takes the update-then-insert fallback below (this docstring used to claim all four
+        did, and to describe ON CONFLICT / ON DUPLICATE KEY forms that no longer exist -- both
+        corrected 2026-08-20 with T1-UPSERT-NO-CONSTRAINT):
+          SQLite   -> no .upsert(); falls through to the fallback branch below
+          Postgres -> UPDATE, else guarded INSERT ... WHERE NOT EXISTS   (constraint-free)
+          MySQL    -> UPDATE, else guarded INSERT ... WHERE NOT EXISTS   (constraint-free)
+          MongoDB  -> update_one with upsert=True                        (no constraint needed)
+        No backend requires a UNIQUE constraint on the match column any more -- Mohio's
+        auto-created tables never have one on a non-`id` column, which is precisely what the
+        old ON CONFLICT / ON DUPLICATE KEY forms broke on.
         """
+        # STOPGAP (2026-08-09): same hole as save/save.all -- see the comment on _exec_SaveBlock.
+        if self._resolve_held_list_source(node.source, ctx) is not None:
+            raise MohioRuntimeError(
+                "`save or update` over a list isn't built yet -- refusing rather than writing "
+                "to an unintended table. Mutating a held list (save/update/remove/modify) is "
+                "real, wanted, NOT YET BUILT work, tracked as the T1-QUERY-HELD follow-on. "
+                "Connect a real database and `save or update db.<table>` to write rows today.")
         db, _early = self._db_or_fail(ctx, 'save or update', node)
         if db is None: return _early
         table = self._resolve_source(node.source, ctx)
@@ -8001,13 +9188,29 @@ class MohioInterpreter:
 
         self._audit_data_change('save_or_update', table, ctx,
                                 match_fields=match_fields or None,
-                                fields=list(fields.keys()))
-        return MohioValue(fields, 'shape')
+                                fields=list(fields.keys()), values=fields)
+        result = MohioValue(fields, 'shape')
+        # T1-RUN3 Part B3 (2026-08-19): save/save.or.update never dispatched ANY handler at
+        # all -- not even on.success, let alone when/otherwise. Consistent with every other
+        # write verb now.
+        self._handle_success(node.handlers, ctx)
+        return result
 
     def _exec_SaveAllBlock(self, node, ctx):
         # Persist every record in a collection. Was a silent _stub -- a persistence
         # verb that does not persist is a data-loss trap, so this now does the real
         # work and fails loud on bad input / no connection rather than no-opping.
+        #
+        # STOPGAP (2026-08-09): same hole as save/save-or-update -- see the comment on
+        # _exec_SaveBlock. `node.target` is the DESTINATION (`save all to <target> from
+        # <source>`); `node.source` is the batch of records being saved and is legitimately a
+        # list, so only `target` is checked here.
+        if self._resolve_held_list_source(node.target, ctx) is not None:
+            raise MohioRuntimeError(
+                "`save all` over a list isn't built yet -- refusing rather than writing to an "
+                "unintended table. Mutating a held list (save/update/remove/modify) is real, "
+                "wanted, NOT YET BUILT work, tracked as the T1-QUERY-HELD follow-on. Connect a "
+                "real database and `save all to db.<table>` to write rows today.")
         db    = ctx.get_connection('db')
         table = self._resolve_source(node.target, ctx)
         if not db:
@@ -8048,12 +9251,24 @@ class MohioInterpreter:
         self._audit_data_change('save_all', table, ctx, count=len(saved_ids))
         result = MohioValue({'count': len(saved_ids), 'ids': saved_ids}, 'shape')
         if self.verbose: print(f"  [save all] {len(saved_ids)} rows to {table}")
-        for h in node.handlers:
-            if isinstance(h, OnSuccess):
-                self._exec_block(h.body, ctx); break
+        # T1-RUN3 Part B3 (2026-08-19): was on.success-only, when/otherwise never dispatched.
+        self._handle_success(node.handlers, ctx)
         return result
 
     def _exec_UpdateBlock(self, node, ctx):
+        # STOPGAP (2026-08-09): `update` over a held list silently did nothing when a db
+        # happened to be connected (found: count/state unchanged, exit 0, no error -- the
+        # exact T0-6 silent-corruption shape, unfixed here). This refuses loudly instead. It is
+        # NOT real list-mutation support -- that is the afternoon's design pass. Querying a
+        # held list already works (T1-QUERY-HELD); mutating one does not yet, on purpose,
+        # until designed. Uses the same held-source detection T0-6/T1-QUERY-HELD built.
+        if self._resolve_held_list_source(node.source, ctx) is not None:
+            raise MohioRuntimeError(
+                "`update` over a list isn't built yet -- refusing rather than silently doing "
+                "nothing. Mutating a held list (update/remove/modify) is real, wanted, "
+                "NOT YET BUILT work, tracked as the T1-QUERY-HELD follow-on. Querying a held "
+                "list already works (`find`/`retrieve`/`grab`); connect a real database to "
+                "update rows today.")
         db, _early = self._db_or_fail(ctx, 'update', node)
         if db is None: return _early
         table = self._resolve_source(node.source, ctx)
@@ -8103,15 +9318,33 @@ class MohioInterpreter:
                         self._transaction_write_failed = True
                     return self._handle_failure(node.handlers, ctx, str(e))
                 raise _Raise(error_name='db_error', message=str(e))
+            # T1-AUDIT-COMPOSITE-KEY-IDENTITY, Finding C (ruled 2026-08-21): a mutation must be
+            # as identifiable as an insert -- "which row was updated" is a core audit question.
+            # The match CONDITIONS are what selected the row, so they are the identity values;
+            # tagged columns are redacted by the renderer exactly as they are for save. An
+            # identity column absent from the match renders `<absent>`, which is the honest
+            # answer: the operation was not narrowed by it, and `count` says how many it hit.
             self._audit_data_change('update', table, ctx,
                                     match_fields=list(conditions.keys()),
-                                    fields=list(updates.keys()), count=count)
+                                    fields=list(updates.keys()), count=count,
+                                    values=conditions)
             if self.verbose: print(f"  [update] {table} — {count} rows")
 
         self._handle_success(node.handlers, ctx)
         return None
 
     def _exec_RemoveBlock(self, node, ctx):
+        # STOPGAP (2026-08-09): same disease as _exec_UpdateBlock above, same fix. `remove`
+        # over a held list silently did nothing when a db happened to be connected (verified:
+        # exit 0, count unchanged, item still present). Refuse loudly instead -- not real
+        # list-mutation support, that is the afternoon's design pass.
+        if self._resolve_held_list_source(node.source, ctx) is not None:
+            raise MohioRuntimeError(
+                "`remove` over a list isn't built yet -- refusing rather than silently doing "
+                "nothing. Mutating a held list (update/remove/modify) is real, wanted, "
+                "NOT YET BUILT work, tracked as the T1-QUERY-HELD follow-on. Querying a held "
+                "list already works (`find`/`retrieve`/`grab`); connect a real database to "
+                "remove rows today.")
         db, _early = self._db_or_fail(ctx, 'remove', node)
         if db is None: return _early
         table = self._resolve_source(node.source, ctx)
@@ -8143,7 +9376,8 @@ class MohioInterpreter:
                     return self._handle_failure(node.handlers, ctx, str(e))
                 raise _Raise(error_name='db_error', message=str(e))
             self._audit_data_change('remove', table, ctx,
-                                    match_fields=list(conditions.keys()), count=count)
+                                    match_fields=list(conditions.keys()), count=count,
+                                    values=conditions)
             if self.verbose:
                 print(f"  [remove] from {table} where {conditions!r} — {count} rows")
             self._handle_success(node.handlers, ctx)
@@ -8171,7 +9405,8 @@ class MohioInterpreter:
                 return self._handle_failure(node.handlers, ctx, str(e))
             raise _Raise(error_name='db_error', message=str(e))
         self._audit_data_change('remove', table, ctx,
-                                match_fields=[field], count=count)
+                                match_fields=[field], count=count,
+                                values={field: match_val})
         if self.verbose:
             print(f"  [remove] from {table} where {field} = {match_val!r} — {count} rows")
 
@@ -8200,10 +9435,8 @@ class MohioInterpreter:
         self._audit_data_change('remove_all', table, ctx, count=count)
         if self.verbose:
             print(f"  [remove.all] cleared {table} — {count} rows")
-        for h in handlers:
-            if isinstance(h, OnSuccess):
-                self._exec_block(h.body, ctx)
-                break
+        # T1-RUN3 Part B3 (2026-08-19): was on.success-only, when/otherwise never dispatched.
+        self._handle_success(handlers, ctx)
         return None
 
     def _exec_TransactionBlock(self, node, ctx):
@@ -8245,37 +9478,58 @@ class MohioInterpreter:
         # boolean (signup polarity: unique == value not already present). These are
         # non-retrieving -- they answer a question, never return rows. For the row,
         # use find / get.
-        db    = ctx.get_connection('db')
         table = self._resolve_source(node.source, ctx)
+        if node.variant == 'unique':
+            # T1-OUTCOME-STRUCTURE (ruled 2026-08-11): a missing/broken connection is an
+            # OPERATIONAL failure -- route to on.failure like every other verb block
+            # (_db_or_fail is the one door for this), so it can never be read as "taken".
+            # exists/count keep their pre-existing (unchanged, out of scope here) behavior
+            # below.
+            db, early = self._db_or_fail(ctx, 'check unique', node)
+            if db is None:
+                return early
+        else:
+            db = ctx.get_connection('db')
         if not db or not table:
             raise MohioRuntimeError(
                 "check exists/count/unique needs a database source -- e.g. "
                 "`in db.<table>`.")
         where = {}
         cond = node.condition
-        cond_type = type(cond).__name__
-        if cond is not None and cond_type == 'MatchClause' and cond.field:
-            where[cond.field] = (self._eval_simple(cond.value, ctx)
-                                 if cond.value is not None else None)
-        elif cond is not None and cond_type == 'WhereClause' and cond.field:
-            # db.count() only understands equality filters (a dict of column=value); it has no
-            # WHERE-builder for comparison operators. `is`/`==`/bare is equality and honored the
-            # same as a match clause -- this used to check ONLY for MatchClause, so a `where`
-            # condition parsed fine and was silently dropped, counting the WHOLE table instead
-            # of the filtered rows (e.g. `check count as n / where grp is "a"` returned every
-            # row, not just grp=a). A comparison condition (above/below/contains/...) fails
-            # loud here rather than silently degrading to "no filter" -- count() cannot express
-            # it, and a wrong count masquerading as a right one is worse than an error.
-            if cond.condition in ('is', '==', ''):
-                where[cond.field] = self._eval_filter_value(cond.value, ctx)
-            else:
-                raise MohioRuntimeError(
-                    f"check count/exists: the where condition '{cond.condition}' is not "
-                    f"supported here -- only equality (`where {cond.field} is ...`) can be "
-                    f"counted. For a comparison filter, use `find`/`retrieve` and read "
-                    f"`.count`.")
-        cnt = db.count(table, where or None)
+        # `condition` is a single MatchClause/WhereClause, or (for `unique`'s composite-key
+        # support) a LIST of MatchClause -- match_clause returns a list when the source had
+        # more than one comma-separated pair. AND every clause into the same filter.
+        cond_items = cond if isinstance(cond, list) else ([cond] if cond is not None else [])
+        for c in cond_items:
+            c_type = type(c).__name__
+            if c_type == 'MatchClause' and c.field:
+                where[c.field] = (self._eval_simple(c.value, ctx)
+                                     if c.value is not None else None)
+            elif c_type == 'WhereClause' and c.field:
+                # db.count() only understands equality filters (a dict of column=value); it has no
+                # WHERE-builder for comparison operators. `is`/`==`/bare is equality and honored the
+                # same as a match clause -- this used to check ONLY for MatchClause, so a `where`
+                # condition parsed fine and was silently dropped, counting the WHOLE table instead
+                # of the filtered rows (e.g. `check count as n / where grp is "a"` returned every
+                # row, not just grp=a). A comparison condition (above/below/contains/...) fails
+                # loud here rather than silently degrading to "no filter" -- count() cannot express
+                # it, and a wrong count masquerading as a right one is worse than an error.
+                if c.condition in ('is', '==', ''):
+                    where[c.field] = self._eval_filter_value(c.value, ctx)
+                else:
+                    raise MohioRuntimeError(
+                        f"check count/exists: the where condition '{c.condition}' is not "
+                        f"supported here -- only equality (`where {c.field} is ...`) can be "
+                        f"counted. For a comparison filter, use `find`/`retrieve` and read "
+                        f"`.count`.")
         handlers = node.handlers or []
+        # T1-GUARD-FAILOPEN (2026-08-19): db.count() already fails loud on a missing table
+        # (its own pre-existing policy, unchanged here) -- route that through on.failure/
+        # fail loud exactly like retrieve/find/grab now do, instead of an uncaught exception.
+        try:
+            cnt = db.count(table, where or None)
+        except Exception as e:
+            return self._handle_failure(handlers, ctx, str(e), operational_failure=True)
 
         def _run_success():
             for h in handlers:
@@ -8287,22 +9541,48 @@ class MohioInterpreter:
             found = cnt > 0
             if node.name:
                 ctx.set(node.name, MohioValue(found, 'boolean'))
-            if found:
-                _run_success()
-            elif any(isinstance(h, OnFailure) for h in handlers):
-                return self._handle_failure(handlers, ctx, "no matching record exists")
+            # RUN-1 sibling fix: "found" and "not found" are both a legitimate RESULT, not a
+            # failure -- on.failure is reserved for a real operational error (caught above).
+            # _handle_success runs on.success (STAGE 1) AND when/otherwise (STAGE 2, via
+            # _run_conditional_set), on EITHER outcome -- previously _run_success() here only
+            # ran on.success on a HIT, and neither on.success nor when/otherwise ever ran on a
+            # miss, so a `when`/`otherwise` written on a `check X exists` block was silently
+            # inert regardless of outcome. Consistent with retrieve/grab now.
+            self._handle_success(handlers, ctx)
             return MohioValue(found, 'boolean')
 
         if node.variant == 'unique':
-            is_unique = (cnt == 0)   # signup: unique == not already present
+            # T1-OUTCOME-STRUCTURE (ruled 2026-08-11): uniqueness is a RESULT, not an
+            # outcome. on.failure no longer means "taken" -- it means the query broke
+            # (handled above, before we ever get here). on.success is the operational ack
+            # that the query ran, nothing more. The answer itself (available == a zero-row
+            # match, taken == non-zero) branches on `when empty` / `otherwise`, the exact
+            # mechanism proven elsewhere for a real find result (`check <name> / when empty
+            # / otherwise`, tests/test_not_found.py) -- applied here directly to the row
+            # count, since `check unique` never fetches a row to bind.
+            available = (cnt == 0)
             if node.name:
-                ctx.set(node.name, MohioValue(is_unique, 'boolean'))
-            if is_unique:
-                _run_success()
-            elif any(isinstance(h, OnFailure) for h in handlers):
-                return self._handle_failure(handlers, ctx,
-                                            "value already exists (not unique)")
-            return MohioValue(is_unique, 'boolean')
+                ctx.set(node.name, MohioValue(available, 'boolean'))
+            _run_success()
+            when_empty = None
+            for h in handlers:
+                if isinstance(h, CheckWhen):
+                    _wv = getattr(h, 'value', None)
+                    if type(_wv).__name__ == 'DottedName' \
+                            and list(getattr(_wv, 'parts', [])) == ['empty'] \
+                            and not ctx.exists('empty'):
+                        when_empty = h
+                        continue
+                    raise MohioRuntimeError(
+                        "check unique only answers one question -- available or taken -- "
+                        "so its only branch is `when empty` (plus `otherwise`). Use `when "
+                        "empty` to test 'available', not another condition.")
+            if available and when_empty is not None:
+                return self._run_check_branch_body(when_empty.body, ctx, node.name)
+            otherwise = next((h for h in handlers if isinstance(h, OtherwiseClause)), None)
+            if otherwise is not None:
+                return self._run_check_branch_body(otherwise.body, ctx, node.name)
+            return MohioValue(available, 'boolean')
 
         if node.variant == 'count':
             if not node.name:
@@ -8318,34 +9598,67 @@ class MohioInterpreter:
     def _exec_CompareBlock(self, node, ctx):
         # Compare two named values. Returns a result exposing equality, both
         # sides, and (for numbers) the numeric difference. For test/diff use.
+        # T1-COMPARE-OPERAND-FAILLOUD (2026-08-20). This used to call `ctx.get(name)` directly,
+        # which is the LENIENT internal lookup -- it returns None for a name that was never
+        # declared. So `compare a to ghostoperand` silently produced a confident, plausible,
+        # WRONG answer (`equal=false`) instead of naming the mistake. Compare's operands are
+        # ordinary user-facing variable reads from real .mho source, so they belong on the same
+        # read path as every other one: build the DottedName the grammar would have produced for
+        # a bare name and evaluate it, inheriting `c023363`'s fail-loud (T1-EVAL-SIMPLE-FAILLOUD,
+        # 2026-08-19-04) verbatim -- same message, same `it`/`random` exemptions, and any future
+        # change to that rule follows automatically. Deliberately NOT a copied `ctx.exists()`
+        # guard here: a second spelling of the same rule is how the two drift apart.
+        # A never-declared operand is a developer mistake, not an operational failure, so the
+        # `_Raise` it produces travels through this block's `except (_GiveBack, _Raise): raise`
+        # and fails loud -- it is not converted into `on.failure`, which is the query-BROKE
+        # channel (T1-OUTCOME-STRUCTURE). A DECLARED-but-empty operand still compares normally.
+        from mohio_ast import DottedName as _DN
         def _resolve(name):
-            v = ctx.get(name)
+            v = self._eval(_DN(parts=[name], line=getattr(node, 'line', 0)), ctx)
             return v.to_python() if isinstance(v, MohioValue) else v
-        a = _resolve(node.name_a)
-        b = _resolve(node.name_b)
-        equal = (a == b)
-        result = {'equal': equal, node.name_a: a, node.name_b: b}
-        a_num = isinstance(a, (int, float)) and not isinstance(a, bool)
-        b_num = isinstance(b, (int, float)) and not isinstance(b, bool)
-        if a_num and b_num:
-            result['difference'] = a - b
-            result['absolute']   = abs(a - b)
-            result['larger']     = max(a, b)
-            result['smaller']    = min(a, b)
-            # percent change from b to a, and the ratio a:b. Guard divide-by-zero.
-            if b != 0:
-                result['percentage'] = round((a - b) / b * 100, 2)
-                result['ratio']      = round(a / b, 4)
-            else:
-                result['percentage'] = None
-                result['ratio']      = None
+        try:
+            a = _resolve(node.name_a)
+            b = _resolve(node.name_b)
+            equal = (a == b)
+            result = {'equal': equal, node.name_a: a, node.name_b: b}
+            a_num = isinstance(a, (int, float)) and not isinstance(a, bool)
+            b_num = isinstance(b, (int, float)) and not isinstance(b, bool)
+            if a_num and b_num:
+                result['difference'] = a - b
+                result['absolute']   = abs(a - b)
+                result['larger']     = max(a, b)
+                result['smaller']    = min(a, b)
+                # percent change from b to a, and the ratio a:b. Guard divide-by-zero.
+                if b != 0:
+                    result['percentage'] = round((a - b) / b * 100, 2)
+                    result['ratio']      = round(a / b, 4)
+                else:
+                    result['percentage'] = None
+                    result['ratio']      = None
+        except (_GiveBack, _Raise):
+            raise
+        except Exception as e:
+            # STATE channel. A genuine error computing the comparison gives `on.failure` first
+            # refusal and, with none declared, fails loud -- it never degrades into `otherwise`
+            # (T1-OUTCOME-STRUCTURE: `otherwise` picks between LEGITIMATE outcomes, it does not
+            # catch a break). Same call the other verb blocks make, not a compare-local variant.
+            return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
+        rv = MohioValue(result, 'comparison')
+        # Bind `comparison` BEFORE the body and the handlers run, not after. A `when` clause
+        # conditions on WHAT CAME BACK (`when comparison.equal`), so the result has to exist by
+        # the time the conditional set is evaluated -- the same order find/retrieve already use
+        # (bind the result name, then dispatch). Reading it after the block is unchanged.
+        ctx.set('comparison', rv)
         for stmt in (getattr(node, 'body', None) or []):
             self._exec(stmt, ctx)
-        rv = MohioValue(result, 'comparison')
-        # bind the result to `comparison` so it can be read after the block
-        ctx.set('comparison', rv)
         if getattr(self, 'verbose', False):
             print(f"  [compare] {node.name_a} to {node.name_b}: equal={equal}")
+        # CONDITION channel (and on.success first). compare is a pure computation with no
+        # connection to drop and no driver to raise, so a wired `on.failure` simply stays quiet
+        # whenever the comparison itself succeeds -- exactly as find's on.failure stays quiet
+        # against a healthy database. Shared dispatch, one mechanism for every verb.
+        if node.handlers:
+            self._handle_success(node.handlers, ctx)
         return rv
     def _exec_SummarizeBlock(self, node, ctx): return self._stub('summarize', node, ctx)
     def _exec_CalculateBlock(self, node, ctx): return self._stub('calculate', node, ctx)
@@ -8699,6 +10012,7 @@ class MohioInterpreter:
                 ctx.set(node.alias, result)
             else:
                 ctx.set('_sql_result', result)
+            self._audit_raw_sql(sql_interpolated, ctx)
             return result
 
         conn = db.conn
@@ -8766,7 +10080,27 @@ class MohioInterpreter:
         if self.verbose:
             print(f"  [sql] {len(statements)} statement(s) ok")
 
+        self._audit_raw_sql(sql_interpolated, ctx)
         return result
+
+    def _audit_raw_sql(self, sql_interpolated, ctx):
+        """T1-AUDIT-COVERAGE-GAPS Part F (2026-08-17), RULED as a deliberate STOPGAP, not the
+        destination (see T1-AUDIT-RAWSQL-FULL-RECORD, PRODUCTION-BUILD-PLAN.md): raw `sql`
+        bypasses every verb-level audit call (_audit_data_access/_audit_data_change), so
+        before this a raw sql UPDATE changed data with ZERO audit trail. This records only
+        that raw sql executed, by whom, when, and the statement (parameterized -- `?`
+        placeholders, never the interpolated VALUES, which may carry sensitive data) --
+        deliberately WITHOUT parsing which tables/fields were touched. That parsing is the
+        real, deferred job; this is the honest, opaque interim record, not a substitute for
+        it. Never blocks the call it's recording."""
+        try:
+            self._audit_logs.setdefault('data_audit_log', []).append(self._audit_event(
+                'data_audit_log', {
+                    'event':     'RAW_SQL_EXECUTED',
+                    'statement': sql_interpolated,
+                }, ctx))
+        except Exception:
+            pass
 
     def _exec_CreateBlock(self, node, ctx):
         result = {}
@@ -8866,7 +10200,18 @@ class MohioInterpreter:
         count = 0
         for row in rows:
             if not isinstance(row, dict):
-                continue
+                # STOPGAP (2026-08-09): `modify` genuinely works on a record list (this branch
+                # mutates dicts in place, below) and on a db table (rows are always dicts), so
+                # this is not a blanket held-source refusal like save/update/remove got -- only
+                # a SCALAR item hits this branch. Before this fix that `continue` silently
+                # skipped every scalar with no error: exit 0, count 0, list unchanged, the same
+                # silent-no-op disease. Fail loud instead. Not real support for modifying plain
+                # values -- that is the T1-QUERY-HELD follow-on.
+                raise MohioRuntimeError(
+                    "`modify` over a list of plain values isn't built yet -- refusing rather "
+                    "than silently changing nothing. Mutating a held list of plain values is "
+                    "real, wanted, NOT YET BUILT work, tracked as the T1-QUERY-HELD follow-on. "
+                    "`modify` over a list of records (each item a shape/dict) already works.")
             child = ctx.child()
             if node.noun:
                 child.set(node.noun, MohioValue(dict(row), 'record'))
@@ -9063,7 +10408,7 @@ class MohioInterpreter:
     def _exec_AiDecideInvoke(self, node, ctx):
         """ai.decide <name> -- run a previously-declared ai.decide block by name.
         Running it binds the result to a variable named <name> (see the result-bind
-        in _exec_AiDecideBlock), which is what the following `check <name>` reads.
+        in _run_ai_decide_invocation), which is what the following `check <name>` reads.
         This is the declare-once / invoke-many pattern."""
         block = getattr(self, '_ai_blocks', {}).get(node.name)
         if block is None:
@@ -9071,14 +10416,47 @@ class MohioInterpreter:
                 f"ai.decide {node.name}: no ai.decide block named '{node.name}' is "
                 f"declared. Declare it with `ai.decide {node.name} returns <type> ... "
                 f"ai.decide: done`, then invoke it with `ai.decide {node.name}`.")
-        return self._exec_AiDecideBlock(block, ctx)
+        return self._run_ai_decide_invocation(block, ctx)
 
     def _exec_AiDecideBlock(self, node, ctx):
-        # Register this decision by name so a later bare `ai.decide <name>`
-        # invocation can re-run it (see _exec_ServiceCallStmt, service 'ai').
+        # T1-EVAL-AI-DECIDE-DECLARE-VS-INVOKE: `ai.decide NAME returns TYPE ... ai.decide:
+        # done` appearing as a STATEMENT is always a DECLARATION, dispatched exactly once, in
+        # source order, wherever it's written (often top-level, before any real request).
+        # Declaring a block used to run its FULL body right here -- interpolating goal/
+        # persona/context and firing a real AI call -- using whatever ctx happened to be
+        # active at that point. Zork's documented "define-at-top / invoke-deep" pattern
+        # declares a block once at module scope with template vars ({{noun}}, {{candidates}})
+        # that only exist later, inside the handler that re-invokes it by name -- so the
+        # declaration-time run used to silently interpolate those to "None" (and, on a live
+        # provider, waste a real paid AI call) before the genuine invocation overwrote the
+        # result. FIX-12's interpolation hardening correctly turned that silent "None" into a
+        # loud error -- at the WRONG time, because declaration was never supposed to run the
+        # body at all.
+        #
+        # This method now ONLY registers (name -> AST node, for a later `ai.decide NAME`
+        # re-invoke to find) -- no interpolation, no execution, no AI call, unconditionally.
+        # An earlier version of this fix tried to infer "is this a declaration or a re-
+        # invocation" from whether the name was already in _ai_blocks -- that signal is
+        # unreliable: _register_ai_blocks pre-walks the whole program and registers every
+        # ai.decide block by name BEFORE the declaration statement itself ever executes, so
+        # the name is always already present by the time this method runs, regardless of
+        # which of the two cases it actually is. The real, structural distinction is the
+        # DISPATCH PATH, not runtime state: this method is only ever reached via the
+        # declaration-shaped statement; every genuine invocation goes through
+        # _run_ai_decide_invocation directly (_exec_AiDecideInvoke, _exec_AiResolveBlock's
+        # live tier, and the `ai.decide NAME` service-call form all call it, not this).
+        # Declaration = define; invocation = run.
         if not hasattr(self, '_ai_blocks'):
             self._ai_blocks = {}
         self._ai_blocks[node.name] = node
+        return None
+
+    def _run_ai_decide_invocation(self, node, ctx):
+        """Run the full ai.decide body -- weigh, threshold, goal/persona/context
+        interpolation, the real AI call, not-confident handling, result binding. Called ONLY
+        for a genuine invocation (an explicit `ai.decide NAME` re-invoke), always with the
+        caller's real, in-scope context. See _exec_AiDecideBlock's docstring for why this is
+        a separate method from the declaration dispatch."""
         # 1. Collect weigh inputs
         weigh  = next((b for b in node.body if isinstance(b, WeighClause)), None)
         inputs = {}
@@ -9334,42 +10712,38 @@ class MohioInterpreter:
         log = self._audit_logs.setdefault(log_name, AuditLog(log_name))
         log.record(entry)
 
-        # Write to database -- persistent, durable, HASH-CHAINED audit trail.
-        # This goes through the same chaining helper as every other audit writer. It used to call
-        # db.save directly, which meant the primary ai.decide record -- the one carrying the
-        # decision, its confidence, and the sector it was made under -- was written OUTSIDE the
-        # chain: verification skipped it entirely (no entry_hash), so it could be altered or
-        # removed and nothing would disagree. A chain that covers three of four writers is not a
-        # chain, it is a chain-shaped claim.
-        db = ctx.get_connection('db')
-        if db:
-            try:
-                from mohio_audit_grades import canonical_audit_columns as _cac
-                db.ensure_table(log_name, _cac())
-                self._audit_chained_save(db, log_name, {
-                    'audit_id':       audit_id,
-                    'ts':             ts,
-                    'event':          'ai.decide',
-                    'agent':          decision_name,
-                    'decision_name':  decision_name,
-                    'inputs':         json.dumps(inputs_dict),   # names + classification only
-                    'input_binding':  input_binding,             # reserved; null at base tier
-                    'result':         entry['result'],
-                    'confidence':     str(decision.confidence),
-                    'model':          decision.model,
-                    'fell_back':      str(decision.fell_back),
-                    'sector':         sector,
-                    'session_id':     str(session_id or ''),
-                    'member_id':      str(member_id or ''),
-                })
-            except MohioInterpreter.AuditContentRefused:
-                raise
-            except Exception as e:
-                if self.verbose:
-                    print(f"  [ai.audit] db write failed: {e}")
+        # T1-AUDIT-COVERAGE-GAPS Part D (2026-08-17): this used to call
+        # self._audit_chained_save(db, ...) directly against the tenant db -- the M2 sink-bypass
+        # anti-pattern (SOP-BUILD-UNTIL-DONE.md's standing guardrail names this specific
+        # function as the example NOT to copy). That skipped the registered
+        # `_audit_sink_provider` entirely: a deployment with a dedicated append-only audit sink
+        # still got every ai.decide record written to the tenant database. `_audit_event`
+        # (mohio_interpreter.py:7417) is the real seam -- it resolves sinks the same way
+        # (provider first, tenant db fallback), ensures the table, hash-chains, writes to every
+        # configured sink for redundancy, and already implements the identical two-tier
+        # failure policy this function used to hand-roll (hard `audit.no_durable_store` /
+        # `req_grade` refusal when a compliance framework is active, a loud stderr ALERT and
+        # continue otherwise) -- so that custom try/except is gone, not duplicated.
+        # `_audit_event` stamps its own `audit_id`/`ts`; the ones computed above are kept for
+        # the in-memory `AuditLog` record and the deterministic-ID doc comment, unchanged.
+        enriched = self._audit_event(log_name, {
+            'event':          'ai.decide',
+            'agent':          decision_name,
+            'decision_name':  decision_name,
+            'inputs':         json.dumps(inputs_dict),   # names + classification only
+            'input_binding':  input_binding,             # reserved; null at base tier
+            'result':         entry['result'],
+            'confidence':     str(decision.confidence),
+            'model':          decision.model,
+            'fell_back':      str(decision.fell_back),
+            'sector':         sector,
+            'session_id':     str(session_id or ''),
+            'member_id':      str(member_id or ''),
+        }, ctx)
+        entry['audit_id'] = enriched.get('audit_id', audit_id)
 
         if self.verbose:
-            print(f"  [ai.audit] -> {log_name} [{audit_id}] sector:{sector}")
+            print(f"  [ai.audit] -> {log_name} [{entry['audit_id']}] sector:{sector}")
 
     def _exec_AiAuditStmt(self, node, ctx):
         log = self._audit_logs.setdefault(node.log_name, AuditLog(node.log_name))
@@ -9440,8 +10814,19 @@ class MohioInterpreter:
                     try:
                         v = self._eval(dotted, ctx)
                         payload[key] = v.to_python() if isinstance(v, MohioValue) else v
-                    except Exception:
-                        payload[key] = None
+                    except Exception as e:
+                        # T1-GUARD-FAILOPEN: this payload is what gets HASHED into the cache
+                        # key just below. Collapsing a failed weigh input to None made it a
+                        # CONSTANT regardless of what the real (unevaluable) value actually
+                        # was -- two genuinely different requests whose weigh inputs both fail
+                        # this way converge on the identical digest and get served EACH
+                        # OTHER'S cached decision. A weigh input that cannot be evaluated must
+                        # never be hashed as if it were a known, comparable value.
+                        raise MohioRuntimeError(
+                            f"ai.resolve {node.name}: could not evaluate the weigh input "
+                            f"'{key}' ({e}). A weigh input that fails to evaluate cannot be "
+                            f"hashed into the cache key -- doing so would let two different "
+                            f"failing requests collide onto the same cached decision.")
         digest = hashlib.sha256(
             _json.dumps({'decision': live_name, 'inputs': payload}, sort_keys=True,
                         default=str).encode()).hexdigest()
@@ -9494,7 +10879,7 @@ class MohioInterpreter:
                 f"ai.resolve {node.name}: nothing to resolve. Tiers 1 and 2 missed and no "
                 f"`live ai.decide <name>` tier is declared, so there is no way to produce an "
                 f"answer. Add a live tier.")
-        decision = self._exec_AiDecideBlock(block, ctx)
+        decision = self._run_ai_decide_invocation(block, ctx)
         result = decision.to_python() if isinstance(decision, MohioValue) else decision
         conf = 0.0
         if isinstance(result, dict):
@@ -9953,6 +11338,13 @@ class MohioInterpreter:
                               for m in metas if m.kind == 'private' for p in (m.value or []))
             if is_private and not is_public:
                 if not (ctx.has_any_roles() and ctx.roles_verified()):
+                    # T1-AUDIT-COVERAGE-GAPS Part B: a private: path denial is a security-
+                    # relevant event, same shape as require role's denial audit above.
+                    _evt = self._audit_event('security_audit_log', {
+                        'event': 'access_denied', 'reason': 'private_path_unauthenticated',
+                        'path': norm_req,
+                    }, ctx)
+                    self._audit_logs.setdefault('security_audit_log', []).append(_evt)
                     raise _Raise(
                         error_name='authorization_error',
                         message=(f"private: {norm_req} requires an authenticated session -- "
@@ -9971,6 +11363,13 @@ class MohioInterpreter:
             metas = [b for b in node.body if isinstance(b, JourneyMeta)]
             if any(m.kind == 'private' for m in metas):
                 if not (ctx.has_any_roles() and ctx.roles_verified()):
+                    # T1-AUDIT-COVERAGE-GAPS Part B: same event as the path-present denial
+                    # above, no path known to name.
+                    _evt = self._audit_event('security_audit_log', {
+                        'event': 'access_denied', 'reason': 'private_path_unauthenticated',
+                        'path': None,
+                    }, ctx)
+                    self._audit_logs.setdefault('security_audit_log', []).append(_evt)
                     raise _Raise(
                         error_name='authorization_error',
                         message=("this request carried no path, and the journey declares "
@@ -10060,6 +11459,7 @@ class MohioInterpreter:
         """Execute one page body in a child scope and format its response. A page
         whose body ends in a `render` block serves that HTML; a `give back` returns
         data/status. Inherits the journey scope via the context chain."""
+        self._refuse_write_on_get(page.body, 'page')
         child = ctx.child()
         child._current_request = req
         # Expose request fields (and a `request` shape) the same way the request
@@ -10127,10 +11527,6 @@ class MohioInterpreter:
             ctx._match_conditions = {'and': [], 'or': [], 'not': []}
         pairs = self._resolve_match_pairs(node.pairs, ctx)
         ctx._match_conditions['not'].extend(pairs)
-        return None
-
-    def _exec_MatchPair(self, node, ctx):
-        """Individual match pair -- handled by parent block."""
         return None
 
     # ── VIEW TEMPLATE ENGINE ──────────────────────────────────
@@ -10256,56 +11652,6 @@ class MohioInterpreter:
   </footer>
 </body>
 </html>"""
-
-    def _exec_ViewRender(self, node, ctx):
-        """
-        Execute: give back 200 view "rates_page" cabin cabin price 250
-
-        1. Resolve all param values from context
-        2. Look for a template file in views/
-        3. Render template with variable substitution
-        4. Set content-type to text/html
-        5. Return rendered HTML as give back value
-        """
-        # Resolve parameters
-        variables = {}
-        for param in (node.params or []):
-            if isinstance(param, (list, tuple)) and len(param) == 2:
-                key, val_node = param
-                if val_node is not None:
-                    try:
-                        resolved = self._eval(val_node, ctx)
-                        raw = (resolved.to_python()
-                               if isinstance(resolved, MohioValue)
-                               else resolved)
-                        variables[str(key)] = raw
-                    except Exception:
-                        variables[str(key)] = str(val_node)
-
-        # Add all context variables as fallback
-        if hasattr(ctx, '_vars'):
-            for k, v in ctx._vars.items():
-                if k not in variables and not k.startswith('_'):
-                    raw = v.to_python() if isinstance(v, MohioValue) else v
-                    variables[k] = raw
-
-        # Set content type on context
-        ctx._response_content_type = 'text/html'
-
-        # Look for template file
-        template_str = self._find_view_template(node.template_name, ctx)
-
-        if template_str:
-            html = self._render_template(template_str, variables)
-        else:
-            html = self._auto_html(node.template_name, variables)
-
-        self._debug_trace(ctx,
-            f"view '{node.template_name}' rendered "
-            f"({len(html)} chars, {len(variables)} vars)")
-
-        return MohioValue(html, 'html')
-
 
     def _exec_ViewCallStmt(self, node, ctx):
         """
@@ -10577,7 +11923,19 @@ class MohioInterpreter:
                 raw = val.to_python() if isinstance(val, MohioValue) else val
                 canonical = str(raw) if raw else None
             except Exception as e:
-                self._debug_trace(ctx, f"applang ai.decide error: {e}")
+                # T1-GUARD-FAILOPEN: "the ai.decide crashed" and "the ai.decide legitimately
+                # produced no answer" used to look identical -- both silently fell through to
+                # the fallback below, returning None into routing. A legitimate no-answer
+                # already returns cleanly above (a falsy/empty result, or a `give back`-style
+                # early exit via _GiveBack, both handled before this branch) -- anything
+                # reaching HERE is a genuine execution failure (a malformed block, a provider
+                # outage, a real bug), never a "no answer" outcome, and must fail loud rather
+                # than silently drive routing with a null intent-resolution result.
+                raise MohioRuntimeError(
+                    f"applang: the ai.decide block for {user_input!r} failed to execute "
+                    f"({e}). This is not \"the AI produced no answer\" -- it is a genuine "
+                    f"failure, and a silently-null intent-resolution result must not drive "
+                    f"routing.")
 
         if canonical:
             # Persist the resolved mapping
@@ -10838,6 +12196,82 @@ class MohioInterpreter:
                 f'Debug mode: {mode}\n'
             )
         return None
+
+    def _languages_covered_by_maps(self, maps):
+        """Every language code mentioned in a languages_block's map:/custom: sub-blocks,
+        so an explicit custom-declared pack (registry-vs-custom resolution) counts as
+        coverage without also requiring a locally-named pack. `maps` holds raw,
+        untransformed Lark trees (map_entry/custom_entry have no clean AST of their own
+        -- a separate, pre-existing gap, not fixed here), so this walks the raw
+        structure defensively instead of assuming a clean shape."""
+        from lark import Token as _Token
+        codes = set()
+        def walk(item):
+            if isinstance(item, list):
+                for x in item: walk(x)
+            elif hasattr(item, 'children'):
+                for x in item.children: walk(x)
+            elif isinstance(item, str) and not isinstance(item, _Token):
+                codes.add(item.lower())
+        walk(maps)
+        return codes
+
+    def _exec_LanguagesBlock(self, node, ctx):
+        """LOCK (languages-declaration-2026-08-07): a REAL journey_body member (a langmap
+        declaration), not unbuilt -- CORRECTED from BATCH8 (T1-SILENT-SWEEP), which
+        wrongly routed this through NotBuiltService/fail-loud-as-unbuilt. Stores the
+        parsed declaration on ctx so it is genuinely reachable/introspectable -- real,
+        verifiable behavior, matching what a declaration is meant to do, distinct from
+        the pre-BATCH8 bug (silently discarded to None, no effect at all anywhere).
+
+        COMPILER ENFORCEMENT (languages-declaration-2026-08-07 §7): every `supported`/
+        `deploy` language needs a real pack -- either an explicit custom/map entry in
+        this same block, or a locally-named one (`en-<lang>.langmap` etc; there is no
+        network registry client in this codebase, `registry.mohio.io` is documented
+        intent, not built, so "registry lookup" is the local maps/ directory today).
+        Missing -> fails loud, naming the language, where it looked, and the fallback
+        it would otherwise have silently taken -- never a silent skip. `planned` is
+        deliberately NOT checked (informational only, per spec). `current` is not
+        checked either -- a file compiles in whatever it is written in; it needs no
+        external pack to "exist." Boundary: this fires at RUN time (this executor),
+        not as a `mio check`-time static scan -- a real gap this narrower fix doesn't
+        close; logged as a follow-on wiring task, not silently claimed as full coverage.
+        """
+        from mohio_langmap import find_pack_for_language
+        covered = self._languages_covered_by_maps(node.maps)
+        for lang in list(node.supported) + ([node.deploy] if node.deploy else []):
+            if lang.lower() in ('en', 'english'):
+                continue   # English is canonical -- packs translate to/from it, never to itself
+            if lang.lower() in covered:
+                continue
+            if find_pack_for_language(lang) is not None:
+                continue
+            raise MohioRuntimeError(
+                f"No langmap found for {lang}. Checked the registry and local packs. "
+                f"Check the langmap's name and extension (.langmap). Code will render "
+                f"in {node.current or 'the current language'} instead.")
+        ctx._languages = {
+            'current':   node.current,
+            'supported': list(node.supported),
+            'deploy':    node.deploy,
+            'planned':   list(node.planned),
+            'maps':      list(node.maps),
+        }
+        return None
+
+    def _exec_EnterpriseBlock(self, node, ctx):
+        """LOCK (journey-newest-decisions-2026-08-07): the design is NOT fully built /
+        possibly outdated -- keep failing loud (unlike languages_block, this one is a
+        genuine gap), but honestly: this is a real, under-review feature, not a simple
+        "not built in this release" deferral. Do not revert this wording to the generic
+        NotBuiltService phrasing."""
+        raise MohioRuntimeError(
+            "enterprise is not fully built / under review in this release -- the "
+            "declaration parses (key_ref, tier), but the build-time key/tier validation "
+            "the grammar's own docstring promises is not implemented, and the design "
+            "itself may be outdated. Left silent it would accept and discard a real "
+            "declaration with no signal. Remove it for now if you don't need it, or "
+            "check with the team on its current status before relying on it.")
 
     def _exec_DebugLogStmt(self, node, ctx):
         """Write a single variable value to the debug log."""
@@ -11281,23 +12715,17 @@ class MohioInterpreter:
         if not hasattr(self, '_compliance') or self._compliance is None:
             self._compliance = []
         self._compliance.append(entry)
-        db = ctx.get_connection('db') if hasattr(ctx, 'get_connection') else None
-        if db is not None:
-            try:
-                row = {k: (v if isinstance(v, (int, float, str)) else str(v))
-                       for k, v in entry.items()}
-                self._audit_chained_save(db, 'compliance_audit', row)
-            except MohioInterpreter.AuditContentRefused:
-                raise                       # a refused record is never downgraded to a warning
-            except Exception as _e:
-                # `compliance_audit` is the PRIMARY compliance log. Swallowing a failed write
-                # here left stdout as the only trace that a compliance record did not persist --
-                # and stdout is not an audit trail. Surface it on stderr so a failure is visible
-                # in logs that are actually collected, and record the reason.
-                import sys as _sys
-                print(f"  [audit] WARNING: compliance_audit write failed: {_e}. "
-                      f"The compliance record for this action was NOT persisted.",
-                      file=_sys.stderr)
+        # T1-AUDIT-COVERAGE-GAPS Part D (2026-08-17): this used to call
+        # self._audit_chained_save(db, 'compliance_audit', ...) directly against the tenant db --
+        # the M3 sink-bypass anti-pattern (same shape as M2/_write_ai_audit, same fix). Routed
+        # through _audit_event so cm.retain/cm.expire/cm.lock go through the registered sink
+        # provider instead of always landing on the tenant db (cm.purge's from-form was already
+        # rerouted this way earlier). _audit_event has its own complete failure policy
+        # (AuditContentRefused / audit.no_durable_store propagate uncaught; a non-required
+        # write failure prints its own stderr ALERT and continues) -- no wrapping needed here.
+        row = {k: (v if isinstance(v, (int, float, str)) else str(v))
+               for k, v in entry.items()}
+        self._audit_event('compliance_audit', row, ctx)
         try:
             detail = ", ".join(f"{k}={v}" for k, v in entry.items() if k != 'at')
             print(f"  [miolog.audit] compliance {entry.get('action', '?')}: {detail}")
@@ -11544,9 +12972,16 @@ class MohioInterpreter:
                     try:
                         v = self._eval(n, ctx)
                         state['prompt'] = (v.to_python() if isinstance(v, MohioValue) else v)
-                    except Exception:
-                        state['prompt'] = str(getattr(n, 'value',
-                                              getattr(n, 'parts', n)))
+                    except Exception as e:
+                        # T1-GUARD-FAILOPEN: this used to silently fall back to the raw AST
+                        # node's .value/.parts repr, which then became the LITERAL prompt text
+                        # sent to the AI provider -- a real, costly API call for a garbage
+                        # string like "['it']", with no error at the mistake. Fail loud
+                        # instead: a prompt that cannot be evaluated must never be sent.
+                        raise MohioRuntimeError(
+                            f"ai.create: could not evaluate the prompt ({e}). Sending the raw "
+                            f"expression as text would send garbage to the AI provider and "
+                            f"cost a real API call for nothing.")
             _walk(getattr(node, 'args', None))
             for p in (getattr(node, 'params', None) or []):
                 _walk(p)
@@ -11579,7 +13014,7 @@ class MohioInterpreter:
                     f"'{name}' is defined. Define it first with "
                     f"`ai.decide {name or 'NAME'} returns <type> ... ai.decide: done`, "
                     f"then invoke it with `ai.decide {name or 'NAME'}`.")
-            return self._exec_AiDecideBlock(block, ctx)
+            return self._run_ai_decide_invocation(block, ctx)
 
         if service == 'miolog':
             msg    = self._eval(node.args, ctx) if node.args else MohioValue('')
@@ -11795,12 +13230,18 @@ class MohioInterpreter:
                     f"{mx / (1024 * 1024):g} MB limit on the {area} area. To proceed: use a "
                     f"smaller file, or raise `max size` on that area.")
 
+        # T1-AUDIT-COVERAGE-GAPS Part E2 (2026-08-17): file read/write/delete/move/copy is
+        # data leaving controlled memory into (or out of) persistent storage, the same
+        # boundary-crossing shape miohttp/miomail now record. The relative path only (never
+        # the resolved absolute filesystem path, which would leak MIOFILE_ROOT layout, and
+        # never file contents).
         op = node.op
         if op == "read":
             target, raw = _resolve(node.path)
             if not target.is_file():
                 raise MohioRuntimeError(f"miofile.read: there is no file at '{raw}'.")
             data = target.read_text(encoding="utf-8")
+            self._audit_egress('miofile', raw, ctx, op='read')
             if node.alias:
                 ctx.set(node.alias, MohioValue(data, "text"))
             return MohioValue(data, "text")
@@ -11810,12 +13251,14 @@ class MohioInterpreter:
             _enforce_zone(raw, len(content.encode("utf-8")))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+            self._audit_egress('miofile', raw, ctx, op='write')
             return MohioValue(True, "boolean")
         if op == "delete":
             target, raw = _resolve(node.path)
             if not target.is_file():
                 raise MohioRuntimeError(f"miofile.delete: there is no file at '{raw}'.")
             target.unlink()
+            self._audit_egress('miofile', raw, ctx, op='delete')
             return MohioValue(True, "boolean")
         if op == "exists":
             target, raw = _resolve(node.path)
@@ -11831,6 +13274,7 @@ class MohioInterpreter:
                 shutil.move(str(src), str(dst))
             else:
                 shutil.copy2(str(src), str(dst))
+            self._audit_egress('miofile', draw, ctx, op=op, source=sraw)
             return MohioValue(True, "boolean")
         if op == "list":
             target, raw = _resolve(node.path)
@@ -11909,9 +13353,11 @@ class MohioInterpreter:
                     headers={"Authorization": f"Bearer {sgk}", "Content-Type": "application/json"},
                     method="POST")
                 with urllib.request.urlopen(req, timeout=15) as r:
+                    self._audit_egress('miomail', 'sendgrid', ctx, status=r.status)
                     return MohioValue(r.status in (200, 202), "boolean")
             except Exception as e:
                 if self.verbose: print(f"  [miomail] SendGrid error: {e}")
+                self._audit_egress('miomail', 'sendgrid', ctx, error=str(e)[:200])
                 return MohioValue(False, "boolean")
 
         # Brevo
@@ -11929,9 +13375,11 @@ class MohioInterpreter:
                     headers={"api-key": bvk, "Content-Type": "application/json"},
                     method="POST")
                 with urllib.request.urlopen(req, timeout=15) as r:
+                    self._audit_egress('miomail', 'brevo', ctx, status=r.status)
                     return MohioValue(r.status in (200, 201), "boolean")
             except Exception as e:
                 if self.verbose: print(f"  [miomail] Brevo error: {e}")
+                self._audit_egress('miomail', 'brevo', ctx, error=str(e)[:200])
                 return MohioValue(False, "boolean")
 
         # SMTP
@@ -11959,9 +13407,11 @@ class MohioInterpreter:
                         srv.ehlo(); srv.starttls(); srv.ehlo()
                     if smtp_user and smtp_pass: srv.login(smtp_user, smtp_pass)
                     srv.sendmail(from_addr, all_r, msg.as_string())
+                self._audit_egress('miomail', f'smtp:{smtp_host}', ctx, status='sent')
                 return MohioValue(True, "boolean")
             except Exception as e:
                 if self.verbose: print(f"  [miomail] SMTP error: {e}")
+                self._audit_egress('miomail', f'smtp:{smtp_host}', ctx, error=str(e)[:200])
                 return MohioValue(False, "boolean")
 
         # Mock — dev mode
@@ -11973,6 +13423,7 @@ class MohioInterpreter:
         if bcc_list: print(f"    BCC: {', '.join(bcc_list)}")
         print(f"    Body:    {body_text[:100]}{'...' if len(body_text) > 100 else ''}")
         print(f"    Set SENDGRID_API_KEY, BREVO_API_KEY, or SMTP_HOST to send real email.")
+        self._audit_egress('miomail', 'mock', ctx, status='sent')
         return MohioValue(True, "boolean")
 
     def _exec_MiohttpStmt(self, node, ctx):
@@ -12029,6 +13480,8 @@ class MohioInterpreter:
             raise   # a refused redirect (SSRF guard) fails loud -- never swallow into a result
         except Exception as e:
             result = {"status": 0, "ok": False, "body": "", "json": None, "headers": {}, "error": str(e)}
+
+        self._audit_egress('miohttp', url, ctx, method=method, status=result.get('status'))
 
         mv = MohioValue(result, "shape")
         if node.alias: ctx.set(node.alias, mv)
@@ -12675,10 +14128,23 @@ class MohioInterpreter:
                     ctx.set(node.name, seed)
                 if self.verbose: print(f"  [declare] {node.name} as {tn} = {_zero!r}")
                 return seed
-        value = self._eval(node.value, ctx)
+        _has_default = getattr(node, 'default', None) is not None
+        # T1-EVAL-SIMPLE-FAILLOUD Piece 2 (2026-08-17): same shape as _exec_HoldDecl's `default`
+        # handling directly above in this file -- the source now fails loud at `_eval`'s
+        # user-facing DottedName check when it's genuinely undeclared, exactly the case `default`
+        # exists to handle (`mode undefined_thing default "easy"`, VERIFIED-CANONICAL-SYNTAX.md's
+        # own documented example). Catch it and treat it the same as the pre-existing None/empty
+        # fallback below, instead of letting it propagate and defeat `default`.
+        try:
+            value = self._eval(node.value, ctx)
+        except _Raise as _undecl:
+            if _has_default and getattr(_undecl, 'error_name', None) == 'undeclared_variable':
+                value = MohioValue(None)
+            else:
+                raise
         value_py = value.to_python() if isinstance(value, MohioValue) else value
         # value-level fallback: `x source default Y`
-        if (value_py is None or value_py == '') and getattr(node, 'default', None) is not None:
+        if (value_py is None or value_py == '') and _has_default:
             value = self._eval(node.default, ctx)
             value_py = value.to_python() if isinstance(value, MohioValue) else value
         # ── type contract (x as int) ─────────────────────────────────────────────────────
@@ -12783,7 +14249,18 @@ class MohioInterpreter:
     # ── Value Evaluation ──────────────────────────────────────
 
     def _eval(self, node, ctx) -> MohioValue:
-        if node is None:                     return MohioValue(None)
+        # T1-GUARD-FAILOPEN: this is the SAME bug class the _eval_simple hardening (T1-CHECK-
+        # UNIQUE-REDESIGN follow-on) closed one layer up -- a bare None here means an upstream
+        # extraction step found no AST node at all, and silently answering MohioValue(None)
+        # let a wrong extraction read exactly like a legitimate null value. _eval_simple now
+        # guards its own None input before delegating here, but any OTHER caller that reaches
+        # _eval directly with an unguarded, possibly-None node reintroduces the identical hole.
+        if node is None:
+            raise MohioRuntimeError(
+                "internal: _eval was asked to evaluate nothing (no AST node) -- there is no "
+                "value here to compute, so returning None would silently stand in for a real "
+                "answer. This is a compiler gap upstream (a value-extraction step found no "
+                "node), not your code -- please report it with the line that triggered it.")
         if isinstance(node, MohioValue):     return node
         # A comparison used as a VALUE -- `hold flag (score > 100)` -- is a boolean, and must be
         # evaluated as one. Before math_cmp was handled it arrived here as a raw Tree and the
@@ -12854,6 +14331,35 @@ class MohioInterpreter:
                     "right before it, and nothing has produced a value yet. Start a "
                     "`then` pipeline (a head value followed by `then ...`), or use a "
                     "named variable instead of `it`.")
+            # T1-EVAL-SIMPLE-FAILLOUD Piece 2 (redesigned 2026-08-17 after the Context.get()
+            # attempt broke 52 files -- see PRODUCTION-BUILD-PLAN.md). The fail-loud lives HERE,
+            # at the single user-facing read path where a parsed DottedName from real .mho source
+            # gets its value, NOT in Context.get() itself. Context.get() stays lenient because it
+            # also serves internal `__`-prefixed bookkeeping (read via direct Python calls, never
+            # a parsed DottedName -- structurally exempt, never reaches this branch at all) and
+            # every other internal lookup that isn't a developer's variable reference. A name
+            # absent from the ENTIRE scope chain here is always a mistake: either it was never
+            # declared (a typo), or it WAS declared and then `forget`/`rename` removed it --
+            # `delete_var` leaves no trace of either, so the two are genuinely the same state and
+            # get the same fail-loud (no tombstone needed to tell them apart). `clear` is
+            # unaffected: it calls `ctx.set(...)`, never `delete_var`, so a cleared variable stays
+            # present (empty) and never reaches this check.
+            #
+            # `random` is exempt for the same reason `it` is: it's a pseudo-namespace, never a
+            # real declared variable. `get_dotted` (mohio_interpreter.py:778) already has its own
+            # dedicated, MORE SPECIFIC fail-loud for the exact misuse this would otherwise catch
+            # first with a generic message -- `random.token`/`random.hex`/`random.number` used
+            # bare (no required clause) mis-parse into DottedName(['random', X]) and must reach
+            # that check to get the real, security-relevant message ("needs its required clause"),
+            # not a generic "variable 'random' is not declared".
+            if (node.parts and node.parts[0] not in ('it', 'random')
+                    and not ctx.exists(node.parts[0])):
+                raise _Raise(
+                    error_name='undeclared_variable',
+                    message=f"variable '{node.parts[0]}' is not declared -- there is no value "
+                            f"here to read.",
+                    hint=f"Define {node.parts[0]} first (`{node.parts[0]} <value>`), or check "
+                         f"for a typo.")
             val = ctx.get_dotted(node.parts)
 
             # ai.decide result fields. The block binds its NAME to the bare result, so
@@ -13183,6 +14689,22 @@ class MohioInterpreter:
         return MohioValue(node)
 
     def _eval_simple(self, node, ctx):
+        # `node is None` means the caller had literally nothing to evaluate -- an upstream
+        # extraction step found no AST node at all. `_eval(None, ...)` used to answer that
+        # with a silent MohioValue(None), so a wrong extraction (grabbing the wrong child, or
+        # finding none) read exactly like a legitimate null value three layers downstream --
+        # this is the shape that let check unique's old bug (T1-CHECK-UNIQUE-REDESIGN: the
+        # transformer grabbed the table reference instead of the match value) flow to a wrong
+        # answer instead of erroring at the point things went wrong. Fail loud here instead:
+        # every caller that legitimately has no value to pass already guards for it before
+        # calling (`x if x is not None else None`), so a bare None reaching this point is
+        # always a compiler-internal gap, never a real "the value is null" case.
+        if node is None:
+            raise MohioRuntimeError(
+                "internal: _eval_simple was asked to evaluate nothing (no AST node) -- there "
+                "is no value here to compute, so returning None would silently stand in for a "
+                "real answer. This is a compiler gap upstream (a value-extraction step found "
+                "no node), not your code -- please report it with the line that triggered it.")
         v = self._eval(node, ctx)
         return v.to_python() if isinstance(v, MohioValue) else v
 
@@ -13470,10 +14992,24 @@ class MohioInterpreter:
         return datetime.timedelta()
 
     def _interpolate(self, template, ctx):
+        """Render {{ var }} for AI prompts (persona/goal/context) and outbound miohttp/miomail
+        URL/headers/body. Same unknown-variable hardening as its sibling _interpolate_output
+        (T1-GUARD-FAILOPEN): a typo'd {{var}} used to silently render the literal text "None"
+        instead of failing loud -- which then shipped straight into an AI provider prompt or an
+        outbound request, both real, costly, wrong calls with no error at the mistake."""
         def replace(m):
             expr  = m.group(1).strip()
             parts = expr.split('.')
-            val   = ctx.get_dotted(parts)
+            root  = parts[0]
+            if not ctx.exists(root):
+                raise _Raise(
+                    error_name='unknown_variable',
+                    message=f"{{{{ {expr} }}}} refers to an unknown variable '{root}'.",
+                    line=None,
+                    hint=(f"Define it before use (e.g. hold {root} = \"...\"), or check the "
+                          f"spelling. Double braces {{ }} are reserved only for inserting a "
+                          f"variable's value."))
+            val = ctx.get_dotted(parts)
             return str(val.to_python() if isinstance(val, MohioValue) else val)
         return re.sub(r'\{\{([^}]+)\}\}', replace, str(template))
 
@@ -14042,8 +15578,14 @@ class MohioInterpreter:
 
         if isinstance(node, Condition):
             lv = self._eval_simple(node.left, ctx)
-            rv = self._eval_simple(node.right, ctx)
             op = node.op
+            # Unary predicates (is.empty/not.empty/even/odd) carry no right operand by design
+            # -- node.right is None, and their own branches below never read `rv`. Evaluating
+            # it anyway was always wasted work; after _eval_simple's None-input hardening
+            # (T1-CHECK-UNIQUE-REDESIGN follow-on) it is fatal for exactly these four ops, so
+            # only compute it for the binary comparisons that actually use it.
+            rv = (self._eval_simple(node.right, ctx)
+                  if op not in ('is.empty', 'not.empty', 'even', 'odd') else None)
             # Silent-false trap: `X is foo` where `foo` is an unquoted word that is NOT a declared
             # variable compared X to None and silently returned false (the same shape as the
             # `is even` bug). Fail loud instead, pointing at the fix. Only a single bare name is
@@ -14190,15 +15732,158 @@ class MohioInterpreter:
             v = self._eval(node, ctx)
             vv = v.to_python() if isinstance(v, MohioValue) else v
             return self._loose_eq(raw, vv)
-        except Exception:
-            return False
+        except Exception as e:
+            # T1-GUARD-FAILOPEN: a genuinely-false comparison never reaches this except
+            # block -- _loose_eq above returns that answer normally. Any exception here means
+            # the `when` clause's own expression could not be evaluated (a real error, e.g. a
+            # math error or a broken reference), which is not the same question as "did it
+            # compare equal." Silently reading it as false picked whichever branch happened to
+            # be the fallback, masking the error and selecting a branch the program never
+            # actually asked for.
+            raise MohioRuntimeError(
+                f"this `when` condition could not be evaluated ({e}) -- a broken condition "
+                f"must not silently read as false and skip the intended branch.")
 
     # ── Helpers ───────────────────────────────────────────────
+
+    def _filter_held_list(self, items, where, post_filters, verb, name):
+        """T1-QUERY-HELD's core ruling (Ronnie's call), built and proven standalone --
+        NOT YET WIRED into _exec_FindBlock/_exec_RetrieveBlock/_exec_GrabBlock. Those three
+        still call `_refuse_held_source_query` below and fail loud unconditionally; wiring
+        this in to replace that call is the remaining step before T1-QUERY-HELD itself lands.
+
+        THE RULING: a list built from a shape is type-uniform by definition (the shape is the
+        schema, same as a SQL column) -- so it behaves like a db table, not like Mongo's
+        anything-goes documents. Three lanes, matching how Mohio's real db backends already
+        treat a WHERE filter against a row that lacks the column being tested (confirmed live
+        against SQLite and Postgres, read against Mongo's identical shared-filter code path --
+        all three exclude a row missing the field, never raise):
+
+          1. Uniform record list (every item is a dict, i.e. every item is "a shape"), some
+             items lack the filtered field: EXCLUDE those items (matching the db's silent
+             exclude) but WARN naming the count and field(s) -- the db path has no such
+             warning today (it can't; there's no equivalent of "half the rows are missing a
+             column" to announce, a SQL table either has the column or doesn't). This is a
+             deliberate, acknowledged divergence: held lists get a warning the db path
+             doesn't, because unlike a db table a held list can silently drift into this shape
+             at runtime with no schema migration to have caught it.
+          2. Genuinely mixed list (some items are records, some are plain scalars, in the SAME
+             list): no db backend can produce this shape at all -- a table's rows are always
+             uniform records, a collection's documents are always documents, never a mix with
+             bare scalars. INVALID INPUT, fail loud.
+          3. Scalar-only list queried with a field filter: same reasoning as (2) one step
+             further -- there is no field to filter by at all. Fail loud, naming that.
+
+        Runtime-warning mechanism: Mohio has no existing runtime warning channel (only
+        check-time CompileWarning, collected in ctx.warnings and printed by mio.py's `mio
+        check`). This is a new concept for `mio run`, not a pre-existing convention being
+        reused -- flagging that judgment call rather than presenting it as settled. Prints
+        directly, self-contained (no reverse import of mio.py's color helpers).
+
+        Returns (matched_rows: list[dict], warning: str | None). Raises MohioRuntimeError for
+        the two invalid-shape cases. `items` is the raw Python list already unwrapped from its
+        MohioValue; each element may itself still be MohioValue-wrapped (list literals and
+        `add ... to` do not uniformly unwrap on the way in) or already a plain dict/scalar --
+        both are normalized here.
+        """
+        def _unwrap(x):
+            return x.to_python() if isinstance(x, MohioValue) else x
+
+        raw_items = [_unwrap(it) for it in items]
+        is_record = [isinstance(it, dict) for it in raw_items]
+        has_records = any(is_record)
+        has_scalars = any(not r for r in is_record)
+        wants_field_filter = bool(where) or bool(post_filters)
+
+        if has_records and has_scalars:
+            raise MohioRuntimeError(
+                f"`{verb}` cannot query '{name}' -- it mixes records and plain values in the "
+                f"same list. A queried list must hold one kind of thing, the way a database "
+                f"table or collection does. Split it into separate lists, one per kind.")
+
+        if not has_records:
+            _fields = set((where or {}).keys()) | {f for (f, _, _, _) in (post_filters or [])}
+            if _fields and _fields != {'value'}:
+                raise MohioRuntimeError(
+                    f"`{verb}` cannot filter '{name}' by field -- it holds plain values, not "
+                    f"records, so there is no field to filter on. Use `where value is ...` to "
+                    f"test the value itself, `repeat each` with a `check`/`when` guard, or "
+                    f"connect a real database.")
+            if not _fields:
+                return raw_items, None
+            # `where value is ...` on a scalar-only list -- 'value' means the scalar itself, not
+            # a dict field. NOT `it` -- `it` is already the then-chain pipeline pronoun
+            # (mohio.lark:2739, _exec_ThenChain) and reusing it here would be a second,
+            # conflicting sense of the same word (flagged and ruled 2026-08-09: `value` is the
+            # scalar-filter reference, `it` stays exclusively the then-chain result). Wrap each
+            # scalar as {'value': v} so the same equality/_row_matches machinery applies
+            # unchanged, then unwrap back to the bare scalar for the result.
+            wrapped = [{'value': v} for v in raw_items]
+            matched_wrapped, _ = self._filter_held_list(wrapped, where, post_filters, verb, name)
+            return [r['value'] for r in matched_wrapped], None
+
+        all_fields = set((where or {}).keys()) | {f for (f, _, _, _) in (post_filters or [])}
+        matched, missing_count, missing_fields = [], 0, set()
+        for row in raw_items:
+            row_missing = [f for f in all_fields if f not in row]
+            if row_missing:
+                missing_count += 1
+                missing_fields.update(row_missing)
+                continue
+            ok = all(row.get(f) == v for f, v in (where or {}).items())
+            if ok and post_filters:
+                ok = all(self._row_matches(row, f, c, v, v2) for (f, c, v, v2) in post_filters)
+            if ok:
+                matched.append(row)
+
+        warning = None
+        if missing_count:
+            fields_txt = ", ".join(f"'{f}'" for f in sorted(missing_fields))
+            warning = (f"{missing_count} item(s) in '{name}' excluded from `{verb}` -- missing "
+                       f"{fields_txt}, so the filter could not be evaluated against them.")
+            print(f"  ! {warning}")
+        return matched, warning
+
+    def _resolve_held_list_source(self, source, ctx):
+        """T1-QUERY-HELD: the ONE place find/retrieve/grab decide whether a source is a
+        queryable held list, ahead of `_refuse_held_source_query`/`_db_or_fail`/
+        `_resolve_source`. Returns the raw Python list if `source` is a single-part
+        DottedName naming a currently-held variable whose value IS a list. Returns None for
+        every other shape -- not held, held but not a list (a scalar, `miofile.read`'s raw
+        text), a `db.table`, or a multi-part dotted source (`cache.settings`) -- all of which
+        fall through to the existing `_refuse_held_source_query` / db path completely
+        unchanged. This is the single condition that makes the refusal in that function
+        conditional instead of unconditional; it does not replace it, it gates it.
+        """
+        if isinstance(source, DottedName) and len(source.parts or []) == 1:
+            name = source.parts[0]
+        elif isinstance(source, str) and source and '.' not in source:
+            # save_or_update_block (mohio_transformer_ast.py) stringifies its source at
+            # transform time -- `.'join(parts)` for a DottedName, unlike every other verb here,
+            # which keeps the DottedName object. A bare single-word string with no dot is the
+            # same "one plain NAME" shape as the DottedName branch above; anything with a dot
+            # (`db.scores`, `cache.settings`) is a real dotted reference, never a held list name.
+            name = source
+        else:
+            return None
+        if not ctx.exists(name):
+            return None
+        value = ctx.get(name)
+        raw = value.to_python() if isinstance(value, MohioValue) else value
+        return raw if isinstance(raw, list) else None
 
     def _refuse_held_source_query(self, source, ctx, verb):
         """find / retrieve / grab run against a database today -- querying a held (non-DB)
         value, `held_source_query`, is real, wanted, NOT YET BUILT work (PRODUCTION-BUILD-PLAN.md
         Tier 1, item T1-QUERY-HELD; CLAUDE-CODE-BACKLOG.md).
+
+        AS OF THIS UNIT: this refusal is no longer unconditional. `_resolve_held_list_source`
+        runs FIRST at each of the three call sites; when the source is a held LIST, this
+        function is never reached at all -- `_filter_held_list` handles it instead. This
+        function still runs, and still refuses, for every other held-source shape: a held
+        SCALAR (`hold total 5` queried with `find`), held file content (a string), and any
+        other non-list held value. That refusal is unchanged from T0-6, on purpose -- there is
+        still nothing downstream that can query those shapes.
 
         `source` for these three verbs is always a DbRef (`db.X`) or a DottedName (a bare
         NAME, or a dotted chain like `cache.settings`) -- see source_ref's transformer.
@@ -14295,14 +15980,44 @@ class MohioInterpreter:
             hint="Declare one first, e.g. 'connect db as sqlite from env.DATABASE_URL'. "
                  "Without it this would have done nothing at all, and said nothing.")
 
-    def _handle_failure(self, handlers, ctx, reason):
+    def _handle_failure(self, handlers, ctx, reason, operational_failure=False, conn_name='db'):
         for h in handlers:
             if isinstance(h, OnFailure):
                 if self.verbose: print(f"  [on.failure] {reason}")
                 try:
                     return self._exec_block(h.body, ctx)
                 except _GiveBack: raise
-        # on.failure did not fire, so `otherwise` is the final fallback (design spec).
+        # on.failure did not fire. Per T1-OUTCOME-STRUCTURE, on.failure/on.success are the
+        # OPERATIONAL channel (did it break) and when/otherwise are the CONDITIONAL channel
+        # (what came back) -- `otherwise` exists to pick between LEGITIMATE outcomes (found
+        # vs not found), not to catch a broken query. A genuine operational failure (a raised
+        # exception) must not vanish into `otherwise` or into silent None just because no
+        # on.failure was declared -- that would still be the same swallow, one hop later.
+        # Matches the existing save/update/remove pattern exactly: they check ONLY for
+        # OnFailure before raising, never for OtherwiseClause. Callers reporting a real
+        # exception (not an ordinary miss) must pass operational_failure=True.
+        if operational_failure:
+            # T1-RUN3-CONNECTION-HANDLER (2026-08-19): before failing loud, fall back to the
+            # connection-level on.failure (declared once on `connect`, inherited by every
+            # operation that didn't declare its own) -- the declare-once OVERRIDE the run's
+            # foundation calls for, checked only after the per-operation handler above found
+            # nothing, so a per-use override always wins. `conn_name` defaults to 'db' because
+            # every query verb in this interpreter already resolves its connection via
+            # ctx.get_connection('db') -- the codebase's own single-connection convention,
+            # not a new one invented here. Audited either way: a genuine operational failure
+            # is compliance-relevant whether or not anything catches it.
+            self._audit_logs.setdefault('security_audit_log', []).append(self._audit_event(
+                'security_audit_log', {
+                    'event': 'operation_failed', 'reason': str(reason)[:300],
+                }, ctx))
+            _conn_handlers = getattr(self, '_connection_handlers', {}).get(conn_name) or []
+            for h in _conn_handlers:
+                if isinstance(h, OnFailure):
+                    if self.verbose: print(f"  [connect on.failure] {reason}")
+                    try:
+                        return self._exec_block(h.body, ctx)
+                    except _GiveBack: raise
+            raise _Raise(error_name='db_error', message=str(reason))
         return self._handle_otherwise(handlers, ctx)
 
     def _handle_success(self, handlers, ctx):
@@ -14448,13 +16163,13 @@ class MohioInterpreter:
             session_ctx = store.get(session_id, base_ctx)
             if session_ctx is not None and self._session_is_expired(
                     session_ctx, now, idle_ceiling, absolute_ceiling):
-                self._invalidate_session(store, session_id)
+                self._invalidate_session(store, session_id, session_ctx)
                 session_id = _uuid.uuid4().hex
                 session_ctx = None
 
             # Bounded scan for OTHER stale sessions, piggybacked on this request+lock
             # rather than a dedicated background task.
-            self._opportunistic_expiry_sweep(store, now, idle_ceiling, absolute_ceiling)
+            self._opportunistic_expiry_sweep(store, now, idle_ceiling, absolute_ceiling, base_ctx)
 
             # Get or create session context
             _is_new = session_ctx is None

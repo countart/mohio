@@ -197,6 +197,7 @@ class MohioServer:
         return {
             "status":         "running",
             "version":        VERSION,
+            "build":          BUILD_SHA,
             "uptime_seconds": int(uptime.total_seconds()),
             "requests":       self.request_count,
             "sessions":       self._session_store.count(),
@@ -249,7 +250,7 @@ class MohioServer:
 # CORS HEADERS
 # ══════════════════════════════════════════════════════════════
 
-from mohio_version import VERSION
+from mohio_version import VERSION, BUILD_SHA
 
 CORS_HEADERS = {
     # No wildcard by default on a multi-tenant runtime -- see _cors_origins().
@@ -516,6 +517,20 @@ def create_app(server: MohioServer):
     # ── Shared POST dispatcher ────────────────────────────────
 
     async def _dispatch_post(request: Request) -> Response:
+        # TEMPORARY DIAGNOSTIC (2026-08-14) -- comparing route resolution between
+        # zork.mohio.io and mohio-t-11.fly.dev. No code anywhere in this repo reads
+        # Host/X-Forwarded-Host for route selection (verified by trace), so this logs
+        # exactly what the process receives for each hostname, to see whether Fly's
+        # edge is forwarding something that differs. Remove after the comparison.
+        import sys as _diag_sys
+        print(f"  [DIAG] host={request.headers.get('host')!r} "
+              f"x-forwarded-host={request.headers.get('x-forwarded-host')!r} "
+              f"x-forwarded-proto={request.headers.get('x-forwarded-proto')!r} "
+              f"x-forwarded-for={request.headers.get('x-forwarded-for')!r} "
+              f"method={request.method!r} url.path={request.url.path!r} "
+              f"url.hostname={request.url.hostname!r} "
+              f"raw_path={getattr(request, 'scope', {}).get('raw_path')!r}",
+              file=_diag_sys.stderr, flush=True)
         ctype = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
         is_form = False
         try:
@@ -754,12 +769,26 @@ def create_app(server: MohioServer):
                             f"stopped. Long-running work belongs in a background job."},
                 status_code=504)
         except Exception as e:
-            # A crashing root route used to degrade silently to index.html or the neutral page,
-            # so a developer saw a friendly page instead of their error. Surface it.
+            # FIX-B9-6 (T1-SILENT-SWEEP-BATCH9, finding #17): `MohioServer.dispatch` already
+            # catches every exception from running the program itself and returns a real
+            # {status, body} error dict via format_runtime_error/log_runtime_error (see
+            # dispatch() above) -- it never raises. So reaching this except block means
+            # something failed OUTSIDE that -- most likely _with_timeout's own wrapping
+            # machinery -- which is rarer and MORE surprising than an ordinary program crash,
+            # not less. The old code set `result = None` and fell through to the SAME
+            # "no root route" placeholder logic used for a genuinely undefined `/`, at HTTP
+            # 200 -- indistinguishable from a healthy app with no root route, which is exactly
+            # what made a real crash here look like "GET works" from the outside (the
+            # comment two lines up already said "Surface it" -- it only ever reached server
+            # logs, never the client). A crash is not the same outcome as no route; it must
+            # not share a branch. Return a real error response instead of falling through.
             if server.verbose:
                 import traceback as _tb; _tb.print_exc()
+            from mohio_interpreter import format_runtime_error, log_runtime_error
+            info = format_runtime_error(e)
+            log_runtime_error(info, verbose=server.verbose)
             print(f"  [serve /] root route raised: {e}")
-            result = None
+            return JSONResponse(info, status_code=info["status"])
         if isinstance(result, dict):
             status = result.get("status", 200)
             body = result.get("body")
@@ -791,7 +820,12 @@ def create_app(server: MohioServer):
         return JSONResponse(server.stats())
 
     async def ping(request: Request) -> Response:
-        return JSONResponse({"pong": True, "version": VERSION})
+        # `build` is the COMMIT, and it is the field a deploy question actually needs: VERSION
+        # moves per release, so it cannot tell a production container apart from a checkout six
+        # commits ahead that reports the same number (2026-08-20 -- that ambiguity cost a live
+        # investigation a clean answer). "unknown" means this build did not record its commit,
+        # which is itself worth seeing, and is never a fabricated value.
+        return JSONResponse({"pong": True, "version": VERSION, "build": BUILD_SHA})
 
     def _static_file_response(path: str, _if_none_match: str = ""):
         """Return a Response for a real static file under the APP's static root, or None.
@@ -892,11 +926,6 @@ def create_app(server: MohioServer):
             except Exception:
                 continue
         return None
-
-    async def serve_static(request: Request) -> Response:
-        path = request.path_params.get("path", "")
-        resp = _static_file_response(path, request.headers.get("If-None-Match", ""))
-        return resp if resp is not None else Response(status_code=404)
 
     async def serve_page_or_static(request: Request) -> Response:
         """GET catch-all. A real static file wins (predictable: explicit assets
@@ -1035,11 +1064,18 @@ def create_app(server: MohioServer):
         # minimal and removes admin attack surface from every microVM. Seeding is likewise an
         # app/dev concern, never a runtime one (there is no generic seeder -- uniqueness is a
         # per-app claim that cannot be inferred). Zork keeps its own seed/admin on its own side.
-        # Static files
-        Route("/favicon.ico",               serve_static,     methods=["GET"]),
-        Route("/favicon-32x32.png",         serve_static,     methods=["GET"]),
-        Route("/favicon-16x16.png",         serve_static,     methods=["GET"]),
-        Route("/apple-touch-icon.png",      serve_static,     methods=["GET"]),
+        # Static files. Favicon/touch-icon paths used to get their own dedicated Route()
+        # entries pointed at serve_static -- confirmed live bug (2026-08-15): serve_static
+        # reads the filename from request.path_params["path"], a param only the {path:path}
+        # catch-all route below ever populates. The four dedicated routes matched a fixed
+        # literal path with no {path:path} placeholder, so path_params["path"] was always ""
+        # for them, _static_file_response("") always returns None, and they intercepted
+        # ahead of the catch-all -- every tenant app's favicon 404'd unconditionally, real
+        # file or not. Fixed: removed, so these filenames fall through to the catch-all
+        # (serve_page_or_static) immediately below, which already resolves an arbitrary
+        # static filename correctly. serve_static itself is now unreferenced (it existed
+        # only to back these four routes) -- removed alongside them rather than left as dead,
+        # broken code.
         Route("/{path:path}",               serve_page_or_static, methods=["GET", "HEAD"]),
         Route("/{path:path}",               _dispatch_post,   methods=["POST", "PUT", "DELETE"]),
         Route("/{path:path}",               options_handler,  methods=["OPTIONS"]),

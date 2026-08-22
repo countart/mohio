@@ -30,6 +30,24 @@ _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 def _run(src):
     i = MohioInterpreter(); i.run(transform(_P.parse(src), src)); return i
 
+def _run_with_audit_event_spy(src):
+    """Same real pipeline as _run, but proves the audit write went through _audit_event --
+    the real seam -- and not a bypass straight to _audit_chained_save (the M2/M3 anti-pattern
+    the architectural rule forbids repeating). Spies on the actual bound method so a future
+    regression that swaps in a direct _audit_chained_save call is caught, not just a shape
+    that happens to look similar."""
+    calls = []
+    orig = MohioInterpreter._audit_event
+    def spy(self, log_name, entry, ctx):
+        calls.append((log_name, entry.get('event')))
+        return orig(self, log_name, entry, ctx)
+    MohioInterpreter._audit_event = spy
+    try:
+        i = MohioInterpreter(); i.run(transform(_P.parse(src), src))
+    finally:
+        MohioInterpreter._audit_event = orig
+    return i, calls
+
 def _acc(i):
     return [e for e in i._audit_logs.get('data_audit_log', [])
             if e.get('event') == 'DATA_ACCESS']
@@ -99,6 +117,72 @@ def test_grab_path_audits():
     assert a[-1]['operation'] == 'grab', a[-1]
 
 
+# --- T1-AUDIT-COVERAGE-GAPS Part A: retrieve.all/.first/.last/.count and pull were the
+# confirmed-live gap -- retrieve.one/find/grab already audited (above), these siblings didn't.
+# Match on a NON-tagged field: a [phi]/[pci] field is encrypted at rest, so matching on its
+# plaintext value can never find the row (a real trap hit and resolved while verifying this).
+
+def test_retrieve_all_audits():
+    i = _run('sector: healthcare\n' + SH + CN + SV +
+             'retrieve.all p from db.patients\n    match name to "Jane"\nretrieve.all: done\n')
+    a = _acc(i)
+    assert len(a) >= 1, "retrieve.all of a [phi] field did not audit"
+    assert a[-1]['operation'] == 'retrieve' and a[-1]['phi_fields'] == ['diagnosis'], a[-1]
+
+def test_retrieve_first_audits():
+    i = _run('sector: healthcare\n' + SH + CN + SV +
+             'retrieve.first p from db.patients\n    match name to "Jane"\nretrieve.first: done\n')
+    a = _acc(i)
+    assert len(a) >= 1, "retrieve.first of a [phi] field did not audit"
+    assert a[-1]['operation'] == 'retrieve' and a[-1]['phi_fields'] == ['diagnosis'], a[-1]
+
+def test_retrieve_last_audits():
+    i = _run('sector: healthcare\n' + SH + CN + SV +
+             'retrieve.last p from db.patients\n    match name to "Jane"\nretrieve.last: done\n')
+    a = _acc(i)
+    assert len(a) >= 1, "retrieve.last of a [phi] field did not audit"
+    assert a[-1]['operation'] == 'retrieve' and a[-1]['phi_fields'] == ['diagnosis'], a[-1]
+
+def test_retrieve_count_audits():
+    i = _run('sector: healthcare\n' + SH + CN + SV +
+             'retrieve.count p from db.patients\n    match name to "Jane"\nretrieve.count: done\n')
+    a = _acc(i)
+    assert len(a) >= 1, "retrieve.count of a [phi] field did not audit"
+    assert a[-1]['operation'] == 'retrieve' and a[-1]['phi_fields'] == ['diagnosis'], a[-1]
+
+def test_pull_audits():
+    i = _run('sector: healthcare\n' + SH + CN + SV +
+             'pull p up to 5 from db.patients\npull: done\n')
+    a = _acc(i)
+    assert len(a) >= 1, "pull of a [phi] field did not audit"
+    assert a[-1]['operation'] == 'pull' and a[-1]['phi_fields'] == ['diagnosis'], a[-1]
+
+def test_retrieve_all_audits_via_audit_event_not_bypass():
+    # Test-strength check (content-safety review, 2026-08-19): retrieve.all's DATA_ACCESS
+    # write must go through _audit_event, not a hand-rolled call straight to
+    # _audit_chained_save. Representative of the four retrieve.* call sites Part A touched.
+    i, calls = _run_with_audit_event_spy(
+        'sector: healthcare\n' + SH + CN + SV +
+        'retrieve.all p from db.patients\n    match name to "Jane"\nretrieve.all: done\n')
+    assert ('data_audit_log', 'DATA_ACCESS') in calls, \
+        f"retrieve.all's PHI read audit did not go through _audit_event: {calls}"
+
+def test_pull_audits_via_audit_event_not_bypass():
+    # pull is a structurally separate call site (_exec_PullBlock, not _exec_RetrieveBlock).
+    i, calls = _run_with_audit_event_spy(
+        'sector: healthcare\n' + SH + CN + SV +
+        'pull p up to 5 from db.patients\npull: done\n')
+    assert ('data_audit_log', 'DATA_ACCESS') in calls, \
+        f"pull's PHI read audit did not go through _audit_event: {calls}"
+
+def test_retrieve_all_no_match_no_rows_still_no_audit():
+    # An empty result set touches no PHI values -- _audit_data_access's own "no tagged field in
+    # the result, no entry" rule (its docstring) applies identically here.
+    i = _run('sector: healthcare\n' + SH + CN + SV +
+             'retrieve.all p from db.patients\n    match name to "Nobody"\nretrieve.all: done\n')
+    assert len(_acc(i)) == 0, "empty retrieve.all result wrongly produced a DATA_ACCESS entry"
+
+
 def test_write_under_sector_audits_even_untagged():
     # A sector audits every write, tagged or not (compliance breadth, unchanged).
     i = _run('sector: financial\nshape Log\n    msg as text\nshape: done\n'
@@ -128,6 +212,30 @@ def test_pci_tag_carries_access_without_sector():
     a = _acc(i)
     assert any(e.get('pci_fields') == ['number'] for e in a), a
 
+# --- T1-AUDIT-COVERAGE-GAPS Part C: [pii] reads without an explicit purpose wrapper ---
+PII_SH = 'shape Contact\n    name as text\n    email as text [pii]\nshape: done\n'
+PII_SV = 'save to db.contacts\n    name "Bo"\n    email "bo@example.com"\nsave: done\n'
+PII_FN = 'retrieve c from db.contacts\n    match name to "Bo"\nretrieve: done\n'
+
+def test_pii_read_without_purpose_wrapper_now_audits():
+    # Previously silent: [pii] was tracked only via _field_purposes (an explicit `purpose`
+    # block), so a plain read of a [pii] field produced no DATA_ACCESS entry at all.
+    i = _run(PII_SH + CN + PII_SV + PII_FN)
+    a = _acc(i)
+    assert any(e.get('pii_fields') == ['email'] for e in a), \
+        f"[pii] read without a purpose wrapper did not audit: {a}"
+
+def test_pii_read_names_only_never_values():
+    i = _run(PII_SH + CN + PII_SV + PII_FN)
+    blob = str(_acc(i))
+    assert 'email' in blob, "pii field name missing from audit"
+    assert 'bo@example.com' not in blob, "PII VALUE leaked into the audit trail"
+
+def test_pii_read_audits_via_audit_event_not_bypass():
+    i, calls = _run_with_audit_event_spy(PII_SH + CN + PII_SV + PII_FN)
+    assert ('data_audit_log', 'DATA_ACCESS') in calls, \
+        f"[pii] read audit did not go through _audit_event: {calls}"
+
 def test_phi_and_pci_in_one_row_both_logged():
     sh = 'shape Rec\n    name as text\n    dx as text [phi]\n    pan as text [pci]\nshape: done\n'
     sv = 'save to db.recs\n    name "A"\n    dx "flu"\n    pan "4111111111111234"\nsave: done\n'
@@ -147,10 +255,21 @@ if __name__ == '__main__':
         (test_non_phi_read_does_not_audit,      "non-[phi] read does not audit"),
         (test_entries_are_names_only_never_values, "entries are names-only, never values"),
         (test_grab_path_audits,                 "grab path audits"),
+        (test_retrieve_all_audits,              "retrieve.all path audits"),
+        (test_retrieve_first_audits,            "retrieve.first path audits"),
+        (test_retrieve_last_audits,             "retrieve.last path audits"),
+        (test_retrieve_count_audits,            "retrieve.count path audits"),
+        (test_pull_audits,                      "pull path audits"),
+        (test_retrieve_all_audits_via_audit_event_not_bypass, "retrieve.all audit goes through _audit_event"),
+        (test_pull_audits_via_audit_event_not_bypass, "pull audit goes through _audit_event"),
+        (test_retrieve_all_no_match_no_rows_still_no_audit, "empty retrieve.all result does not audit"),
         (test_write_under_sector_audits_even_untagged, "sector audits every write (untagged too)"),
         (test_tagged_table_remove_carries_without_sector, "remove on a tagged table stays trailed"),
         (test_pci_read_is_access_logged,        "[pci] read is access-logged (PCI DSS req 10)"),
         (test_pci_tag_carries_access_without_sector, "[pci] tag carries access-audit without a sector"),
+        (test_pii_read_without_purpose_wrapper_now_audits, "[pii] read without a purpose wrapper now audits"),
+        (test_pii_read_names_only_never_values, "[pii] audit entries are names-only, never values"),
+        (test_pii_read_audits_via_audit_event_not_bypass, "[pii] read audit goes through _audit_event"),
         (test_phi_and_pci_in_one_row_both_logged, "one read touching [phi] and [pci] logs both"),
     ]
     passed = 0

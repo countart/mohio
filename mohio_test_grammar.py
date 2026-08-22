@@ -484,7 +484,11 @@ while: done
 
     # ── if — trailing qualifier ONLY ──────────────────────────
     run("halt_if",          "halt if maintenance_mode is true")
-    run("give_back_if",     'give back 404 "not found" if member is empty')
+    # was `is empty` (two words) -- that form silently misparses as `member IS empty`
+    # (bareword equality, not an emptiness predicate); the test was passing on the misparse,
+    # not on real if-guard behavior. Fixed to the canonical dot form, 2026-08-10 --
+    # T1-SPACED-MISPARSE-GUARDS.
+    run("give_back_if",     'give back 404 "not found" if member is.empty')
     run("halt_plain",       "halt")
     run("stop_stmt",        "stop")
 

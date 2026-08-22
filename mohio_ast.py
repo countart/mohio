@@ -2,7 +2,7 @@
 # Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 # mohio_ast.py
 # Mohio AST Node Types -- v3.8
-# Version: 4.8.2 | August 2026 | Particular LLC
+# Version: see mohio_version.VERSION | August 2026 | Particular LLC
 #
 # Every grammar rule that produces a meaningful semantic unit
 # maps to exactly one AST node class. The transformer emits
@@ -56,6 +56,7 @@ class ConnectDecl(Node):
     name:   str = ""      # alias (db)
     driver: str = ""      # postgres, redis, etc.
     source: Any = None    # value_expr -- usually env ref
+    handlers: list = field(default_factory=list)   # T1-RUN3: OnFailure/OnSuccess, additive
 
 @dataclass
 class ComplianceDecl(Node):
@@ -343,6 +344,10 @@ class MioconnectDecl(Node):
     auth_header_name: str = ""          # custom header name (auth header "X-API-Key")
     timeout:    Any  = None
     operations: list = field(default_factory=list)   # list[MioconnectOperation]
+    retry:      Optional[int] = None    # T1-RUN3: retry N times on a genuine connectivity
+                                         # failure (never on an HTTP error response -- that's
+                                         # a legitimate result, not an operational break)
+    handlers:   list = field(default_factory=list)   # T1-RUN3: OnFailure/OnSuccess, additive
 
 @dataclass
 class MioconnectOperation(Node):
@@ -1888,12 +1893,6 @@ class NoMatchBlock(Node):
     pairs: list = field(default_factory=list)
 
 @dataclass
-class MatchPair(Node):
-    """field to value -- one condition in a match block"""
-    field: str = ""
-    value: Any = None
-
-@dataclass
 class ViewCallStmt(Node):
     """
     view "rates_page"
@@ -1905,20 +1904,6 @@ class ViewCallStmt(Node):
     """
     template_name: str  = ""
     params:        list = field(default_factory=list)
-
-@dataclass
-class ViewRender(Node):
-    """
-    give back 200 view "rates_page"
-        cabin       cabin
-        price       249.99
-    give back: done
-
-    Renders a named view template with supplied variables.
-    Returns HTML string. Content-type: text/html unless overridden.
-    """
-    template_name: str  = ""
-    params:        list = field(default_factory=list)  # list of (key, value) tuples
 
 @dataclass
 class RespondAsStmt(Node):

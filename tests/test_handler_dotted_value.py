@@ -15,6 +15,26 @@ The fix is that a bare dotted name is no longer a statement unless its head is a
 reserved mio* service. `order.total` alone does nothing, so it is not an action;
 `miosys.now` is. That removes the ambiguity at the source rather than teaching the
 analyzer to ignore it.
+
+SUPERSESSION, end-to-end case only (ruled 2026-08-19, recorded 2026-08-21). That case originally
+spelled its not-found branch `on.failure give back 200 gate.failure`, against an empty `flags`
+table. FORK-1 (`c023363`, T1-EVAL-SIMPLE-FAILLOUD) and build-diary 2026-08-19-05 moved not-found
+onto `when empty` / `otherwise` and left `on.failure` for genuine ERRORS only, so a zero-row match
+stopped firing it and control fell through to the page's trailing `give back` -- the response came
+back "REACHED-AFTER" instead of the puzzle message. It now says `when flag is empty`.
+
+Bisected rather than assumed: 14/14 at `1bd295d` (FORK-1's parent), 13/14 from `c023363` onward
+and byte-identical since.
+
+Only the TRIGGER changed. The expectation is untouched and was verified in both directions before
+this edit: under `when flag is empty` an empty table returns "The gate is sealed." and a seeded one
+returns "REACHED-AFTER" -- exactly what this case has always asserted.
+
+Nothing about THIS file's subject is superseded. The dotted value surviving in the `give back` is
+what it guards, and that is if anything better demonstrated now: `gate.failure` is still rendered
+correctly from inside the branch. The seven per-field AST cases, the mio*-service cases, and both
+reachability cases were never affected and are untouched.
+
 """
 import os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -83,7 +103,7 @@ check("mio* call with a value still parses", parses('miolog.info "started"'), Tr
 check("mio* call with params still parses",
       parses('miocookie.set "theme" to "dark"'), True)
 
-# End to end: the failure path returns the message, the success path falls through.
+# End to end: the not-found path returns the message, the found path falls through.
 SRC = ('connect db as sqlite from env.DATABASE_URL\n'
        'page at /x\n'
        '    retrieve gate from db.puzzles\n'
@@ -91,7 +111,8 @@ SRC = ('connect db as sqlite from env.DATABASE_URL\n'
        '        on.success\n'
        '            retrieve flag from db.flags\n'
        '                match flag_name to "nope"\n'
-       '                on.failure give back 200 gate.failure\n'
+       '                when flag is empty\n'
+       '                    give back 200 gate.failure\n'
        '            retrieve: done\n'
        '    retrieve: done\n'
        '    give back 200 "REACHED-AFTER"\n'
@@ -114,9 +135,9 @@ def serve(seed_flag):
     conn.commit()
     return TestClient(create_app(server), raise_server_exceptions=False).get("/x").text
 
-check("the failure path returns the message",
+check("the not-found path returns the message",
       "The gate is sealed." in serve(seed_flag=False), True)
-check("the success path falls through past both blocks",
+check("the found path falls through past both blocks",
       "REACHED-AFTER" in serve(seed_flag=True), True)
 
 # The analyzer needed no change: with the phantom gone it is quiet here, and it still

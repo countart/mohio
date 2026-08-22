@@ -62,7 +62,25 @@ TYPE_MAP = {
 
 
 def normalize_type(t):
-    return TYPE_MAP.get((t or "text").lower(), "text")
+    # T1-SILENT-SWEEP-BATCH7 (2026-08-15): an unrecognized scalar type name (a typo, e.g.
+    # `age as itn`) used to be indistinguishable from "no type declared at all" -- both
+    # silently became "text", no error. `age as itn` is real, reachable Mohio syntax
+    # (type_name: TYPE_NAME | NAME | ... accepts any identifier at parse time, so a typo
+    # parses clean and only shows up here). A genuinely absent type (`t` falsy) is
+    # unaffected -- that is the real "no type declared" default, still "text". A namespaced
+    # reference (e.g. "sh.Order", a field typed as another shape) is also unaffected -- not
+    # a TYPE_MAP scalar by design, not a typo; schema generation keeps representing those as
+    # "text" until nested-shape schema support is designed, unchanged from before.
+    if not t:
+        return "text"
+    key = t.lower()
+    if key in TYPE_MAP:
+        return TYPE_MAP[key]
+    if '.' in t:
+        return "text"
+    raise ValueError(
+        f"Unrecognized field type '{t}'. Expected one of: "
+        f"{', '.join(sorted(set(TYPE_MAP.keys())))}, or a sh.Shape reference.")
 
 
 # ── Schema extraction from AST ─────────────────────────────────────────────────

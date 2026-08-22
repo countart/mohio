@@ -276,6 +276,20 @@ def tree_to_str(tree):
         return " ".join(tree_to_str(c) for c in tree.children)
     return str(tree)
 
+def strip_quoted_string_contents(text):
+    """T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): several AI-governance compliance gates below
+    do a raw `'keyword' in text` substring search over tree_to_str(tree)'s output -- which
+    includes the CONTENTS of every quoted STRING literal in the block verbatim (Lark keeps
+    the quote marks in a STRING token's raw text, so the string's own text is right there in
+    the joined output). An unrelated string value that happens to contain the phrase (e.g. a
+    `reason "not confident this is the right call"` note) silently satisfied the check,
+    exactly as if the real 'not confident' block existed. The real grammar keywords these
+    checks look for are always bare, unquoted tokens in the joined text -- never spelled out
+    inside a string literal's own content -- so blanking every quoted string's contents (kept
+    quote marks so a caller that separately counts quote characters, e.g. ai.agent's `goal`
+    fallback, is unaffected) removes exactly the spoofable surface and nothing else."""
+    return re.sub(r'"[^"]*"', '""', text)
+
 def extract_closer_name(closer_tree):
     """
     Extract the block name from a closer tree node.
@@ -732,15 +746,6 @@ class MohioValidator:
                 hint="Use a paid/enterprise base or provide a matching .sector profile."
             ))
 
-    def resolve_dotted(self, left: str, right: str) -> str:
-        """Use symbol table to resolve what kind of dotted expression this is."""
-        if self.symbol_table:
-            return self.symbol_table.resolve_dotted(left, right)
-        # Fallback without symbol table -- use reserved set
-        if left.lower() in MOHIO_RESERVED_EXACT:
-            return 'builtin'
-        return 'unknown'
-
     def _check_reserved_name(self, name, context, line):
         """Check if a name is a reserved Mohio word. Fatal error if so."""
         name_lower = name.strip().lower()
@@ -913,10 +918,16 @@ class MohioValidator:
                                      f'decision is non-regulatory, add sec.non_critical reason "...". '
                                      f"See: mohio.io/docs/sectors/{self.ctx.sector_base}"
                             ))
-        has_nc = "not confident" in text.lower()
-        has_audit = "ai.audit" in text
-        audit_pos = text.find("ai.audit")
-        nc_pos = text.lower().find("not confident")
+        # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): checked raw `text` before -- a quoted
+        # string anywhere in the block containing "not confident"/"ai.audit" (e.g. a
+        # `reason "not confident this call is safe"` note) silently satisfied a
+        # compliance-critical check with no real block present. See
+        # strip_quoted_string_contents's own docstring.
+        _scrubbed = strip_quoted_string_contents(text)
+        has_nc = "not confident" in _scrubbed.lower()
+        has_audit = "ai.audit" in _scrubbed
+        audit_pos = _scrubbed.find("ai.audit")
+        nc_pos = _scrubbed.lower().find("not confident")
         audit_first = audit_pos != -1 and nc_pos != -1 and audit_pos < nc_pos
 
         if not has_nc:
@@ -968,10 +979,21 @@ class MohioValidator:
 
     def _v_ai_resolve_block(self, tree):
         line = get_line(tree)
-        text = tree_to_str(tree)
-        has_cache = 'cache' in text
-        has_learned = 'learned' in text
-        has_live = 'live' in text
+        # T1-SILENT-SWEEP-BATCH7 (2026-08-15): the substring checks below used to search
+        # tree_to_str(tree)'s flattened text for the literal words "cache"/"learned"/"live" --
+        # but `_CACHE`/`_LEARNED`/`_LIVE` are underscore-prefixed Lark terminals, filtered out
+        # of the tree entirely (standard Lark convention), so their matched text NEVER
+        # appears in tree_to_str's output for a real declaration. The check false-positived
+        # as "missing" even on a genuinely correct `cache NAME` / `learned ...` / `live
+        # ai.decide X` block (confirmed: reproduced with all three real tiers declared,
+        # still reported "missing: live"). Fixed to look at the actual tree structure instead
+        # of text: each tier's grammar rule is ALIASED (`_CACHE NAME -> resolve_cache`, etc.),
+        # and Lark's alias survives on the resulting subtree's `.data` even though the
+        # underlying keyword terminal itself does not survive as a token -- find_subtree
+        # (already used elsewhere in this file) finds these directly, no string matching.
+        has_cache = find_subtree(tree, 'resolve_cache') is not None
+        has_learned = find_subtree(tree, 'resolve_learned') is not None
+        has_live = find_subtree(tree, 'resolve_live') is not None
         if not (has_cache and has_learned and has_live):
             missing = [t for t, h in [('cache', has_cache), ('learned', has_learned), ('live', has_live)] if not h]
             self.ctx.error(
@@ -984,19 +1006,27 @@ class MohioValidator:
     def _v_ai_agent_block(self, tree):
         line = get_line(tree)
         text = tree_to_str(tree)
+        # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): checked raw `text` before -- a quoted
+        # string containing "goal"/"name"/"limits"/"max steps"/"not confident" (e.g. a
+        # `reason "no clear goal was set"` note) could silently satisfy these
+        # compliance-critical checks. Scrubbing quoted-string CONTENTS is safe here even
+        # for the quote-counting fallback below: the scrub only blanks what is BETWEEN a
+        # pair of quote marks, never the quote characters themselves, so `.count('"')` is
+        # identical on scrubbed vs raw text.
+        _scrubbed = strip_quoted_string_contents(text)
         # goal or name satisfies the "what is this agent doing" requirement
         # tree_to_str drops grammar literals like "goal" -- check raw source instead
         raw_src = getattr(tree.meta, 'orig_text', '') if hasattr(tree, 'meta') else ''
         # Fallback: check if any string value exists in the block (goal produces a string)
         # The goal/name keywords are grammar literals lost in tree_to_str
         # but the goal VALUE (a string) is preserved
-        has_goal = ('goal' in text or 'name' in text or
+        has_goal = ('goal' in _scrubbed or 'name' in _scrubbed or
                     bool(raw_src and 'goal' in raw_src) or
-                    text.count('"') >= 2)  # goal requires a string value
+                    _scrubbed.count('"') >= 2)  # goal requires a string value
         # limits satisfied by: limits block OR direct max steps/cost/time
-        has_limits = ('limits' in text or 'max steps' in text
-                      or 'max cost' in text or 'max time' in text)
-        has_nc = 'not confident' in text.lower()
+        has_limits = ('limits' in _scrubbed or 'max steps' in _scrubbed
+                      or 'max cost' in _scrubbed or 'max time' in _scrubbed)
+        has_nc = 'not confident' in _scrubbed.lower()
         if not has_goal:
             self.ctx.error("ai.agent is missing a 'goal' declaration.", line,
                 hint="Add: goal \"Description of what this agent does\"")

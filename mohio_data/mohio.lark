@@ -518,6 +518,13 @@ MATH_OP: PLUS | MINUS | STAR | DIV | PERCENT
 CMP_OP:  ">=" | "<=" | "!=" | ">" | "<" | "=="
 
 // ── Arrow ────────────────────────────────────────────────────
+// LOCK (journey-newest-decisions-2026-08-07): -> / <- / <-> are ALWAYS flow (mapping
+// entries, mioconnect field-mapping/middleware, the languages/translation map/custom
+// blocks, and the optional cosmetic separator in check/otherwise bodies). ASCII is
+// canonical; unicode arrow forms are NOT required and must never be added by `mio fmt`
+// (an ASCII->unicode conversion here would be a bug, not a style normalization). Math
+// comparison (</>/<=/>=, see CMP_OP above) lives inside `(...)` grouping, so it never
+// collides with a flow arrow at the token level.
 ARROW: "->"
 BACK_ARROW: "<-"
 IGNORE_CASE.2:     "ignore.case"       // matching disregards letter case
@@ -676,8 +683,16 @@ CONN_READONLY.3:  /readonly(?![A-Za-z0-9_])/
 CONN_WRITEONLY.3: /writeonly(?![A-Za-z0-9_])/
 CONN_READWRITE.3: /readwrite(?![A-Za-z0-9_])/
 conn_access: CONN_READONLY | CONN_WRITEONLY | CONN_READWRITE
-connect_decl: CONNECT NAME AS conn_access? NAME FROM (ENV_REF | SECRET_REF)
-            | CONNECT NAME AS conn_access NAME NAME FROM (ENV_REF | SECRET_REF)
+// T1-RUN3-CONNECTION-HANDLER (2026-08-19): additive connection-level on.failure/on.success,
+// declared once and inherited by every operation on this connection (a declare-once OVERRIDE
+// of the per-operation fail-loud baseline, not a replacement for it). Mirrors remove_all_block's
+// own proven `(result_handlers closer)?` shape (mohio.lark:1708) exactly: the group is optional
+// as a WHOLE, so a bare one-liner (neither handlers nor closer) is untouched -- every existing
+// `connect X as Y from Z` keeps parsing exactly as before. Rides the SAME shared result_handlers
+// mechanism every verb block uses, not a parallel one -- see result_handlers's own transformer
+// (mohio_transformer_ast.py) for the shared choke point.
+connect_decl: CONNECT NAME AS conn_access? NAME FROM (ENV_REF | SECRET_REF) (result_handlers closer)?
+            | CONNECT NAME AS conn_access NAME NAME FROM (ENV_REF | SECRET_REF) (result_handlers closer)?
 
 // ── shape ────────────────────────────────────────────────────
 
@@ -815,6 +830,7 @@ mioconnect_body: _ADDRESS value_expr                  -> mc_address
                | mioconnect_operation
                | _RETRY NUMBER _TIMES                 -> mc_retry
                | on_failure_handler
+               | on_success_handler
 
 mioconnect_operation: _OPERATION NAME mioconnect_op_body* closer
 
@@ -949,18 +965,55 @@ debug_log_target: NAME ("." NAME)* | value_expr
 debug_checkpoint: DEBUG_KW "." CHECKPOINT_KW STRING debug_log_stmt* closer
 
 
+// LOCK (journey-newest-decisions-2026-08-07): `journey` is the htaccess+config spine --
+// a real, live block (Zork runs one today), not a stub. `languages_block`/`enterprise_block`
+// below are legitimate journey_body members, not foreign additions. FILE VISIBILITY is by
+// FILE-NAMING convention (journey.mho = the spine, _x.mho = include-only, never routed
+// directly) -- unrelated to and unaffected by the path/folder classification declarations
+// below. An app with no root route defined serves the neutral placeholder; a path with no
+// matching route is a clean 404 -- this dispatch behavior is unrelated to the classification
+// model. Do not relitigate this without reading the lock doc first.
+//
+// PAGE-CLASSIFICATION MODEL (T1-PAGE-CLASSIFICATION-MODEL, design-locked 2026-08-15, see
+// PRODUCTION-BUILD-PLAN.md): what KIND a page is, journey-level, same shape as sector:/
+// framework:. Four states, each a TRANSLATABLE developer-facing keyword (not an invariant
+// namespace like ai./env.) -- job: journey-level page-classification declaration taking a
+// path/folder list:
+//   public:    DEFAULT (no declaration needed) -- served + listed. One-job meaning: something
+//              end users can see or interact with. Kept as an OPTIONAL explicit declaration
+//              for readability/future-proofing, never required.
+//   private:   served but UNLISTED (reachable by direct URL, excluded from sitemap; unlisted
+//              docs, conditional/share-by-link content). One-job meaning: something you keep
+//              to yourself, shown on a need-to-know basis.
+//   hidden:    NOT served -- 404. Path-based equivalent of the `_pagename`/`journey.mho`
+//              built-in file-naming blocks (which stay served=no because includes must be
+//              usable-but-not-served). One-job meaning: something nobody should see.
+//   authorize: login/auth required before serve; depends on the real session-verified-role
+//              mechanism (`require role`/`grant role`), NOT `mioauth.*` (confirmed not built).
+//              One-job meaning: to give or need permission.
+// GRAMMAR/AST ONLY as of 2026-08-15: all four parse and transform into a correctly-tagged
+// JourneyMeta (see journey_body below). SERVE-LAYER ENFORCEMENT IS NOT WIRED -- next session's
+// build. Known, deliberate divergence in the meantime: `_exec_JourneyDecl` still runs the
+// PRE-EXISTING private:/public: mechanism (403-block via require role's session check, real,
+// tested, unchanged by this edit) -- that is the OLD semantics, not the locked served-but-
+// unlisted meaning above. `hidden:`/`authorize:` currently have ZERO runtime effect (declared,
+// parses, produces a real AST node, but nothing reads it) -- not a silent bug, a deliberately
+// scoped deferral, tracked in PRODUCTION-BUILD-PLAN.md.
 journey_decl: JOURNEY NAME? journey_body* closer
 
-// The four alternatives below are aliased (-> ...) so the transformer can tell them
-// apart: `_PUBLIC`/`_PRIVATE`/`_FLOW` are all underscore-filtered terminals, so
-// `public: /a` and `private: /a` and `flow: /a` would otherwise reduce to an
-// identical `path_list` tree with no trace of which keyword produced it (found
-// 2026-08-06, same shape as ai_agent_body's max-steps/max-cost collision, same fix).
+// The six alternatives below are aliased (-> ...) so the transformer can tell them
+// apart: `_PUBLIC`/`_PRIVATE`/`_FLOW`/`_HIDDEN`/`_AUTHORIZE` are all underscore-filtered
+// terminals, so `public: /a` and `private: /a` and `flow: /a` (and now `hidden: /a` and
+// `authorize: /a`) would otherwise reduce to an identical `path_list` tree with no trace of
+// which keyword produced it (found 2026-08-06, same shape as ai_agent_body's max-steps/
+// max-cost collision, same fix; hidden:/authorize: joined the family 2026-08-15).
 journey_body: _SERVES ":" "single tenant"    -> journey_serves_single
             | _SERVES ":" "multiple tenants" -> journey_serves_multiple
-            | _PUBLIC   ":" path_list -> journey_public
-            | _PRIVATE  ":" path_list -> journey_private
-            | _FLOW     ":" path_list -> journey_flow
+            | _PUBLIC    ":" path_list -> journey_public
+            | _PRIVATE   ":" path_list -> journey_private
+            | _HIDDEN    ":" path_list -> journey_hidden
+            | _AUTHORIZE ":" path_list -> journey_authorize
+            | _FLOW      ":" path_list -> journey_flow
             | languages_block
             | enterprise_block
             | debug_decl
@@ -982,9 +1035,12 @@ CUSTOM_KW.2:    /custom(?![A-Za-z0-9_])/
 MAP_KW.2:       /map(?![A-Za-z0-9_])/
 PRIMARY_KW.2:   /primary(?![A-Za-z0-9_])/    // accepted alias for current — mio fmt suggests current
 
-// languages block — use bare "done" closer for now
-// "languages: done" support added in v3.9 with proper keyword closer
-languages_block: _LANGUAGES languages_body* DONE
+// LOCK (languages-declaration-2026-08-07): this is a REAL feature (a langmap
+// declaration), not a stub -- do NOT fail-loud-as-unbuilt here or in the transformer/
+// executor. The named closer `languages: done` is REQUIRED to work (the shared `closer`
+// rule already carries a `/languages/ ":" DONE` alternative for exactly this); bare
+// `done` must keep working too. Both route through the shared `closer` rule below.
+languages_block: _LANGUAGES languages_body* closer
 
 languages_body: CURRENT_KW lang_code
               | SUPPORTED_KW lang_code ("," lang_code)*
@@ -1670,7 +1726,21 @@ remove_all_spaced.4: REMOVE ALL FROM source_ref
 
 check_mioql_block: CHECK_EXISTS NAME IN source_ref match_clause result_handlers closer
                 | CHECK_COUNT (AS NAME)? IN source_ref (where_clause | match_clause)? result_handlers closer
-                | CHECK_UNIQUE IN source_ref MATCH_MOD NAME TO value_expr result_handlers closer
+                | CHECK_UNIQUE IN source_ref match_clause result_handlers closer
+
+// `check unique` REDESIGN (T1-CHECK-UNIQUE-REDESIGN, ruled 2026-08-11): now routes through the
+// shared match_clause exactly like its siblings above (check exists / check count), instead of
+// the old bespoke `MATCH_MOD NAME TO value_expr` single-slot rule. This does three things at
+// once: (1) drops the redundant `match.unique` requirement -- plain `match field to value` is
+// canonical here now, same as exists/count; (2) supports a composite key for free, since
+// match_clause already accepts comma-separated pairs (`match email to "a@b.com", tenant_id to
+// 5` -- each pair carries its own value; AND-ed into one filter); (3) the field is still
+// required -- match_clause's own match_pair is mandatory, so a fieldless `check unique in
+// db.users to "x"` simply does not parse, same as it never parsed for exists/count. Outcome
+// structure also changed: on.success/on.failure are no longer the answer (available/taken) --
+// they are purely operational now (did the query run at all), matching every other verb block.
+// The answer branches on `when empty` / `otherwise`, same mechanism as `check <name> / when
+// empty / otherwise` elsewhere (see mohio_interpreter.py's _exec_CheckMioqlBlock).
 
 // Natural existence shorthand: `check found in db.users / match email to "x" / check: done`.
 // The required match/where filter is what disambiguates it from the value-check
@@ -1718,8 +1788,17 @@ modify_block: MODIFY EVERY NAME IN value_expr (WHERE condition)? modify_body* cl
 modify_body: apply_block
            | load_pack_decl
            | MODIFY_AS value_expr
+           | modify_as_spaced
            | MODIFY_IN (value_expr | REL_PATH | PATH_LIT)
            | statement
+
+// `modify as X` (space) is NOT modify.as -- without this guard it silently misparses into an
+// unrelated statement (confirmed live: a mioconnect_call aliasing "modify" as X) with no error
+// at the mistake -- measured 2026-08-10, PARSE-COST-MEASUREMENT.md. Fail loud instead, pointing
+// to the dotted form. .4 so it wins over modify_body's `statement` fallback, same pattern as
+// remove_all_spaced (mohio.lark:1667). MODIFY/AS are both already-reserved tokens elsewhere, so
+// this carries none of on_failure_spaced's fresh-terminal collision risk.
+modify_as_spaced.4: MODIFY AS value_expr
 
 // ── copy ─────────────────────────────────────────────────────
 
@@ -2102,7 +2181,30 @@ ai_decide_body: CHECK _CONFIDENCE ABOVE value_expr -> confidence_check
               | on_success_handler
               | on_error_handler
               | ai_prompt_opts                    // prompt/persona/context/temperature/model
+              | ai_decide_sec_bare
               | statement
+
+// `sec.<word>` used BARE (no trailing `NAME value`, e.g. bare `sec.non_critical` with no
+// `reason "..."`) inside ai.decide. None of the six real sec.* constructs (classify/encrypt/
+// validate/audit/nohardcode/headers) are wired as ai_decide_body clauses at all -- they live
+// outside ai.decide (top-level statement list / shape_decl, mohio.lark:653-654,2299-2301,687)
+// -- so a bare sec.<word> here is never legitimate. Without this guard it silently fell
+// through the generic `statement` catch-all just above and corrupted the parse of the NEXT
+// body line (confirmed live: `sec.non_critical` followed by `weigh amount, member_id` failed
+// with "No terminal matches ',' ... at line 8" -- two lines from the real problem). Same
+// silent-fallthrough class as the on.failure/modify.as spaced traps (mohio.lark:2556-2560,
+// :1745). Scoped to the BARE form only: `sec.non_critical reason "..."` (WITH a trailing
+// value) already parses cleanly today via the existing generic `service_call_stmt`
+// (dotted_name_with_dot service_param+, mohio.lark:2487) and must stay untouched by this rule.
+// A first attempt (matching sec.<word> unconditionally) turned out to ALSO complete for the
+// WITH-reason case -- `reason "..."` alone independently satisfies the generic bare-NAME
+// assignment (`assignment: SET? NAME "="? value_expr ...`, "=" is optional), so Earley found a
+// second full parse (sec.<word> as this rule + `reason "..."` as its own clause) and the
+// explicit priority made THAT one win, breaking the previously-working case. The lookahead
+// below closes that: it matches ONLY when nothing but end-of-line follows the dotted word, so
+// it can never even be offered as a candidate when `reason "..."` (or anything else) trails it.
+SEC_DOTTED_ANY.4: /sec\.[a-z_]+(?=[ \t]*[\r\n]|$)/
+ai_decide_sec_bare.4: SEC_DOTTED_ANY
 
 using_chain: USING NAME
 
@@ -2514,11 +2616,27 @@ result_handlers: result_handler*
 result_handler: on_failure_handler
               | on_success_handler
               | on_error_handler
+              | on_failure_spaced
+              | on_success_spaced
               | check_when
               | otherwise_clause
 
 on_failure_handler: ON_FAILURE inline_action? body_stmt*
 on_success_handler: ON_SUCCESS inline_action? body_stmt*
+
+// `on failure`/`on success` (space) are NOT the dotted result handlers. Without this guard
+// they silently misparse into stray bare assignments (on = failure / on = success) and the
+// rest of the block collapses around them with no loud error at the mistake -- measured
+// 2026-08-10, PARSE-COST-MEASUREMENT.md. Catch it and fail loud, pointing to the dotted form.
+// Scoped ONLY to this exact result-handler position (ON_KW/FAILURE_KW/SUCCESS_KW are ordinary
+// NAME-shaped terminals, ambiguous with a ordinary bare variable named on/failure/success
+// elsewhere) -- .4 priority wins the ambiguity ONLY where both readings are actually possible
+// at this position, same pattern as remove_all_spaced (mohio.lark:1667).
+ON_KW.4:      /on(?![A-Za-z0-9_])/
+FAILURE_KW.4: /failure(?![A-Za-z0-9_])/
+SUCCESS_KW.4: /success(?![A-Za-z0-9_])/
+on_failure_spaced.4: ON_KW FAILURE_KW inline_action? body_stmt*
+on_success_spaced.4: ON_KW SUCCESS_KW inline_action? body_stmt*
 // RETIRED: on.error duplicated on.failure ("it broke"). It was allowed in three places,
 // honored in exactly one (ai.decide), and used in no .mho file -- so everywhere else it
 // was a silent no-op. This rule exists ONLY so `on.error` still parses and the
@@ -2580,6 +2698,11 @@ where_condition: dotted_name IS ABOVE value_expr                     -> wc_above
                | dotted_name IS _MORE _THAN value_expr             -> wc_above
                | dotted_name IS _GREATER _THAN value_expr          -> wc_above
                | dotted_name IS _LESS _THAN value_expr             -> wc_below
+               // `is at least` / `is at most` are client_cond (MioScript validate-block) only --
+               // this server-side where_condition rule exists solely to catch the misuse and fail
+               // loud (T1-CONDITIONAL-VOCAB-SERVER-CLIENT-SPLIT); it never builds a real comparison.
+               | dotted_name IS _AT _LEAST value_expr                -> wc_atleast_clientonly
+               | dotted_name IS _AT _MOST value_expr                 -> wc_atmost_clientonly
                | dotted_name IS BETWEEN value_expr AND value_expr     -> wc_between
                | dotted_name IS_NOT ABOVE value_expr                  -> wc_not_above
                | dotted_name IS_NOT BELOW value_expr                  -> wc_not_below
@@ -2720,6 +2843,7 @@ condition: value_expr IS NOT? value_expr      -> cond_is
          | value_expr IS BELOW value_expr      -> cond_is_below
          | value_expr IS_NOT value_expr        -> cond_is_not
          | value_expr IS_EMPTY                 -> cond_is_empty
+         | cond_is_empty_spaced
          | NOT_EMPTY value_expr                -> cond_not_empty
          | value_expr CONTAINS value_expr      -> cond_contains
          | value_expr STARTS_WITH value_expr   -> cond_starts
@@ -2728,6 +2852,29 @@ condition: value_expr IS NOT? value_expr      -> cond_is
          | condition AND condition             -> cond_and
          | condition OR condition              -> cond_or
          | value_expr                           -> cond_bool
+
+// `X is empty` (space) inside a general condition (while/if/unless/check) is NOT the same as
+// `X is.empty` (dotted) -- without this guard it silently misparses via cond_is above,
+// reading "empty" as an ordinary bareword value_expr (equality against a variable literally
+// named "empty") instead of an emptiness predicate -- measured 2026-08-10,
+// PARSE-COST-MEASUREMENT.md. `mio check` does not catch this; `mio run` only catches it
+// incidentally, via the unrelated undefined-name guard, and only when no variable named
+// "empty" happens to be in scope. Fail loud here instead, pointing to the dotted form.
+// DELIBERATELY NO priority bump (unlike remove_all_spaced.4/on_failure_spaced.4/
+// modify_as_spaced.4): default priority already wins over cond_is's `value_expr IS NOT?
+// value_expr` reading in `while`/trailing-if-unless (verified live) -- and a .4 bump was
+// TRIED and REVERTED, because it also started winning over `where_condition`'s own
+// `dotted_name IS EMPTY -> wc_is_empty`, which `check_when`'s `WHEN where_condition |
+// WHEN condition` fork ALSO reaches for the identical text (e.g. `when a is empty` on a
+// find/retrieve result) -- that form already works correctly and must not be touched.
+// Caught by tests/test_otherwise_spec.py (4 real failures) during the same-day sibling
+// sweep, not by the grammar gate itself (mohio_test_grammar.py has no test case in this
+// exact shape) -- a real blind spot in the gate, noted, not closed here. Scoped to the
+// general `condition` rule; where_condition's own working form is untouched. The gate's
+// own `give_back_if` test used to rely on the misparse this closes (the trailing
+// if/unless qualifier shares this same `condition` rule) -- fixed to the dot form
+// 2026-08-10 before this guard landed, T1-SPACED-MISPARSE-GUARDS.
+cond_is_empty_spaced: value_expr IS EMPTY
 
 // ─────────────────────────────────────────────────────────────
 // VALUE EXPRESSIONS
@@ -3368,27 +3515,11 @@ load_pack_stmt: LOAD PACK NAME (_VERSION (NUMBER | STRING))?
 
 // ── apply — already defined in block_stmt zone ───────────────
 // apply_block defined at line ~1131. Bulk form added there.
-
-// ── modify every — bulk transformation ───────────────────────
-odify_block: MODIFY _EVERY NAME _IN NAME (_WHERE condition)? modify_body* closer
-            | MODIFY _ALL _IN NAME modify_body* closer
-ify_body: apply_block
-           | load_pack_stmt
-           | "modify.as" NAME ("." _IN value_expr)?
-           | "modify.in" value_expr
-           | statement
-
-// ── miopdf — PDF service declaration (commercial tier) ────────
-MIOPDF_WITH.3:  "miopdf.with"
-iopdf_decl: MIOPDF_WITH NAME miopdf_with_body* closer
-
-miopdf_with_body: _KEY     (SECRET_REF | ENV_REF | STRING)
-                | _ADDRESS (SECRET_REF | ENV_REF | STRING)
-                | _TIMEOUT NUMBER time_unit
-                | _QUALITY NAME
-                | _TEST    (TRUE | FALSE)
-                | _ASYNC   (TRUE | FALSE)
-                | _JAVASCRIPT (TRUE | FALSE)
+// (T1-SILENT-SWEEP-BATCH11, 2026-08-15: removed `odify_block`/`ify_body`/`iopdf_decl` +
+// `MIOPDF_WITH`/`miopdf_with_body` here -- typo'd duplicates of `modify_block`/
+// `modify_body` (line ~1776) and `miopdf_decl` (line ~866), never referenced from any
+// other grammar rule, unreachable from `start`. Confirmed zero references anywhere in the
+// grammar, transformer, interpreter, or corpus before removal.)
 
 // ── inject — template variable binding ───────────────────────
 // inject member into member   (source into slot; `into` is canonical)
@@ -3908,6 +4039,13 @@ _AUDIENCE.2: /audience(?![A-Za-z0-9_])/
 _AUDIO.2: /audio(?![A-Za-z0-9_])/
 _AUDIT.2: /audit(?![A-Za-z0-9_])/
 _AUTH.2: /auth(?![A-Za-z0-9_])/
+// Page-classification declaration (T1-PAGE-CLASSIFICATION-MODEL, journey_body above) --
+// NOT the same word as _AUTH (`auth key`/`auth bearer`/... inside miohttp_body/mioconnect,
+// a 4-char prefix that cannot match "authorize" -- the negative lookahead requires a
+// non-word char immediately after "auth", but "authorize" continues with "orize"). Collision
+// checked 2026-08-15: zero prior use of "authorize" anywhere in the grammar, transformer,
+// interpreter, or the .mho corpus.
+_AUTHORIZE.2: /authorize(?![A-Za-z0-9_])/
 _AVERAGE.2: /average(?![A-Za-z0-9_])/
 _BACK.2: /back(?![A-Za-z0-9_])/
 _BACKEND.2: /backend(?![A-Za-z0-9_])/
@@ -4014,6 +4152,11 @@ _HAS.2: /has(?![A-Za-z0-9_])/
 _HASH.2: /hash(?![A-Za-z0-9_])/
 _HEADER.2: /header(?![A-Za-z0-9_])/
 _HEIGHT.2: /height(?![A-Za-z0-9_])/
+// Page-classification declaration (T1-PAGE-CLASSIFICATION-MODEL, journey_body above). Not
+// the same word as _HIDE (a different, pre-existing verb -- "hide" 4 chars, "hidden" 6,
+// distinct terminals, no overlap). Collision checked 2026-08-15: zero prior use of "hidden"
+// anywhere in the grammar, transformer, interpreter, or the .mho corpus.
+_HIDDEN.2: /hidden(?![A-Za-z0-9_])/
 _HIDE.2: /hide(?![A-Za-z0-9_])/
 _HIGHEST.2: /highest(?![A-Za-z0-9_])/
 _HIGHEST_CONFIDENCE.2: /highest_confidence(?![A-Za-z0-9_])/
@@ -4142,6 +4285,13 @@ _PORT.2: /port(?![A-Za-z0-9_])/
 _PREFIX.2: /prefix(?![A-Za-z0-9_])/
 _PRESERVE.2: /preserve(?![A-Za-z0-9_])/
 _PRESET.2: /preset(?![A-Za-z0-9_])/
+// CORRECTED 2026-08-15 (was marked SUPERSEDED, that was wrong -- verified by running: real,
+// tested, 403-block enforcement is live today, tests/test_journey_access_control.py 21/21).
+// `journey_private`/`journey_public` are part of the LOCKED page-classification model (see
+// journey_body's comment above) with a NEW target meaning (served-but-unlisted, not blocked)
+// -- reconciling the current 403-block runtime behavior to that meaning is next session's
+// serve-layer build, not done here. Do not "fix" this terminal toward file-naming; the two
+// mechanisms (file-naming for file visibility, this for page classification) are separate.
 _PRIVATE.2: /private(?![A-Za-z0-9_])/
 _PROFILE.2: /profile(?![A-Za-z0-9_])/
 _PROMPT.2: /prompt(?![A-Za-z0-9_])/

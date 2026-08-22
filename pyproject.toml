@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mohio"
-version = "4.8.2"
+version = "4.9.0"
 description = "Mohio, an AI-native language where AI reasoning and compliance are compiler-enforced primitives."
 requires-python = ">=3.10"
 dependencies = ["lark>=1.1.0", "anthropic>=0.96.0", "cryptography>=49.0.0", "tiktoken>=0.13.0", "bcrypt>=4.0", "nh3>=0.2.0"]

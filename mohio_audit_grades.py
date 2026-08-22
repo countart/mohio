@@ -153,13 +153,36 @@ def framework_grade_overrides():
     """
     raw = _os.environ.get("MOHIO_FRAMEWORK_GRADES", "").strip()
     out = {}
+    if not raw:
+        return out
+    import sys as _sys
     for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): a malformed entry (no "=", or an
+        # unrecognized grade word -- typically a typo) used to be dropped with no trace at
+        # all. An operator setting this var is deliberately trying to STRENGTHEN a
+        # framework's required grade; a typo that silently no-ops that attempt is the
+        # opposite of what they asked for, and nothing told them. Warn (not raise --
+        # this is a startup/deployment-time config value, and the unset/empty case above
+        # is the common path and must stay silent).
         if "=" not in part:
+            print(f"  [audit] MOHIO_FRAMEWORK_GRADES entry {part!r} has no '=' -- "
+                  f"expected 'framework=grade' (e.g. 'glba=append_only'). Ignored.",
+                  file=_sys.stderr)
             continue
         name, grade = part.split("=", 1)
         name, grade = _normalize(name), grade.strip().lower()
-        if name and grade in GRADES:
-            out[name] = grade
+        if not name:
+            print(f"  [audit] MOHIO_FRAMEWORK_GRADES entry {part!r} has an empty framework "
+                  f"name. Ignored.", file=_sys.stderr)
+            continue
+        if grade not in GRADES:
+            print(f"  [audit] MOHIO_FRAMEWORK_GRADES entry {part!r}: {grade!r} is not a "
+                  f"recognized grade (expected one of {GRADES}). Ignored.", file=_sys.stderr)
+            continue
+        out[name] = grade
     return out
 
 

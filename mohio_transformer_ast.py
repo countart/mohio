@@ -70,8 +70,8 @@ from lark.exceptions import VisitError
 from mohio_ast import (
     Program, Node,
     ApplangBlock,
-    MatchBlock, MatchAnyBlock, NoMatchBlock, MatchPair,
-    ViewCallStmt, ViewRender, RespondAsStmt, TitleDecl, DescribeDecl,
+    MatchBlock, MatchAnyBlock, NoMatchBlock,
+    ViewCallStmt, RespondAsStmt, TitleDecl, DescribeDecl,
     DebugDecl, DebugLogStmt, DebugCheckpoint,
     # Declarations
     SectorDecl, ConnectDecl, ShapeDecl, ShapeField, ShapeFieldModifier,
@@ -650,7 +650,32 @@ class MohioTransformer(Transformer):
             # Defensive only -- FROM (ENV_REF | SECRET_REF) is not optional in the
             # grammar, so this should be unreachable from any real parse.
             source = None
-        return ConnectDecl(name=alias, driver=driver, source=source)
+        # T1-RUN3-CONNECTION-HANDLER (2026-08-19): additive `(result_handlers closer)?`,
+        # same shared choke point every verb block uses (see result_handlers's own
+        # transformer method). A bare one-liner (no handlers_node) is untouched.
+        _open_tok = next((c for c in children if isinstance(c, Token) and c.type == 'CONNECT'), None)
+        _open_line = _line(_open_tok)
+        handlers_node = next((c for c in children
+                              if _is_tree(c, 'result_handlers')), None)
+        handlers = []
+        if handlers_node is not None:
+            handlers = [c for c in handlers_node.children
+                        if isinstance(c, (OnFailure, OnSuccess))]
+            # connect has a STATE (on.failure/on.success -- did the connection succeed) but
+            # no CONDITION (a connection isn't "found" or "empty"), unlike a query verb --
+            # so when/otherwise have nothing to branch on here. Rather than silently
+            # accepting and never dispatching them (the exact disease this session's other
+            # fixes close), fail loud at check-time, naming the real reason.
+            _bad = next((c for c in handlers_node.children
+                        if isinstance(c, (CheckWhen, OtherwiseClause))), None)
+            if _bad is not None:
+                raise MohioCompileError(
+                    "connect only has on.failure/on.success (a connection either succeeds or "
+                    "it doesn't) -- when/otherwise have no result to branch on here, unlike a "
+                    "query verb's found/empty. Use on.failure for a connection error.",
+                    line=_open_line)
+            self._validate_closer('connect', children, _open_line)
+        return ConnectDecl(name=alias, driver=driver, source=source, handlers=handlers)
 
     # ── mioconnect declaration ──────────────────────────────────
     # Each body/op-body alias returns a tagged tuple; the parent decl /
@@ -744,6 +769,12 @@ class MohioTransformer(Transformer):
         for c in children:
             if isinstance(c, MioconnectOperation):
                 decl.operations.append(c)
+            elif isinstance(c, (OnFailure, OnSuccess)):
+                # T1-RUN3-CONNECTION-HANDLER (2026-08-19): route through the real shared
+                # mechanism -- these used to be pure syntax noise here (no dataclass field
+                # to hold them), silently discarded. See _exec_MioconnectCall for where
+                # they're actually dispatched now.
+                decl.handlers.append(c)
             elif isinstance(c, tuple):
                 tag = c[0]
                 if   tag == 'address':  decl.address = c[1]
@@ -756,7 +787,10 @@ class MohioTransformer(Transformer):
                     else:  # bearer / key
                         decl.auth_value = c[2]
                 elif tag == 'timeout':  decl.timeout = c[1]
-                # webhook / retry: parsed and accepted; no node field in MVP
+                elif tag == 'retry':    decl.retry = c[1]
+                # webhook: parsed and accepted; no node field in MVP (unrelated to the
+                # STATE-channel facade this run closes -- webhook signature verification is
+                # its own separate, already-shipped feature elsewhere).
         return decl
 
     def mioconnect_call(self, children):
@@ -1121,6 +1155,20 @@ class MohioTransformer(Transformer):
             "broke), and one job takes one word. Use `on.failure`. For a result that came back "
             "empty, that is a CONDITION -- use `when` / `otherwise`.")
 
+    def wc_atleast_clientonly(self, children):
+        """`is at least` is client_cond (MioScript validate-block) only. Used in a server-side
+        check/when or where clause, the words used to silently split into an unrelated comparison
+        plus a stray body statement and never match (T1-CONDITIONAL-VOCAB-SERVER-CLIENT-SPLIT)."""
+        raise MohioCompileError(
+            "is at least / is at most are client-side validation only -- use >= or <= in (...) "
+            "for server-side comparisons.")
+
+    def wc_atmost_clientonly(self, children):
+        """`is at most` -- see wc_atleast_clientonly."""
+        raise MohioCompileError(
+            "is at least / is at most are client-side validation only -- use >= or <= in (...) "
+            "for server-side comparisons.")
+
     def retired_typed_hold(self, children):
         """`hold x as int 5` -- the same backwards form wearing a `hold`."""
         name = next((str(c) for c in children
@@ -1306,12 +1354,42 @@ class MohioTransformer(Transformer):
         names = [c for c in children if isinstance(c, Token) and c.type == 'NAME']
         open_line = _line(names[0]) if names else 0
         self._validate_closer('compare', children, open_line)
-        body = [c for c in children
-                if not isinstance(c, Token) and not isinstance(c, Closer)]
+        # `compare_body*` is a repeated wrapper rule (mohio.lark) with no transformer method of
+        # its own, so each repetition survives here as a raw, UNFLATTENED `Tree('compare_body',
+        # [...])` -- found while wiring the lone-otherwise check below (its members were
+        # invisible to isinstance() checks until unwrapped). Real, separate, pre-existing bug
+        # this incidentally also fixes: `_exec_CompareBlock`'s `for stmt in node.body:
+        # self._exec(stmt, ctx)` was iterating raw Tree objects, not real statement nodes --
+        # every `compare_body` item (return_clause/calculate_block/handlers alike) was silently
+        # inert. Not the focus of this fix, but leaving it unflattened here would have made this
+        # fix's own check blind in exactly the same way -- unwrap it properly instead of adding
+        # a Tree-aware special case to the shared validator.
+        body = []
+        for c in children:
+            if isinstance(c, Token) or isinstance(c, Closer):
+                continue
+            if _is_tree(c, 'compare_body'):
+                body.extend(c.children)
+            else:
+                body.append(c)
+        # T1-COMPARE-HANDLER-DISPATCH (2026-08-20): compare's handlers arrive via a bare
+        # `result_handler` embedded directly in compare_body (mohio.lark:1634), never through
+        # the shared result_handlers wrapper -- the same shape `find_body` uses. They used to
+        # be left mixed into `body`, where `_exec_CompareBlock` blindly `_exec`'d each one and
+        # died on "No executor for 'OnSuccess'". Partition them out here exactly the way
+        # `find_block` already does, so compare rides the SAME shared dispatch
+        # (`_handle_success`/`_handle_failure`) every other verb block uses rather than a
+        # compare-specific parallel path.
+        _HANDLERS = (OnFailure, OnSuccess, OnError, OtherwiseClause, CheckWhen)
+        handlers = [c for c in body if isinstance(c, _HANDLERS)]
+        body     = [c for c in body if not isinstance(c, _HANDLERS)]
+        # Validate against the handler list itself: identical members to what this check saw
+        # before (it only ever looks for otherwise/when/on.failure/on.success), now separated.
+        self._validate_lone_otherwise(handlers, open_line)
         return CompareBlock(
             name_a=str(names[0]) if len(names) > 0 else "",
             name_b=str(names[1]) if len(names) > 1 else "",
-            body=body, handlers=[], line=open_line)
+            body=body, handlers=handlers, line=open_line)
 
     def timespan_body(self, children):
         keyword = next((str(c) for c in children if isinstance(c, Token)
@@ -1759,20 +1837,29 @@ class MohioTransformer(Transformer):
         return [str(c) for c in children
                 if isinstance(c, Token) and c.type in ('PATH_LIT', 'STRING')]
 
-    # journey-level access-control metadata (2026-08-06). Each of the five aliased
-    # journey_body alternatives now produces a correctly-tagged JourneyMeta -- never
+    # journey-level access-control metadata (2026-08-06). Each of the now-seven aliased
+    # journey_body alternatives produces a correctly-tagged JourneyMeta -- never
     # silently collapsed into the same 'path_list' kind the way all three used to be,
     # and never dropped to None the way serves: used to be. private:/public: are read
-    # and enforced by _exec_JourneyDecl (real, server-verified-session-based). flow:
-    # is captured but still not interpreted -- no documented source of truth for its
-    # intended behavior exists anywhere in this repo (the design doc _exec_JourneyDecl
-    # itself cites, Docs/journey-page-design-2026-06-17.md, has never existed in git
-    # history), so building a guessed runtime meaning for it was deliberately not done
-    # here; only "no longer indistinguishable from public:/private:" was in scope.
+    # and enforced by _exec_JourneyDecl (real, server-verified-session-based) -- that
+    # enforcement is the PRE-EXISTING 403-block mechanism, not yet reconciled to the
+    # LOCKED page-classification meaning below (served-but-unlisted, not blocked); see
+    # the grammar's journey_body comment. flow: is captured but still not interpreted --
+    # no documented source of truth for its intended behavior exists anywhere in this
+    # repo (the design doc _exec_JourneyDecl itself cites,
+    # Docs/journey-page-design-2026-06-17.md, has never existed in git history), so
+    # building a guessed runtime meaning for it was deliberately not done here; only
+    # "no longer indistinguishable from public:/private:" was in scope.
     # serves: is captured with its real declared value but likewise not yet enforced --
     # real tenant isolation needs a way to establish a request's tenant identity that
     # does not exist anywhere in the language today (no grant-tenant-shaped primitive),
     # which is new grammar, not a wiring fix, so it stops here pending that ruling.
+    #
+    # hidden:/authorize: (T1-PAGE-CLASSIFICATION-MODEL, design-locked 2026-08-15) joined
+    # the family here: grammar + AST only, same as this comment's flow:/serves: note --
+    # _exec_JourneyDecl does not read kind='hidden'/'authorize' at all (ZERO runtime
+    # effect, not a silent bug -- serve-layer enforcement is next session's build,
+    # tracked in PRODUCTION-BUILD-PLAN.md, not guessed at here).
     def journey_public(self, children):
         paths = next((c for c in children if isinstance(c, list)), [])
         return JourneyMeta(kind='public', value=paths)
@@ -1780,6 +1867,14 @@ class MohioTransformer(Transformer):
     def journey_private(self, children):
         paths = next((c for c in children if isinstance(c, list)), [])
         return JourneyMeta(kind='private', value=paths)
+
+    def journey_hidden(self, children):
+        paths = next((c for c in children if isinstance(c, list)), [])
+        return JourneyMeta(kind='hidden', value=paths)
+
+    def journey_authorize(self, children):
+        paths = next((c for c in children if isinstance(c, list)), [])
+        return JourneyMeta(kind='authorize', value=paths)
 
     def journey_flow(self, children):
         paths = next((c for c in children if isinstance(c, list)), [])
@@ -1931,6 +2026,42 @@ class MohioTransformer(Transformer):
         body = [c for c in children if not isinstance(c, Token)]
         return OtherwiseClause(body=body)
 
+    @staticmethod
+    def _validate_lone_otherwise(members, line):
+        """T1-OTHERWISE-HARDENING (2026-08-19, Ronnie's FINAL ruling). `otherwise` means "the
+        other case" -- with no preceding when/on.failure/on.success declared in the SAME block,
+        there is no first case for it to be the OTHER one of, so it is meaningless and fires
+        unconditionally, silently, every single time the block runs (a typo'd/deleted `when` --
+        or `on.failure`/`on.success` -- degrades into an always-on branch, not a loud error).
+        `on.failure`/`on.success` count as a legitimate preceding case, NOT just `when`: a real,
+        useful, pre-existing pattern is `on.failure show "broke" / otherwise show "empty"` with
+        no `when` at all (find/save/retrieve's own conditional-set fallback after ruling out an
+        operational break) -- `tests/test_otherwise_spec.py`'s own "find, otherwise ALONE is the
+        fallback" case is exactly this shape, and must keep working. The FIRST version of this
+        check (2026-08-19, RUN 2 C1) only checked for `when` and wrongly rejected that pattern on
+        every `result_handlers`-based verb (retrieve/save/update/... -- it merely went unnoticed
+        because `find` itself routed around the check entirely, see below) -- corrected here,
+        not just widened to new sites, when this ruling landed.
+        No verb is exempt: this same check is called from every site that assembles a handler
+        list, whether it arrives via the shared `result_handlers` wrapper (retrieve/grab/save/
+        update/remove/pull/save-or-update/connect/check_mioql/...) or via a bare `result_handler`
+        embedded directly in a block's own body grammar (`find_body`/`compare_body` -- the two
+        sites RUN 2's C1 missed, since they never pass through `result_handlers` at all) or via
+        `check_block`'s own dedicated `check_when*/otherwise_clause?` shape (which structurally
+        can never carry on.failure/on.success at all, so the `when`-only condition was always
+        already correct there -- this generalized check still reduces to it via the same
+        false-if-absent logic)."""
+        has_otherwise = any(isinstance(c, OtherwiseClause) for c in members)
+        if not has_otherwise:
+            return
+        has_case = any(isinstance(c, (CheckWhen, OnFailure, OnSuccess)) for c in members)
+        if not has_case:
+            raise MohioCompileError(
+                "otherwise requires a when, on.failure, or on.success -- a lone `otherwise` "
+                "with none of those declared in the same block would fire unconditionally "
+                "every time, silently, instead of actually being a fallback.",
+                line=line)
+
     def check_block(self, children):
         open_token = next((c for c in children
                            if isinstance(c, Token) and c.type == 'CHECK'), None)
@@ -1947,6 +2078,12 @@ class MohioTransformer(Transformer):
         value = non_tokens[0] if non_tokens else None
         whens = [c for c in non_tokens[1:] if isinstance(c, CheckWhen)]
         otherwise = next((c for c in non_tokens if isinstance(c, OtherwiseClause)), None)
+        # T1-OTHERWISE-HARDENING (2026-08-19, Ronnie's FINAL ruling): see
+        # _validate_lone_otherwise's own docstring for the full rule. check_block's grammar
+        # never carries on.failure/on.success (they are not alternatives in check_when*), so
+        # this reduces to "otherwise requires a when" here specifically -- not a special case,
+        # the same shared check, just nothing else it could possibly find in this block shape.
+        self._validate_lone_otherwise(whens + ([otherwise] if otherwise else []), _line(open_token))
         return CheckBlock(value=value, when_clauses=whens,
                           otherwise=otherwise, as_name=as_name, line=open_line)
 
@@ -2023,14 +2160,35 @@ class MohioTransformer(Transformer):
             condition = next((c for c in children
                               if isinstance(c, (MatchClause, WhereClause))), None)
         elif variant == 'unique':
-            # CHECK_UNIQUE IN source MATCH_MOD NAME TO value handlers closer
-            field_tok = next((c for c in children
-                              if isinstance(c, Token) and c.type == 'NAME'), None)
-            val = next((c for c in children
-                        if type(c).__name__ in ('Literal', 'DottedName')), None)
-            condition = MatchClause(modifier='unique',
-                                    field=str(field_tok) if field_tok else '',
-                                    value=val)
+            # CHECK_UNIQUE IN source_ref match_clause handlers closer (redesigned
+            # 2026-08-11, T1-CHECK-UNIQUE-REDESIGN) -- routed through the shared match_clause
+            # like exists/count above, same typed extraction they use. This replaces the old
+            # bespoke `MATCH_MOD NAME TO value_expr` inline rule, whose overly-broad
+            # `type(c).__name__ in ('Literal', 'DottedName')` scan for the value grabbed
+            # whichever Literal/DottedName child came first in `children` -- including
+            # `source` itself once the pretokenizer turned `db.<table>` into a DottedName
+            # (whenever `db` was also a declared connection name), silently binding the
+            # WHERE filter to the table reference instead of the intended value. Fix the
+            # class (typed, positional extraction via the proven match_pair mechanism), not
+            # the instance. match_clause returns a LIST when the source has more than one
+            # comma-separated pair -- a composite key (`match a to X, b to Y`); a single
+            # MatchClause otherwise.
+            condition = next((c for c in children
+                              if isinstance(c, (MatchClause, WhereClause, list))), None)
+            if condition is None:
+                # match_clause's OTHER two shapes (match any / no.match block forms) parse
+                # here structurally (same shared rule as exists/count) but are not wired for
+                # a count-based uniqueness check -- silently falling through to "no filter"
+                # would count the WHOLE table and report a false "available". Fail loud.
+                _block = next((c for c in children
+                               if type(c).__name__ in
+                               ('MatchBlock', 'MatchAnyBlock', 'NoMatchBlock')), None)
+                if _block is not None:
+                    raise MohioCompileError(
+                        f"check unique: a {type(_block).__name__} match condition isn't "
+                        f"supported here yet -- only `match field to value` (or "
+                        f"comma-separated composite fields, `match a to X, b to Y`) can be "
+                        f"evaluated for uniqueness.")
         return CheckMioqlBlock(variant=variant, name=name, source=source,
                               condition=condition, handlers=handlers)
 
@@ -2535,6 +2693,11 @@ class MohioTransformer(Transformer):
                         time_bucket = _it[2]
                     if _it[1] and group_by is None:
                         group_by = _it[1]
+        # T1-OTHERWISE-HARDENING (2026-08-19, Ronnie's FINAL ruling): find's handlers arrive via
+        # a bare `result_handler` embedded directly in find_body, never through the shared
+        # result_handlers wrapper -- so RUN 2's C1 fix (in that wrapper's transformer) never
+        # reached find at all. Same shared check as every other block now.
+        self._validate_lone_otherwise(handlers, open_line)
         return FindBlock(
             name=str(name_token) if name_token else "",
             group_by=group_by,
@@ -2630,6 +2793,62 @@ class MohioTransformer(Transformer):
             "'remove.all from db.<table>'.\n"
             "  To delete specific rows, use 'remove from db.<table> where "
             "<field> is <value>'.")
+
+    def on_failure_spaced(self, children):
+        # `on failure` (spaced) -- not valid. Without this guard it silently misparses
+        # into stray bare assignments (on = failure) and the enclosing block collapses
+        # around it with no loud error at the mistake -- measured 2026-08-10,
+        # PARSE-COST-MEASUREMENT.md. Fail loud instead, pointing to the dotted form.
+        raise MohioCompileError(
+            "on failure (two words) isn't available yet. Use the dot form: on.failure. "
+            "The dot joins the words into one unit so the grouping is unambiguous. The "
+            "two-word form is coming in the Rust conversion.")
+
+    def on_success_spaced(self, children):
+        # Same guard as on_failure_spaced, mirrored for `on success` (spaced).
+        raise MohioCompileError(
+            "on success (two words) isn't available yet. Use the dot form: on.success. "
+            "The dot joins the words into one unit so the grouping is unambiguous. The "
+            "two-word form is coming in the Rust conversion.")
+
+    def modify_as_spaced(self, children):
+        # `modify as X` (spaced) -- not valid. Without this guard it silently misparses into
+        # an unrelated statement (confirmed live: a mioconnect_call aliasing "modify" as X)
+        # with no error at the mistake -- measured 2026-08-10, PARSE-COST-MEASUREMENT.md. Fail
+        # loud instead, pointing to the dotted form.
+        raise MohioCompileError(
+            "modify as (two words) isn't available yet. Use the dot form: modify.as. "
+            "The dot joins the words into one unit so the grouping is unambiguous. The "
+            "two-word form is coming in the Rust conversion.")
+
+    def ai_decide_sec_bare(self, children):
+        # `sec.<word>` used bare inside ai.decide (no trailing `NAME value`, e.g. bare
+        # `sec.non_critical` with no `reason "..."`). None of the six real sec.* constructs are
+        # wired as ai.decide clauses -- fail loud and name the word, pointing at where sec.*
+        # actually lives, rather than let it fall through to the generic statement catch-all
+        # and corrupt the next body line's parse.
+        tok = next((c for c in children if isinstance(c, Token) and c.type == 'SEC_DOTTED_ANY'), None)
+        word = str(tok) if tok is not None else 'sec.<word>'
+        raise MohioCompileError(
+            f"`{word}` is not a recognized ai.decide clause -- ai.decide's body is `check "
+            f"confidence above`, `weigh`, `ai.audit to`, `not confident`, `on.failure`/"
+            f"`on.success`, or a prompt option. sec.* security declarations (sec.classify, "
+            f"sec.validate, sec.audit, sec.nohardcode, sec.headers, sec.encrypt) live outside "
+            f"ai.decide, not inside it. If you meant `sec.non_critical` as an audit-exemption "
+            f"marker, give it a reason: `{word} reason \"why this decision is non-regulatory\"`.",
+            line=_line(tok) if tok is not None else 0)
+
+    def cond_is_empty_spaced(self, children):
+        # `X is empty` (spaced) inside a general condition (while/if/unless/check) -- not
+        # valid. Without this guard it silently misparses via cond_is, reading "empty" as an
+        # ordinary bareword value (equality against a variable literally named "empty")
+        # instead of an emptiness predicate -- measured 2026-08-10,
+        # PARSE-COST-MEASUREMENT.md. Fail loud instead, pointing to the dotted form. Does NOT
+        # touch where_condition's `IS EMPTY -> wc_is_empty` (query context), which works today.
+        raise MohioCompileError(
+            "is empty (two words) isn't available yet here. Use the dot form: is.empty. "
+            "The dot joins the words into one unit so the grouping is unambiguous. The "
+            "two-word form is coming in the Rust conversion.")
 
     def remove_all_block(self, children):
         # REMOVE_ALL FROM <source_ref> (result_handlers closer)? -- destructive
@@ -2807,14 +3026,22 @@ class MohioTransformer(Transformer):
                            if isinstance(c, Token) and c.type == 'NAME'), None)
         source = next((c for c in children if isinstance(c, (DbRef, DottedName))),
                       _first_tree(children, 'source_ref'))
-        # the where field is the dotted_name AFTER the source; the value is the trailing expr.
-        dotted = [c for c in children if isinstance(c, DottedName)]
-        field_node = dotted[-1] if dotted else None
+        # `WHERE dotted_name IS value_expr` -- the grammar's own token order settles what's
+        # the field and what's the value: the IS token is the anchor. The field DottedName is
+        # whatever DottedName comes BEFORE it (excluding `source`, which can itself be a bare
+        # DottedName and sits even earlier); the value is whatever comes AFTER. A prior
+        # version picked the LAST DottedName found anywhere in `children` as the field, which
+        # silently swapped field and value whenever the value_expr was ITSELF a dotted-name
+        # reference (verified live: `grab m from db.members where id is other.ref` bound
+        # field='other.ref', value=DottedName(['id']) -- exactly backwards, and the wrong
+        # column got queried with the wrong value, no error at the mistake).
+        is_token = next((c for c in children
+                         if isinstance(c, Token) and c.type == 'IS'), None)
+        is_idx = children.index(is_token) if is_token is not None else len(children)
+        field_node = next((c for c in children[:is_idx]
+                           if isinstance(c, DottedName) and c is not source), None)
         field = '.'.join(field_node.parts) if field_node else ""
-        # value is the last non-token child (the value_expr after IS)
-        value = next((c for c in reversed(children)
-                      if not isinstance(c, Token) and c is not field_node
-                      and c is not source), None)
+        value = next((c for c in children[is_idx + 1:] if not isinstance(c, Token)), None)
         match = MatchClause(field=field, value=value) if field else None
         return GrabBlock(
             name=str(name_token) if name_token else "",
@@ -2953,7 +3180,26 @@ class MohioTransformer(Transformer):
             fd = next((c for c in non_tokens if isinstance(c, DottedName)), None)
             return cls(field='.'.join(fd.parts) if fd else "",
                        value=non_tokens[1] if len(non_tokens) > 1 else None)
-        condition = self._WC_COND.get(str(wc.data)[3:], str(wc.data)[3:])
+        rule = str(wc.data)[3:]
+        if rule == 'cmp':
+            # `dotted_name CMP_OP value_expr -> wc_cmp` (the raw symbolic form: score >= 80).
+            # Unlike every other wc_* alias, the condition here is not implied by the rule name
+            # -- it IS the CMP_OP token (>=, <=, >, <, ==, !=). The generic path below has no
+            # slot for that: it fell through _WC_COND (nothing maps 'cmp' -> anything real, so
+            # `condition` stayed the literal string 'cmp'), and because CMP_OP isn't in
+            # _WC_SKIP, the operator token itself rode along into `values[0]`, bumping the real
+            # right-hand value into `value2`. Handle it here explicitly: read the operator out
+            # of the token and use it directly as `condition`, the same symbol cond_cmp already
+            # uses for control-flow (`_eval_condition`) -- one op-leaf, same meaning everywhere.
+            op_tok = next((c for c in wc.children
+                           if isinstance(c, Token) and c.type == 'CMP_OP'), None)
+            field_dotted = next((c for c in wc.children if isinstance(c, DottedName)), None)
+            field = '.'.join(field_dotted.parts) if field_dotted else ""
+            value = next((c for c in wc.children
+                          if c is not field_dotted and c is not op_tok), None)
+            return cls(field=field, condition=str(op_tok) if op_tok is not None else 'cmp',
+                       value=value, value2=None)
+        condition = self._WC_COND.get(rule, rule)
         field_dotted = next((c for c in wc.children if isinstance(c, DottedName)), None)
         field = '.'.join(field_dotted.parts) if field_dotted else ""
         values = []
@@ -3160,6 +3406,15 @@ class MohioTransformer(Transformer):
         return token  # already transformed
 
     def result_handlers(self, children):
+        # T1-OTHERWISE-HARDENING (2026-08-19, Ronnie's FINAL ruling): see
+        # _validate_lone_otherwise's own docstring for the full rule (on.failure/on.success also
+        # legitimize an otherwise here, not just when -- corrected from the first version of
+        # this check). Checked HERE, once, at the shared choke point every result-handler-
+        # bearing block passes through (retrieve/grab/save/update/remove/pull/save-or-update/
+        # connect/check_mioql/...) -- not duplicated per block.
+        _line_no = next((getattr(c, 'line', None) for c in children
+                         if getattr(c, 'line', None)), 0)
+        self._validate_lone_otherwise(children, _line_no)
         # Return as a tree for the parent to extract
         return Tree('result_handlers', children)
 
@@ -4022,6 +4277,43 @@ class MohioTransformer(Transformer):
                      if isinstance(c, str)
                      and c in ('on', 'off', 'minimal', 'verbose')), 'on')
         return DebugDecl(mode=mode)
+
+    def debug_log_stmt(self, children):
+        """`debug.log score` / `debug.log player.name`.
+
+        FIX-B8-4 (T1-SILENT-SWEEP-BATCH8): no method existed for this rule at all, so
+        `debug_log_stmt` survived into the finished AST as a raw Lark Tree -- the DebugLogStmt
+        node `_exec_DebugLogStmt` (mohio_interpreter.py) actually dispatches on was never
+        constructed, so a real `.mho` `debug.log` statement fell through to the generic
+        "No executor for 'debug_log_stmt'" path. A full, working executor sat dead the whole
+        time; the only thing missing was this method.
+
+        `debug_log_target` has no transformer method of its own (NAME("."NAME)* has nothing
+        to build), so it survives here as a raw Lark Tree; walk its children for the dotted
+        NAME sequence -- the only shape `_resolve_debug_target` actually supports (a plain
+        dotted variable path split on '.').
+        """
+        from mohio_ast import DebugLogStmt
+        target_tree = next((c for c in children
+                             if hasattr(c, 'data') and c.data == 'debug_log_target'), None)
+        names = [str(t) for t in (target_tree.children if target_tree is not None else [])
+                 if isinstance(t, Token) and t.type == 'NAME']
+        return DebugLogStmt(target='.'.join(names))
+
+    def debug_checkpoint(self, children):
+        """`debug.checkpoint "label" ... done` -- a named checkpoint with nested debug.log lines.
+
+        FIX-B8-5 (T1-SILENT-SWEEP-BATCH8): same shape as debug_log_stmt above -- no transformer
+        method existed, so `debug.checkpoint` also fell through to "No executor," leaving
+        `_exec_DebugCheckpoint`'s full, working implementation dead. The nested `debug_log_stmt`
+        children are transformed bottom-up before this method runs, so they already arrive as
+        real DebugLogStmt nodes here.
+        """
+        from mohio_ast import DebugCheckpoint, DebugLogStmt
+        label_tok = next((c for c in children if isinstance(c, Token) and c.type == 'STRING'), None)
+        label = _unquote(str(label_tok)) if label_tok is not None else ''
+        logs = [c for c in children if isinstance(c, DebugLogStmt)]
+        return DebugCheckpoint(label=label, logs=logs)
 
     def trailing_qualifier(self, children):
         """`if <condition>` trailing an action statement.
@@ -5713,8 +6005,72 @@ class MohioTransformer(Transformer):
     def tools_block(self, children):
         from mohio_ast import ToolsBlock
         return ToolsBlock(grants=[c for c in children if isinstance(c, str)])
-    def languages_block(self, children): return None
-    def enterprise_block(self, children): return None
+    def languages_block(self, children):
+        # LOCK (languages-declaration-2026-08-07): this is a REAL feature (a langmap
+        # declaration on a journey), NOT unbuilt -- do not fail-loud-as-unbuilt here.
+        # BATCH8 (T1-SILENT-SWEEP) previously routed this through NotBuiltService; that
+        # was wrong and is corrected here. `languages_body` has no transformer method of
+        # its own, so each occurrence survives as a raw `Tree('languages_body', [...])`
+        # -- the KW token (CURRENT_KW/SUPPORTED_KW/DEPLOY_KW/PLANNED_KW/PRIMARY_KW)
+        # identifies which field it's for; `lang_code` is already resolved to a plain
+        # string by the time we see it. A `languages_body` that matched `map_block`/
+        # `custom_block` instead carries no KW token -- those two rules return a bare
+        # list of their own entries (map_entry/custom_entry, themselves still raw Lark
+        # trees -- a separate, pre-existing gap in THAT sub-feature, not fixed here);
+        # captured into `maps` as-is for a future consumer to read.
+        from mohio_ast import LanguagesBlock
+        current = deploy = ""
+        supported, planned, maps = [], [], []
+        for c in children:
+            if isinstance(c, Closer):
+                continue
+            if not (hasattr(c, 'data') and c.data == 'languages_body'):
+                continue
+            tok = next((x for x in c.children if isinstance(x, Token)), None)
+            # Token is a str subclass in Lark -- excluding Token here is required, not
+            # cosmetic, or the KW token itself (always first) is picked up as codes[0].
+            codes = [x for x in c.children if isinstance(x, str) and not isinstance(x, Token)]
+            if tok is None:
+                maps.extend(c.children)
+            elif tok.type in ('CURRENT_KW', 'PRIMARY_KW'):
+                if codes: current = codes[0]
+            elif tok.type == 'SUPPORTED_KW':
+                supported.extend(codes)
+            elif tok.type == 'DEPLOY_KW':
+                if codes: deploy = codes[0]
+            elif tok.type == 'PLANNED_KW':
+                planned.extend(codes)
+        return LanguagesBlock(current=current, supported=supported, deploy=deploy,
+                              planned=planned, maps=maps)
+
+    def enterprise_block(self, children):
+        # The lock (journey-newest-decisions-2026-08-07) marks `enterprise` NOT fully
+        # built / possibly outdated -- unlike languages_block above, this one keeps
+        # failing loud (see _exec_EnterpriseBlock), but with honest wording ("not fully
+        # built / under review", never "not built in this release" -- this is a real,
+        # partially-specified design under review, not a simple deferral). Builds a
+        # real EnterpriseBlock node (key_ref/tier, matching the grammar's own docstring)
+        # so the fail-loud message can be specific and so the declaration is at least
+        # inspectable, rather than routing through the generic NotBuiltService stub.
+        # `enterprise_body` has no transformer method of its own (same shape as
+        # languages_body above), so each occurrence survives as a raw
+        # `Tree('enterprise_body', [...])` -- walk into it for the ENV_REF/NAME token
+        # (verified live: a top-level token scan misses these entirely, since they are
+        # nested one level down, not direct children of enterprise_block).
+        from mohio_ast import EnterpriseBlock
+        key_ref = ""
+        tier = ""
+        for c in children:
+            if not (hasattr(c, 'data') and c.data == 'enterprise_body'):
+                continue
+            tok = next((x for x in c.children if isinstance(x, Token)), None)
+            if tok is None:
+                continue
+            if tok.type == 'ENV_REF':
+                key_ref = str(tok)
+            elif tok.type == 'NAME':
+                tier = str(tok)
+        return EnterpriseBlock(key_ref=key_ref, tier=tier)
 
     def view_decl(self, children):
         from mohio_ast import ViewDecl
@@ -6133,7 +6489,17 @@ class MohioTransformer(Transformer):
                            condition=condition, body=field_changes)
     def modify_body(self, children): return children
 
-    def inject_stmt(self, children): return None
+    def inject_stmt(self, children):
+        # FIX-B8-1 (T1-SILENT-SWEEP-BATCH8): genuinely unbuilt -- no InjectClause executor
+        # exists anywhere (grep for _exec_Inject* returns nothing), even though the grammar
+        # comment calls this "canonical." `inject ... into ...` used to `return None`, a
+        # total silent no-op that never even reached the generic "no executor" fail-loud net
+        # -- worse than every other orphan in this batch, since it was discarded before an
+        # AST node ever existed. Same NotBuiltService mechanism as languages_block/
+        # enterprise_block above.
+        from mohio_ast import NotBuiltService
+        line = _line(next((c for c in children if isinstance(c, Token)), None))
+        return NotBuiltService(service='inject', method='', tier='plain', line=line)
 
 
     def sql_block(self, children):

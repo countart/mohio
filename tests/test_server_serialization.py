@@ -68,9 +68,13 @@ check("dict with real content passes through untouched",
       == {"message": "you see a leaflet"})
 
 # 4. the EXACT seed leaflet description round-trips byte-for-byte
+# The Zork seed is third-party game content used only as a fixture. It moved to `_private/`
+# (gitignored, not distributed -- LICENSE-SCOPE.md's Control tests entry). It is therefore
+# ABSENT in any public clone, so this stays a graceful skip rather than a failure: the check
+# runs where the fixture exists and reports SKIP where it does not.
 seed_path = next((p for p in (
-    os.path.join(ROOT, "tests", "seed_zork.json"),
-    "tests/seed_zork.json") if os.path.exists(p)), None)
+    os.path.join(ROOT, "_private", "seed_zork.json"),
+    "_private/seed_zork.json") if os.path.exists(p)), None)
 if seed_path:
     seed = json.load(open(seed_path, encoding='utf-8'))
     desc = next((i["description"] for i in seed.get("items", []) if i.get("id") == "leaflet"), None)

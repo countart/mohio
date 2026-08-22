@@ -127,12 +127,16 @@ run("...and the conditional set really did run alongside it",
     'find: done\n',
     want="OTHERWISE")
 
-run("find, otherwise ALONE is the fallback when nothing else is declared",
-    'find d in db.rows\n'
-    '    where title is "absent"\n'
-    '    otherwise show "OTHERWISE"\n'
-    'find: done\n',
-    want="OTHERWISE")
+# T1-OTHERWISE-HARDENING (2026-08-19, Ronnie's FINAL ruling): a lone `otherwise` -- nothing
+# preceding it in the same block, not even on.failure/on.success -- FAILS LOUD everywhere, no
+# verb exempt. This case used to be asserted as VALID ("otherwise ALONE is the fallback when
+# nothing else is declared") -- that was correct behavior under the pre-ruling design but is now
+# stale: `otherwise` means "the other case," and with nothing declared at all there is no first
+# case for it to be the other one of. The loud version of this check lives in the "once per set,
+# and LAST" section below, alongside find's other now-invalid otherwise shapes. The SURVIVING,
+# still-valid pattern -- `on.failure` + `otherwise`, no `when` at all -- is proven above by
+# "find, has results -> otherwise fires as the fallback" (line 104): a real case (on.failure)
+# DOES precede that otherwise, so it stays legal and keeps working.
 
 # ── never mandatory ───────────────────────────────────────────────────────
 run("find with NO handlers at all is fine (never mandatory)",
@@ -203,6 +207,16 @@ loud("otherwise BEFORE on.failure is LOUD (it must be last)",
 loud("TWO otherwise in a check is LOUD",
      'hold n 1\ncheck n\n    when n is more than 3\n        show "w"\n'
      '    otherwise\n        show "a"\n    otherwise\n        show "b"\ncheck: done\n')
+# T1-OTHERWISE-HARDENING (2026-08-19, Ronnie's FINAL ruling): a lone `otherwise` -- no
+# preceding when/on.failure/on.success at all -- fails loud everywhere, no verb exempt. This
+# replaces the STALE "otherwise ALONE is the fallback" assertion that used to live above (find
+# routed around RUN 2's C1 fix entirely, via find_body's own bare result_handler, so it kept
+# accepting this shape after every other verb was already closed -- now it's the same rule
+# everywhere, find included).
+loud("lone otherwise on find (nothing precedes it) is LOUD",
+     'find d in db.rows\n    where title is "absent"\n    otherwise show "OTHERWISE"\nfind: done\n')
+loud("lone otherwise on compare (nothing precedes it) is LOUD",
+     'hold a 1\nhold b 2\ncompare a to b\n    otherwise show "OTHERWISE"\ncompare: done\n')
 
 
 # ── THE CONDITIONAL SET: `when` / `otherwise` in every verb block ─────────
@@ -249,8 +263,14 @@ run("when/otherwise work in save and retrieve too, not just find",
     'save: done\n',
     want="SAVE_WHEN", must_not="SAVE_OTHERWISE")
 
+# T1-OTHERWISE-HARDENING (2026-08-19, Ronnie's FINAL ruling): the outer block's own `otherwise`
+# now needs a real preceding case too (a lone otherwise fails loud everywhere, no verb exempt) --
+# `on.success` added here as that case. It does not compete with the conditional set (STATE and
+# CONDITION are independent, proven above by "on.success and the conditional set are two stages;
+# BOTH fire"), so the outer otherwise still fires exactly as before; only the syntax changed.
 run("a nested block keeps its OWN conditional set",
     'find e in db.rows\n    where title is "present"\n'
+    '    on.success show "OUTER_ACK"\n'
     '    otherwise\n        show "OUTER"\n'
     '        find f in db.rows\n            where title is "absent"\n'
     '            when f is empty\n                show "NESTED_WHEN"\n'

@@ -3,7 +3,7 @@
 # Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
 mio -- Mohio Language CLI
-Version: 4.8.2 | Language: v3.8 | August 2026 | Particular LLC
+Version: see mohio_version.VERSION | Language: v3.8 | August 2026 | Particular LLC
 
 Usage:
     mio run <file.mho> [options]
@@ -1511,12 +1511,10 @@ def _generate_applang_training_data(args):
 
     # Handle postgres:// style URLs -- use sqlite for now
     if db_path and db_path.startswith('postgres'):
-        print("  ! Postgres export not yet supported. Use sqlite DATABASE_URL.")
-        return
+        _die("Postgres export not yet supported. Use sqlite DATABASE_URL.")
 
     if not os.path.exists(db_path) and db_path != ':memory:':
-        print(f"  Error: database not found at {db_path}")
-        return
+        _die(f"database not found at {db_path}")
 
     try:
         conn = sqlite3.connect(db_path)
@@ -1528,9 +1526,8 @@ def _generate_applang_training_data(args):
             "AND name='applang_map'"
         )
         if not cur.fetchone():
-            print("  Error: applang_map table not found.")
-            print("  Run your Mohio app with an applang block first to build the corpus.")
-            return
+            _die("applang_map table not found.\n"
+                 "  Run your Mohio app with an applang block first to build the corpus.")
 
         # Get max hit count for normalization
         cur = conn.execute("SELECT MAX(hit_count) as max_hits FROM applang_map")
@@ -1587,7 +1584,7 @@ def _generate_applang_training_data(args):
         print(f"  [generate] ready for OpenAI, Anthropic, or HuggingFace fine-tuning")
 
     except Exception as e:
-        print(f"  Error: {e}")
+        _die(str(e))
 
 
 def cmd_translate(args=None):
@@ -2086,21 +2083,6 @@ def cmd_serve(args):
     print(f"\n  {bold('mio serve')}  {dim(f'v{VERSION}')}")
     print(f"  {dim('Loading')} {bold(filename)}")
 
-    # -- Fast mode check ------------------------------------------
-    fast_mode = getattr(args, 'fast', False)
-    if fast_mode:
-        from mohio_symbol_table import extract_symbols, check_reserved_violations
-        from mohio_transformer import MOHIO_RESERVED_EXACT, MOHIO_RESERVED_WHAT
-        st = extract_symbols(source)
-        violations = check_reserved_violations(st)
-        if violations:
-            for name, what in violations:
-                print(f"  x '{name}' is reserved -- it is {what}.")
-            print(f"  x {filename} -- {len(violations)} reserved word violation(s)")
-            sys.exit(1)
-        print(f"  v {filename} -- fast check passed (ASCII + reserved words)")
-        return
-
     # -- Parse: AST cache first ------------------------------------
     # If this is the first run or cache is stale, Earley parses the file.
     # This is slow on large files. We start uvicorn first so Railway
@@ -2119,8 +2101,13 @@ def cmd_serve(args):
         sys.exit(1)
 
     if ctx.warnings:
-        if '--json' not in sys.argv:
-            print(yellow(f"  {len(ctx.warnings)} warning(s) -- run mio check for details"))
+        # FIX-B9-2 (T1-SILENT-SWEEP-BATCH9): `serve` has no `--json` flag (confirmed against
+        # its own subparser -- only `check` has one), so this suppression was always
+        # unconditionally true here -- copy-pasted from `check`'s identical warning line
+        # (commit 8627173 added the --json suppression to a block shared with `serve` without
+        # checking which command it landed in). Removed the dead condition; serve always
+        # prints its own startup warning count.
+        print(yellow(f"  {len(ctx.warnings)} warning(s) -- run mio check for details"))
 
     # -- AST transform -----------------------------------------
     try:
@@ -2723,8 +2710,18 @@ def cmd_check(args):
         _err.hint = ""
         ctx.errors.append(_err)
         _program = None
-    except Exception:
-        _program = None   # non-Mohio transform hiccup: advisory only, don't break check
+    except Exception as _e:
+        # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): used to `pass` here (advisory only) with
+        # no warning at all -- unlike every OTHER advisory-hiccup site in this same
+        # function (Layer 3 scanners, the never-store/PCI guard, the upload lint), which all
+        # already call _scan_incomplete_warn. A genuine compiler bug in Layer 2 (not a real
+        # MohioError -- those are handled above and already surface a real check error) used
+        # to silently skip EVERY Layer-3 check that follows (never-store/PCI guard,
+        # upload-size lint, handler-closer lint) with `mio check`'s summary still reporting
+        # clean. Still never breaks `mio check` itself (advisory, unchanged) -- just no
+        # longer invisible.
+        _scan_incomplete_warn("Layer 2 AST construction", _e)
+        _program = None
     if _program is not None:
         try:
             # Layer 3 (whole-program scanners) THROUGH THE DOOR, now that the program is fully
@@ -2931,6 +2928,20 @@ def cmd_install_hooks(args):
     hooks_dir = git_dir / "hooks"
     hooks_dir.mkdir(exist_ok=True)
 
+    # FIX-B9-4 (T1-SILENT-SWEEP-BATCH9): `install-hooks` is meant to run inside a USER'S OWN
+    # app repo, which never contains a copy of the mohio compiler -- `mio` is a real pip
+    # console-script (pyproject.toml: `mio = "mio:main"`), so a hardcoded repo-relative
+    # `compiler/mio.py` (leftover from some other layout) could never resolve there. Bake in
+    # the exact interpreter and mio.py path currently running `install-hooks` itself -- correct
+    # whether this is a dev checkout or a pip-installed environment, and needs nothing present
+    # in the target repo at all. Kept as two separately-quoted variables (not one combined
+    # MIO_CMD string) so each is independently double-quoted AT THE POINT OF USE below --
+    # POSIX `sh` word-splits an unquoted variable expansion on whitespace regardless of quote
+    # characters embedded in its value, so a single combined string would break the moment
+    # either path contains a space (e.g. Windows "Program Files").
+    mio_python = str(sys.executable)
+    mio_script = str(Path(__file__).resolve())
+
     # -- pre-push hook ----------------------------------------
     pre_push_content = f"""#!/bin/sh
 # Mohio pre-push hook -- installed by mio install-hooks
@@ -2941,11 +2952,12 @@ echo ""
 echo "  mio pre-push check..."
 
 FAILED=0
-MIO_CMD="python compiler/mio.py"
+MIO_PYTHON="{mio_python}"
+MIO_SCRIPT="{mio_script}"
 
 # Find all .mho files in the repo
 for f in $(find . -name "*.mho" -not -path "./.git/*" 2>/dev/null); do
-    result=$($MIO_CMD check "$f" {security_flag} 2>&1)
+    result=$("$MIO_PYTHON" "$MIO_SCRIPT" check "$f" {security_flag} 2>&1)
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
@@ -2984,12 +2996,13 @@ echo ""
 echo "  mio pre-commit check..."
 
 FAILED=0
-MIO_CMD="python compiler/mio.py"
+MIO_PYTHON="{mio_python}"
+MIO_SCRIPT="{mio_script}"
 
 # Only check staged .mho files
 for f in $(git diff --cached --name-only --diff-filter=ACM | grep ".mho$"); do
     if [ -f "$f" ]; then
-        result=$($MIO_CMD check "$f" {security_flag} 2>&1)
+        result=$("$MIO_PYTHON" "$MIO_SCRIPT" check "$f" {security_flag} 2>&1)
         exit_code=$?
         if [ $exit_code -ne 0 ]; then
             echo ""
@@ -3055,15 +3068,22 @@ def cmd_schema(args):
     if not path.exists():
         _die(f"File not found: {filename}", exit_code=3)
 
-    # ── Multi-file directory mode ──────────────────────────────
-    # mio serve myapp/ maps .mho files to URLs automatically:
-    #   index.mho -> /
-    #   rates.mho -> /rates
-    #   terms.mho -> /terms
-    # This is the ColdFusion/PHP mental model -- one file per page.
+    # FIX-B9-5 (T1-SILENT-SWEEP-BATCH9): this used to call `_cmd_serve_directory(args, path,
+    # verbose)` -- `verbose` was never defined anywhere in this function (no local assignment,
+    # `schema`'s own subparser has no --verbose flag), a guaranteed NameError -- and even a
+    # defined `verbose` wouldn't have helped, because `_cmd_serve_directory` is the HTTP
+    # SERVER's directory-mode route scanner, copy-pasted in from cmd_serve/cmd_check without
+    # adapting the call target. Directory-mode schema generation is a genuine, non-trivial
+    # design decision (one manifest per file? one merged manifest for the whole app? how are
+    # outputs named?) that hasn't been made, not a typo to patch -- fail loud as not-yet-built
+    # instead of routing into an unrelated command. Single-file `mio schema <action> file.mho`
+    # is unaffected; it never reaches this branch.
     if path.is_dir():
-        _cmd_serve_directory(args, path, verbose)
-        return
+        _die(f"mio schema {action} does not support a directory yet ({filename}) -- "
+             f"run it against one .mho file at a time. Left silent it would have crashed "
+             f"with an internal NameError, or routed into the http server's directory "
+             f"scanner and started serving instead of generating a schema. Tracked for a "
+             f"future release.")
 
     source = _read_source(path)
 
@@ -3073,6 +3093,16 @@ def cmd_schema(args):
     if action == 'generate':
         print(f"\n  {bold('mio schema generate')}  {dim(filename)}\n")
         schema = generate_schema(source, filename)
+        # T1-SILENT-SWEEP-BATCH7 (2026-08-15): generate_schema() already carries a real
+        # parse/transform/extraction failure in the returned dict's 'error' key (its own
+        # design, a deliberate graceful-degrade shape) -- but this call site never checked
+        # it, so a genuine failure (e.g. normalize_type's new fail-loud on an unrecognized
+        # field type) silently produced an empty schema, "Schema generated" with 0 tables,
+        # and a written .mhoschema file, exit 0. Surfaced here instead of writing a broken
+        # manifest and claiming success.
+        if schema.get('error'):
+            _die(f"Could not generate a schema for {filename}: {schema['error']}",
+                 exit_code=1)
         n_tables = len(schema.get('tables', {}))
         n_fields = sum(len(t['fields']) for t in schema.get('tables', {}).values())
 

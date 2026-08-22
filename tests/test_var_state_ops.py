@@ -42,8 +42,15 @@ def run(src):
 
 
 def fails(src):
+    # A verb-level check (release/clear/forget/rename/replace's own "nothing to X" guard) raises
+    # a real Python exception that propagates straight out of run(). A value-evaluation error
+    # carried in `give back`'s VALUE (e.g. reading an undeclared/forgotten name) is a `_Raise`
+    # that `run()` catches and formats into a {'status', 'body'} response instead, matching real
+    # end-to-end `mio run` behavior (confirmed live: a served program returns 500, it doesn't
+    # crash the process) -- so both shapes count as "fails" here.
     try:
-        run(src); return False
+        result = MohioInterpreter().run(transform(P.parse(src), src))
+        return isinstance(result, dict) and result.get('status', 200) >= 400
     except Exception:
         return True
 
@@ -68,8 +75,13 @@ check("clear on a bare variable empties it (to null)",
 check("clear on a missing name fails loud", fails('clear nope\ngive back 200 "x"'))
 
 # ── forget: removes the name entirely ─────────────────────────────────────────────────
-check("forget removes the variable (reads as empty after)",
-      run('x 5\nforget x\ngive back 200 x') is None)
+# T1-EVAL-SIMPLE-FAILLOUD Piece 2 (2026-08-17): reading a forgotten name now fails loud, same
+# treatment as a never-declared name -- `forget` genuinely removes all trace (`delete_var`), so
+# a forgotten name and a typo are the same state at the read site. This UPDATES a prior assertion
+# that documented the OLD lenient behavior (reads as empty, no error), which was never a contract
+# to preserve, just what the code happened to do before this fix.
+check("forget removes the variable (reading it after now fails loud, not silently empty)",
+      fails('x 5\nforget x\ngive back 200 x'))
 check("forget frees the name for a fresh declaration of any type",
       run('x "5"\nforget x\nx as int\nx 5\ngive back 200 x') == 5)
 check("forget on a missing name fails loud", fails('forget nope\ngive back 200 "x"'))
@@ -77,8 +89,8 @@ check("forget on a missing name fails loud", fails('forget nope\ngive back 200 "
 # ── rename: relabel, carry value + contract ───────────────────────────────────────────
 check("rename carries the value to the new name",
       run('x 5\nrename x to y\ngive back 200 y') == 5)
-check("rename removes the old name",
-      run('x 5\nrename x to y\ngive back 200 x') is None)
+check("rename removes the old name (reading it after now fails loud, not silently empty)",
+      fails('x 5\nrename x to y\ngive back 200 x'))
 check("rename carries the type contract (new name still enforces)",
       fails('x as int\nx 5\nrename x to y\ny "cat"\ngive back 200 y'))
 check("rename onto an existing name fails loud (never overwrites)",

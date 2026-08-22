@@ -1,10 +1,10 @@
 # LICENSE-SCOPE.md
 
-Release: 4.8.2
-Source-control tag: v4.8.2
-First public distribution date: 2026-08-08
+Release: 4.9.0
+Source-control tag: v4.9.0
+First public distribution date: 2026-08-22
 License: Business Source License 1.1
-Change Date: 2030-08-08 (four years from first public distribution)
+Change Date: 2030-08-22 (four years from first public distribution)
 Change License: AGPL-3.0-or-later — match LICENSE
 
 ---
@@ -85,7 +85,7 @@ The Spanish, Portuguese, and Hindi language packs are excluded from this release
 Demo profiles, not certified ones. Included: they teach the mechanism without exposing certified content. Certified/official profiles remain excluded.
 
 ### Control tests
-- `tests/` — the test suite, including all tests designated as Normative Control Tests in this file.
+- `tests/` — the test suite, including all tests designated as Normative Control Tests in this file. Excludes `seed_zork.json` (any path): third-party game content used only as a test fixture, moved to `_private/` and not distributed.
 
 **Rationale, and this one matters:** the LICENSE defines a Compliance-Reduced Build by reference to Normative Control Tests. If a licensee cannot run those tests, they cannot determine whether their modified build complies. Withholding the tests would make the central restriction unverifiable by the party bound by it.
 

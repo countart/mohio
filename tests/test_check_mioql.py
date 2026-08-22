@@ -3,10 +3,16 @@
 """
 test_check_mioql.py -- A1: check exists / check count / check unique (MioQL).
 
-- check exists -> boolean; on.success when found, on.failure when not.
+- check exists -> boolean. on.success fires when found; on.failure is now RESERVED for a
+  genuine driver error (T1-GUARD-FAILOPEN Part B, 2026-08-19 -- supersedes the old "on.failure
+  when not found" pattern this file used to lock). A real not-found is a legitimate answer,
+  not a failure: on.success does not fire either (there's nothing to acknowledge succeeding),
+  and when/otherwise is the correct channel to branch on found vs not-found -- same shape
+  check unique already had (below), now consistent across both.
 - check count  -> integer bound to `as NAME`; fail loud without `as`.
-- check unique -> boolean, SIGNUP polarity: on.success = available (count 0),
-  on.failure = already exists (count > 0).
+- check unique -> boolean. on.success / on.failure are operational (did the
+  query run); the answer branches on when-empty (available, count 0) /
+  otherwise (taken, count > 0) -- T1-CHECK-UNIQUE-REDESIGN, 2026-08-11.
 Non-retrieving: they answer a question, never return rows.
 """
 import os
@@ -35,14 +41,21 @@ def check(name, cond):
 
 check("exists found -> on.success",
       run('check exists f in db.users match email to "taken@x.com"\n    on.success\n        show "YES"\n    on.failure\n        show "NO"\ncheck: done\n') == ["YES"])
-check("exists not found -> on.failure",
-      run('check exists f in db.users match email to "missing@x.com"\n    on.success\n        show "YES"\n    on.failure\n        show "NO"\ncheck: done\n') == ["NO"])
+check("exists not found -> on.failure does NOT fire; on.success DOES (STATE channel: the "
+      "query ran fine, superseded 'on.failure=not-found', RUN-1/Part-B consistent)",
+      run('check exists f in db.users match email to "missing@x.com"\n    on.success\n        show "YES"\n    on.failure\n        show "NO"\ncheck: done\n') == ["YES"])
+check("exists not found -> when-empty/otherwise IS the correct channel now",
+      run('check exists f in db.users match email to "missing@x.com"\n'
+          '    when f is true\n        show "YES"\n    otherwise\n        show "NO"\ncheck: done\n') == ["NO"])
+check("exists found -> when/otherwise still works (regression guard)",
+      run('check exists f in db.users match email to "taken@x.com"\n'
+          '    when f is true\n        show "YES"\n    otherwise\n        show "NO"\ncheck: done\n') == ["YES"])
 check("count as NAME binds the integer",
       run('check count as total in db.users\n    on.success\n        show total\ncheck: done\n') == ["1"])
-check("unique taken -> on.failure (already exists)",
-      run('check unique in db.users match.unique email to "taken@x.com"\n    on.success\n        show "AVAIL"\n    on.failure\n        show "TAKEN"\ncheck: done\n') == ["TAKEN"])
-check("unique available -> on.success",
-      run('check unique in db.users match.unique email to "new@x.com"\n    on.success\n        show "AVAIL"\n    on.failure\n        show "TAKEN"\ncheck: done\n') == ["AVAIL"])
+check("unique taken -> otherwise (already exists)",
+      run('check unique in db.users match email to "taken@x.com"\n    when empty\n        show "AVAIL"\n    otherwise\n        show "TAKEN"\ncheck: done\n') == ["TAKEN"])
+check("unique available -> when empty",
+      run('check unique in db.users match email to "new@x.com"\n    when empty\n        show "AVAIL"\n    otherwise\n        show "TAKEN"\ncheck: done\n') == ["AVAIL"])
 
 # count without `as` fails loud (no magic default)
 try:

@@ -91,18 +91,41 @@ class LangmapLoader:
         "multi word phrase" -> "target phrase"
     """
 
+    # Entry modifiers, trailing on the value side of an arrow (STRING-MATCH handlers,
+    # not jobmap -- these affect how the SOURCE word is looked up during translate(),
+    # nothing about grammatical role). See _split_modifier / translate() below.
+    _MODIFIERS = ('ignore.case', 'match.case', 'keep.whitespace')
+
     def __init__(self, langmap_path: str | Path):
         self.path = Path(langmap_path)
         self.forward: dict[str, str] = {}   # source -> canonical
         self.backward: dict[str, str] = {}  # canonical -> source
+        self.forward_modifiers: dict[str, str] = {}   # source-key -> modifier (forward dir)
+        self.backward_modifiers: dict[str, str] = {}  # canonical-key -> modifier (backward dir)
         self.jobs: dict[tuple[str, str], str] = {}   # (connector, context) -> canonical
         self.connectors: set[str] = set()            # context-sensitive surface words
         self._load()
 
+    def _split_modifier(self, raw: str) -> tuple[str, str | None]:
+        """FIX-1: split an optional trailing modifier flag off a raw (not yet cleaned/
+        quote-stripped) value string. Used to load as a literal part of the value --
+        `gamma <-> delta ignore.case` loaded value 'delta ignore.case' -- because nothing
+        ever recognized the modifier as a separate token. Matches on a trailing WORD
+        boundary so a value that merely ends with similar text (unlikely, but not
+        assumed impossible) isn't clipped by accident."""
+        raw = raw.rstrip()
+        for mod in self._MODIFIERS:
+            if raw == mod:
+                return '', mod   # modifier with no value at all -- caller's `if src and tgt`
+                                  # guard drops it, same as any other malformed line
+            if raw.endswith(mod) and raw[-len(mod) - 1] in ' \t':
+                return raw[:-len(mod)].rstrip(), mod
+        return raw, None
+
     def _load(self):
         if not self.path.exists():
             raise FileNotFoundError(f"Language pack not found: {self.path}")
-        
+
         in_jobs = False
         for line_num, line in enumerate(self.path.read_text(encoding='utf-8').splitlines(), 1):
             line = line.strip()
@@ -124,24 +147,49 @@ class LangmapLoader:
                 except Exception:
                     pass
                 continue
-            
+
             if '<->' in line:
                 # Bidirectional
                 parts = line.split('<->', 1)
                 if len(parts) == 2:
                     src = self._clean(parts[0])
-                    tgt = self._clean(parts[1].split('//')[0])  # strip inline comments
+                    raw_tgt, mod = self._split_modifier(parts[1].split('//')[0])
+                    tgt = self._clean(raw_tgt)  # strip inline comments
                     if src and tgt:
                         self.forward[src] = tgt
                         self.backward[tgt] = src
+                        if mod:
+                            self.forward_modifiers[src] = mod
+                            self.backward_modifiers[tgt] = mod
             elif '->' in line:
                 # One-way
                 parts = line.split('->', 1)
                 if len(parts) == 2:
                     src = self._clean(parts[0])
-                    tgt = self._clean(parts[1].split('//')[0])
+                    raw_tgt, mod = self._split_modifier(parts[1].split('//')[0])
+                    tgt = self._clean(raw_tgt)
                     if src and tgt:
                         self.forward[src] = tgt
+                        if mod:
+                            self.forward_modifiers[src] = mod
+            elif '<-' in line:
+                # FIX-2: back-arrow -- `X <- Y` means "the reverse of `Y -> X`" (a
+                # target-to-source entry written backward, per the .langmap doc's own
+                # example: `enviando <- sending`). Used to match neither the `<->` nor
+                # `->` branch above (a bare `<-` contains no `->` substring) and so fell
+                # through to "lines without arrows are ignored" -- silently dropped, not
+                # a parse error, no warning. Normalize on load: treat identically to a
+                # one-way `Y -> X` entry (forward only, no backward population -- a
+                # back-arrow entry is not a bidirectional one).
+                parts = line.split('<-', 1)
+                if len(parts) == 2:
+                    tgt = self._clean(parts[0])           # LHS: the pack-language word
+                    raw_src, mod = self._split_modifier(parts[1].split('//')[0])
+                    src = self._clean(raw_src)             # RHS: the canonical/source word
+                    if src and tgt:
+                        self.forward[src] = tgt
+                        if mod:
+                            self.forward_modifiers[src] = mod
             # Lines without arrows are ignored (metadata, notes)
 
     def _clean(self, s: str) -> str:
@@ -299,13 +347,15 @@ class LangmapLoader:
         table = self.forward if direction == 'forward' else self.backward
         if not table:
             return source
-        
+
+        mods = self.forward_modifiers if direction == 'forward' else self.backward_modifiers
+
         # Sort by length descending so longer phrases match first
         # "listen for" must match before "listen" alone
         sorted_keys = sorted(table.keys(), key=len, reverse=True)
-        
+
         result = source
-        
+
         # Process line by line to avoid translating inside strings and comments
         lines_out = []
         for line in result.splitlines():
@@ -314,7 +364,7 @@ class LangmapLoader:
             if stripped.startswith('//') or stripped.startswith('#'):
                 lines_out.append(line)
                 continue
-            
+
             # Don't translate inside strings (simple heuristic)
             # Split on string boundaries, only translate non-string segments
             segments = re.split(r'("(?:[^"\\]|\\.)*")', line)
@@ -326,6 +376,27 @@ class LangmapLoader:
                     # Translate this segment
                     for key in sorted_keys:
                         val = table[key]
+                        mod = mods.get(key)
+                        # FIX-1: STRING-MATCH modifiers, applied here (not jobmap -- these
+                        # are pure regex-matching behavior, no grammatical role involved).
+                        # match.case overrides the otherwise-default case-insensitive
+                        # match; ignore.case is that same default, just explicit. Every
+                        # existing entry (no modifier at all) keeps today's behavior
+                        # unchanged -- case-insensitive matching, verified by the
+                        # Klingon/Emoji round-trip tests still passing.
+                        case_flags = 0 if mod == 'match.case' else re.IGNORECASE
+                        # keep.whitespace: require the EXACT whitespace the entry was
+                        # written with (today's literal-escape behavior). Without it, a
+                        # multi-word key tolerates any run of whitespace between its
+                        # words (a source with "listen   for" or a wrapped line still
+                        # matches "listen for") -- the literal reading of "preserve
+                        # whitespace in matching": without the modifier, whitespace is
+                        # NOT strictly preserved/required.
+                        if mod == 'keep.whitespace' or ' ' not in key:
+                            key_pattern = re.escape(key)
+                        else:
+                            key_pattern = r'\s+'.join(re.escape(p) for p in key.split(' '))
+
                         # Accent-insensitive match. A developer typing `metodo` for `método`
                         # otherwise gets NO substitution and the word becomes an ordinary
                         # identifier: the file still compiles, and silently means something
@@ -339,37 +410,22 @@ class LangmapLoader:
                             _fpat = (r'(?<![a-zA-Z_])' + re.escape(_folded)
                                      + r'(?![a-zA-Z_])')
                             seg = re.sub(_fpat, val, seg, flags=re.IGNORECASE)
-                        # Word-boundary aware replacement (case insensitive)
-                        pattern = r'(?<![a-zA-Z_])' + re.escape(key) + r'(?![a-zA-Z_])'
-                        seg = re.sub(pattern, val, seg, flags=re.IGNORECASE)
+                        # Word-boundary aware replacement
+                        pattern = r'(?<![a-zA-Z_])' + key_pattern + r'(?![a-zA-Z_])'
+                        seg = re.sub(pattern, val, seg, flags=case_flags)
                     new_segments.append(seg)
             lines_out.append(''.join(new_segments))
-        
-        return '\n'.join(lines_out)
 
-    @classmethod
-    def from_journey(cls, journey_path: Path) -> dict[str, 'LangmapLoader']:
-        """
-        Read a journey.mho file and extract language pack declarations.
-        Returns dict of {lang_code: LangmapLoader} for all declared mappings.
-        """
-        packs = {}
-        if not journey_path.exists():
-            return packs
-        
-        content = journey_path.read_text(encoding='utf-8')
-        # Simple extraction — look for 'using' followed by a .langmap path
-        for match in re.finditer(r'using\s+([^\s\n]+\.langmap)', content):
-            map_path = journey_path.parent / match.group(1)
-            try:
-                loader = cls(map_path)
-                # Derive lang code from filename
-                stem = map_path.stem  # e.g. en-klingon or kl-en
-                packs[stem] = loader
-            except FileNotFoundError:
-                pass
-        
-        return packs
+        # `source.splitlines()` above discards whether the original ended in a newline
+        # (both "a\n" and "a" split to ['a']), so a plain '\n'.join() silently drops a
+        # trailing newline on every call -- confirmed live: translating and then
+        # translating back never reproduces the original bytes, only something that
+        # LOOKS identical when printed. A round-trip is the whole point of a `<->`
+        # pack; losing one byte on every single translate silently breaks it.
+        result = '\n'.join(lines_out)
+        if source.endswith('\n') and not result.endswith('\n'):
+            result += '\n'
+        return result
 
 
 def _normalize_particled_closers(source: str) -> str:
@@ -388,7 +444,27 @@ def _normalize_particled_closers(source: str) -> str:
     return '\n'.join(out) + ('\n' if source.endswith('\n') else '')
 
 
-def preprocess_source(source: str, lang: str | None, 
+def find_pack_for_language(lang: str, maps_dir: str | Path | None = None) -> Path | None:
+    """Look for a `.langmap` pack for `lang` in the local pack directory, by the same
+    naming convention `preprocess_source`/`cmd_translate` already use (`en-<lang>`,
+    `<lang>-en`, bare `<lang>`). Returns the path if found, else None -- no network
+    registry client exists in this codebase (`registry.mohio.io` is documented intent,
+    not built), so "registry lookup" is this local-directory lookup, today.
+    """
+    if maps_dir is None:
+        import mohio_data
+        maps_dir = mohio_data.MAPS_DIR
+    maps_dir = Path(maps_dir)
+    lang_lower = (lang or '').lower()
+    for candidate in (maps_dir / f"en-{lang_lower}.langmap",
+                      maps_dir / f"{lang_lower}-en.langmap",
+                      maps_dir / f"{lang_lower}.langmap"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def preprocess_source(source: str, lang: str | None,
                        maps_dir: str | Path | None = None,
                        langmap_path: str | Path | None = None) -> str:
     """

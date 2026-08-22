@@ -29,12 +29,24 @@ _DECLARED_VARS = set()
 
 def _name_expr(name):
     """Resolve a bare name read in a client value: a held page var, the response
-    var inside a send branch, an event datum, else the listened element's value."""
+    var inside a send branch, an event datum, else fail loud."""
     if name in _DECLARED_VARS:
         return f"_moState[{json.dumps(name)}]"
     if name == 'result':
         return "result"
-    return _DATUM.get(name, 'event.target.value')
+    if name in _DATUM:
+        return _DATUM[name]
+    # T1-SILENT-SWEEP-BATCH7 (2026-08-15): an unrecognized name used to silently fall back to
+    # 'event.target.value' -- wrong JS shipped to real browsers with no error at compile or
+    # runtime, for e.g. a typo'd event datum or a `hold`-declared var referenced before its
+    # own compile_listeners() pass has run (compile_listeners always collects every declared
+    # var across all listeners FIRST, so a genuinely declared var is always in _DECLARED_VARS
+    # by the time this runs -- this only fires on a name that is neither declared nor a known
+    # event datum nor `result`).
+    raise ValueError(
+        f"'the {name}' is not a recognized client value. Expected one of: "
+        f"{', '.join(sorted(_DATUM.keys()))}, 'result' (inside a send branch), or a "
+        f"page var declared with 'hold'.")
 
 # Human-intent event names mapped to DOM events. Unknown names pass through raw,
 # so a raw DOM event like `listen for keydown on ...` still works (escape hatch).

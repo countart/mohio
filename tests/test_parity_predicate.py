@@ -34,13 +34,17 @@ def check(label, got, expected):
     _p += ok; _f += (not ok)
 
 
-def result(body):
+def raw_result(body):
     prog = ("shape S\n    method POST\nshape: done\n"
             "listen for\n    new sh.S at /x\n"
             + "\n".join("        " + l for l in body.splitlines())
             + "\n    new: done\nlisten: done\n")
-    r = MohioInterpreter().run(transform(_P.parse(prog), prog),
-                               request={"_method": "POST", "_path": "/x"})
+    return MohioInterpreter().run(transform(_P.parse(prog), prog),
+                                  request={"_method": "POST", "_path": "/x"})
+
+
+def result(body):
+    r = raw_result(body)
     v = getattr(r, "value", r)
     return v.get("body") if hasattr(v, "get") else v
 
@@ -72,7 +76,13 @@ def fails_loud(label, body, phrase):
     raised = False
     msg = ""
     try:
-        result(body)
+        r = raw_result(body)
+        # A _Raise reaching give back's value is caught by run() and formatted into a
+        # {'status', 'body'} response instead of propagating as a Python exception (matching
+        # real end-to-end `mio run` behavior) -- `2 is frobnicate` now fails loud this way,
+        # via T1-EVAL-SIMPLE-FAILLOUD's user-facing undeclared-variable check.
+        if isinstance(r, dict) and r.get('status', 200) >= 400:
+            raised, msg = True, str(r.get('body', ''))
     except Exception as e:
         raised, msg = True, str(e)
     ok = raised and phrase in msg
@@ -88,7 +98,7 @@ fails_loud("'abc' is even fails loud",
 
 print("\n=== the wider silent-false trap: `is <undefined word>` fails loud ===")
 fails_loud("`2 is frobnicate` (undefined word) fails loud",
-           'check 2\n    when 2 is frobnicate\n        verdict "x"\ncheck: done', "unknown name")
+           'check 2\n    when 2 is frobnicate\n        verdict "x"\ncheck: done', "not declared")
 
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

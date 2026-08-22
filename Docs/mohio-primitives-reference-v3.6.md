@@ -12,6 +12,15 @@
 >> many listed services/primitives (`mioai.*`, `ai.chain`, `ai.override`, most of the stream
 >> and `mioconnect`/`miopdf`/`miosearch` surface) are **not built**. **Do not copy syntax from
 >> this file — verify every form against the Language Reference and the spine before using it.**
+>>
+>> **Framing correction (2026-08-11):** the "Nine-Prefix Modifier System" section below and the
+>> "prefix system" language throughout this file are RETIRED, INCORRECT framing — see
+>> `CLAUDE.md`'s "Dot Connector System" and `PARSE-COST-MEASUREMENT.md`. The dot is a GROUPING
+>> DIRECTIVE (it joins two or more words into one unambiguous unit), not a fixed set of nine
+>> semantic "prefixes" attached to a verb — `on.failure` is `on` + `failure`, neither word a
+>> verb; the dot's job is identical for `db.items` (scope + name) and `as.int` (cast). The
+>> category table below (`by.`/`do.`/`on.`/etc.) is also stale as an exhaustive list — do not
+>> treat it as the complete word set.
 
 ## Version 3.6 · April 2026 · Particular LLC
 
@@ -133,13 +142,31 @@ Structural declarations that run before logic. They define the world. They are c
 
 ### MioQL — match, where, order, group
 
+> **Correction (2026-08-11), verified live:** inline `match.unique`/`match.any`/`match.none`/
+> `match.all` (the dot-modifier forms shown below, as a prefix on a bare `match` line) are
+> confirmed SEMANTICALLY INERT today — the transformer discards which modifier token was used
+> and always emits a plain AND match, identical to bare `match`. They do NOT enforce
+> "exactly one," OR-match, exclusion, or any distinct behavior; the `// error if not exactly
+> one` / `// one or more must exist` / etc. comments below are ASPIRATIONAL, not real. Real,
+> working alternatives exist for two of these: `check unique` is a genuinely functional block
+> (`check unique in db.T / match field to value / when empty / otherwise`, plain `match` — see
+> `Docs/mioql-user-guide.md`). `match.unique` itself carries no special meaning there since
+> T1-CHECK-UNIQUE-REDESIGN (2026-08-11): `check unique` now routes through the same shared
+> `match_clause` as every other verb block, so `match.unique` still parses but is discarded
+> exactly like the inert modifiers above, and `on.success`/`on.failure` are operational only
+> (did the query run), never the available/taken answer. OR-matching is real via the `match any` BLOCK
+> form (`match any / field to value / field to value / match any: done` — see
+> `Docs/Mohio-Language-Reference-Pioneer-Edition.md`), not the inline `match.any` modifier.
+> `match.none`/`match.all` as inline modifiers have no working equivalent today. Zero real
+> corpus usage of the inline modifier forms was found either (`PARSE-COST-MEASUREMENT.md`).
+
 ```mohio
 // match — record identity
 match id to request.id
-match.unique email to request.email   // error if not exactly one
-match.any member_id to member.id       // one or more must exist
-match.none email to request.email      // conflict check
-match.all status to "active"           // every matching record
+match.unique email to request.email   // NOT enforced -- see correction above
+match.any member_id to member.id       // NOT enforced -- see correction above
+match.none email to request.email      // NOT enforced -- see correction above
+match.all status to "active"           // NOT enforced -- see correction above
 
 // where — conditions
 where amount is above 1000

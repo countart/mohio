@@ -172,6 +172,36 @@ r5d = it5c.run_with_session(prog5, {'_method': 'POST', '_path': '/p', 'command':
 check("an absolute-expired session is rejected even when idle-fresh (independent mechanisms)",
       sid_of(r5d) != sid5c, sid_of(r5d))
 
+# T1-AUDIT-COVERAGE-GAPS Part E1 (2026-08-17): session expiry/invalidation is a
+# security-relevant state change, same as rotation (section 4 above, audited via
+# 'session_rotated') -- was previously silent. Reusing the idle-expiry repro from case 5
+# above: the invalidation that fires when sid5a is presented again must now audit.
+_log = it5._audit_logs.get('security_audit_log', [])
+check("an idle-expired session's invalidation writes a security_audit_log entry",
+      any(e.get('event') == 'session_invalidated' and e.get('reason') == 'expired'
+          for e in _log), _log)
+
+# Test-strength check (content-safety review, 2026-08-19): the invalidation write must go
+# through _audit_event, not a hand-rolled call straight to _audit_chained_save (the M2/M3
+# bypass pattern the architectural rule forbids repeating). Spy on the real bound method,
+# reusing the same idle-expiry repro so the assertion covers the real dispatch path.
+_calls = []
+_orig_audit_event = MohioInterpreter._audit_event
+def _spy_audit_event(self, log_name, entry, ctx):
+    _calls.append((log_name, entry.get('event'), entry.get('reason')))
+    return _orig_audit_event(self, log_name, entry, ctx)
+MohioInterpreter._audit_event = _spy_audit_event
+try:
+    it5e = MohioInterpreter(); sessions5e = _InMemorySessionStore()
+    r5e = it5e.run_with_session(prog5, {'_method': 'POST', '_path': '/p', 'command': 'x'}, None, sessions5e)
+    sid5e = sid_of(r5e)
+    sessions5e.get(sid5e, None)._last_accessed = time.time() - 3600
+    it5e.run_with_session(prog5, {'_method': 'POST', '_path': '/p', 'command': 'x'}, sid5e, sessions5e)
+finally:
+    MohioInterpreter._audit_event = _orig_audit_event
+check("the session-invalidation audit goes through _audit_event (not a bypass)",
+      ('security_audit_log', 'session_invalidated', 'expired') in _calls, _calls)
+
 # ── 6. Sector expire_rules tighten, never loosen (mirrors get_confidence_floor) ────
 it6 = MohioInterpreter()
 strict = SectorProfile(name='banking-strict')

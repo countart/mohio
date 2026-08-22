@@ -69,5 +69,35 @@ r = hit(['user'])
 check("MOHIO_TRUST_PROXY_ROLES=1 + wrong role -> 403", r.get('status') == 403, str(r))
 os.environ.pop('MOHIO_TRUST_PROXY_ROLES', None)
 
+# T1-AUDIT-COVERAGE-GAPS Part B (2026-08-17): a require-role denial is a security-relevant
+# event -- only grants were being audited, denials were silent. Verify the denial itself
+# writes to security_audit_log, using a fresh interpreter so the log is empty beforehand.
+it = MohioInterpreter()
+r = it.run(ast_transform(P.parse(SRC), SRC), request={'method': 'POST', 'path': '/', 'action': 'wipe'})
+_log = it._audit_logs.get('security_audit_log', [])
+check("a require-role denial (no roles) writes a security_audit_log entry",
+      any(e.get('event') == 'access_denied' and e.get('reason') == 'role_not_present'
+          for e in _log), _log)
+check("the denial entry names the required role",
+      any('admin' in (e.get('required_roles') or []) for e in _log), _log)
+
+# Test-strength check (content-safety review, 2026-08-19): the denial write must go through
+# _audit_event, not a hand-rolled call straight to _audit_chained_save (the M2/M3 bypass
+# pattern the architectural rule forbids repeating). Spy on the real bound method so a
+# regression back to that pattern is caught directly, not inferred from row shape.
+_calls = []
+_orig_audit_event = MohioInterpreter._audit_event
+def _spy_audit_event(self, log_name, entry, ctx):
+    _calls.append((log_name, entry.get('event'), entry.get('reason')))
+    return _orig_audit_event(self, log_name, entry, ctx)
+MohioInterpreter._audit_event = _spy_audit_event
+try:
+    it2 = MohioInterpreter()
+    it2.run(ast_transform(P.parse(SRC), SRC), request={'method': 'POST', 'path': '/', 'action': 'wipe'})
+finally:
+    MohioInterpreter._audit_event = _orig_audit_event
+check("the require-role denial audit goes through _audit_event (not a bypass)",
+      ('security_audit_log', 'access_denied', 'role_not_present') in _calls, _calls)
+
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

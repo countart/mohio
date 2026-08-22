@@ -153,14 +153,16 @@ Add a `where` or `match` to count a subset.
 
 ### check unique — is this value free?
 
-Signup polarity: `on.success` means the value is available (count is zero).
+`on.success` / `on.failure` are operational here (did the query run) — not the
+answer. The answer branches on `when empty` (available) and `otherwise`
+(taken), the same mechanism as `check <name> / when empty / otherwise`.
 
 ```
 check unique in db.users
-    match.unique email to "new@x.com"
-    on.success
+    match email to "new@x.com"
+    when empty
         show "available"
-    on.failure
+    otherwise
         show "taken"
 check: done
 ```

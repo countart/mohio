@@ -67,6 +67,38 @@ for s in ("maybe", "unsure", "N/A", "banana"):
 r, c, _ = _parse_response('{"result": true, "confidence": 0.95, "explanation": "x"}', "boolean")
 check("a real JSON boolean result is unaffected (regression guard)", r is True, str(r))
 
+# ── Gap 1b (T1-SILENT-SWEEP-BATCH6-10, 2026-08-15): the boolean/number sibling gap ──
+# for values that are neither a real boolean/number NOR a recognized string -- a missing
+# "result" (null) or a wrong-shaped value (list/dict) used to fall through unchanged
+# (boolean) or silently become 0.0 (number), indistinguishable from a genuine answer.
+
+for bad in (None, [1, 2], {"nested": True}):
+    raw = _json.dumps({"result": bad, "confidence": 0.9, "explanation": "x"})
+    try:
+        _parse_response(raw, "boolean")
+        check(f'_parse_response raises on unusable boolean value {bad!r} (was: passed through)',
+              False)
+    except AiProviderError as e:
+        check(f'_parse_response raises AiProviderError on unusable boolean value {bad!r}',
+              'unusable' in str(e).lower(), str(e))
+
+for bad in (None, "unknown", [1, 2]):
+    raw = _json.dumps({"result": bad, "confidence": 0.9, "explanation": "x"})
+    try:
+        _parse_response(raw, "number")
+        check(f'_parse_response raises on unusable number value {bad!r} (was: silently 0.0)',
+              False)
+    except AiProviderError as e:
+        check(f'_parse_response raises AiProviderError on unusable number value {bad!r}',
+              'unusable' in str(e).lower(), str(e))
+
+# Regression: a genuine 0 and a genuine non-zero number are both unaffected
+r0, _, _ = _parse_response('{"result": 0, "confidence": 0.9, "explanation": "x"}', "number")
+check("a real JSON zero is unaffected (regression guard, not mistaken for 'unusable')",
+      r0 == 0.0, str(r0))
+rn, _, _ = _parse_response('{"result": 42.5, "confidence": 0.9, "explanation": "x"}', "number")
+check("a real non-zero JSON number is unaffected (regression guard)", rn == 42.5, str(rn))
+
 # ── Gap 2: agent_turn's real tool-use extraction ────────────────────────────────────
 
 class _Block:

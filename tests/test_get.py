@@ -14,8 +14,12 @@ collection, get/grab return one record by an exact match.
   4. grab (the alias) fetches the same way
   5. a miss binds nothing (None) — no error, so `if x is none` stays valid
   6. on.success fires when a record is found
-  7. on.failure fires on a miss (the fetch-or-404 pattern)
+  7. on.failure does NOT fire on a miss (T1-GUARD-FAILOPEN Part B, 2026-08-19 --
+     supersedes the old "fetch-or-404" pattern this test used to lock: on.failure is now
+     reserved for a genuine driver error, matching retrieve's RUN-1 ruling; a real miss is
+     a legitimate empty result and runs the normal when/otherwise path instead)
   8. a miss without on.failure binds None and does not error
+  9. a real miss still fires when-empty/otherwise (the new, correct not-found channel)
 """
 import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -72,8 +76,8 @@ check("a miss binds None", run('get u from db.users\n    match id to 999\nget: d
 # 6-7. handlers
 check("on.success fires when found",
       run('get u from db.users\n    match id to 1\n    on.success\n        show "found"\nget: done\n') == ["found"])
-check("on.failure fires on a miss",
-      run('get u from db.users\n    match id to 999\n    on.failure\n        show "not-found"\nget: done\n') == ["not-found"])
+check("on.failure does NOT fire on a real miss (superseded fetch-or-404 pattern)",
+      run('get u from db.users\n    match id to 999\n    on.failure\n        show "not-found"\nget: done\n') == [])
 
 # 8. miss without handler does not error
 ok = True
@@ -82,6 +86,16 @@ try:
 except Exception:
     ok = False
 check("a miss without on.failure does not error", ok)
+
+# 9. a real miss fires when-empty/otherwise -- the new, correct not-found channel
+check("a real miss fires when-empty (the new not-found channel, RUN-1/Part-B consistent)",
+      run('get u from db.users\n    match id to 999\n'
+          '    when u is empty\n        show "MISS"\n    otherwise\n        show "HIT"\n'
+          'get: done\n') == ["MISS"])
+check("found still fires otherwise/HIT (regression guard)",
+      run('get u from db.users\n    match id to 1\n'
+          '    when u is empty\n        show "MISS"\n    otherwise\n        show "HIT"\n'
+          'get: done\n') == ["HIT"])
 
 print(f"\nRESULTS: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

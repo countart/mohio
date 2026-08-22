@@ -7,9 +7,26 @@ update-then-insert FALLBACK otherwise (sqlite). The `:memory:` suite only runs t
 NATIVE path -- the one zork's Postgres `saved_games` actually uses -- was untested. This exercises
 it against a REAL Postgres.
 
-It also pins the known limitation the native path inherits (the zork clean-DB schema item): Postgres
-`ON CONFLICT("field")` needs a UNIQUE constraint on that field. Upsert on the `id` PK is idempotent;
-upsert on a NON-id field with no unique index must FAIL LOUD (never silently duplicate).
+It also covers upsert on a NON-id field with no unique index. Upsert on the `id` PK is idempotent;
+so, now, is upsert on any other column.
+
+**SUPERSESSION (2026-08-20, T1-UPSERT-NO-CONSTRAINT, ruled Option A).** This file originally pinned
+a known LIMITATION as intended behavior: Postgres `ON CONFLICT("field")` needs a UNIQUE constraint
+on that field, so upsert on a NON-id field with no unique index "must FAIL LOUD (never silently
+duplicate)." That pin is superseded, deliberately and on the record -- not quietly edited to make a
+red test pass.
+
+The reason it is superseded, precisely: the 2026-07-31 GOAL was **never silently duplicate**, and
+that goal is unchanged -- it is still exactly what this file asserts. What changed is the MEANS.
+Fail-loud achieved "no duplicate" by refusing to work at all, which broke upsert on Mohio's OWN
+auto-created tables, since `ensure_table` never puts a unique on a non-`id` column -- so
+`upsert db.saved_games match session_id` 500'd on every call, on exactly the tables Mohio makes
+(reproduced live on Postgres 18: "there is no unique or exclusion constraint matching the ON
+CONFLICT specification"). Option A reaches the SAME goal with a `WHERE NOT EXISTS` guard: no
+duplicate row, AND it works with or without a constraint. It is a better means to July's actual
+end, so the goal survives and the mechanism is replaced. `save_if_not_exists`
+(mohio_interpreter.py:1319) had already ruled this identical question the identical way, in the
+same file, months earlier -- upsert was the outlier, not the precedent.
 
 Needs a real Postgres. If none is reachable it SKIPS (exit 0) -- it does NOT fall back to sqlite,
 because approximating with sqlite is exactly what hid this gap.
@@ -99,20 +116,33 @@ try:
         check("native upsert on id: the row holds the LATEST value (20)",
               row is not None and str(row[0]) == "20", f"score = {row!r}")
 
-    # --- native upsert on a NON-id field with no unique index: must FAIL LOUD (zork limitation) ---
+    # --- native upsert on a NON-id field with NO unique index -----------------------------------
+    # SUPERSEDED 2026-07-31 -> 2026-08-20 (T1-UPSERT-NO-CONSTRAINT, ruled Option A). This block
+    # used to assert the upsert FAILS LOUD. The GOAL it was protecting -- "never silently
+    # duplicate" -- is unchanged and is still exactly what is asserted below; only the MEANS
+    # changed. Option A reaches that goal with a `WHERE NOT EXISTS` guard instead of a constraint
+    # error, and additionally works on Mohio's own auto-created tables (never unique on a non-id
+    # column) -- the case the fail-loud broke outright. See this file's docstring.
     err = None
     try:
         run(f'connect db as postgres from env.DATABASE_URL\n'
-            f'save or update db.{T2}\n    match handle to "neo"\n    score 10\nsave: done\n')
+            f'save or update db.{T2}\n    match handle to "neo"\n    score 10\nsave: done\n'
+            f'save or update db.{T2}\n    match handle to "neo"\n    score 20\nsave: done\n')
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
-    # surfaced either as a raised exception or a 500 result -- both are fail-loud, neither is silent.
-    check("native upsert on a non-id field with no unique index FAILS LOUD (no silent duplicate)",
-          err is not None, "expected a failure (ON CONFLICT needs a unique constraint) but the upsert succeeded")
-    if err:
-        check("the failure points at the missing unique/ON CONFLICT constraint",
-              'conflict' in err.lower() or 'unique' in err.lower() or 'constraint' in err.lower(),
-              err[:200])
+    check("native upsert on a non-id field with no unique index SUCCEEDS (no constraint needed)",
+          err is None, f"upsert path errored: {err}")
+    if err is None:
+        c = psycopg2.connect(DSN); cur = c.cursor()
+        cur.execute(f'SELECT COUNT(*) FROM "{T2}" WHERE handle = %s', ('neo',))
+        n2 = cur.fetchone()[0]
+        cur.execute(f'SELECT score FROM "{T2}" WHERE handle = %s', ('neo',))
+        row2 = cur.fetchone(); cur.close(); c.close()
+        # THE ORIGINAL INTENT, unchanged and still the thing under test: never silently duplicate.
+        check("non-id upsert NEVER SILENTLY DUPLICATES -- exactly ONE row (July's actual goal)",
+              n2 == 1, f"row count = {n2}")
+        check("non-id upsert: the row holds the LATEST value (20) -- the second write was not lost",
+              row2 is not None and str(row2[0]) == "20", f"score = {row2!r}")
 finally:
     try: _drop()
     except Exception: pass

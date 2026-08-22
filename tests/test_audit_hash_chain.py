@@ -339,7 +339,12 @@ _P2 = _Lark(_g2, parser='earley', ambiguity='resolve', propagate_positions=True)
 _AI = ('connect db as sqlite from env.DATABASE_URL\namt 100\n'
        'ai.decide d returns boolean\n    confidence above 0.85\n    weigh amt\n'
        '    ai.audit to phi_audit_log\n    not confident\n        give back false\n'
-       'ai.decide: done\ngive back 200 "ok"\n')
+       'ai.decide: done\n'
+       # FIX-13 (f67cacb): declaring an ai.decide block no longer runs its body -- the bare
+       # invocation below does, matching test_ai_decide_invoke.py's documented pattern.
+       # Without it the decision never runs and phi_audit_log stays empty (rows=0).
+       'ai.decide d\n'
+       'give back 200 "ok"\n')
 
 
 def _run_ai():

@@ -54,23 +54,6 @@ class SymbolTable:
     def is_user_symbol(self, name: str) -> bool:
         return name.lower() in {n.lower() for n in self.all_user_names()}
     
-    def resolve_dotted(self, left: str, right: str) -> str:
-        """
-        Determine what kind of dotted expression left.right is.
-        Returns: 'builtin', 'field_access', 'unknown'
-        """
-        left_lower = left.lower()
-        if left_lower in self.builtins:
-            return 'builtin'
-        if self.is_user_symbol(left):
-            return 'field_access'
-        # Runtime variables (session, request, env at runtime) 
-        runtime_shapes = {'session', 'request', 'save', 'result', 
-                         'member', 'user', 'item', 'room', 'player'}
-        if left_lower in runtime_shapes:
-            return 'field_access'
-        return 'unknown'
-
 
 # -- Patterns for pre-pass extraction ----------------------------------
 

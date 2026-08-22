@@ -211,7 +211,12 @@ def test_using_chain_end_to_end():
         '    not confident\n'
         '        give back false\n'
         '    not confident: done\n'
-        'ai.decide: done\n'
+        'ai.decide: done\n\n'
+        # FIX-13 (f67cacb): ai.decide no longer runs its body at declaration time --
+        # declaring only defines it. The bare invocation below is what actually runs it,
+        # matching test_ai_decide_invoke.py's documented pattern. Without this line the
+        # body never executes and mock.resolved/decided_with stay at their init values.
+        'ai.decide isFraudulent\n'
     )
     MohioInterpreter(ai=mock).run(
         transform(parser.parse(src), src),

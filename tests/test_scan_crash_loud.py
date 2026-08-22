@@ -86,6 +86,26 @@ def main():
     check("never-store guard crash warns on stderr",
           "never-store (PCI/PII) guard" in err)
 
+    # 2b. Layer-2 AST construction crash (T1-SILENT-SWEEP-BATCH6-10, 2026-08-15) -- a
+    # genuine compiler bug in mohio_enforce.enforce (NOT a real MohioError, which is
+    # handled separately and already surfaces a real check error) used to `pass` here with
+    # NO warning at all, silently skipping every Layer-3 check that follows. cmd_check's OWN
+    # AST-build call is distinguished by scan=False (an earlier Layer-1 validation call
+    # inside _parse_and_validate also calls enforce() with build_ast=False -- that one must
+    # keep working normally, or the file never even reaches cmd_check's own try block).
+    _orig_enforce = mohio_enforce.enforce
+    def _enforce_crash_on_scan_false(*a, **k):
+        if k.get('scan') is False:
+            raise RuntimeError("injected Layer-2 AST-build crash")
+        return _orig_enforce(*a, **k)
+    mohio_enforce.enforce = _enforce_crash_on_scan_false
+    try:
+        _, err = _run_check_capturing(CLEAN_SRC)
+    finally:
+        mohio_enforce.enforce = _orig_enforce
+    check("Layer-2 AST-build crash warns on stderr",
+          "[enforce] WARNING" in err and "Layer 2 AST construction" in err)
+
     # 3. clean file, no injected crash -> NO warning (false-positive guard)
     _, err = _run_check_capturing(CLEAN_SRC)
     check("clean file produces no scan-incomplete warning",

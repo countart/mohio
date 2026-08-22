@@ -35,7 +35,8 @@ sys.path.insert(0, ROOT); os.chdir(ROOT)
 os.environ.pop('MOHIO_FRAMEWORK_GRADES', None)   # no deployment overrides during the invariant check
 
 from mohio_audit_grades import (GRADES, _rank, satisfies, stronger, required_grade,
-                                FRAMEWORK_AUDIT_GRADE, UNRATIFIED_MAPPINGS)
+                                FRAMEWORK_AUDIT_GRADE, UNRATIFIED_MAPPINGS,
+                                framework_grade_overrides)
 
 _p = _f = 0
 def check(label, cond, detail=""):
@@ -96,6 +97,48 @@ check("satisfies(a,b) is exactly rank(a) >= rank(b) for every grade pair", not s
 str_fail = [(a, b) for a in GRADES for b in GRADES
             if stronger(a, b) != (a if _rank(a) >= _rank(b) else b)]
 check("stronger(a,b) is the higher-ranked grade for every pair", not str_fail, str(str_fail))
+
+# ── T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): framework_grade_overrides() malformed entries
+# used to be silently dropped with no warning -- an operator's attempt to STRENGTHEN a
+# framework's grade could silently no-op. Now warns to stderr per bad entry; the common
+# unset/empty case stays silent.
+import io as _io
+import contextlib as _contextlib
+
+def _run_overrides(env_val):
+    old = os.environ.get('MOHIO_FRAMEWORK_GRADES')
+    if env_val is None:
+        os.environ.pop('MOHIO_FRAMEWORK_GRADES', None)
+    else:
+        os.environ['MOHIO_FRAMEWORK_GRADES'] = env_val
+    buf = _io.StringIO()
+    with _contextlib.redirect_stderr(buf):
+        result = framework_grade_overrides()
+    if old is not None:
+        os.environ['MOHIO_FRAMEWORK_GRADES'] = old
+    else:
+        os.environ.pop('MOHIO_FRAMEWORK_GRADES', None)
+    return result, buf.getvalue()
+
+r, err = _run_overrides(None)
+check("unset MOHIO_FRAMEWORK_GRADES -- empty result, no warning (common case stays silent)",
+      r == {} and err == "", (r, err))
+
+r, err = _run_overrides("glba=append_only")
+check("a valid entry parses correctly, no warning", r == {"glba": "append_only"} and err == "",
+      (r, err))
+
+r, err = _run_overrides("glba-append_only")
+check("an entry with no '=' is dropped AND warned (was: silently dropped)",
+      r == {} and err.strip() != "", (r, err))
+
+r, err = _run_overrides("glba=apend_only")
+check("an unrecognized grade word is dropped AND warned (was: silently dropped)",
+      r == {} and err.strip() != "", (r, err))
+
+r, err = _run_overrides("glba=apend_only,sox=worm")
+check("one bad + one good entry -- good one survives, bad one is warned, not silently both dropped",
+      r == {"sox": "worm"} and err.strip() != "", (r, err))
 
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

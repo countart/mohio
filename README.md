@@ -387,7 +387,7 @@ held back pending a provisional patent filing.)
 
 ## Current state
 
-Current release: 4.8.2
+Current release: 4.9.0
 
 Mohio is built in the open and moving fast — the compiler updates multiple times a
 day. The core language is solid and tested; the surface around it is filling in.
@@ -540,6 +540,6 @@ For licensing: **hello@mohio.io**
 
 **Mohio Language Project · Particular LLC · BSL 1.1**
 
-*4.8.2 · Write intent. Execute reason. See everything.*
+*4.9.0 · Write intent. Execute reason. See everything.*
 
 </div>

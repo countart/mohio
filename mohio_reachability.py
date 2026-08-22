@@ -1298,7 +1298,14 @@ def scan_audit_grade_requirement(program):
                 path = find_sector_profile(name)
                 if path:
                     profile_found = True
-                    frameworks = list(getattr(load_sector_profile(path), 'compliance', []) or [])
+                    # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): was `load_sector_profile(path)` --
+                    # load_sector_profile expects a SECTOR NAME (it re-resolves to a path
+                    # internally via find_sector_profile), not a path. Passed a path, its
+                    # internal re-resolution could never match any real filename, so it always
+                    # returned None -- frameworks stayed permanently [] and the WORM/append-only
+                    # audit-grade warning below never fired for any real sector with a real
+                    # profile.
+                    frameworks = list(getattr(load_sector_profile(name), 'compliance', []) or [])
             except Exception:
                 profile_found = False
             if not profile_found:
@@ -1469,7 +1476,24 @@ def scan_sector_route_unauthenticated(program):
             return
         if not is_dataclass(node):
             return
-        if type(node).__name__ in ('PageDecl', 'ListenerDecl', 'RequestBlock', 'NewBlock'):
+        # T1-SILENT-SWEEP-BATCH11 (2026-08-15): this tuple used to carry two dead strings --
+        # 'RequestBlock' is a Python-level alias for RequestInboundBlock (mohio_ast.py:1583,
+        # `RequestBlock = RequestInboundBlock`), so type(node).__name__ could never equal it
+        # (a class's __name__ is fixed at definition, unaffected by an alias assigned to it
+        # elsewhere); 'ListenerDecl' never existed as a class anywhere in this codebase. Both
+        # were removed as dead weight, and at the time this check's real coverage was left as
+        # just PageDecl/NewBlock -- `request for sh.X` routes were silently never covered by
+        # this security scanner at all, the same disease the sweep this tuple came from was
+        # named for. FIXED (2026-08-15, attended): 'RequestInboundBlock' is the real class
+        # name (confirmed via `class RequestInboundBlock(Node)`, mohio_ast.py). Reachability
+        # rule: a `request for sh.X [at /path]` listener reaches its body through
+        # _exec_ListenBlock's GET/REQUEST-gated dispatch (mohio_interpreter.py, `_method_ok`)
+        # -- the identical listener-dispatch mechanism `new sh.X` uses for POST, just gated to
+        # GET/REQUEST instead of POST/NEW/PUT. This scanner does no deeper reachability
+        # analysis for PageDecl/NewBlock either (pure type-match anywhere in the tree, no
+        # check that a listener is inside a reachable `listen for`), so RequestInboundBlock is
+        # covered the same way, not a bespoke stricter rule.
+        if type(node).__name__ in ('PageDecl', 'NewBlock', 'RequestInboundBlock'):
             if reads_data(node) and not contains(node, RequireRoleDecl):
                 where = getattr(node, 'path', None) or getattr(node, 'name', '') or 'a route'
                 warnings.append(CompileError(
@@ -1662,15 +1686,25 @@ def run_scans(program):
     also never be SKIPPED because a caller forgot it existed -- which is exactly what a
     hand-copied list guarantees will happen eventually.
     """
+    import sys as _sys
     errors, warnings = [], []
     for scan in ERROR_SCANS:
         try:
             errors.extend(scan(program))
-        except Exception:
-            pass
+        except Exception as e:
+            # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): used to `pass` here -- a scanner that
+            # raises on some particular program silently dropped its ENTIRE contribution to
+            # `mio check`, with `mio check` still reporting a clean pass for that program.
+            # Still never takes down the check itself (the other scanners still run, the
+            # program is not refused) -- just no longer invisible when it happens.
+            print(f"  [mio check] internal warning: scanner {getattr(scan, '__name__', scan)!r} "
+                  f"raised {type(e).__name__}: {e} -- its findings for this run are incomplete.",
+                  file=_sys.stderr)
     for scan in WARNING_SCANS:
         try:
             warnings.extend(scan(program))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [mio check] internal warning: scanner {getattr(scan, '__name__', scan)!r} "
+                  f"raised {type(e).__name__}: {e} -- its findings for this run are incomplete.",
+                  file=_sys.stderr)
     return errors, warnings

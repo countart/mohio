@@ -144,6 +144,43 @@ check("after login, the covered subpath /admin/users -> 200 too",
       r.status_code == 200 and "[ADMIN_USERS]" in r.text, f"status={r.status_code} body={r.text[:150]}")
 
 
+# T1-AUDIT-COVERAGE-GAPS Part B (2026-08-17): a private: denial is a security-relevant event,
+# only grants were being audited before -- verify the denial itself writes to
+# security_audit_log. Fresh interp+client (not make_client, which doesn't expose interp) so
+# the log is empty beforehand and the denial is unambiguous.
+_prog_audit = transform(_P.parse(_ACCESS), _ACCESS)
+_interp_audit = MohioInterpreter(ai=MockAI())
+_c_audit = TestClient(create_app(MohioServer(_prog_audit, _interp_audit)), raise_server_exceptions=False)
+r = _c_audit.get("/admin")
+_log = _interp_audit._audit_logs.get('security_audit_log', [])
+check("private: /admin denial writes a security_audit_log entry",
+      r.status_code == 403 and any(
+          e.get('event') == 'access_denied' and e.get('reason') == 'private_path_unauthenticated'
+          for e in _log), _log)
+check("the denial entry names the denied path",
+      any(e.get('path') == '/admin' for e in _log), _log)
+
+# Test-strength check (content-safety review, 2026-08-19): the denial write must go through
+# _audit_event, not a hand-rolled call straight to _audit_chained_save (the M2/M3 bypass
+# pattern the architectural rule forbids repeating). Spy on the real bound method, driven
+# through real HTTP so the assertion covers the actual dispatch path, not a shortcut.
+_calls = []
+_orig_audit_event = MohioInterpreter._audit_event
+def _spy_audit_event(self, log_name, entry, ctx):
+    _calls.append((log_name, entry.get('event'), entry.get('reason')))
+    return _orig_audit_event(self, log_name, entry, ctx)
+MohioInterpreter._audit_event = _spy_audit_event
+try:
+    _prog_spy = transform(_P.parse(_ACCESS), _ACCESS)
+    _interp_spy = MohioInterpreter(ai=MockAI())
+    _c_spy = TestClient(create_app(MohioServer(_prog_spy, _interp_spy)), raise_server_exceptions=False)
+    _c_spy.get("/admin")
+finally:
+    MohioInterpreter._audit_event = _orig_audit_event
+check("the private: denial audit goes through _audit_event (not a bypass)",
+      ('security_audit_log', 'access_denied', 'private_path_unauthenticated') in _calls, _calls)
+
+
 # ══════════════════════════════════════════════════════════════════════
 # GROUP B -- flow: converted from silent no-op to fail-loud (501)
 # ══════════════════════════════════════════════════════════════════════
@@ -339,6 +376,21 @@ r_c = _pathless(_NO_PRIVATE_SINGLE, [{"_method": "GET"}])[0]
 check("(c) pathless request, journey has NO private: entries -> unaffected (200)",
       r_c.get('status') == 200 and '[HOME_NO_PRIVATE]' in str(r_c.get('body', '')),
       str(r_c))
+
+# T1-AUDIT-COVERAGE-GAPS Part B: the pathless deny-by-default denial (case (a) above) is the
+# same security-relevant event as the path-known case -- verify it audits too, same as (a)'s
+# 403 assertion but inspecting the interpreter directly (not through _pathless, which discards
+# its interpreter per call).
+_prog_pathless = transform(_P.parse(_PRIVATE_SINGLE), _PRIVATE_SINGLE)
+_interp_pathless = MohioInterpreter()
+_r_pathless = _interp_pathless.run_with_session(
+    _prog_pathless, {"_method": "GET"}, "e2e-pathless-audit", _InMemorySessionStore())
+_log = _interp_pathless._audit_logs.get('security_audit_log', [])
+check("pathless private: denial writes a security_audit_log entry",
+      _r_pathless.get('status') == 403 and any(
+          e.get('event') == 'access_denied' and e.get('reason') == 'private_path_unauthenticated'
+          and e.get('path') is None
+          for e in _log), _log)
 
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)
