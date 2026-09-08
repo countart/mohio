@@ -24,4 +24,9 @@ ai.decide critical_decision returns boolean
         show "AI reasoning unavailable"
 ai.decide: done
 
+// Declaring an ai.decide does not run it -- the bare name on its own line does.
+// Without this line the block above registers and never executes: no weigh, no
+// confidence gate, no fallback, and no error either.
+ai.decide critical_decision
+
 show "critical_decision complete"

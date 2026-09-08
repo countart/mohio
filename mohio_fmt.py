@@ -72,7 +72,7 @@ def dequote_paths(src: str, parser) -> tuple[str, int]:
         tree = parser.parse(src)
     except Exception:
         return src, 0   # unparseable for other reasons -- leave to the normal path
-    rules = {'page_decl', 'listen_block', 'new_block',
+    rules = {'listen_block', 'new_block',
              'request_inbound_block', 'connection_block'}
     spans = []  # (start_pos, end_pos, replacement)
     for st in tree.iter_subtrees():

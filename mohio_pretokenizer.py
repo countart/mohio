@@ -134,6 +134,31 @@ def unmark(token_value: str) -> str:
     return token_value
 
 
+def unmark_text(text: str) -> str:
+    """Strip EVERY marker occurrence from a run of raw text. For captured block bodies.
+
+    `unmark` strips a LEADING marker, which is right for a single token. A raw block body is not
+    a token: `render` and `sql` capture whole lines verbatim (`raw_show_line` / `raw_sql_line`
+    are `/[^
+]+/`), and the marker sits in the MIDDLE of them, so `unmark` slides straight past
+    it. That is how `<h1>Thanks, {{ __USERVAR__contact.name }}</h1>` reached the interpolator and
+    made `examples/contact.mho` -- a copyable reference example -- answer a real POST with
+    "unknown variable '__USERVAR__contact'".
+
+    It lives HERE, beside `unmark` and `unmark_dotted`, rather than as a `.replace()` at each
+    capture site, because the marker is this module's invention and knowledge of its spelling
+    should not spread. Two call sites already need it; a third stripper written by hand at the
+    next one is how a mechanism becomes a habit.
+
+    The pretokenizer is LINE-BASED and block-unaware -- it skips comments and quoted strings and
+    nothing else -- so it cannot tell a markup line from a code line and cannot stop marking at
+    the source. Undoing it at capture is the available fix. The real repair is a resolution layer
+    that decodes a name once instead of every consumer stripping a prefix, which is spine-era
+    work and deliberately not attempted here.
+    """
+    return text.replace(USERVAR_MARKER, '') if text else text
+
+
 def unmark_dotted(token_value: str):
     """
     Convert a marked token back to (left, right) parts.

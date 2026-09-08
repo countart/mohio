@@ -6,9 +6,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mohio"
-version = "4.9.0"
+version = "5.0.0"
+readme = "README.md"
 description = "Mohio, an AI-native language where AI reasoning and compliance are compiler-enforced primitives."
-requires-python = ">=3.10"
+# The floor is what the suite is ACTUALLY exercised on, and that is 3.12: the development
+# machine runs 3.12.6 and every full-suite run to date has been on it. ">=3.13" excluded the
+# only interpreter the tests have ever passed on -- it named the deployment image (Dockerfile
+# and Dockerfile.jproof build on python:3.13-slim, pioneer-digest.yml pins 3.13) and called
+# that the floor, which had it backwards: those are the CEILING that is also tested, not the
+# minimum that is required. The real minimum is 3.12, because the PEP-701 f-strings in this
+# codebase need 3.12+. A 3.12 floor still admits every 3.13 image above it.
+# Re-ruled 2026-09-02 (an earlier pass had applied 3.13 before this was checked).
+requires-python = ">=3.12"
 dependencies = ["lark>=1.1.0", "anthropic>=0.96.0", "cryptography>=49.0.0", "tiktoken>=0.13.0", "bcrypt>=4.0", "nh3>=0.2.0"]
 
 [project.optional-dependencies]

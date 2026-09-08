@@ -3,22 +3,26 @@
 // particularllc-skeleton.mho
 //
 // A minimal, VERIFIED skeleton for rebuilding particularllc.com in Mohio.
-// Serves a custom home at / and each section as a `page` route, plus the one
-// dynamic piece (the news/articles pull) as a `find` inside a page. This is the
-// exact structure the site needs: static pages + one dynamic list.
+// The home page is served BY CONVENTION -- the file answers `/` with whatever it
+// gives back, so no routing code is needed for it at all. Each section is a
+// `listen for` route, and the one dynamic piece (the news/articles pull) is a
+// `find` inside its route. This is the exact structure the site needs: a home
+// page, static sections, and one dynamic list.
 //
 // Run:   python mio.py serve examples/particularllc-skeleton.mho
 //
-// IMPORTANT: paths after `at` are UNQUOTED path literals -- `page at /about`,
-// never `page at "/about"`. A quoted path does not register and the page will
-// not serve. (This is the one catch; a grammar change to also accept the quoted
-// form is a separate item.)
+// IMPORTANT: paths after `at` are UNQUOTED path literals -- `at /software`,
+// never `at "/software"`. A quoted path does not register and the route will
+// not serve; `mio fmt --write` unquotes it for you.
 
 connect db as sqlite from env.DATABASE_URL
 
-// ── Home (served at / -- the custom home route works today) ──────────────────
-page at /
-    give back 200 "<h1>Particular LLC</h1>
+shape Visit
+    referrer as text
+shape: done
+
+// ── Home (served at / by convention -- the file itself is the page) ───────────
+give back [200] "<h1>Particular LLC</h1>
 <p>Software, publishing, and consulting. Mooresville, NC.</p>
 <ul>
   <li><a href=\"/software\">Software (led by Mohio)</a></li>
@@ -26,34 +30,41 @@ page at /
   <li><a href=\"/consulting\">Consulting (ExecutiveKT)</a></li>
   <li><a href=\"/news\">News</a></li>
 </ul>"
-page: done
 
 // ── Static section pages ─────────────────────────────────────────────────────
-page at /software
-    give back 200 "<h1>Software</h1><p>Led by Mohio, an AI-native language.</p>"
-page: done
+listen for
+    request for sh.Visit at /software
+        give back [200] "<h1>Software</h1><p>Led by Mohio, an AI-native language.</p>"
+    request: done
+listen: done
 
-page at /publishing
-    give back 200 "<h1>Publishing</h1><p>Particular Reads.</p>"
-page: done
+listen for
+    request for sh.Visit at /publishing
+        give back [200] "<h1>Publishing</h1><p>Particular Reads.</p>"
+    request: done
+listen: done
 
-page at /consulting
-    give back 200 "<h1>Consulting</h1><p>ExecutiveKT. Reach us at hello@particularllc.com.</p>"
-page: done
+listen for
+    request for sh.Visit at /consulting
+        give back [200] "<h1>Consulting</h1><p>ExecutiveKT. Reach us at hello@particularllc.com.</p>"
+    request: done
+listen: done
 
 // ── News: the one dynamic piece (replaces articles.php) ──────────────────────
 // Find published articles newest-first, build the list, serve it. This is the
 // GATHER -> ACT arc with no AI in the middle.
-page at /news
-    find posts in db.articles
-        where published is true
-        order.down by id
-    find: done
+listen for
+    request for sh.Visit at /news
+        find posts in db.articles
+            where published is true
+            order.down by id
+        find: done
 
-    hold html "<h1>News</h1>"
-    repeat each p in posts
-        html (html & "<article><h2>" & p.title & "</h2><p>" & p.summary & "</p></article>")
-    repeat: done
+        hold html "<h1>News</h1>"
+        repeat each p in posts
+            html (html & "<article><h2>" & p.title & "</h2><p>" & p.summary & "</p></article>")
+        repeat: done
 
-    give back 200 html
-page: done
+        give back 200 html
+    request: done
+listen: done

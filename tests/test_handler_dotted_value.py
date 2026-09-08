@@ -65,8 +65,11 @@ _P = Lark(_g, parser="earley", ambiguity="resolve", propagate_positions=True)
 
 def handler_body(field):
     """Statement types inside the on.failure handler for `give back 200 r.<field>`."""
-    src = ('page at /x\n    retrieve r from db.t\n        match id to 1\n'
-           f'        on.failure give back 200 r.{field}\n    retrieve: done\npage: done\n')
+    src = ('shape Q\n    q as text\nshape: done\n'
+           'listen for\n    request for sh.Q at /x\n'
+           '        retrieve r from db.t\n            match id to 1\n'
+           f'            on.failure give back 200 r.{field}\n'
+           '        retrieve: done\n    request: done\nlisten: done\n')
     prog = transform(_P.parse(src), src)
     out = []
     def visit(n):
@@ -81,7 +84,8 @@ def handler_body(field):
             elif isinstance(v, list):
                 for i in v:
                     visit(i)
-    visit(prog.statements[0])
+    for st in prog.statements:
+        visit(st)
     return out[0] if out else []
 
 print("test_handler_dotted_value")
@@ -104,19 +108,7 @@ check("mio* call with params still parses",
       parses('miocookie.set "theme" to "dark"'), True)
 
 # End to end: the not-found path returns the message, the found path falls through.
-SRC = ('connect db as sqlite from env.DATABASE_URL\n'
-       'page at /x\n'
-       '    retrieve gate from db.puzzles\n'
-       '        match id to "p1"\n'
-       '        on.success\n'
-       '            retrieve flag from db.flags\n'
-       '                match flag_name to "nope"\n'
-       '                when flag is empty\n'
-       '                    give back 200 gate.failure\n'
-       '            retrieve: done\n'
-       '    retrieve: done\n'
-       '    give back 200 "REACHED-AFTER"\n'
-       'page: done\n')
+SRC = ('shape Q\n    q as text\nshape: done\nconnect db as sqlite from env.DATABASE_URL\nlisten for\n    request for sh.Q at /x\n        retrieve gate from db.puzzles\n            match id to "p1"\n            on.success\n                retrieve flag from db.flags\n                    match flag_name to "nope"\n                    when flag is empty\n                        give back 200 gate.failure\n                retrieve: done\n        retrieve: done\n        give back [200] "REACHED-AFTER"\n    request: done\nlisten: done\n')
 prog = transform(_P.parse(SRC), SRC)
 
 def serve(seed_flag):
@@ -144,7 +136,7 @@ check("the found path falls through past both blocks",
 # reports a genuinely unconditional return followed by a statement.
 check("no unreachable warning on the nested handler",
       len(scan_unreachable(prog)), 0)
-GENUINE = 'page at /x\n    give back 200 "first"\n    show "dead"\npage: done\n'
+GENUINE = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /x\n        give back [200] "first"\n        show "dead"\n    request: done\nlisten: done\n'
 check("a real unreachable statement still warns",
       len(scan_unreachable(transform(_P.parse(GENUINE), GENUINE))) > 0, True)
 

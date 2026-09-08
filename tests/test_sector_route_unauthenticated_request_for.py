@@ -14,9 +14,10 @@ Reachability rule (verified against `_exec_ListenBlock`/`_method_ok`, mohio_inte
 `request for sh.X [at /path]` listener reaches its body through the identical listener-dispatch
 mechanism `new sh.X` uses for POST -- the same `listen for` container, the same candidate-filter
 -> path/shape/fallback routing -- just gated to GET/REQUEST instead of POST/NEW/PUT. The scanner
-does no deeper reachability analysis for its existing PageDecl/NewBlock coverage either (a pure
+does no deeper reachability analysis for its existing NewBlock coverage either (a pure
 type-match anywhere in the tree, no check that a listener sits inside a dispatchable `listen
 for`), so RequestInboundBlock is covered the same way, not a bespoke stricter rule.
+(`PageDecl` was in this list until 2026-08-25; the `page` block is removed, so it is gone.)
 
 Corpus sweep (2026-08-15, all of examples/, cookbook/, start-here/, tests/, drafts/, tests/zork/):
 zero new findings. Only 4 files use `request for sh.` at all; 2 declare no sector (scanner exits
@@ -61,7 +62,7 @@ sector: financial
 connect db as sqlite from env.DATABASE_URL
 
 shape Acct
-    method GET
+    note as text
 shape: done
 
 listen for
@@ -79,7 +80,7 @@ sector: financial
 connect db as sqlite from env.DATABASE_URL
 
 shape Acct
-    method GET
+    note as text
 shape: done
 
 listen for
@@ -104,22 +105,12 @@ check("the identical `request for` route WITH require role is NOT flagged "
       "(a real, correctly-guarded route must not false-positive)",
       not warnings_protected, [w.message for w in warnings_protected])
 
-# Regression: the existing PageDecl/NewBlock coverage this scanner already had is unaffected.
-PAGE_UNPROTECTED = """\
-sector: financial
-connect db as sqlite from env.DATABASE_URL
-
-page Balance at /balance
-    retrieve acct from db.accounts
-        match id to 1
-    retrieve: done
-    render
-        <p>{{ acct }}</p>
-    render: done
-page: done
-"""
-warnings_page = scan(PAGE_UNPROTECTED)
-check("regression: the existing `page` route coverage still fires unaffected",
+# Regression: the NewBlock coverage this scanner already had is unaffected, and a `request for`
+# route that RENDERS (rather than giving back) is still flagged. The `page` block this fixture
+# used to be written with was removed 2026-08-25; the route shape it guarded is what matters.
+RENDER_UNPROTECTED = 'shape Q\n    q as text\nshape: done\nsector: financial\nconnect db as sqlite from env.DATABASE_URL\n\nlisten for\n    request for sh.Q at /balance\n        retrieve acct from db.accounts\n            match id to 1\n        retrieve: done\n        render\n            <p>{{ acct }}</p>\n        render: done\n    request: done\nlisten: done\n'
+warnings_page = scan(RENDER_UNPROTECTED)
+check("regression: a rendering `request for` route still fires unaffected",
       any('/balance' in w.message for w in warnings_page), [w.message for w in warnings_page])
 
 NEW_UNPROTECTED = """\
@@ -135,7 +126,7 @@ listen for
         save to db.accounts
             amount request.amount
         save: done
-        give back 201 "ok"
+        give back [201] "ok"
     new: done
 listen: done
 """

@@ -53,8 +53,8 @@ _clean = "\n".join(
 )
 _PARSER = Lark(_clean, parser="earley", ambiguity="resolve", propagate_positions=True)
 
-_INDEX = 'page at /\n    give back 200 "<h1>Index Page</h1>"\npage: done\n'
-_ABOUT = 'page at /about\n    give back 200 "<h1>About Page</h1>"\npage: done\n'
+_INDEX = 'give back [200] "<h1>Index Page</h1>"\n'
+_ABOUT = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /about\n        give back [200] "<h1>About Page</h1>"\n    request: done\nlisten: done\n'
 _CSS = "body { color: rebeccapurple; }\n"
 
 
@@ -158,7 +158,7 @@ def test_check_directory_passes_clean_tree(tmp_path):
 def test_check_directory_fails_on_broken_file(tmp_path):
     _write_app(tmp_path)
     # `give back` with no value is a hard error -- the whole-dir check must catch it.
-    (tmp_path / "bad.mho").write_text("page at /bad\n    give back\npage: done\n",
+    (tmp_path / "bad.mho").write_text('shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /bad\n        give back\n    request: done\nlisten: done\n',
                                       encoding="utf-8")
     r = _run_check(tmp_path)
     assert r.returncode == 1

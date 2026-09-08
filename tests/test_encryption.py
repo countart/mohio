@@ -90,8 +90,16 @@ def test_zone_seals_every_field():
     # round-trips back to plaintext
     got = _val(run(ZONE + DB + SAVE +
                    'find rows in db.intakes\nfind: done\ngive back 200 rows.first.notes\n'))
-    if str(got) != 'confidential':
-        fails.append(f"zone round-trip: got {got!r}")
+    # ROUND-TRIPS BACK FROM CIPHERTEXT, and is then MASKED on the way out. This used to expect
+    # bare 'confidential', which was the single-field egress leak: a [phi] field handed back on
+    # its own went out in the clear, because the egress mask decides by dict key and a scalar
+    # has none. That path now resolves the field by name like every other control.
+    #
+    # The property this test is really about is unchanged and is still what the check proves:
+    # the value came back DECRYPTED. Masked ciphertext is impossible, and '****tial' is the last
+    # four characters of 'confidential', so decryption plainly ran before the mask did.
+    if str(got) != '****tial':
+        fails.append(f"zone round-trip (decrypted, then masked on egress): got {got!r}")
     assert not fails, "zone failures:\n  " + "\n  ".join(fails)
 
 
@@ -108,7 +116,7 @@ def test_generic_zone_seal_no_class():
 def test_encryption_fails_loud_without_key():
     os.environ.pop('MOHIO_ENCRYPTION_KEY', None)
     body = run(SHAPE + DB + 'save to db.people\n    ssn "123-45-6789"\nsave: done\n'
-               'give back 200 "stored"\n')
+               'give back [200] "stored"\n')
     text = str(_val(body))
     assert 'key_missing' in text or 'encryption' in text, \
         f"expected fail-loud without key, got {text!r}"

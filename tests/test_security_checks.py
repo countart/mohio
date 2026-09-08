@@ -117,7 +117,7 @@ ai.decide screen_transaction returns boolean
     weigh amount, member_id
     ai.audit to fraud_audit_log
     not confident
-        give back 200 "Referred to manual review"
+        give back [200] "Referred to manual review"
 ai.decide: done"""
 
 # ai.decide below financial floor (0.60 < 0.85) — triggers SECTOR_VIOLATION
@@ -127,7 +127,7 @@ ai.decide screen_transaction returns boolean
     weigh amount, member_id
     ai.audit to fraud_audit_log
     not confident
-        give back 200 "Referred to manual review"
+        give back [200] "Referred to manual review"
 ai.decide: done"""
 
 # ai.decide below financial floor with sec.non_critical + reason — fully suppresses floor
@@ -138,7 +138,7 @@ ai.decide screen_transaction returns boolean
     weigh amount, member_id
     ai.audit to hint_audit_log
     not confident
-        give back 200 "Referred to manual review"
+        give back [200] "Referred to manual review"
 ai.decide: done"""
 
 # ai.decide valid for healthcare floor (0.95 — confidence 0.96 passes)
@@ -148,7 +148,7 @@ ai.decide suggest_diagnosis returns text
     weigh symptoms, history
     ai.audit to phi_audit_log
     not confident
-        give back 200 "Referred to clinician"
+        give back [200] "Referred to clinician"
 ai.decide: done"""
 
 # ai.decide below healthcare floor (0.85 < 0.95) — triggers SECTOR_VIOLATION
@@ -158,7 +158,7 @@ ai.decide suggest_diagnosis returns text
     weigh symptoms, history
     ai.audit to phi_audit_log
     not confident
-        give back 200 "Referred to clinician"
+        give back [200] "Referred to clinician"
 ai.decide: done"""
 
 # ai.agent WITH limits (limits block + closer) — valid
@@ -170,7 +170,7 @@ ai.agent triage_agent
         cost ceiling 0.50
     limits: done
     not confident
-        give back 200 "Agent could not complete"
+        give back [200] "Agent could not complete"
 ai.agent: done"""
 
 # ai.agent WITHOUT limits — triggers MISSING_AGENT_LIMITS
@@ -178,7 +178,7 @@ _AGENT_NO_LIMITS = """\
 ai.agent triage_agent
     goal "Pre-screen the transaction"
     not confident
-        give back 200 "Agent could not complete"
+        give back [200] "Agent could not complete"
 ai.agent: done"""
 
 
@@ -194,7 +194,7 @@ def _wrap_listen(body: str, sector: str = "", connect: str = "connect db as post
 
 listen for
 {indented}
-    give back 200 "ok"
+    give back [200] "ok"
 listen: done
 """
 
@@ -235,7 +235,7 @@ class TestHardcodedCredential:
         grammar or add a _scan_source / _v_connect_decl regex to catch
         connect ... from "literal" patterns.
         """
-        source = 'connect db as postgres from "postgresql://admin:secret@db/prod"\n\nlisten for\n    give back 200 "ok"\nlisten: done\n'
+        source = 'connect db as postgres from "postgresql://admin:secret@db/prod"\n\nlisten for\n    give back [200] "ok"\nlisten: done\n'
         result = _run_check(source)
         _assert_present(result, "HARDCODED_CREDENTIAL")
         assert result.returncode == 1, (
@@ -352,7 +352,7 @@ ai.decide is_relevant returns boolean
     weigh score
     ai.audit to general_audit_log
     not confident
-        give back 200 "Manual review"
+        give back [200] "Manual review"
 ai.decide: done"""
         source = _wrap_listen(body)
         result = _run_check(source)
@@ -468,7 +468,7 @@ ai.decide screen_transaction returns boolean
     weigh amount, member_id
     ai.audit to hint_audit_log
     not confident
-        give back 200 "Referred to manual review"
+        give back [200] "Referred to manual review"
 ai.decide: done"""
         source = _wrap_listen(body, sector="demo_low")
         result = _run_check(source)

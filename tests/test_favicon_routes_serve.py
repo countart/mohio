@@ -44,7 +44,7 @@ def check(label, cond, detail=""):
         print(f"          {detail}")
     _p += bool(cond); _f += (not cond)
 
-SRC = 'page Home at /home\n    render\n        <p>[HOME]</p>\n    render: done\npage: done\n'
+SRC = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /home\n        render\n            <p>[HOME]</p>\n        render: done\n    request: done\nlisten: done\n'
 FAVICON_FILES = ["favicon.ico", "favicon-32x32.png", "favicon-16x16.png", "apple-touch-icon.png"]
 
 

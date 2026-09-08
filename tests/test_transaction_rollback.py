@@ -202,7 +202,7 @@ SAGA_COMPENSATES = (
     '        compensate\n            show "no-op"\n'
     '    step: done\n'
     'saga: done\n'
-    'give back 200 "done"\n')
+    'give back [200] "done"\n')
 _buf = io.StringIO()
 with redirect_stderr(_buf):
     prog = transform(P.parse(SAGA_COMPENSATES), SAGA_COMPENSATES)
@@ -220,7 +220,7 @@ SAGA_SUCCESS = (
     '        compensate\n            show "released"\n'
     '    step: done\n'
     'saga: done\n'
-    'give back 200 "done"\n')
+    'give back [200] "done"\n')
 _buf2 = io.StringIO()
 with redirect_stderr(_buf2):
     prog2 = transform(P.parse(SAGA_SUCCESS), SAGA_SUCCESS)

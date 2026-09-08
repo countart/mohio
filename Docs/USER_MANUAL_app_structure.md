@@ -35,7 +35,7 @@ listen for
                 call make_invoice
                 call: done
             otherwise
-                give back 200 "Unknown action."
+                give back [200] "Unknown action."
         check: done
     new: done
 listen: done
@@ -64,7 +64,7 @@ task: done
 ```mohio
 // billing.mho
 task make_invoice
-    give back 200 "Invoice #1001 created."
+    give back [200] "Invoice #1001 created."
 task: done
 ```
 

@@ -19,6 +19,7 @@ The body goes on the next line, indented. `otherwise` is the catch-all. The bloc
 with `check: done`.
 
 ```
+score 120
 check score
     when score is more than 100
         show "Amazing!"
@@ -56,6 +57,7 @@ When there is a single action and a single condition that should suppress it, `u
 the whole sentence:
 
 ```
+door_is_open false
 show "Door is locked" unless door_is_open
 ```
 
@@ -69,8 +71,12 @@ This is the other half of the No-IF idea. When an operation can fail, you do not
 then `if`-check a result. You attach the reactions to the operation itself:
 
 ```
+connect db as sqlite from env.DATABASE_URL
+
 try
     save to db.orders
+        item "widget"
+    save: done
     on.failure
         show "could not save"
     on.success
@@ -93,7 +99,7 @@ read is:
 retrieve member from db.members
     match id to request.member_id
     on.failure
-        give back 404 "Member not found."
+        give back [404] "Member not found."
 retrieve: done
 ```
 

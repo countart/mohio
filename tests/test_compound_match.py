@@ -148,7 +148,7 @@ def test_find_or_not_exec():
     g = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
     parser = Lark(g, parser="earley", ambiguity="resolve", propagate_positions=True)
     head = ("connect db as sqlite from env.DATABASE_URL\n"
-            "shape S\n    method POST\nshape: done\n"
+            "shape S\n    note as text\nshape: done\n"
             "listen for\n    new sh.S at /x\n"
             '        save to db.issues\n            project "MOHIO"\n            label "bug"\n            status "Open"\n        save: done\n'
             '        save to db.issues\n            project "MOHIO"\n            label "blocker"\n            status "Done"\n        save: done\n'

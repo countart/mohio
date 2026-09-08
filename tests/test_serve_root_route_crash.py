@@ -72,7 +72,7 @@ NO_ROOT_SRC = (
     'listen for\n'
     '    new sh.Request\n'
     '        require role "user"\n'
-    '        give back 200 "ok"\n'
+    '        give back [200] "ok"\n'
     '    new: done\n'
     'listen: done\n'
 )

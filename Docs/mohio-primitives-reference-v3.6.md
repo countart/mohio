@@ -24,7 +24,9 @@
 
 ## Version 3.6 · April 2026 · Particular LLC
 
-*The authoritative quick reference for the Mohio language surface. For full specifications, design decisions, and compiler internals — see the Language Design Document (LDD). This document is derived from it.*
+*A quick reference for the Mohio language surface. VERIFIED-CANONICAL-SYNTAX.md is the authoritative source for
+syntax; langref_meta.json is the authoritative source for the keyword surface — not the Language Design Document
+(LDD), which Ron has ruled outdated at every version.*
 
 ---
 
@@ -85,7 +87,8 @@ Structural declarations that run before logic. They define the world. They are c
 |-------|-----------------|
 | `journey` | Application entry. Orchestrates all pages and shared declarations. |
 | `saga` | Distributed operation. Steps with rollback. |
-| `shape [Name]` | Data structure contract — DB, API, UI, and compliance simultaneously. |
+| `shape [Name]` | Describes a data element. Declares; does not run. Data structure contract — DB, API, UI, and compliance simultaneously. |
+| `task [Name]` | The callable action-doer. Declares logic; runs when `call`ed. |
 | `pattern [Name]` | Named text pattern for validation, extraction, and replacement. |
 | `miomap [Name]` | Field mapping between two shapes. Transformation contract. |
 | `connect [name] as [type]` | Database or cache connection. Credentials always via env. |
@@ -102,6 +105,7 @@ Structural declarations that run before logic. They define the world. They are c
 
 | Verb | Notes |
 |------|-------|
+| `call [TaskName]` | Invoke a declared task. `call` is the verb — the task it invokes is a declaration, not one. Only a task with `returns <type>` can be captured as a value (`call ... as NAME`). |
 | `listen for` | Multiplexing container. Universal entry point. |
 | `connection at [path]` | Persistent WebSocket. Inside listen for. |
 | `while.active` | WebSocket loop. |
@@ -398,15 +402,15 @@ ai.decide isFraudulent(transaction) returns boolean
     weigh transaction.amount, transaction.device_id, member.history
     ai.audit to fraud_audit_log
     not confident
-        give back 202 "Referred to manual review"
+        give back [202] "Referred to manual review"
     on.failure
-        give back 503 "Fraud check unavailable"
+        give back [503] "Fraud check unavailable"
     on.error
         miolog.error "Unexpected fraud check error"
             code    error.code
             message error.message
             at      error.location
-        give back 500 "Internal error"
+        give back [500] "Internal error"
 ai.decide: done
 ```
 
@@ -577,7 +581,7 @@ require role "admin"
 require role "admin" or "system"
 verify token from request.header "Authorization"
     scope "read:members"
-    on.failure give back 401 "Unauthorized"
+    on.failure give back [401] "Unauthorized"
 verify: done
 sign url for cloud_storage/{{ file.path }}
     expires in 30 minutes
@@ -706,5 +710,6 @@ The prefix system never translates — it is the structural guarantee. Vocabular
 
 *Mohio Language — Primitives & Modifiers Reference*
 *Version 3.6 · April 2026 · Particular LLC · BSL 1.1*
-*LDD v3.6 is the authoritative source. When this document and the LDD conflict, the LDD wins.*
+*VERIFIED-CANONICAL-SYNTAX.md is the authoritative source for syntax; langref_meta.json for the keyword surface.
+When this document conflicts with either, this document is wrong.*
 *Full service appendices and design decisions available via the Pioneer Program — mohio.io*

@@ -266,7 +266,7 @@ listen for
                     via email
 
                 miolog.fraud_audit_log.warn "Transaction blocked -- {{ transaction.id }}" done
-                give back 403 "Transaction blocked"
+                give back [403] "Transaction blocked"
 
             when false
                 // Approve the transaction
@@ -276,7 +276,7 @@ listen for
                 update: done
 
                 miolog.app_log.info "Transaction approved -- {{ transaction.id }}" done
-                give back 200 "Transaction approved"
+                give back [200] "Transaction approved"
 
         check: done
 
@@ -346,7 +346,7 @@ listen for
 
         miolog.fraud_audit_log.info "Screener override -- {{ transaction_id }} -- by {{ screener.id }} -- outcome {{ override.actual_outcome }}" done
 
-        give back 200 "Override recorded"
+        give back [200] "Override recorded"
 
     new: done
 

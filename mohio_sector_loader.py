@@ -215,7 +215,7 @@ def _parse_sector_profile_text(text: str, source_path: str = "") -> SectorProfil
     # Extract profile name. Canonical form is the public `sector: name` line
     # (same line the grammar uses to activate a sector in a .mho app; the file
     # extension disambiguates definition from activation). Dotted names allowed
-    # (`sector: education.us.nc`). The block closer `sector: done` is skipped.
+    # (`sector: education, us, nc`). The block closer `sector: done` is skipped.
     # Legacy `sector profile "name"` is tolerated as a fallback during migration.
     for mm in re.finditer(r'(?m)^\s*sector:\s*([A-Za-z][\w.]*)', clean):
         if mm.group(1) != 'done':

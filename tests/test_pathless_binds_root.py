@@ -71,7 +71,7 @@ listen for
         save to db.hits
             note ping.note
         save: done
-        give back 200 "root ok"
+        give back [200] "root ok"
     new: done
 listen: done
 '''
@@ -87,7 +87,7 @@ listen for
         save to db.hits
             note hit.note
         save: done
-        give back 200 "hit ok"
+        give back [200] "hit ok"
     new: done
 listen: done
 '''

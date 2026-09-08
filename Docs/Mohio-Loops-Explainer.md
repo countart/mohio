@@ -2,7 +2,7 @@
 <!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Loops in Mohio
 
-A loop repeats a piece of work. Mohio has four loop shapes, each named for the thing that controls it, plus a flexible `stop` for breaking out. Every example here is verified against the current compiler.
+A loop repeats a piece of work. Mohio has four loop shapes, each named for the thing that controls it, plus a flexible `stop` for breaking out. Every example here was run against the current compiler on 2026-08-27, not just read.
 
 ---
 
@@ -40,7 +40,7 @@ Runs while `n < 3`; ends the moment that turns false.
 ### 3. `each item in list` — once for every item
 
 ```
-names = [ "Aria", "Bo", "Cy" ]
+names as list "Aria", "Bo", "Cy"
 each name in names
     show name
 each: done
@@ -94,6 +94,7 @@ show n                  // 3
 **`stop <name>`** — in nested loops, break a specific *named* loop from inside an inner one. Only `loop` can be named:
 
 ```
+rows as list "a", "b", "c"
 loop outer
     each row in rows
         stop outer          // breaks the outer loop, not just the each
@@ -105,8 +106,9 @@ loop: done
 
 ```
 total = 0
+nums as list 1, 2, 3
 loop outer
-    each x in [ 1, 2, 3 ]
+    each x in nums
         total = (total + x)
         stop outer when total > 5
     each: done
@@ -145,7 +147,7 @@ The everyday loop job: build up a total, count, or string. Set a variable **befo
 
 ```
 total = 0
-nums = [ 10, 20, 30 ]
+nums as list 10, 20, 30
 each n in nums
     total = (total + n)
 each: done
@@ -174,7 +176,8 @@ An assignment inside a loop updates the variable in the surrounding code — tha
 
 ```
 total = 0
-each x in [ 1, 2, 3, 4 ]
+nums as list 1, 2, 3, 4
+each x in nums
     skip when x < 3
     total = (total + x)
 each: done

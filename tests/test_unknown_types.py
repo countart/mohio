@@ -23,7 +23,12 @@ def check(label, src, want_exit):
 T = 'task t\n    take n as %s\n    returns int\n\n    give back 1\ntask: done\n'
 check("unknown type `banana` fails",  T % 'banana', 1)
 check("retired `num` fails",          T % 'num',    1)
-check("retired `number` fails",       T % 'number', 1)
+# `number` is NO LONGER RETIRED. Phase 3 of the recovered shape model rules it a NATURE: `47`
+# and `4.567` are both just number, and a shape says what a thing IS rather than how many places
+# it prints to. The old refusal pointed at `int`/`dec`, which reads as a correction and is really
+# a category error -- it answered "what nature is this" with "pick a storage precision".
+# `num` stays retired; it is an abbreviation, not a nature.
+check("`number` is a nature and passes", T % 'number', 0)
 check("`int` passes",                 T % 'int',    0)
 check("`dec` passes",                 T % 'dec',    0)
 check("`text` passes",                T % 'text',   0)

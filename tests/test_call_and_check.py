@@ -67,7 +67,7 @@ it0.run(_build(BARE))
 check("bare `call X` runs the task", 'ran' in [str(s) for s in it0.shown], True)
 
 # no-arg block form runs the task
-HDR = 'shape P\n    method GET\nshape: done\n'
+HDR = 'shape P\n    note as text\nshape: done\n'
 src = (HDR +
        'task do_work\n    show "ran"\ntask: done\n'
        'listen for\n    request for sh.P at /p\n'

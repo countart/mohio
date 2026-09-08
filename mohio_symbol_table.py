@@ -36,29 +36,29 @@ class SymbolTable:
     journeys:   Set[str] = field(default_factory=set)
     connects:   Set[str] = field(default_factory=set)
     
-    # Built-in namespaces (always populated from MOHIO_RESERVED_EXACT)
-    builtins:   Set[str] = field(default_factory=set)
-    
     # Warnings generated during pre-pass
     warnings:   list = field(default_factory=list)
-    
-    def __post_init__(self):
-        self.builtins = set(MOHIO_RESERVED_EXACT)
-    
+
     def all_user_names(self) -> Set[str]:
         return self.variables | self.tasks | self.shapes | self.journeys | self.connects
-    
-    def is_builtin(self, name: str) -> bool:
-        return name.lower() in self.builtins
-    
-    def is_user_symbol(self, name: str) -> bool:
-        return name.lower() in {n.lower() for n in self.all_user_names()}
-    
+
+    # REMOVED 2026-09-01: `builtins`, `__post_init__`, `is_builtin`, `is_user_symbol`.
+    # The two methods had NO caller anywhere in the tree, tests included, and `builtins`
+    # existed only to feed `is_builtin` -- so `__post_init__` copied the whole
+    # MOHIO_RESERVED_EXACT set on EVERY parse to populate a field nothing ever read. The
+    # three places that genuinely need the reserved set (`extract_symbols`'s warning check
+    # and `check_reserved_violations`) read MOHIO_RESERVED_EXACT directly.
+
 
 # -- Patterns for pre-pass extraction ----------------------------------
 
 _HOLD_PATTERN    = re.compile(r'^\s*hold\s+([a-zA-Z_][a-zA-Z0-9_]*)\b', re.MULTILINE)
-_SET_PATTERN     = re.compile(r'^\s*set\s+([a-zA-Z_][a-zA-Z0-9_]*)\b', re.MULTILINE)
+# NOTE (2026-09-01): there is deliberately no `set` pattern here. `set` is RETIRED and
+# hard-errors -- verified by running, not assumed: `set x 5` -> "`set` is retired. Write the
+# declaration directly". So a file containing `set x 5` is REJECTED, and registering `x` from
+# it could only ever help a program that cannot compile. The retirement is pinned by
+# tests/test_unknown_types.py and tests/test_drift_loud_rules.py, so if `set` is ever brought
+# back those go red first, and this note points at what was removed on that assumption.
 _TASK_PATTERN    = re.compile(r'^\s*task\s+([a-zA-Z_][a-zA-Z0-9_]*)\b', re.MULTILINE)
 _SHAPE_PATTERN   = re.compile(r'^\s*shape\s+([a-zA-Z][a-zA-Z0-9_]*)\b', re.MULTILINE)
 _JOURNEY_PATTERN = re.compile(r'^\s*journey\s+([a-zA-Z_][a-zA-Z0-9_]*)\b', re.MULTILINE)
@@ -68,6 +68,30 @@ _MIOCONNECT_PATTERN = re.compile(
     r'^\s*mioconnect\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+as\s+([a-zA-Z_][a-zA-Z0-9_]*))?', re.MULTILINE)
 _ASSIGN_PATTERN  = re.compile(
     r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+(?!:)[\w\"\'\(]', re.MULTILINE)
+# A loop VARIABLE is a user name too. `repeat` and `each` are both skip-words, so the assignment
+# pattern above never looked at this line and the loop variable was invisible to the symbol table.
+# That matters because the pretokenizer is what lets a dotted access carry a type-word FIELD
+# (`e.map`, `row.text`): it can only mark `e.map` if it knows `e` is a user name. Without this,
+# any type-word field on a loop variable silently resolved to the whole owner instead of the
+# field -- found via the flow/walk report's own `e.map`.
+_LOOP_VAR_PATTERN = re.compile(
+    r'^\s*(?:repeat\s+)?each\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+in\b', re.MULTILINE)
+
+# The name a QUERY binds its result to: `retrieve r from db.x`, `find rows in db.x`,
+# `grab one from db.x`, `pull p up to 5 from db.x`.
+#
+# Q59-sibling (2026-09-01). These were missing, and the consequence was worse than "the name
+# is unknown". The pretokenizer marks a dotted chain by its ROOT, so with `r` unknown it
+# matched from the MIDDLE instead: `show r.phone.length` became
+# `show r.__USERVAR__phone.length` -- a mangled token that then failed to parse with the
+# zero-information "Unexpected end-of-input. Expected one of:" (no line, no caret). A
+# developer writing the natural `r.phone.length` got an error naming nothing at all.
+#
+# Same class as the loop-variable pattern directly above, added for the same reason: a
+# binding form the symbol table did not know about.
+_QUERY_ALIAS_PATTERN = re.compile(
+    r'^\s*(?:retrieve(?:\.\w+)?|find(?:\.\w+)?|grab|pull)\s+'
+    r'([a-zA-Z_][a-zA-Z0-9_]*)\b', re.MULTILINE)
 
 # Lines to skip (comments, keywords that aren't assignments)
 _SKIP_WORDS = {
@@ -99,13 +123,16 @@ def extract_symbols(source: str) -> SymbolTable:
             if name.lower() in MOHIO_RESERVED_EXACT:
                 st.warnings.append(f"Reserved word '{name}' used as variable name")
     
-    for m in _SET_PATTERN.finditer(clean):
+    for m in _LOOP_VAR_PATTERN.finditer(clean):
         name = m.group(1)
         if name.lower() not in _SKIP_WORDS:
             st.variables.add(name)
-            if name.lower() in MOHIO_RESERVED_EXACT:
-                st.warnings.append(f"Reserved word '{name}' used as variable name")
-    
+
+    for m in _QUERY_ALIAS_PATTERN.finditer(clean):
+        name = m.group(1)
+        if name.lower() not in _SKIP_WORDS:
+            st.variables.add(name)
+
     for m in _TASK_PATTERN.finditer(clean):
         st.tasks.add(m.group(1))
     

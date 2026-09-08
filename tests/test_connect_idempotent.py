@@ -54,7 +54,7 @@ print("seed survives a postgres connect declaration")
 os.environ.pop('DATABASE_URL', None)
 pg = _mk(
     'connect db as postgres\n    from env.DATABASE_URL\nconnect: done\n'
-    'shape Page\n    method GET\nshape: done\n'
+    'shape Page\n    note as text\nshape: done\n'
     'listen for\n    request for sh.Page at /m\n'
     '        retrieve.one member from db.members\n            match id to "M001"\n'
     '            on.success\n                show "ok"\n            on.failure\n                show "missing"\n'
@@ -80,9 +80,9 @@ if os.path.exists('/tmp/_ci_sqlite.db'):
 sq = _mk(
     'connect db as sqlite\n    from env.DATABASE_URL\nconnect: done\n'
     'shape Room\n    name as text required\nshape: done\n'
-    'shape Page\n    method GET\nshape: done\n'
+    'shape Page\n    note as text\nshape: done\n'
     'listen for\n    new sh.Room at /add\n        save to db.rooms\n            name room.name\n'
-    '        save: done\n        give back 201 "ok"\n    new: done\n'
+    '        save: done\n        give back [201] "ok"\n    new: done\n'
     '    request for sh.Page at /c\n        retrieve.count n from db.rooms\n            on.success\n                show "ok"\n'
     '        retrieve.count: done\n        render\n            <p>[{{ n }}]</p>\n        render: done\n'
     '    request: done\nlisten: done\n')

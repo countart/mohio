@@ -12,7 +12,8 @@ collection, get/grab return one record by an exact match.
   2. get fetches a record by id
   3. get fetches by any field (email)
   4. grab (the alias) fetches the same way
-  5. a miss binds nothing (None) — no error, so `if x is none` stays valid
+  5. a miss binds a testable absence (VALUE path) and displays as empty, never Python's
+     `None` (DISPLAY path) — two separate assertions; see the supersession note at the case
   6. on.success fires when a record is found
   7. on.failure does NOT fire on a miss (T1-GUARD-FAILOPEN Part B, 2026-08-19 --
      supersedes the old "fetch-or-404" pattern this test used to lock: on.failure is now
@@ -70,8 +71,58 @@ check("get fetches by id", run('get u from db.users\n    match id to 1\nget: don
 check("get fetches by another field", run('get u from db.users\n    match email to "b@x.com"\nget: done\nshow u.name\n') == ["Bob"])
 check("grab fetches the same way", run('grab u from db.users\n    match id to 2\ngrab: done\nshow u.name\n') == ["Bob"])
 
-# 5. miss binds None
-check("a miss binds None", run('get u from db.users\n    match id to 999\nget: done\nshow u\n') == [None])
+# 5. miss binds an absence the program can test -- and displays as empty, not `None`
+#
+# SUPERSEDED 2026-08-23 -> 2026-08-24 (T1-EMPTY-DISPLAY-NONE). This case used to read
+#     run('... get: done\nshow u\n') == [None]
+# which claims to test what `get` BINDS but actually asserts what `show` RENDERS: `run()`
+# returns `it.shown`, and `_exec_ShowStmt` appends `self._display_value(val)`, not `val`
+# (mohio_interpreter.py:12544-12545). So the old assertion locked Python's `None` leaking
+# into user-visible output -- exactly the leak T1-EMPTY-DISPLAY-NONE deliberately closed by
+# rendering an empty value as Mohio's empty form. The guard lives inside `_display_value`
+# alone, and `_exec_ShowStmt` still `return val` unchanged, so the BOUND value never passed
+# through it. The behaviour under test did not regress; the assertion was reading the wrong
+# channel and went red the moment display was corrected.
+#
+# The two behaviours are separate and both are locked here, one assertion each, so neither can
+# be fixed by breaking the other:
+#   (a) VALUE path  -- a miss binds a real absence the program can branch on (`when u is empty`)
+#   (b) DISPLAY path -- showing that absence renders empty, never the host language's `None`
+check("a miss binds a testable absence -- the VALUE path (when u is empty fires)",
+      run('get u from db.users\n    match id to 999\nget: done\n'
+          'check u\n    when u is empty\n        show "ABSENT"\n'
+          '    otherwise\n        show "PRESENT"\ncheck: done\n') == ["ABSENT"])
+check("showing that absence renders EMPTY, never `None` -- the DISPLAY path",
+      run('get u from db.users\n    match id to 999\nget: done\nshow u\n') == [''])
+check("a found record is NOT treated as absent (mutation guard on the pair above)",
+      run('get u from db.users\n    match id to 1\nget: done\n'
+          'check u\n    when u is empty\n        show "ABSENT"\n'
+          '    otherwise\n        show "PRESENT"\ncheck: done\n') == ["PRESENT"])
+
+# LABELLED UNIT COMPANION, paired with the real-`.mho`-path cases above (T1-TEST-REAL-PATH-
+# STANDARD). It exists because the null-vs-empty-text distinction is NOT observable from Mohio
+# source: `when u is empty` fires for BOTH `MohioValue(None, 'null')` and `MohioValue('',
+# 'text')`, and there is no `.type` accessor to tell them apart. Proven by mutation -- swapping
+# the miss binding to `MohioValue('', 'text')` left all thirteen language-level cases green.
+# So the "a miss binds NULL, not an empty string" guarantee can only be locked by reading the
+# bound value itself. Same executor and dispatch as a real run, with the context supplied
+# explicitly (the convention tests/test_cast_canon.py already uses).
+def bound(prog, var):
+    from mohio_interpreter import Context
+    it = fresh()
+    t = transform(P.parse(H + prog), H + prog)
+    ctx = Context()
+    it.run_declarations(t)
+    for st in t.statements:
+        it._exec(st, ctx)
+    return ctx.get(var)
+
+_miss = bound('get u from db.users\n    match id to 999\nget: done\n', 'u')
+check("a miss binds NULL specifically -- not an empty string (the VALUE path, exactly)",
+      getattr(_miss, 'to_python', lambda: _miss)() is None)
+_hit = bound('get u from db.users\n    match id to 1\nget: done\n', 'u')
+check("a hit binds the real record (mutation guard on the null check above)",
+      getattr(_hit, 'to_python', lambda: _hit)() is not None)
 
 # 6-7. handlers
 check("on.success fires when found",

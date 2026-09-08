@@ -72,7 +72,7 @@ shape: done
 listen for
     new sh.P at /p
         player_session session.id
-        give back 200 "session={{player_session}}"
+        give back [200] "session={{player_session}}"
     new: done
 listen: done
 '''

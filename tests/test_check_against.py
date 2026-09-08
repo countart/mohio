@@ -84,13 +84,40 @@ check("sha256: correct value matches",
 check("sha256: wrong value does not match",
       run_case(WRONG, sha_stored) == ['MISMATCHED'])
 
-# ── adversarial edge: a stored value that matches no known format must not crash,
-#    and must not silently report a match it cannot back up (falls to plaintext-dev
-#    compare, which is honest about being unverified rather than throwing) ─────────
-check("unrecognized stored format: equal literal values still match (plaintext fallback)",
-      run_case("plainvalue", "plainvalue") == ['MATCHED'])
-check("unrecognized stored format: unequal literal values do not match",
-      run_case("plainvalue", "somethingelse") == ['MISMATCHED'])
+# ── sha512 (128-hex) ──────────────────────────────────────────────────────
+# Added 2026-09-01. `hash ... using sha512` was always legal and always produced a hash this
+# statement could not verify -- only the 64-hex sha256 length was recognised, so a sha512
+# digest fell through to the old plaintext compare and answered MISMATCHED. A supported
+# algorithm reporting "wrong password" is the worst way to say "unsupported algorithm".
+sha512_stored = hashlib.sha512(PASSWORD.encode()).hexdigest()
+check("sha512: correct value matches (was: MISMATCHED, always)",
+      run_case(PASSWORD, sha512_stored) == ['MATCHED'])
+check("sha512: wrong value does not match",
+      run_case(WRONG, sha512_stored) == ['MISMATCHED'])
+
+# ── a stored value that is not a hash at all ──────────────────────────────
+# CORRECTED 2026-09-01. This previously asserted that two equal literals MATCH, and called the
+# behaviour "honest about being unverified rather than throwing". It was the opposite of
+# honest: the program printed MATCHED and nothing anywhere said the value had never been
+# hashed. Run through the CLI, an app whose stored passwords were still plaintext printed
+# LOGGED IN, while `mio check` -- which announces "full compliance and security analysis" --
+# reported no errors. A verifier that cannot verify must say so, not return True.
+def refusal(candidate, stored):
+    try:
+        run_case(candidate, stored)
+        return None
+    except Exception as e:
+        return str(e)
+
+_msg = refusal("plainvalue", "plainvalue")
+check("a stored value that is not a hash is REFUSED (was: MATCHED, silently)",
+      _msg is not None and "not a hash this can verify" in _msg, _msg)
+check("...and the message names the unhashed-password case as the likely bug",
+      _msg is not None and "never hashed" in _msg, _msg)
+check("...and points to `check` / `when` for comparing two ordinary values",
+      _msg is not None and "check` / `when" in _msg, _msg)
+check("unequal non-hash values are refused too, not reported as a mismatch",
+      refusal("plainvalue", "somethingelse") is not None)
 
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

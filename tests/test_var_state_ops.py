@@ -72,7 +72,7 @@ check("clear KEEPS the type contract (x \"cat\" still fails after clear)",
       fails('x as int\nx 5\nclear x\nx "cat"\ngive back 200 x'))
 check("clear on a bare variable empties it (to null)",
       run('y 5\nclear y\ngive back 200 y') is None)
-check("clear on a missing name fails loud", fails('clear nope\ngive back 200 "x"'))
+check("clear on a missing name fails loud", fails('clear nope\ngive back [200] "x"'))
 
 # ── forget: removes the name entirely ─────────────────────────────────────────────────
 # T1-EVAL-SIMPLE-FAILLOUD Piece 2 (2026-08-17): reading a forgotten name now fails loud, same
@@ -84,7 +84,7 @@ check("forget removes the variable (reading it after now fails loud, not silentl
       fails('x 5\nforget x\ngive back 200 x'))
 check("forget frees the name for a fresh declaration of any type",
       run('x "5"\nforget x\nx as int\nx 5\ngive back 200 x') == 5)
-check("forget on a missing name fails loud", fails('forget nope\ngive back 200 "x"'))
+check("forget on a missing name fails loud", fails('forget nope\ngive back [200] "x"'))
 
 # ── rename: relabel, carry value + contract ───────────────────────────────────────────
 check("rename carries the value to the new name",
@@ -95,7 +95,7 @@ check("rename carries the type contract (new name still enforces)",
       fails('x as int\nx 5\nrename x to y\ny "cat"\ngive back 200 y'))
 check("rename onto an existing name fails loud (never overwrites)",
       fails('x 5\ny 9\nrename x to y\ngive back 200 y'))
-check("rename a missing name fails loud", fails('rename nope to y\ngive back 200 "x"'))
+check("rename a missing name fails loud", fails('rename nope to y\ngive back [200] "x"'))
 
 # ── replace: swap the value, respect the contract ─────────────────────────────────────
 check("replace swaps the value", run('x 5\nreplace x with 10\ngive back 200 x') == 10)
@@ -103,7 +103,7 @@ check("replace respects a type contract (int cannot be replaced with text)",
       fails('x as int\nx 5\nreplace x with "cat"\ngive back 200 x'))
 check("replace a valid typed value works",
       run('x as int\nx 5\nreplace x with 99\ngive back 200 x') == 99)
-check("replace a missing variable fails loud", fails('replace nope with 1\ngive back 200 "x"'))
+check("replace a missing variable fails loud", fails('replace nope with 1\ngive back [200] "x"'))
 
 # ── the full design-session flow ──────────────────────────────────────────────────────
 check("full flow: x \"5\" / forget x / x as int / x 5 -> 5",

@@ -25,10 +25,10 @@ bio      as text multiline                      // <textarea>
 ## Numbers, dates, times
 
 ```
-age   as number      // type=number  (also integer, decimal)
-born  as date        // type=date
-start as time        // type=time
-when  as datetime    // type=datetime-local
+age       as int       // type=number   (dec / decimal for fractional values)
+born      as date      // type=date
+start     as time      // type=time
+starts_at as datetime  // type=datetime-local
 ```
 
 ## Choices

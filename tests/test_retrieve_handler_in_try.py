@@ -92,10 +92,10 @@ def body(src):
 
 # -- probe7 case A: nested retrieve inside `otherwise`, inner branches `give back` -----------
 b = body('retrieve outer from db.rooms\n    match rid to "west"\n'
-         '    when outer is empty\n        give back 200 "A: outer empty"\n'
+         '    when outer is empty\n        give back [200] "A: outer empty"\n'
          '    otherwise\n'
          '        retrieve inner from db.puzzles\n            match room to "west"\n'
-         '            when inner is empty\n                give back 200 "A: inner empty"\n'
+         '            when inner is empty\n                give back [200] "A: inner empty"\n'
          '            otherwise\n                give back 200 ("A: OK " & inner.pid)\n'
          '        retrieve: done\n'
          'retrieve: done\n')
@@ -106,20 +106,20 @@ check("case A: nested retrieve inside `otherwise`, give back in the inner branch
 b = body('retrieve outer2 from db.rooms\n    match rid to "no_such_room_xyz"\n'
          '    when outer2 is empty\n'
          '        retrieve inner2 from db.puzzles\n            match room to "west"\n'
-         '            when inner2 is empty\n                give back 200 "B: inner empty"\n'
+         '            when inner2 is empty\n                give back [200] "B: inner empty"\n'
          '            otherwise\n                give back 200 ("B: OK " & inner2.pid)\n'
          '        retrieve: done\n'
-         '    otherwise\n        give back 200 "B: outer found"\n'
+         '    otherwise\n        give back [200] "B: outer found"\n'
          'retrieve: done\n')
 check("case B: nested retrieve inside `when ... is empty`", b == "B: OK P1", b)
 
 # -- probe7 case D: nested retrieve.all inside `otherwise` -----------------------------------
 b = body('retrieve o4 from db.rooms\n    match rid to "west"\n'
-         '    when o4 is empty\n        give back 200 "D: outer empty"\n'
+         '    when o4 is empty\n        give back [200] "D: outer empty"\n'
          '    otherwise\n'
          '        retrieve.all i4 from db.puzzles\n'
-         '            when i4 is empty\n                give back 200 "D: inner all empty"\n'
-         '            otherwise\n                give back 200 "D: OK"\n'
+         '            when i4 is empty\n                give back [200] "D: inner all empty"\n'
+         '            otherwise\n                give back [200] "D: OK"\n'
          '        retrieve.all: done\n'
          'retrieve: done\n')
 check("case D: nested retrieve.all inside `otherwise`", b == "D: OK", b)
@@ -131,20 +131,20 @@ b = body('retrieve o3 from db.rooms\n    match rid to "west"\n'
          'retrieve i3 from db.puzzles\n    match room to "west"\n'
          '    when i3 is empty\n        i3_skip "ok"\n'
          'retrieve: done\n'
-         'give back 200 "C: sibling retrieves -- OK"\n')
+         'give back [200] "C: sibling retrieves -- OK"\n')
 check("case C control: sibling (non-nested) retrieves still pass",
       b == "C: sibling retrieves -- OK", b)
 
 # -- a bare `give back` in a branch, no nesting at all -- the simplest form of the bug -------
 b = body('retrieve r from db.rooms\n    match rid to "west"\n'
-         '    when r is empty\n        give back 200 "empty"\n'
-         '    otherwise\n        give back 200 "give back from otherwise"\n'
+         '    when r is empty\n        give back [200] "empty"\n'
+         '    otherwise\n        give back [200] "give back from otherwise"\n'
          'retrieve: done\n')
 check("a plain `give back` inside `otherwise` is control flow, not a db_error",
       b == "give back from otherwise", b)
 
 b = body('retrieve r from db.rooms\n    match rid to "nope"\n'
-         '    when r is empty\n        give back 200 "give back from when-empty"\n'
+         '    when r is empty\n        give back [200] "give back from when-empty"\n'
          'retrieve: done\n')
 check("a plain `give back` inside `when ... is empty` is control flow, not a db_error",
       b == "give back from when-empty", b)
@@ -171,35 +171,35 @@ check("...and the detail is never empty (an empty-detail error names nothing)",
 
 # -- SIBLING GUARDS: the verbs that were already correct must stay correct -------------------
 b = body('find f in db.rooms\n    where rid is "west"\n'
-         '    when f is empty\n        give back 200 "unexpected"\n'
-         '    otherwise\n        give back 200 "find OK"\n'
+         '    when f is empty\n        give back [200] "unexpected"\n'
+         '    otherwise\n        give back [200] "find OK"\n'
          'find: done\n')
 check("sibling: find -- give back in a branch still works", b == "find OK", b)
 
 b = body('grab g from db.rooms\n    match rid to "west"\n'
-         '    when g is empty\n        give back 200 "unexpected"\n'
-         '    otherwise\n        give back 200 "grab OK"\n'
+         '    when g is empty\n        give back [200] "unexpected"\n'
+         '    otherwise\n        give back [200] "grab OK"\n'
          'grab: done\n')
 check("sibling: grab -- give back in a branch still works", b == "grab OK", b)
 
-b = body('x 5\ncheck x\n    when 5\n        give back 200 "check OK"\n'
-         '    otherwise\n        give back 200 "unexpected"\ncheck: done\n')
+b = body('x 5\ncheck x\n    when 5\n        give back [200] "check OK"\n'
+         '    otherwise\n        give back [200] "unexpected"\ncheck: done\n')
 check("sibling: check block -- give back in a branch still works", b == "check OK", b)
 
 b = body('a 5\nb 5\ncompare a to b\n'
-         '    when comparison.equal\n        give back 200 "compare OK"\n'
-         '    otherwise\n        give back 200 "unexpected"\ncompare: done\n')
+         '    when comparison.equal\n        give back [200] "compare OK"\n'
+         '    otherwise\n        give back [200] "unexpected"\ncompare: done\n')
 check("sibling: compare -- give back in a branch still works", b == "compare OK", b)
 
 # Raw SQL nested in a branch kept working throughout -- it never went through the wrapped path.
 _RAWSQL = ('retrieve r from db.rooms\n    match rid to "west"\n'
-           '    when r is empty\n        give back 200 "unexpected"\n'
+           '    when r is empty\n        give back [200] "unexpected"\n'
            '    otherwise\n'
            '        retrieve rs from db.rooms\n            sql\n'
            "                SELECT * FROM rooms WHERE rid = 'west'\n"
            '            sql: done\n'
            '        retrieve: done\n'
-           '        give back 200 "rawsql-in-branch OK"\n'
+           '        give back [200] "rawsql-in-branch OK"\n'
            'retrieve: done\n')
 b = body(_RAWSQL)
 check("sibling: raw SQL nested in a branch still works", b == "rawsql-in-branch OK", b)

@@ -65,8 +65,14 @@ check("chain_a resolved successfully (precondition)",
       chain_a.resolved and chain_a.active_provider == "gpt-4o")
 d_a = rt_a.decide(name="x", inputs={}, threshold=0.85, return_type="boolean",
                   chain_name="chain_a", model_override="claude-explicit")
+# Q97 (2026-09-01): retargeted from `.model` to `.requested_model`. These assert MODEL
+# RESOLUTION ORDER -- which alias the chain/override/default logic chose -- which is
+# what `requested_model` now holds. `.model` was split off to record which weights the
+# PROVIDER actually ran, so that two decisions a year apart can be told apart in the
+# audit. The assertions below are unchanged in intent; they now name the field that
+# carries it.
 check("(a) explicit model_override WINS over a resolved chain (was: chain won, backwards)",
-      d_a.model == "claude-explicit", d_a.model)
+      d_a.requested_model == "claude-explicit", d_a.requested_model)
 
 # ── (b) chain still works normally when no override is given (regression) ──────────
 rt_b = make_rt()
@@ -77,7 +83,7 @@ rt_b.resolve_chain("chain_b")
 d_b = rt_b.decide(name="x", inputs={}, threshold=0.85, return_type="boolean",
                   chain_name="chain_b")
 check("(b) a resolved chain is still used normally when NO override is given",
-      d_b.model == "gpt-4o", d_b.model)
+      d_b.requested_model == "gpt-4o", d_b.requested_model)
 
 # Regression: no override, no chain -> app default (self._model) used, unaffected.
 rt_b2 = make_rt()
@@ -85,7 +91,7 @@ rt_b2._complete = lambda model, s, u, temperature=None, max_tokens=None: (
     CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "x"}'))
 d_b2 = rt_b2.decide(name="x", inputs={}, threshold=0.85, return_type="boolean")
 check("regression: no override, no chain -> app default (self._model) used",
-      d_b2.model == "claude-sonnet-4-6", d_b2.model)
+      d_b2.requested_model == "claude-sonnet-4-6", d_b2.requested_model)
 
 # Regression: no override, chain EXHAUSTED -> still raises (today's earlier fix, unaffected).
 from mohio_ai import AiProviderError

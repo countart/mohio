@@ -39,7 +39,7 @@ def _parser():
     return Lark(g, parser="earley", ambiguity="resolve", propagate_positions=True)
 _P = _parser()
 
-_SHAPE = "shape S\n    method POST\nshape: done\n"
+_SHAPE = "shape S\n    note as text\nshape: done\n"
 
 def _run(prog, path="/x"):
     r = MohioInterpreter().run(transform(_P.parse(prog), prog),
@@ -56,7 +56,7 @@ def _builds(prog):
 
 def test_shape_on_listener_with_path():
     print("\n=== listen for sh.X at /path routes the handler ===")
-    p = _SHAPE + 'listen for sh.S at /x\n    give back 200 "bound"\nlisten: done\n'
+    p = _SHAPE + 'listen for sh.S at /x\n    give back [200] "bound"\nlisten: done\n'
     check("routes to handler", _run(p), "bound")
 
 def test_shape_on_listener_no_path():
@@ -65,22 +65,22 @@ def test_shape_on_listener_no_path():
     # default posts to /x, which is now correctly refused for a pathless listener. Route the
     # dispatch to / (the real path a pathless listener answers) rather than pin `at /x` on the
     # source, since this case is specifically testing the pathless (shape-only) form.
-    p = _SHAPE + 'listen for sh.S\n    give back 200 "by-shape"\nlisten: done\n'
+    p = _SHAPE + 'listen for sh.S\n    give back [200] "by-shape"\nlisten: done\n'
     check("routes by shape", _run(p, path="/"), "by-shape")
 
 def test_new_wrapper_back_compat():
     print("\n=== new wrapper still routes (back-compat until Zork migrates) ===")
     p = (_SHAPE + 'listen for\n    new sh.S at /x\n'
-         '        give back 200 "wrapper"\n    new: done\nlisten: done\n')
+         '        give back [200] "wrapper"\n    new: done\nlisten: done\n')
     check("new wrapper routes", _run(p), "wrapper")
 
 def test_shape_on_listener_with_try_inside():
     print("\n=== zork-shaped: shape-on-listener with a try block inside parses ===")
     p = (_SHAPE + 'listen for sh.S\n'
          '    try up to 2 times\n'
-         '        give back 200 "ok"\n'
+         '        give back [200] "ok"\n'
          '    on.failure\n'
-         '        give back 500 "err"\n'
+         '        give back [500] "err"\n'
          '    always\n'
          '        miolog.info "done"\n'
          '    try: done\n'

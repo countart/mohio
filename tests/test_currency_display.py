@@ -38,17 +38,17 @@ def run(src):
 
 check("concat formats USD", run('p as USD\np 1234.5\ngive back 200 ("" & p)') == "$1,234.50")
 check("interpolation formats USD",
-      run('p as USD\np 1234.5\ngive back 200 "Total {{p}}"') == "Total $1,234.50")
+      run('p as USD\np 1234.5\ngive back [200] "Total {{p}}"') == "Total $1,234.50")
 check("interpolation formats EUR (comma decimal)",
-      run('p as EUR\np 1234.5\ngive back 200 "Cost {{p}}"') == "Cost €1.234,50")
+      run('p as EUR\np 1234.5\ngive back [200] "Cost {{p}}"') == "Cost €1.234,50")
 check("interpolation mid-sentence",
-      run('p as GBP\np 99\ngive back 200 "Price {{p}} each"') == "Price £99.00 each")
+      run('p as GBP\np 99\ngive back [200] "Price {{p}} each"') == "Price £99.00 each")
 check("shape currency field formats in concat",
       run('shape A\n  price as USD\nshape: done\ncreate a as sh.A\n  price 99.999\ncreate: done\n'
           'give back 200 ("" & a.price)') == "$100.00")
 check("shape currency field formats in interpolation",
       run('shape A\n  price as USD\nshape: done\ncreate a as sh.A\n  price 2500\ncreate: done\n'
-          'give back 200 "MSRP {{a.price}}"') == "MSRP $2,500.00")
+          'give back [200] "MSRP {{a.price}}"') == "MSRP $2,500.00")
 # raw value stays numeric (data layer) — bare give-back is the number, math works
 check("bare give-back of a currency is the raw number (data layer)",
       run('p as USD\np 1234.5\ngive back 200 p') == 1234.5)

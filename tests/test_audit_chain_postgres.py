@@ -194,7 +194,7 @@ _c9 = _db9.conn.cursor(); _c9.execute(f'DROP TABLE IF EXISTS "{T9}"'); _db9.conn
 _PROG = ('amt 100\n'
          'ai.decide d returns boolean\n    confidence above 0.85\n    weigh amt\n'
          f'    ai.audit to {T9}\n    not confident\n        give back false\n'
-         'ai.decide: done\ngive back 200 "ok"\n')
+         'ai.decide: done\ngive back [200] "ok"\n')
 _it9 = MohioInterpreter(ai=_Mock()); _it9._db = _db9
 _t9 = _tf(_Pp.parse(_PROG), _PROG)
 _it9.run_declarations(_t9)

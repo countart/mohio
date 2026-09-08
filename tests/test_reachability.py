@@ -104,7 +104,7 @@ from mohio_transformer_ast import transform
 _raw = mohio_data.GRAMMAR_PATH.read_text()
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
-src = 'give back 200 "first"\nshow "unreachable"\n'
+src = 'give back [200] "first"\nshow "unreachable"\n'
 try:
     program = transform(P.parse(src), src)
     e2e = scan_unreachable(program)

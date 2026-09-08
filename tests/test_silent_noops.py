@@ -70,18 +70,18 @@ check("trailing `if` reaches the AST on halt",
 check("trailing `if` reaches the AST on jump to",
       'TrailingQualifier' in ast('jump to /next if s is "a"\n'))
 check("a guarded give back differs from an unguarded one",
-      ast('give back 200 "x"\n') != ast('give back 200 "x" if s is "a"\n'))
+      ast('give back [200] "x"\n') != ast('give back 200 "x" if s is "a"\n'))
 
 # runtime: the half that actually changes behaviour
 check("give back fires when the condition holds",
-      run('s "yes"\ngive back 200 "fired" if s is "yes"\ngive back 200 "fell"\n') == 'fired')
+      run('s "yes"\ngive back 200 "fired" if s is "yes"\ngive back [200] "fell"\n') == 'fired')
 check("give back does NOT fire when the condition fails",
-      run('s "no"\ngive back 200 "fired" if s is "yes"\ngive back 200 "fell"\n') == 'fell')
+      run('s "no"\ngive back 200 "fired" if s is "yes"\ngive back [200] "fell"\n') == 'fell')
 check("halt halts only when the condition holds",
-      run('s "yes"\nhalt if s is "yes"\ngive back 200 "reached"\n') == 'halted'
-      and run('s "no"\nhalt if s is "yes"\ngive back 200 "reached"\n') == 'reached')
+      run('s "yes"\nhalt if s is "yes"\ngive back [200] "reached"\n') == 'halted'
+      and run('s "no"\nhalt if s is "yes"\ngive back [200] "reached"\n') == 'reached')
 check("jump jumps only when the condition holds",
-      run('s "no"\njump to /x if s is "yes"\ngive back 200 "reached"\n') == 'reached')
+      run('s "no"\njump to /x if s is "yes"\ngive back [200] "reached"\n') == 'reached')
 
 # ── ai.create type: the request itself was lost ───────────────────────────────────────
 # `ai.create poster image` and `ai.create poster video` produced identical ASTs, and the field
@@ -168,10 +168,10 @@ for _old, _new in (('case.no', 'ignore.case'), ('case.yes', 'match.case')):
 from mohio_server import create_app, MohioServer
 from starlette.testclient import TestClient
 
-_GUARDED = ('shape Q\n    method GET\n    role as text\nshape: done\n'
+_GUARDED = ('shape Q\n    note as text\n    role as text\nshape: done\n'
             'listen for\n    request for sh.Q at /secret\n'
             '        give back 200 "CLASSIFIED" if role is "admin"\n'
-            '        give back 200 "denied"\n'
+            '        give back [200] "denied"\n'
             '    request: done\nlisten: done\n')
 _prog = transform(P.parse(_GUARDED), _GUARDED)
 _it = MohioInterpreter(); _it.run_declarations(_prog)

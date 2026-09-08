@@ -370,7 +370,7 @@ task doWork
         when "COMMITTED"
             give back ok "[COMMITTED]"
         when "COMPENSATED"
-            give back 409 "[COMPENSATED]"
+            give back [409] "[COMPENSATED]"
         when "FAILED_COMPENSATION"
             give back error "[FAILED_COMP]"
         otherwise
@@ -413,7 +413,7 @@ task doWork
         when "COMMITTED"
             give back ok "[COMMITTED]"
         when "COMPENSATED"
-            give back 409 "[COMPENSATED]"
+            give back [409] "[COMPENSATED]"
         when "FAILED_COMPENSATION"
             give back error "[FAILED_COMP]"
         otherwise
@@ -499,7 +499,7 @@ class TestSagaRoute:
 _RETRIEVE_HEAD = """\
 connect db as sqlite from env.DATABASE_URL
 shape Page
-    method GET
+    note as text
 shape: done
 listen for
     request for sh.Page at /test

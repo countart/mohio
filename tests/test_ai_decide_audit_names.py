@@ -67,6 +67,15 @@ REG = "SENTINEL-REGION-atlantis"
 
 def audit_row(phi=None, pci=None, purposes=None, profile=None, inputs=None):
     interp = MohioInterpreter()
+    # SEEDED THROUGH THE RESOLVER, which is now the one place a classification lives. This used
+    # to assign the bare-name sets directly, and those sets stopped being what the audit path
+    # reads when classification moved to qualified identity (Q533). The assertions below are
+    # unchanged: what changed is where the fixture puts the fact, not what it claims about it.
+    # No table is given, which registers these the way a loose shape field registers.
+    for _f in (phi or []):
+        interp.classification.register(_f, 'phi')
+    for _f in (pci or []):
+        interp.classification.register(_f, 'pci')
     interp._phi_fields = set(phi or [])
     interp._pci_fields = set(pci or [])
     interp._field_purposes = {k: set() for k in (purposes or [])}

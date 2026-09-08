@@ -51,12 +51,157 @@ class SectorDecl(Node):
     sector: str = ""
 
 @dataclass
+class MapMount(Node):
+    """route:  about.mho to "/about_us"  -- mount a file at a path."""
+    source: str = ""          # the file: `about.mho`, or "blog/post.mho" when quoted
+    path:   str = ""          # the URL it answers at, always a quoted string
+
+@dataclass
+class MapRedirect(Node):
+    """route as redirect:  "/old" to "/new" as permanent."""
+    source: str = ""
+    target: str = ""
+    kind:   str = ""          # "permanent" | "temporary"
+    status: int = 0           # 301 | 302 -- what actually goes on the wire
+
+@dataclass
+class MapStage(Node):
+    """One stage of a data pipeline: `<qualifier>.<path>` with optional formatting.
+
+    `qualifier` declares the stage's KIND (`db`, `json`, `feed`, `legacy`, ...); `path` is the
+    rest of the dotted chain, at whatever depth the real source has. Deliberately kept as text
+    and NOT resolved: `map` is structure-aware, not content-aware -- checking that the path
+    exists or that types line up is the paid `miomap` engine's job."""
+    qualifier: str = ""
+    path:      str = ""          # the dotted remainder, e.g. "dbs1.col2"
+    fmt:       str = ""          # `as dec.4` / `as.usd` / `in.EUR`, carried opaquely
+
+    @property
+    def full(self) -> str:
+        return f"{self.qualifier}.{self.path}" if self.qualifier else self.path
+
+    @property
+    def is_transform(self) -> bool:
+        """A BARE stage names a shape the value passes THROUGH, not a place it comes from or
+        goes to. No qualifier is the tell -- a transform is not a location."""
+        return not self.qualifier
+
+
+@dataclass
+class MapPipeline(Node):
+    """A CHAIN of stages joined by directional hops -- a flow graph, not a one-way list.
+
+    `stages` holds N stages; `hops` holds the N-1 directions between them, so hop i connects
+    stage i to stage i+1. Direction is PER HOP, which is what lets one chain flow both ways
+    (`a -> b <-> c <- d`)."""
+    stages: list = field(default_factory=list)   # MapStage
+    hops:   list = field(default_factory=list)   # "forward" | "bidirectional" | "reverse"
+
+@dataclass
+class FlowStmt(Node):
+    """flow paydata  |  flow paydata.stripe  -- DRIVE a data map (prototyped 2026-08-25).
+
+    `map_name` is the map; `chain` is a chain selector (the source stage's qualifier) or "" for
+    every chain in the map. `handlers` is the STATUS channel -- `on.success` / `on.failure`, the
+    same two-stage outcome every other verb block uses, with on.failure naming the broken hop.
+    There is deliberately no `flow as x`: the END value is `check flow`, and any other position
+    is `grab` or `walk`."""
+    map_name: str = ""
+    chain:    str = ""
+    handlers: list = field(default_factory=list)
+
+
+@dataclass
+class CheckFlowStmt(Node):
+    """check flow paydata [as NAME] -- run it and report the ENDPOINT value.
+
+    The endpoint is the stage after the last forward hop. Any OTHER position is `grab` or
+    `walk`, so `flow` itself is never overloaded with positional access."""
+    map_name: str = ""
+    chain:    str = ""
+    alias:    str = ""
+
+
+@dataclass
+class GrabStageStmt(Node):
+    """grab first|last stage from <map>.<chain>  |  grab stage at N|"name" from ...
+
+    `first` and `last` are the two SEMANTIC ends, found by the ARROWS rather than array
+    position: the first stage is where data ENTERS, the last is where it comes to rest."""
+    map_name:    str = ""
+    chain:       str = ""
+    which:       str = "first"       # first | last | at
+    alias:       str = ""
+    at_position: int = 0
+    at_name:     str = ""
+
+
+@dataclass
+class WalkStmt(Node):
+    """walk paydata / at each stage: report / walk: done -- INSPECT a data map.
+
+    The opposite of `flow`: flow executes and gets out of the way, walk stops at every stage so
+    the program can look at what is there and act on it. `actions` is what runs at each stage --
+    'report', 'log', or a statement body with the stage bound."""
+    map_name: str = ""
+    chain:    str = ""
+    actions:  list = field(default_factory=list)   # ('report'|'log'|'do', body)
+
+
+@dataclass
+class MapSectionsDecl(Node):
+    """map [name] / route | route as redirect | data / map: done  (T1-MAP-EXTRACTION).
+
+    The FREE, translatable mapping construct. Classifiers are explicit because an entry cannot
+    identify itself: `user_name to full_name` is simultaneously a valid route and a valid data
+    map. Sections are scoped -- `route` uses `to`, `data` uses arrows, and the grammar refuses
+    the crossover rather than reinterpreting it."""
+    name:      str  = ""
+    mounts:    list = field(default_factory=list)   # MapMount
+    redirects: list = field(default_factory=list)   # MapRedirect
+    data:      list = field(default_factory=list)   # MapPipeline
+    responses: list = field(default_factory=list)   # MapStatusResponse
+
+
+@dataclass
+class MapStatusResponse(Node):
+    """`[404] /notfound` or `[404] "gone"` -- what an app answers for a status.
+
+    `kind` is 'page' or 'message', decided by CONTENT rather than by a keyword: a path serves a
+    page, a string is a body. That is the same disambiguation the rest of the language uses, so
+    there is nothing extra to learn and nothing to declare twice.
+    """
+    status: int = 0
+    kind:   str = ""      # 'page' | 'message'
+    target: str = ""
+
+
+@dataclass
+class FrameworkDecl(Node):
+    """framework: web-app  --  the app TARGET type (T1-FRAMEWORK-FOUNDATION).
+
+    Orthogonal to SectorDecl: sector enforces RULES, framework scaffolds STRUCTURE. Carries the
+    dotted value verbatim (`mobile.ios`, `api.rest`); `base` splits off the leading segment,
+    which is what the serve layer dispatches on -- a sub-profile refines a framework, it never
+    changes which framework you are in."""
+    framework: str = ""
+
+    @property
+    def base(self) -> str:
+        return (self.framework or "").split(".", 1)[0]
+
+@dataclass
 class ConnectDecl(Node):
     """connect db as postgres from env.DATABASE_URL"""
     name:   str = ""      # alias (db)
     driver: str = ""      # postgres, redis, etc.
     source: Any = None    # value_expr -- usually env ref
     handlers: list = field(default_factory=list)   # T1-RUN3: OnFailure/OnSuccess, additive
+    # readonly / writeonly / readwrite. The grammar has parsed `conn_access` since it was
+    # designed and locked (2026-06-08) and there was NO FIELD HERE to put it in, so every
+    # access mode ever written was discarded at the transformer: a `save` to a `readonly`
+    # connection wrote happily and `mio check` reported no errors (measured 2026-09-02).
+    access: str = ""
 
 @dataclass
 class ComplianceDecl(Node):
@@ -159,6 +304,39 @@ class ShapeDecl(Node):
     fields:        list = field(default_factory=list)   # list[ShapeField]
     retain_years:  Any  = None     # NEW v3.8 -- shape-level retain for N years
     zone_tag:      Any  = None     # shape Intake [phi] -- seals every field in the zone
+    # PHASE 2 of the recovered shape model. `users as table` opens a REAL nested field scope,
+    # so `db.users.email` and `db.orders.email` are two different fields that happen to share a
+    # name. A flat list with table labels IS the bug this exists to prevent.
+    # ADDITIVE: a shape with no table line leaves this empty and keeps every field in `fields`,
+    # which is byte-identical to the MVP behaviour every existing program relies on.
+    tables:        dict = field(default_factory=dict)   # {table_name: ShapeTable}
+
+    def every_field(self):
+        """Every field this shape declares, loose or table-owned, in source order.
+
+        THE HIERARCHY SPLIT FIELDS IN TWO AND THAT IS A SILENT DROP UNTIL EVERY CONSUMER KNOWS.
+        Found by running, 2026-09-04, the same hour the hierarchy landed: a `never store` field
+        declared inside a `users as table` scope was PERSISTED, while the identical field
+        declared loose in the same shape refused the write. Every governance registration --
+        `never store`, `[pii]`/`[phi]`/`[pci]`, `sec.encrypt`, `purpose` -- walked `fields`, and
+        the hierarchy had quietly moved half of them out of it.
+
+        So a shape has two readings and both are legitimate:
+          * `fields` / `tables` -- the STRUCTURE. Which table owns what, which is the whole
+            point of Phase 2 and the only thing keeping `db.users.email` apart from
+            `db.orders.email`.
+          * `every_field()` -- the GOVERNANCE view. A rule that attaches to a field attaches to
+            it wherever it was declared, and a caller asking "which fields carry a tag" must
+            never have to know about scopes to get a complete answer.
+
+        Anything that answers a question about FIELDS uses this; anything that answers a
+        question about TABLES uses `tables`.
+        """
+        out = list(self.fields or [])
+        for tbl in (self.tables or {}).values():
+            out.extend(getattr(tbl, 'fields', None) or [])
+        return out
+
 
 @dataclass
 class ClientListener(Node):
@@ -290,6 +468,23 @@ class ShapeField(Node):
     is_list:    bool = False       # NEW v3.8 -- "as list text"
     dotted:     Optional[str] = None  # NEW v3.8 -- "status.allowed"
     modifiers:  list = field(default_factory=list)   # list[ShapeFieldModifier]
+    # DECLARED AS PART OF A COMMA GROUP (`a, b, c as text`). The refuse-two-fields-on-one-line
+    # guard reads this: several fields on one line is exactly what that guard exists to catch
+    # when they are separated by SPACES, and exactly what a comma group is for when they are
+    # not. Without the flag the two are identical by the time the guard sees them.
+    grouped:    bool = False
+
+@dataclass
+class ShapeTable(Node):
+    """`users as table` -- a table a shape governs, and the fields that BELONG to it.
+
+    Its own node rather than a flag on ShapeField, because the whole point of Phase 2 is that
+    a table owns a field SCOPE. A boolean on a flat field would be the label-on-a-flat-list
+    reading the design rules out by name.
+    """
+    name:    str  = ""
+    fields:  list = field(default_factory=list)   # list[ShapeField], owned by THIS table
+
 
 @dataclass
 class ShapeFieldModifier(Node):
@@ -422,12 +617,19 @@ class TaskDecl(Node):
 
 @dataclass
 class TaskParam(Node):
-    """name as text required | name as sh.Transaction required"""
+    """name as text | name as sh.Transaction | ssn, dob as text [phi]
+
+    `modifiers` carries what trailed the take group, one fresh copy per name so a group of
+    three is indistinguishable from three separate takes. Almost everything that can appear
+    there is refused by the transformer (a task is not a shape); a class tag is kept, because
+    classification belongs to the value and a task param is where a value arrives.
+    """
     name:         str  = ""
     type_name:    str  = ""
     is_required:  bool = False
     is_optional:  bool = False
     default:      Any  = None
+    modifiers:    list = field(default_factory=list)
 
 
 # -- Journey / Saga / Page --------------------------------------
@@ -479,10 +681,14 @@ class JourneyDecl(Node):
 
 @dataclass
 class JourneyMeta(Node):
-    """Journey-level config/metadata. kind is one of 'public'/'private'/'flow'
-    (value: a path list) or 'serves' (value: 'single tenant'/'multiple tenants').
-    public/private are read and enforced by _exec_JourneyDecl (2026-08-06, reusing
-    require role's server-verified-session mechanism). flow is captured but not
+    """Journey-level config/metadata. kind is one of 'public'/'private'/'hidden'/
+    'authorize'/'flow' (value: a path list) or 'serves' (value: 'single tenant'/
+    'multiple tenants'). All four of public/private/hidden/authorize are read and
+    enforced by _exec_JourneyDecl (2026-08-27, the locked T1-PAGE-CLASSIFICATION-MODEL):
+    public: default, served+listed; private: served but unlisted (no runtime gate --
+    inert until a listing feature exists to consume it); hidden: not served, 404
+    (also implied by any `_`-prefixed path segment); authorize: login required,
+    reusing require role's server-verified-session mechanism. flow is captured but not
     yet interpreted -- no documented source of truth for its intended runtime
     behavior exists in this repo. serves is captured but not yet enforced -- real
     tenant isolation needs a request-scoped tenant-identity primitive that does
@@ -496,6 +702,9 @@ class SagaDecl(Node):               # NEW v3.8 (was stub)
     """saga fulfill_order ... saga: done"""
     name:  str  = ""
     steps: list = field(default_factory=list)   # list[StepBlock]
+    # SAGA-LEVEL handlers, `on.failure` for now. A step could already declare one; the saga as
+    # a whole could not, so there was no way to say what happens when it does not commit.
+    body:  list = field(default_factory=list)
 
 @dataclass
 class StepBlock(Node):              # v3.8.2
@@ -506,13 +715,10 @@ class StepBlock(Node):              # v3.8.2
     best_effort: bool = False
     handlers: list = field(default_factory=list)
 
-@dataclass
-class PageDecl(Node):               # NEW v3.8
-    """page Dashboard at /dashboard ... page: done"""
-    name: Optional[str] = None
-    path: Optional[str] = None
-    body: list = field(default_factory=list)
-
+# `PageDecl` REMOVED 2026-08-25. The `page` block was doing the framework's routing job in
+# disguise; serve-by-default does that job now, so the construct had nothing left to do.
+# The WORD stays reserved in the grammar. NOT removed and not related: the page
+# CLASSIFICATION model (public:/private:/hidden:/authorize:), which is access control.
 @dataclass
 class TimespanDecl(Node):
     """timespan last_quarter ... timespan: done"""
@@ -671,6 +877,7 @@ class EachBlock(Node):
     body:       list = field(default_factory=list)
     as_name:    Optional[str] = None   # each: done as NAME
     as_name:    Optional[str] = None   # each: done as NAME
+    take_n:     Optional[int] = None   # `take N` -- walk at most N items
 
 @dataclass
 class RepeatBlock(Node):
@@ -1828,12 +2035,20 @@ class AiAgentBlock(Node):
 
 @dataclass
 class LimitsBlock(Node):
-    """limits / max steps N / max tokens N / cost ceiling N / limits: done"""
+    """limits / max steps N / max tokens N / cost ceiling N / limits: done
+
+    Shared by `ai.agent` (reasoning ceilings) and `journey` (the per-IP request backstop),
+    because both are the same sentence: numeric ceilings for this thing. Reusing the block was
+    the point -- a second way to declare a ceiling would be a second thing to learn.
+    """
     max_steps:    int   = 0
     max_tokens:   int   = 0
     max_calls:    int   = 0
     cost_ceiling: float = 0.0
     timeout:      Any   = None
+    # `max requests N per second` -- 0 means "not declared", so the runtime falls through to
+    # the env override and then the 2000/sec default rather than reading 0 as "allow nothing".
+    max_requests_per_second: int = 0
 
 @dataclass
 class ToolsBlock(Node):
@@ -1994,6 +2209,10 @@ class MioCacheStmt(Node):
     key:    str  = ""
     values: list = field(default_factory=list)
     alias:  str  = ""   # miocache.get "k" as NAME -> bind result to NAME
+    # `miocache.set "k" v for 10 minutes` -- the grammar has always accepted this and the
+    # transformer used to drop it, so a declared expiry was silently ignored and the value
+    # lived forever (Q66). None means no expiry was declared, which is different from 0.
+    ttl_seconds: float = None
 
 @dataclass
 class NotBuiltService(Node):

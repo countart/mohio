@@ -33,7 +33,7 @@ REQUEST LIMITS: body and upload sizes are capped and requests are bounded by a w
 """
 
 from __future__ import annotations
-import json, os, sys, datetime
+import collections, json, os, sys, datetime, threading, time as _pooltime
 from pathlib import Path
 
 _HERE = Path(__file__).parent.resolve()
@@ -156,8 +156,206 @@ _APP_DIR = [None]
 # SERVER STATE
 # ══════════════════════════════════════════════════════════════
 
+def _declared_status_response(server, status):
+    """Answer a status from the app's `map route` declaration, or None to keep the default.
+
+    THE THREE STATES, and the third one is the reason this returns None rather than inventing
+    something: a declared PAGE renders, a declared MESSAGE is the body, and NO DECLARATION falls
+    through to the platform or server default. A route need not declare an error response, and
+    often should not -- a good default page beats a bare message.
+
+    The message form is deliberately naked text. On an HTML route that is a bare string in the
+    browser, and that is the coder's call: the compiler does not guess HTML-versus-API context
+    from the shape of a route, because guessing it wrong is worse than answering exactly what
+    was asked for.
+    """
+    from starlette.responses import Response
+    declared = getattr(server, "status_responses", None) or {}
+    entry = declared.get(int(status))
+    if not entry:
+        return None
+    kind, target = entry
+    if kind == "message":
+        return Response(status_code=int(status), content=str(target),
+                        media_type="text/plain", headers=CORS_HEADERS)
+
+    # A PAGE. Render the mounted program for that path, and serve what it produced AT the
+    # declared status -- the page is an ordinary page, the status is the route's business.
+    programs = getattr(server, "sibling_programs", None) or {}
+    interps = getattr(server, "sibling_interps", None) or {}
+    key = "/" + str(target).strip().lstrip("/").rstrip("/")
+    prog = programs.get(key)
+    interp = interps.get(key)
+    if prog is None or interp is None:
+        return None                       # nothing mounted there: keep the default 404
+    previous = list(getattr(interp, "shown", []) or [])
+    try:
+        interp.shown = []
+        ran = interp.run(prog)
+        produced = [str(x) for x in (interp.shown or []) if str(x).strip()]
+        body = None
+        if isinstance(ran, dict) and ran.get("body"):
+            body = ran["body"]
+        elif produced:
+            body = "\n".join(produced)
+        if body is None:
+            return None
+        return Response(status_code=int(status), content=str(body),
+                        media_type="text/html", headers=CORS_HEADERS)
+    except Exception as _page_err:
+        # SILENT-SHAPE ANNOTATION, and the ratchet was right to ask. A custom error page that
+        # itself fails must never replace the error the visitor came here for -- they asked for
+        # a missing page and would get a 500 about the 404 page instead, which is worse than the
+        # 404. So the fallback IS correct here. What is not correct is being quiet about it: the
+        # operator needs to know their error page is broken, so it says so on stderr and the
+        # visitor still gets the status they came for.
+        import sys as _sys
+        print(f"  [route] the custom [{status}] page at {target!r} failed to render: "
+              f"{type(_page_err).__name__}: {_page_err}. Answering with the plain status "
+              f"instead.", file=_sys.stderr)
+        return None
+    finally:
+        interp.shown = previous
+
+
+def _convention_body(server, url_path):
+    """Run a convention-mapped file and serve whatever it produced, or None to keep the 404.
+
+    T1-FRAMEWORK-FOUNDATION Phase 2. This is the whole no-boilerplate promise: a file in a
+    served folder answers at its convention URL with no `page` block and no route registration.
+    Rendering already worked -- `mio run about.mho` emits a full HTML document -- so the only
+    gap was the serve layer, which had no way to turn that output into a response.
+
+    A `render` block compiles to a ShowBlock, and its HTML lands in `interp.shown`, which is
+    also where `show` output goes. That is deliberate and correct here: in a convention-served
+    framework the page IS whatever the file emits.
+
+    Returns None when this framework does not serve by convention, so the caller keeps its 404.
+    Raises loudly when the framework is declared but not built -- silently handing back a web
+    page to someone who wrote `framework: mobile` would be the worst possible answer.
+    """
+    from starlette.responses import Response
+    from mohio_interpreter import _GiveBack
+    from mohio_framework import (SERVES_BY_CONVENTION, DECLARED_NOT_BUILT, not_built_message)
+    fw = getattr(server, "framework", None)
+    if fw in DECLARED_NOT_BUILT:
+        return Response(status_code=501,
+                        content=not_built_message(fw),
+                        media_type="text/plain",
+                        headers=CORS_HEADERS)
+    if fw not in SERVES_BY_CONVENTION:
+        return None                      # `api`: endpoints only, the 404 is correct
+
+    # Serve ONLY this app's own mapped URL. create_multi_app sends every unmatched path to the
+    # index app as a catch-all, so without this an absent URL would render the home page at 200.
+    own = getattr(server, "route_path", None)
+    expected = own if own is not None else "/"
+    if (url_path or "/").rstrip("/") != expected.rstrip("/"):
+        return None                      # not this file's URL -- a real 404
+
+    # A convention-served GET is READ-ONLY (ruled 2026-08-24). Serve-by-default answers a
+    # bare GET by RUNNING the file, so a top-level `save` would fire on every page view --
+    # verified before this guard: four GETs on a page with a top-level save wrote four rows.
+    # Refuse BEFORE running, never after: the whole point is that nothing mutates.
+    from mohio_framework import unsafe_on_get, read_only_violation_message
+    offenders = unsafe_on_get(server.program)
+    if offenders:
+        src = getattr(server.program, "source_path", None) or url_path
+        return Response(status_code=500,
+                        content=read_only_violation_message(src, url_path, offenders),
+                        media_type="text/plain", headers=CORS_HEADERS)
+
+    interp = server.interp
+    previous = list(getattr(interp, "shown", []) or [])
+    try:
+        interp.shown = []
+        _ran = interp.run(server.program)
+        produced = [str(x) for x in (interp.shown or []) if str(x).strip()]
+        # A top-level `give back` IS the page's answer -- the file producing output, which is
+        # exactly what convention serving serves. `run()` catches the give-back internally and
+        # RETURNS it as {status, body} rather than raising, so it has to be read off the return
+        # value; watching for an exception here caught nothing. Before this the program answered
+        # and nobody heard it: `shown` was empty, the convention path reported "produced no
+        # output", and the request fell through to the neutral "no home page yet" placeholder.
+        # Found while removing `page`, because a great many files used `page at /` for no reason
+        # other than to give a `give back` somewhere to live.
+        if isinstance(_ran, dict) and 'status' in _ran and not produced:
+            interp.shown = previous
+            _body = _ran.get('body')
+            _text = '' if _body is None else str(_body)
+            _html = _text.lstrip()[:1] == '<'
+            _resp = Response(status_code=int(_ran.get('status') or 200), content=_text,
+                             media_type="text/html" if _html else "text/plain",
+                             headers=CORS_HEADERS)
+            _resp.mohio_answered = True
+            return _resp
+    except _GiveBack as gb:
+        # A top-level `give back` IS the page's answer -- it is the file producing output, which
+        # is exactly what convention serving serves. Before this it escaped as an exception, the
+        # convention path reported a failure, and the request fell through to the neutral
+        # "no home page yet" placeholder: the program answered and nobody heard it. Found while
+        # removing `page`, because a great many files used `page at /` for no reason other than
+        # to give a `give back` somewhere to live.
+        interp.shown = previous
+        _status = getattr(gb, 'status', None) or 200
+        _value = getattr(gb, 'value', None)
+        _body = '' if _value is None else (
+            _value.to_python() if hasattr(_value, 'to_python') else _value)
+        _text = '' if _body is None else str(_body)
+        _html = _text.lstrip()[:1] == '<'
+        _resp = Response(status_code=int(_status), content=_text,
+                         media_type="text/html" if _html else "text/plain",
+                         headers=CORS_HEADERS)
+        _resp.mohio_answered = True
+        return _resp
+    except Exception as exc:
+        # Running the page is the response here, so a failure IS the response -- surface it
+        # rather than letting it read as "no such page".
+        interp.shown = previous
+        return Response(status_code=500,
+                        content=f"{url_path} failed while running: {exc}",
+                        media_type="text/plain",
+                        headers=CORS_HEADERS)
+    finally:
+        pass
+
+    if not produced:
+        # FAIL LOUD. A convention-mapped file that answers a direct GET with nothing is a real
+        # mistake -- an empty body or a bare 404 would send the author hunting for a routing
+        # problem that does not exist. Name the file, the method and the path.
+        source = getattr(server.program, "source_path", None) or url_path
+        interp.shown = previous
+        # Two different situations reach here and they must not share one message. A file
+        # with NO routes at all simply forgot to render. A file that DOES declare routes
+        # answers other requests fine and just has nothing for this GET -- telling its author
+        # to "add a listen for route" would send them looking for something already there.
+        from mohio_ast import ListenBlock as _Listen
+        _has_routes = any(isinstance(st, _Listen)
+                          for st in (getattr(server.program, "statements", None) or []))
+        if _has_routes:
+            hint = (f"{source} declares routes but none of them answered GET {url_path}, and "
+                    f"the file rendered nothing either, so there is no response to send. If "
+                    f"this endpoint is only meant for another method, that is fine and this "
+                    f"GET simply has no page; add a `render` block if it should also answer "
+                    f"in a browser.")
+        else:
+            hint = (f"{source} produced no output for GET {url_path}. A file served by "
+                    f"convention answers with whatever it renders or shows, and this one "
+                    f"emitted nothing. Add a `render` block (or a `show`), or give it a "
+                    f"`listen for` route if it was never meant to answer a GET.")
+        return Response(status_code=500, content=hint, media_type="text/plain",
+                        headers=CORS_HEADERS)
+
+    body = "\n".join(produced)
+    interp.shown = previous
+    looks_html = body.lstrip()[:1] == "<"
+    return Response(status_code=200, content=body,
+                    media_type="text/html" if looks_html else "text/plain",
+                    headers=CORS_HEADERS)
+
+
 class MohioServer:
-    def __init__(self, program, interp, verbose=False, app_dir=None):
+    def __init__(self, program, interp, verbose=False, app_dir=None, route_path=None):
         self.program       = program
         self.interp        = interp
         self.verbose       = verbose
@@ -169,6 +367,23 @@ class MohioServer:
         # own source (mohio_server.py, mohio.lark, ...) over HTTP from every tenant app, and
         # meant the app's real assets were never on the search path at all.
         self.app_dir       = Path(app_dir).resolve() if app_dir else None
+
+        # The URL the CLI mapped THIS file to (about.mho -> /about). Convention serving is
+        # gated on it. Without that gate the catch-all in create_multi_app -- which routes
+        # every unmatched path to the index app so assets and health still resolve -- made
+        # `GET /nope` render the HOME PAGE at 200 instead of 404ing. Serving a real page for
+        # a URL that does not exist is worse than the gap this phase closed. None means
+        # single-file serve, where the file IS the app and answers at "/".
+        self.route_path    = route_path
+
+        # T1-FRAMEWORK-FOUNDATION Phase 2. The framework is resolved ONCE, here, from the
+        # ASSEMBLED program -- after includes and the journey spine were merged by the CLI --
+        # and held for the life of the app. It cannot be read per-request or per-statement:
+        # the framework decides WHETHER and HOW a program is invoked at all, so it has to be
+        # known before anything runs. This is what "the app runs under its framework" means.
+        # A bad value raises here, at startup, rather than on the first request.
+        from mohio_framework import resolve as _resolve_framework
+        self.framework = _resolve_framework(self.program, where="this app")
 
     def _build_session_store(self):
         """Choose the session store: an explicitly registered provider always wins (same
@@ -230,7 +445,10 @@ class MohioServer:
                 import traceback
                 traceback.print_exc()
             from mohio_interpreter import format_runtime_error, log_runtime_error
-            info = format_runtime_error(e)
+            # Use THIS REQUEST's id rather than minting a fresh one per error. Before, an error
+            # got its own trace id, so it could be correlated with itself and with nothing else
+            # -- not with the audit row written moments earlier in the same request.
+            info = format_runtime_error(e, trace_id=getattr(self.interp, '_request_id', None))
             log_runtime_error(info, verbose=self.verbose)
             return {"status": info["status"], "body": info}
 
@@ -420,6 +638,183 @@ _MAX_BODY_BYTES   = int(os.environ.get("MOHIO_MAX_BODY_BYTES",   2 * 1024 * 1024
 _MAX_UPLOAD_BYTES = int(os.environ.get("MOHIO_MAX_UPLOAD_BYTES", 10 * 1024 * 1024))  # 10 MB
 _REQUEST_TIMEOUT  = float(os.environ.get("MOHIO_REQUEST_TIMEOUT", 30))               # seconds
 
+# ══════════════════════════════════════════════════════════════
+# PER-IP REQUEST BACKSTOP  (T0-RATE-LIMIT-BACKSTOP, 2026-09-01)
+# ══════════════════════════════════════════════════════════════
+# WHAT THIS IS: a crude, in-memory, per-IP ceiling for a bare `mio serve` with nothing in
+# front of it -- Colab, a laptop demo, a naive self-host. Its whole job is to stop ONE address
+# trivially hammering an unprotected instance.
+#
+# WHAT THIS IS NOT, and must never be sold as: production rate limiting. There is no
+# cross-process coordination and no persistence, so N instances behind a load balancer each
+# count separately. Scale is horizontal (more instances) plus rate limiting at the EDGE
+# (reverse proxy / CDN); that is the scale story, not a bigger number here. This is the
+# per-instance abuser floor underneath it.
+#
+# 2000/sec/IP by default, and the number is deliberately middle-high: per-IP counting sees a
+# NAT'd classroom, office or coffee shop as ONE address, so the default has to leave a shared
+# IP ample headroom while still tripping on a real single-address flood.
+_RATE_LIMIT_DEFAULT = 2000
+_RATE_LIMIT_ENV = "MOHIO_MAX_REQUESTS_PER_SECOND"
+# How many addresses to track at once. The counter itself must not become the attack: an
+# attacker spraying millions of source addresses would otherwise grow this map without bound.
+# Each entry is three small numbers, so the cap is about memory, not accuracy.
+_RATE_LIMIT_MAX_IPS = int(os.environ.get("MOHIO_RATE_LIMIT_MAX_IPS", 20000))
+
+
+class _RateLimiter:
+    """Sliding-window counter, O(1) memory per address.
+
+    A true sliding window would keep every request's timestamp -- at 2000/sec that is 2000
+    floats per address, which turns the counter into the memory footgun it exists to avoid.
+    This keeps the CURRENT one-second window's count and the PREVIOUS one's, and weights the
+    previous by how much of it is still in view. Standard technique, bounded, and accurate
+    enough for a backstop whose job is "one address is hammering us", not billing.
+    """
+
+    def __init__(self, limit_per_second, max_ips=_RATE_LIMIT_MAX_IPS):
+        self.limit = int(limit_per_second)
+        self.max_ips = int(max_ips)
+        self._buckets = collections.OrderedDict()   # ip -> [window, current, previous]
+        self._lock = threading.Lock()
+
+    def allow(self, ip, now=None):
+        """True if this request is under the ceiling. A limit of 0 or less disables it."""
+        if self.limit <= 0:
+            return True
+        now = _pooltime.time() if now is None else now
+        window = int(now)
+        with self._lock:
+            entry = self._buckets.get(ip)
+            if entry is None:
+                entry = [window, 0, 0]
+                self._buckets[ip] = entry
+            elif entry[0] == window - 1:
+                entry[0], entry[1], entry[2] = window, 0, entry[1]
+            elif entry[0] != window:
+                entry[0], entry[1], entry[2] = window, 0, 0
+            # Weight the previous window by the part of it still inside the last second.
+            overlap = 1.0 - (now - window)
+            estimated = entry[1] + entry[2] * overlap
+            if estimated >= self.limit:
+                self._buckets.move_to_end(ip)
+                return False
+            entry[1] += 1
+            self._buckets.move_to_end(ip)
+            self._evict(window)
+            return True
+
+    def _evict(self, window):
+        """Bound the map. Stale entries go first; past the cap, least-recently-seen go too."""
+        while len(self._buckets) > self.max_ips:
+            oldest_ip, oldest = next(iter(self._buckets.items()))
+            # An entry two windows old cannot influence any future decision, so dropping it
+            # loses nothing. Past the cap we drop the least-recently-seen regardless, which is
+            # the right trade: a spraying attacker's one-off addresses are exactly the entries
+            # that never come back, so they are the ones evicted.
+            del self._buckets[oldest_ip]
+            if oldest[0] >= window - 1:
+                break
+
+
+def _resolve_rate_limit(program):
+    """The per-IP ceiling for this app: a journey `limits` block, else env, else the default.
+
+    Same resolution shape as the framework and the session store -- an explicit declaration
+    outranks an env default, which outranks the built-in. Resolved ONCE at startup from the
+    assembled program, not per request.
+    """
+    declared = 0
+    for node in _walk_nodes(program):
+        if type(node).__name__ == 'LimitsBlock':
+            n = int(getattr(node, 'max_requests_per_second', 0) or 0)
+            if n > 0:
+                declared = n
+                break
+    if declared > 0:
+        return declared
+    env = os.environ.get(_RATE_LIMIT_ENV, "").strip()
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            raise RuntimeError(
+                f"{_RATE_LIMIT_ENV}={env!r} is not a whole number. It sets the per-IP requests "
+                f"per second ceiling; use a number, or unset it for the "
+                f"{_RATE_LIMIT_DEFAULT} default.")
+    return _RATE_LIMIT_DEFAULT
+
+
+def _walk_nodes(node, _seen=None):
+    """Every AST node reachable from a program, so a `limits` block is found whether it sits
+    at the top level or inside a journey."""
+    if _seen is None:
+        _seen = set()
+    if id(node) in _seen:
+        return
+    _seen.add(id(node))
+    yield node
+    for attr in ('statements', 'body', 'journey_body'):
+        for child in (getattr(node, attr, None) or []):
+            if hasattr(child, '__dict__'):
+                for sub in _walk_nodes(child, _seen):
+                    yield sub
+
+
+class _RateLimitMiddleware:
+    """Runtime-internal. The coder's surface is the `limits` block and nothing else.
+
+    Deliberately NOT an Express-style middleware the developer writes and wires: they declare
+    the ceiling they want and the runtime hides how it is enforced. It runs before routing so
+    an over-limit request is rejected before any parsing, session lookup or program execution.
+    """
+
+    def __init__(self, app, limiter=None, trusted_proxy=False):
+        self.app = app
+        self.limiter = limiter
+        self.trusted_proxy = trusted_proxy
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or self.limiter is None:
+            await self.app(scope, receive, send)
+            return
+        from starlette.requests import Request
+        request = Request(scope)
+        if not self.limiter.allow(_client_ip(request, self.trusted_proxy)):
+            await _rate_limited_response(self.limiter.limit)(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+def _rate_limited_response(limit):
+    """The same shape as the oversize-payload refusal: an error name a caller can branch on,
+    and a sentence that says what happened without a stack trace."""
+    from starlette.responses import JSONResponse
+    return JSONResponse(
+        {"error": "rate_limit_exceeded",
+         "message": (f"Too many requests from this address -- this app accepts {limit} per "
+                     f"second. Try again shortly.")},
+        status_code=429, headers={"Retry-After": "1"})
+
+
+def _client_ip(request, trusted_proxy):
+    """The address to count against.
+
+    SOCKET PEER BY DEFAULT. `X-Forwarded-For` is set by whoever is in front, and when nothing
+    is in front that is the CLIENT -- so honouring it unconditionally lets an attacker send a
+    different value on every request and never hit the limit at all. Ignoring it when a proxy
+    IS in front is the opposite failure: every request arrives from the proxy's single address,
+    one bucket for the whole site, and a busy afternoon throttles everyone.
+    Neither default is safe in both deployments, so the deployment says which it is:
+    MOHIO_TRUSTED_PROXY=1 when a proxy really does sit in front.
+    """
+    if trusted_proxy:
+        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        if fwd:
+            return fwd
+    client = getattr(request, "client", None)
+    return getattr(client, "host", None) or "unknown"
+
 
 class _TooLarge(Exception):
     """Raised when a request body or upload exceeds its configured cap."""
@@ -517,20 +912,6 @@ def create_app(server: MohioServer):
     # ── Shared POST dispatcher ────────────────────────────────
 
     async def _dispatch_post(request: Request) -> Response:
-        # TEMPORARY DIAGNOSTIC (2026-08-14) -- comparing route resolution between
-        # zork.mohio.io and mohio-t-11.fly.dev. No code anywhere in this repo reads
-        # Host/X-Forwarded-Host for route selection (verified by trace), so this logs
-        # exactly what the process receives for each hostname, to see whether Fly's
-        # edge is forwarding something that differs. Remove after the comparison.
-        import sys as _diag_sys
-        print(f"  [DIAG] host={request.headers.get('host')!r} "
-              f"x-forwarded-host={request.headers.get('x-forwarded-host')!r} "
-              f"x-forwarded-proto={request.headers.get('x-forwarded-proto')!r} "
-              f"x-forwarded-for={request.headers.get('x-forwarded-for')!r} "
-              f"method={request.method!r} url.path={request.url.path!r} "
-              f"url.hostname={request.url.hostname!r} "
-              f"raw_path={getattr(request, 'scope', {}).get('raw_path')!r}",
-              file=_diag_sys.stderr, flush=True)
         ctype = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
         is_form = False
         try:
@@ -802,6 +1183,25 @@ def create_app(server: MohioServer):
             if not result.get("_no_route") and status != 204:
                 return HTMLResponse("" if body is None else str(body),
                                     status_code=status)
+        # T1-FRAMEWORK-FOUNDATION Phase 2 -- serve by default at the ROOT too.
+        # `/` has its own handler (declared home page, then index.html, then the neutral
+        # placeholder), so the seam further down never saw it. A render-only index.mho
+        # therefore still answered with the "no home page yet" placeholder even after
+        # /about started working -- the same gap, one route later. Convention serving is
+        # tried FIRST here: an index.mho that renders something IS the home page, and it
+        # must win over the placeholder that exists precisely because there was none.
+        # A convention answer is used whenever the page actually produced one. The status is
+        # NOT filtered to 200: a file whose whole content is `give back 404 "gone"` is answering,
+        # and answering with 404 is the answer -- treating that as "no page" would replace a
+        # deliberate response with a placeholder. `give back 500` is that same deliberate answer,
+        # so the two kinds of 500 must be told apart by WHO produced them, never by the number:
+        # `mohio_answered` marks a give-back the program made on purpose, while an unmarked 500
+        # is the convention path reporting its own failure and still falls through.
+        _conv_root = _convention_body(server, "/")
+        if _conv_root is not None and (getattr(_conv_root, "mohio_answered", False)
+                                       or _conv_root.status_code != 500):
+            return _conv_root
+
         # No root route. Try the app's declared home page, then the web conventions. A Mohio home
         # page (index.mho) is handled by the dispatch above, not here -- .mho files are executed,
         # not served as static files.
@@ -981,10 +1381,29 @@ def create_app(server: MohioServer):
         # from a handler carries a body/content-type and is served normally below.
         _no_route = isinstance(result, dict) and result.get('_no_route')
         if status in (204, None) or (status == 404 and (_no_route or not body)):
+            # T1-FRAMEWORK-FOUNDATION Phase 2 -- SERVE BY DEFAULT.
+            #
+            # A file that only renders has no route to match, so dispatch marks `_no_route`
+            # and this used to be a bare 404 -- which is why `page` was secretly doing the
+            # framework's routing job. The CLI already mapped this file to this URL; the
+            # program simply never registered a route, because in a convention-served
+            # framework it should not have to. Run it and serve what it produces.
+            #
+            # Only for a framework that serves BY CONVENTION (`web`, `game`). `api` keeps the
+            # 404 on purpose: answering endpoint calls with no page routing is the entire
+            # point of that value, so inventing a page for it would be wrong. A declared but
+            # not-yet-built framework fails LOUD rather than quietly serving a web page.
+            _conv = _convention_body(server, full_path)
+            if _conv is not None:
+                return _conv
+            _declared = _declared_status_response(server, 404)
+            if _declared is not None:
+                return _declared
             return Response(status_code=404, headers=CORS_HEADERS)
 
         response_headers = dict(CORS_HEADERS)
         # Honor any cookies the page set (e.g. a session cookie).
+        get_cookie_parts = []
         pending_cookies = result.get("__pending_cookies__") if isinstance(result, dict) else None
         if isinstance(pending_cookies, dict):
             for cookie_name, cookie_opts in pending_cookies.items():
@@ -1000,8 +1419,16 @@ def create_app(server: MohioServer):
                 if cookie_opts.get('http_only', True):
                     parts.append("HttpOnly")
                 parts.append(f"SameSite={cookie_opts.get('same_site', 'Lax')}")
-                response_headers["Set-Cookie"] = "; ".join(parts)
-                break
+                get_cookie_parts.append("; ".join(parts))
+        # EVERY cookie, not the first one. This loop used to assign the header and then `break`,
+        # so a page setting two cookies delivered one and dropped the other with no error --
+        # measured over real HTTP: `miocookie.set "alpha"` + `miocookie.set "beta"` on a GET
+        # handler produced exactly one Set-Cookie header, `alpha`. The POST dispatcher already
+        # did this correctly with `_with_all_cookies`, which is the helper that exists precisely
+        # because a plain dict cannot hold two headers of the same name; this path never called
+        # it. Same bug, same building, one path fixed and one not.
+        if get_cookie_parts:
+            response_headers["Set-Cookie"] = get_cookie_parts[0]
 
         content_type = result.get("content_type") if isinstance(result, dict) else None
         # `give ... as download`: the browser saves the file instead of displaying it.
@@ -1020,9 +1447,9 @@ def create_app(server: MohioServer):
                 _b = _b.encode("utf-8")
             elif not isinstance(_b, (bytes, bytearray)):
                 _b = str(_b).encode("utf-8")
-            return Response(_b, status_code=status,
+            return _with_all_cookies(Response(_b, status_code=status,
                             media_type=content_type or "application/octet-stream",
-                            headers=response_headers)
+                            headers=response_headers), get_cookie_parts)
 
         # An explicit non-HTML content-type (application/xml, text/plain, ...) from a
         # `give back ... as xml|text` serves the body raw under that type, ahead of the
@@ -1032,15 +1459,15 @@ def create_app(server: MohioServer):
                 raw = _xml_body(body)
             else:
                 raw = "" if body is None else (body if isinstance(body, str) else str(body))
-            return Response(raw, status_code=status, media_type=content_type,
-                            headers=response_headers)
+            return _with_all_cookies(Response(raw, status_code=status, media_type=content_type,
+                            headers=response_headers), get_cookie_parts)
         if content_type == "text/html" or (isinstance(body, str) and "<" in body[:64]):
-            return HTMLResponse(body if isinstance(body, str) else str(body),
-                                status_code=status, headers=response_headers)
+            return _with_all_cookies(HTMLResponse(body if isinstance(body, str) else str(body),
+                                status_code=status, headers=response_headers), get_cookie_parts)
         if isinstance(body, dict):
-            return SafeJSONResponse(body, status_code=status, headers=response_headers)
-        return SafeJSONResponse(_response_payload(body),
-                                status_code=status, headers=response_headers)
+            return _with_all_cookies(SafeJSONResponse(body, status_code=status, headers=response_headers), get_cookie_parts)
+        return _with_all_cookies(SafeJSONResponse(_response_payload(body),
+                                status_code=status, headers=response_headers), get_cookie_parts)
 
     async def options_handler(request: Request) -> Response:
         return Response(status_code=200, headers=CORS_HEADERS)
@@ -1081,7 +1508,17 @@ def create_app(server: MohioServer):
         Route("/{path:path}",               options_handler,  methods=["OPTIONS"]),
     ]
 
+    # The per-IP backstop resolves ONCE here, from the assembled program: a journey `limits`
+    # block outranks MOHIO_MAX_REQUESTS_PER_SECOND, which outranks the 2000 default -- the same
+    # explicit-beats-env-beats-default order the framework and session store already use.
+    _limiter = _RateLimiter(_resolve_rate_limit(server.program))
+    _trusted_proxy = os.environ.get("MOHIO_TRUSTED_PROXY", "").strip().lower() in (
+        "1", "true", "yes")
+
     middleware = [
+        # First in the list, so it runs OUTERMOST: an address over its ceiling is turned away
+        # before CORS, routing, body parsing or any program code.
+        Middleware(_RateLimitMiddleware, limiter=_limiter, trusted_proxy=_trusted_proxy),
         Middleware(CORSMiddleware,
                    allow_origins=_cors_origins(),
                    allow_methods=["*"],
@@ -1096,7 +1533,8 @@ def create_app(server: MohioServer):
 # DIRECTORY MODE  --  one .mho file per page, each at its own URL
 # ══════════════════════════════════════════════════════════════
 
-def create_multi_app(programs, interps, verbose=False, app_dir=None):
+def create_multi_app(programs, interps, verbose=False, app_dir=None, redirects=None,
+                     status_responses=None):
     """Serve a folder of .mho files (mio serve myapp/). Each file was mapped to a
     URL by the CLI (index.mho -> /, contact.mho -> /contact). Here we build a full
     single-file app per program (reusing create_app, so form parsing, guard verify,
@@ -1109,8 +1547,15 @@ def create_multi_app(programs, interps, verbose=False, app_dir=None):
     process cwd, so `GET /style.css` returned empty in directory mode."""
     apps = {}
     for url, program in programs.items():
-        apps[url] = create_app(MohioServer(program, interps[url], verbose=verbose,
-                                           app_dir=app_dir))
+        _srv = MohioServer(program, interps[url], verbose=verbose,
+                           app_dir=app_dir, route_path=url)
+        # Every app carries the declared responses AND the means to render one: a `[404] /page`
+        # answer is a real page, rendered per request the way any other page is, not a string
+        # captured once at boot.
+        _srv.status_responses = dict(status_responses or {})
+        _srv.sibling_programs = programs
+        _srv.sibling_interps = interps
+        apps[url] = create_app(_srv)
     if not apps:
         raise ValueError("create_multi_app: no programs to serve")
 
@@ -1131,11 +1576,26 @@ def create_multi_app(programs, interps, verbose=False, app_dir=None):
             return best
         return apps.get("/") or next(iter(apps.values()))
 
+    # T1-MAP-EXTRACTION: `map`'s redirects answer INSTEAD of any file, so they are checked
+    # before route matching. A redirect that fell through to the route table would be shadowed
+    # by whatever happened to be mounted there, which is the opposite of what it says.
+    _redirects = dict(redirects or {})
+
     async def _router(scope, receive, send):
         if scope.get("type") != "http":
             # lifespan/websocket: hand to any app so startup/shutdown still runs
             await next(iter(apps.values()))(scope, receive, send)
             return
-        await _match(scope.get("path", "/"))(scope, receive, send)
+        _path = scope.get("path", "/")
+        _key = _path if _path == "/" else _path.rstrip("/")
+        _hit = _redirects.get(_key)
+        if _hit is not None:
+            _dst, _code = _hit
+            await send({"type": "http.response.start", "status": _code,
+                        "headers": [(b"location", str(_dst).encode()),
+                                    (b"content-length", b"0")]})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        await _match(_path)(scope, receive, send)
 
     return _router

@@ -51,7 +51,7 @@ def sid_of(resp):
 SRC_WRITE = ('shape P\n    command as text\nshape: done\n'
              'listen for\n    new sh.P at /p\n'
              '        miocookie.set "mio_session" to "hack"\n'
-             '        give back 200 "ok"\n    new: done\nlisten: done\n')
+             '        give back [200] "ok"\n    new: done\nlisten: done\n')
 prog = transform(_P.parse(SRC_WRITE), SRC_WRITE)
 r = MohioInterpreter().run_with_session(prog, {'_method': 'POST', '_path': '/p', 'command': 'x'},
                                         'sess1', _InMemorySessionStore())
@@ -64,7 +64,7 @@ check("the fail-loud names the runtime-owned mechanism (sh. reservation parallel
 SRC_OTHER = ('shape P\n    command as text\nshape: done\n'
              'listen for\n    new sh.P at /p\n'
              '        miocookie.set "preference" to "dark_mode"\n'
-             '        give back 200 "ok"\n    new: done\nlisten: done\n')
+             '        give back [200] "ok"\n    new: done\nlisten: done\n')
 prog_o = transform(_P.parse(SRC_OTHER), SRC_OTHER)
 r_o = MohioInterpreter().run_with_session(prog_o, {'_method': 'POST', '_path': '/p', 'command': 'x'},
                                           None, _InMemorySessionStore())

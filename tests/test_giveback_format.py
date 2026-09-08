@@ -154,7 +154,7 @@ print("\n── F1: bare markup (no format) ──")
 c = serve('''\
 listen for
     request for sh.Q at /q
-        give back 200 "<h1>x</h1>"
+        give back [200] "<h1>x</h1>"
     request: done
 listen: done
 ''')
@@ -203,14 +203,7 @@ ct = r.headers.get('content-type', '')
 check_in("404 as xml content-type", ct, 'application/xml')
 
 # Dynamic XML from a page (GET route)
-c2 = serve('''\
-journey App
-    page Sitemap at /sitemap.xml
-        xml "<urlset><url><loc>https://example.com</loc></url></urlset>"
-        give back 200 xml as xml
-    page: done
-journey: done
-''')
+c2 = serve('shape Q\n    q as text\nshape: done\njourney App\n    listen for\n        request for sh.Q at /sitemap.xml\n                xml "<urlset><url><loc>https://example.com</loc></url></urlset>"\n                give back 200 xml as xml\n        request: done\n    listen: done\njourney: done\n')
 r = c2.get("/sitemap.xml")
 check("dynamic xml status", r.status_code, 200)
 ct = r.headers.get('content-type', '')
@@ -239,8 +232,6 @@ check_in("POST as text content-type", ct, 'text/plain')
 print("\n── F2: quoted paths fail loud ──")
 
 QUOTED_CASES = [
-    ('page at "/about"',
-     'page at "/about"\n    show "hi"\npage: done\n'),
     ('request for at "/y"',
      'listen for\n    request for sh.X at "/y"\n        give back ok "hi"\n    request: done\nlisten: done\n'),
     ('new at "/z"',
@@ -257,33 +248,21 @@ for label, src in QUOTED_CASES:
 
 print("\n── F2: unquoted still works ──")
 
-c = serve('''\
-journey App
-    page About at /about
-        give back 200 "about page" as text
-    page: done
-journey: done
-''')
+c = serve('shape Q\n    q as text\nshape: done\njourney App\n    listen for\n        request for sh.Q at /about\n                give back 200 "about page" as text\n        request: done\n    listen: done\njourney: done\n')
 r = c.get("/about")
 check("unquoted page serves", r.status_code, 200)
 
 print("\n── F2: quoted string as VALUE (not path) — no false positive ──")
 
-r = run_check('''\
-journey App
-    page Go at /go
-        give back 200 "/redirect"
-    page: done
-journey: done
-''')
+r = run_check('shape Q\n    q as text\nshape: done\njourney App\n    listen for\n        request for sh.Q at /go\n                give back [200] "/redirect"\n        request: done\n    listen: done\njourney: done\n')
 check("quoted value compiles", r.returncode, 0)
 
 print("\n── F2: mio fmt rewrites quoted path ──")
 
-fmt_src = 'page at "/about"\n    show "hi"\npage: done\n'
+fmt_src = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at "/about"\n        show "hi"\n    request: done\nlisten: done\n'
 r, content = run_fmt(fmt_src, write=True)
 if content:
-    check_in("fmt rewrites to unquoted", content, 'page at /about')
+    check_in("fmt rewrites to unquoted", content, 'at /about')
     check_true("fmt removes quotes", '"/about"' not in content)
     # Rewritten file checks clean
     with tempfile.NamedTemporaryFile(mode='w', suffix='.mho', dir=ROOT,
@@ -298,22 +277,22 @@ if content:
 
 print("\n── F2: clean file reports canonical ──")
 
-clean_src = 'page at /about\n    show "hi"\npage: done\n'
+clean_src = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /about\n        show "hi"\n    request: done\nlisten: done\n'
 r, _ = run_fmt(clean_src, write=False)
 check_in("canonical file → already canonical", r.stdout, "canonical")
 
 print("\n── F2: edges ──")
 
 # Path with sub-segments
-r = run_check('page at "/news/2026"\n    show "hi"\npage: done\n')
+r = run_check('shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at "/news/2026"\n        show "hi"\n    request: done\nlisten: done\n')
 check_true("sub-segment path fails", r.returncode != 0)
 
 # Trailing slash
-r = run_check('page at "/about/"\n    show "hi"\npage: done\n')
+r = run_check('shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at "/about/"\n        show "hi"\n    request: done\nlisten: done\n')
 check_true("trailing slash path fails", r.returncode != 0)
 
 # Multiple quoted paths in one file
-multi_src = 'page at "/a"\n    show "a"\npage: done\npage at "/b"\n    show "b"\npage: done\n'
+multi_src = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at "/a"\n        show "a"\n    request: done\nlisten: done\nlisten for\n    request for sh.Q at "/b"\n        show "b"\n    request: done\nlisten: done\n'
 r = run_check(multi_src)
 check_true("multiple quoted paths fail", r.returncode != 0)
 

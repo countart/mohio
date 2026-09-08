@@ -387,9 +387,9 @@ listen for
             when guess is answer
                 give back 200 ("You got it in " & total_tries & " tries!")
             when guess is above answer
-                give back 200 "Too high — try again"
+                give back [200] "Too high — try again"
             otherwise
-                give back 200 "Too low — try again"
+                give back [200] "Too low — try again"
         check: done
     new: done
 listen: done

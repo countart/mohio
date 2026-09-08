@@ -215,6 +215,7 @@ DOTTED_CLOSER.3: /[a-zA-Z_][a-zA-Z0-9_.]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*/
 
 // ── Keywords (.2 — beat NAME) ────────────────────────────────
 SECTOR.2:     /sector(?![A-Za-z0-9_])/
+FRAMEWORK.2:  /framework(?![A-Za-z0-9_])/   // T1-FRAMEWORK-FOUNDATION: app TARGET type (web-app/api/...), orthogonal to sector
 CONNECT.2:    /connect(?![A-Za-z0-9_])/
 SHAPE.2:      /shape(?![A-Za-z0-9_])/
 PATTERN.2:    /pattern(?![A-Za-z0-9_])/
@@ -473,6 +474,13 @@ TYPE_NAME.1: /text(?![A-Za-z0-9_])/ | /decimal\.\d+\.pad(?![A-Za-z0-9_])/ | /dec
 // grammar rule for it was removed. Same hole that let `if x is more than 3` become three
 // declarations. otherwise and when are block keywords (design spec: otherwise is the final
 // fallback of a verb block, once per block, always last) and can never be variable names.
+// RESERVED TYPE WORDS, second batch (2026-08-25): bool, datetime, uuid, any, void, base64, pdf
+// and map. Every one is already a TYPE_NAME alternative, so NAME matching them too made each
+// one ambiguous in exactly the way `text` was -- and `map` is worse than ambiguous, because a
+// `map` BLOCK and a variable called `map` compete, and the variable reading can win silently.
+// Zero corpus files used any of the eight as an identifier, so reserving them breaks nothing;
+// the remaining TYPE_NAME words (date, time, email, url, list, image, audio, video, file) are
+// deliberately NOT reserved here -- they read as ordinary nouns and do appear as real names.
 // RESERVED SERVICE NAMES. These 30 roots are the service namespace, extracted from the MIO*
 // terminals in this grammar. NAME must not claim them, or the service name silently
 // becomes a VARIABLE: `miotest "suite"` declared a variable called miotest, and the
@@ -481,7 +489,7 @@ TYPE_NAME.1: /text(?![A-Za-z0-9_])/ | /decimal\.\d+\.pad(?![A-Za-z0-9_])/ | /dec
 // saying so.
 // NOT the whole `mio` prefix: user names may legitimately start with it (the gate has a
 // langmap pack called `miogscreen`). Only the real service roots are reserved.
-NAME: /(?!__USERVAR__)(?!(?:miotranslate|mioresponse|mioschedule|miosecurity|miovalidate|mioconnect|miopublish|miocookie|miosearch|miostream|miocache|miochain|miograph|mioimage|miolearn|mioprint|miovault|mioauth|miodata|miofile|miohttp|mioknow|miomail|miopush|miotest|mioapp|mioenv|miolog|miomap|miopdf|miosms|miosys|mioai)\b)(?!(?:if|unless|otherwise|when)\b)(?!(?:text|decimal|dec|integer|int|boolean)\b)[a-zA-Z_][a-zA-Z0-9_]*/
+NAME: /(?!__USERVAR__)(?!(?:miotranslate|mioresponse|mioschedule|miosecurity|miovalidate|mioconnect|miopublish|miocookie|miosearch|miostream|miocache|miochain|miograph|mioimage|miolearn|mioprint|miovault|mioauth|miodata|miofile|miohttp|mioknow|miomail|miopush|miotest|mioapp|mioenv|miolog|miomap|miopdf|miosms|miosys|mioai)\b)(?!(?:if|unless|otherwise|when|catch)\b)(?!(?:text|decimal|dec|integer|int|boolean|bool|datetime|uuid|any|void|base64|pdf|map|json|USD|CAD|EUR|GBP)\b)[a-zA-Z_][a-zA-Z0-9_]*/
 USERVAR_DOTTED.5: /__USERVAR__[a-zA-Z_][a-zA-Z0-9_]*(?:[.](?:[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+))*/
 
 // ── Literals ─────────────────────────────────────────────────
@@ -630,8 +638,10 @@ closer: DOTTED_CLOSER ":" DONE   // naming goes on the ACTION, never the closer
 // ─────────────────────────────────────────────────────────────
 
 declaration: sector_decl
+           | framework_decl
            | connect_decl
            | shape_decl
+           | shape_decl_unnamed
            | pattern_decl
            | miomap_decl
            | mioconnect_decl
@@ -653,7 +663,6 @@ declaration: sector_decl
            | timespan_decl
            | load_pack_decl
            | define_decl
-           | page_decl
            | miotest_decl
            | view_decl
            | template_decl
@@ -674,8 +683,33 @@ declaration: sector_decl
 
 sector_decl: SECTOR ":" sector_name
 
+// T1-FRAMEWORK-FOUNDATION (2026-08-24). `framework:` declares the app TARGET type and is
+// deliberately built to the SAME shape as `sector:` above -- verified, not assumed: `sector` is
+// NOT in NAME's exclusion list and `sector 5` still parses as an ordinary variable, because the
+// ":" at a declaration position is what disambiguates a declaration from an identifier (see
+// VERIFIED-CANONICAL-SYNTAX.md, "Declaration-vs-identifier disambiguation"). `framework` is
+// therefore NOT reserved either, and `framework 5` keeps working as a variable. The two are
+// ORTHOGONAL: sector enforces RULES, framework scaffolds STRUCTURE. At most one of each, neither
+// required -- a file with no `framework:` IS a web-app, the default.
+// SECTOR_SEG is reused as the segment: it already allows the hyphen `web-app` needs and the dot
+// chain the sub-profile model needs (`mobile.ios`, `api.rest`).
+framework_decl: FRAMEWORK ":" framework_name
+framework_name: SECTOR_SEG ("." SECTOR_SEG)*
+
 SECTOR_SEG: /[a-zA-Z][a-zA-Z0-9_-]*/
-sector_name: SECTOR_SEG ("." SECTOR_SEG)*
+// SECTOR HIERARCHY USES COMMAS, NOT DOTS (ruled 2026-08-25).
+//
+//     sector: financial, banking          <- levels, outermost first
+//     sector: education, us, nc, k12, high_school
+//
+// The levels and their ORDER are unchanged -- only the separator moved. The dot was
+// ambiguous in exactly the place it mattered: a dot is a plausible character inside a sector
+// NAME, so someone writing one inadvertently would silently split their name into levels and
+// get a hierarchy nobody asked for. A comma cannot be mistaken for part of a name, so the
+// level boundaries are unambiguous no matter what a name contains. The internal key stays
+// dotted (`financial.banking`), because that is what the profile loader looks up -- this is a
+// change to how a coder WRITES it, not to what it means.
+sector_name: SECTOR_SEG ("," SECTOR_SEG)*
 
 // ── connect (database / cache) ───────────────────────────────
 
@@ -701,13 +735,64 @@ connect_decl: CONNECT NAME AS conn_access? NAME FROM (ENV_REF | SECRET_REF) (res
 // list fields. The shape reading wins.
 shape_decl.4: SHAPE NAME (TAG_REF | SEC_ENCRYPT)? shape_body* closer
 
+// PHASE 2 ITEM 3 -- an ALL-TABLE shape needs no name. Everything in it is reached through
+// `db.`, so the name would never be used and requiring one is ceremony.
+//
+// THE DISAMBIGUATOR, and it is the whole reason this can exist under Earley at all. The grammar
+// is newline-blind, so `SHAPE NAME? shape_body*` would read `shape Person / email as text` BOTH
+// ways -- named Person with one field, or unnamed with two fields called Person and email -- and
+// Earley would pick one on grounds unrelated to intent. That is the unbounded-body ambiguity
+// this codebase has been bitten by three times. Requiring the token right after SHAPE to be
+// `NAME AS table` makes the two readings DISJOINT on every input:
+//   `shape Person / email as text`  -> unnamed needs `Person as table`, but the next word is
+//                                      `email`, so only the NAMED rule matches.
+//   `shape Store / users as table`  -> unnamed needs `Store as table`, but the next word is
+//                                      `users`, so again only the NAMED rule matches.
+//   `shape / users as table`        -> named would need `as table` to be a shape_body, and it is
+//                                      not, so only the UNNAMED rule matches.
+// No input matches both. There is nothing for Earley to resolve, so nothing it can resolve wrongly.
+shape_decl_unnamed.9: SHAPE NAME AS TABLE_KW shape_body* closer
+
 shape_body: shape_field
           | _RETAIN FOR duration_expr    // shape-level retain — Legal Passport feature
 
-shape_field: NAME ("." NAME)? (AS type_name)? shape_field_mod*   // supports dotted fields: status.allowed, mfa.verified
+// A COMMA LIST DECLARES SEVERAL FIELDS THAT SHARE EVERYTHING AFTER IT. `take` has had this
+// convention since it existed (`take a, b as int`), and a shape field did not, so the same
+// idea had to be written two different ways depending on where you were standing. One word,
+// one job, the same meaning in every context.
+//
+// EVERYTHING TRAILING APPLIES TO EVERY NAME, the type and the modifiers alike. That is the
+// load-bearing half: `d, e, f as text [phi]` classifies all three, not the last one. A
+// modifier binding to the last name only would be a silent compliance leak for every
+// safety-carrying modifier there is (never store, never log, sec.encrypt, a class tag,
+// required), which is why the transformer copies them onto each field rather than sharing
+// one list.
+//
+// THE GROUP IS ITS OWN ALTERNATIVE, with a `+`, and that is not tidiness. A dotted field name
+// (`mfa.verified`) also puts two NAME tokens on one line, so a transformer counting tokens
+// cannot tell `a, b` from `a.b`: measured, folding both into one rule turned `mfa.verified as
+// boolean` from one field into two and let it past the two-fields-on-one-line guard. Only a
+// comma makes a group, so only the comma alternative is named one.
+shape_field: (NAME | TYPE_NAME) ("." NAME)? (AS type_name)? (AS STRING)? shape_field_mod*   // supports dotted fields: status.allowed, mfa.verified
+           | (NAME | TYPE_NAME) ("," (NAME | TYPE_NAME))+ (AS type_name)? (AS STRING)? shape_field_mod*  -> shape_field_group
+
+// THE EXPLICIT NAME GOES LAST AND IN QUOTES: `name as text as "Full Name"`. The type is a bare
+// word, the name is a string, and the quotes are the whole disambiguation -- a bare word in the
+// name position would be indistinguishable from a second field on the same line, which is the
+// FORK-6 family and stays refused (measured: `name as text fullname` reports "declares 2 fields
+// at once"). Anchored to its own AS so it cannot be confused with a modifier that happens to
+// carry a string, such as `purpose "billing"`.
            | NAME "." ALLOWED allowed_list
 
-shape_field_mod: NEVER STORE
+// T1-SHAPE-REFORMS-VALUE (2026-08-25): a shape may declare an EXISTING transform verb as
+// part of a field's description. A shape is the character description of a value, and
+// "padded to five with zeros" is part of that description, not a separate idea. These are
+// the SAME `pad.left`/`pad.right` the language already has (see the string-op rules); nothing
+// new is invented, the shape just gets to say it. That is what lets a shape stand as a
+// transform stage in a data chain and genuinely reform the value passing through.
+shape_field_mod: PAD_LEFT  _TO NUMBER _WITH (NUMBER | STRING)  -> field_pad_left
+               | PAD_RIGHT _TO NUMBER _WITH (NUMBER | STRING)  -> field_pad_right
+               | NEVER STORE
                | NEVER LOG
                | SEC_ENCRYPT               -> field_encrypt_mod
                | TAG_REF                    -> field_tag_mod
@@ -734,7 +819,10 @@ shape_field_mod: NEVER STORE
                | ALLOWED allowed_list
                | _STATUS "." ALLOWED allowed_list
 
-allowed_list: (NAME | STRING) ("," (NAME | STRING))*
+// TYPE_NAME is accepted alongside NAME for the same reason `ext_list` takes it (see that rule):
+// this list holds file extensions (`f as file accept images, pdf, csv`) and allowed VALUES, and
+// either can legitimately spell a type word. Reserving `pdf` (2026-08-25) broke exactly that.
+allowed_list: (NAME | TYPE_NAME | STRING) ("," (NAME | TYPE_NAME | STRING))*
 
 // ── pattern block ─────────────────────────────────────────────
 
@@ -770,8 +858,167 @@ map_modifier:    IGNORE_CASE     -> mod_ignore_case
                | KEEP_WHITESPACE -> mod_keep_whitespace
                | CASE_NO         -> mod_retired_case_no
                | CASE_YES        -> mod_retired_case_yes
-map_decl:        MAP_KW NAME map_alias_entry* closer
+map_decl:        MAP_KW MAP_NAME map_alias_entry* closer
+               | MAP_KW MAP_NAME? map_section+ closer  -> map_sections_decl
                | MAP_KW value_expr _THROUGH NAME _AS NAME map_modifier*
+
+// ── `map` — the FREE, translatable mapping construct (T1-MAP-EXTRACTION, 2026-08-24) ──
+//
+// `map` is basic mapping, shipped with the runtime, free and translatable. `miomap` keeps the
+// commercial middleware. Same split as `ai` (free, you write the reasoning) vs `mioai` (paid
+// service): explicit mapping the developer writes is free; mapping the SYSTEM figures out or
+// adapts is paid.
+//
+// Classifiers are EXPLICIT and required, because an entry cannot identify itself:
+// `user_name to full_name` is simultaneously a valid route and a valid data map, so letting an
+// entry speak for itself would turn a typo into a silently-registered nonsense route.
+//
+// Within `route` the KIND is explicit too, for the same reason one level down: "mount a file at
+// a path" and "redirect a path to a path" share the `X to Y` shape. Mount is the DEFAULT (bare
+// `route`) because it is the common case and its default is safe; redirect is MARKED
+// (`route as redirect`) because it is the exception. A redirect LINE must then declare its own
+// type -- see map_redirect_entry.
+//
+// `route` uses `to` (one-directional: a file answers at an address; an old path points at a new
+// one). `data` uses the arrows, where direction is real semantic content. The two never mix:
+// the sections are scoped, so `to` in a data section and an arrow in a route section are both
+// refused by the grammar rather than quietly reinterpreted.
+// `walk <map>[.chain]` with a body that runs AT EACH STAGE. `report` emits the stage,
+// `log` records it, and any other statement (including a `then` chain) runs with the stage
+// bound, so a program can act at a handoff rather than only look at it.
+walk_stmt: WALK MAP_STAGE_PATH walk_body* closer   -> walk_one_chain
+         | WALK NAME walk_body* closer             -> walk_all_chains
+walk_body: _AT EACH STAGE_KW ":" walk_action
+walk_action: REPORT      -> walk_report
+           | LOG         -> walk_log
+           | statement   -> walk_do
+
+// T1-FLOW-USABILITY (2026-08-25). Everything here REUSES words the language already has --
+// check, show, log, grab, first, last, at, take. `flow` and `walk` were the only two additions;
+// a usability layer that needed a third word would be a design smell, not a feature.
+//
+// STATUS is the existing two-stage outcome channel, not a new return form: a `flow` block takes
+// `on.success` / `on.failure` exactly as every other verb block does, and on.failure names the
+// hop that broke. There is deliberately no `flow as x`: the END value is `check flow`, and any
+// other position is `grab` or `walk`.
+flow_stmt: FLOW MAP_STAGE_PATH result_handler+ closer  -> flow_one_chain_block
+         | FLOW NAME           result_handler+ closer  -> flow_all_chains_block
+         | FLOW MAP_STAGE_PATH   -> flow_one_chain
+         | FLOW NAME             -> flow_all_chains
+
+// `check flow <map>[.chain]` -- run it and tell me what landed at the END. The 80% question,
+// asked with the word the language already uses for "tell me about this" (`check count as n`,
+// `check exists`). The endpoint is the stage after the last forward hop; anything else is
+// `grab` or `walk`, so `flow` itself is never overloaded with positional access.
+check_flow_stmt: CHECK FLOW MAP_STAGE_PATH (_AS NAME)?  -> check_flow_one
+               | CHECK FLOW NAME           (_AS NAME)?  -> check_flow_all
+
+// `grab first stage` / `grab last stage` -- the two SEMANTIC ends of a chain, found by the
+// ARROWS rather than by array position. The first stage is where data actually ENTERS (the
+// position before the first forward or bidirectional hop, which is not necessarily the first
+// stage written); the last is where it comes to rest. Together they are the start-vs-end pair
+// a coder compares to ask "did the value survive, or did something mangle it?" -- the coder
+// writes that comparison; Mohio supplies the two ends.
+//
+// `grab stage at N` / `grab stage at "name"` is direct access for the cases between, and it is
+// convenience only: `walk` already reaches every stage.
+grab_stage_stmt: GRAB (FIRST | LAST) STAGE_KW FROM MAP_STAGE_PATH (_AS NAME)?  -> grab_stage_end
+               | GRAB STAGE_KW _AT (NUMBER | STRING) FROM MAP_STAGE_PATH (_AS NAME)?  -> grab_stage_at
+
+
+map_section: _ROUTE map_mount_entry*                    -> map_route_mount
+           | _ROUTE _AS REDIRECT map_redirect_entry*    -> map_route_redirect
+           | _DATA map_pipeline_line*                 -> map_data_section
+
+// A mount names a FILE and the PATH it answers at. The file may be written bare (`about.mho`)
+// or quoted when it contains a separator (`"blog/post.mho"`); the path is always a STRING,
+// because `/` and path punctuation are exactly where bare tokens turn ambiguous. That matches
+// the `page at` stance, which already fails loud on an unquoted path.
+map_mount_entry: (STRING | dotted_name) TO STRING
+               | STATUS_LABEL (PATH_LIT | REL_PATH | STRING | dotted_name) -> map_status_response
+
+// A ROUTE-LEVEL RESPONSE. `[404] /notfound` serves that page, rendered, at 404;
+// `[404] "gone"` answers with that text at 404. `[status]` is the same bracketed label as
+// everywhere else, and CONTENT decides which of the two it is: a path serves a page, a string
+// is a message. Declared in a `route` section, it applies to the whole app, which is what makes
+// it catch the CLASS of 404s -- an unmatched route and a static file deleted after deploy both
+// land here, and `mio check` only catches the links that were missing at compile time.
+//
+// A route need not declare one. With no declaration the platform or server default answers,
+// and a good default page beats a bare message.
+
+// A redirect MUST declare its type. There is no default and the omission is a hard error, not a
+// warning: a permanent (301) redirect is cached aggressively by browsers, sometimes
+// indefinitely, so a guessed type is a costly and hard-to-undo, user-facing mistake. Default
+// where it is safe (mount), require where it is not (redirect type). The `as` is required and
+// not droppable -- a bare trailing `permanent` leaves it ambiguous where the entry ends, and
+// `as` is the language's consistent "a modifier follows" marker (`as text`, `as redirect`).
+map_redirect_entry: STRING TO STRING _AS redirect_kind
+                  | STRING TO STRING                    -> redirect_missing_type
+redirect_kind: PERMANENT   -> redirect_permanent
+             | TEMPORARY   -> redirect_temporary
+             | NUMBER      -> redirect_numeric
+
+// ── `data`: a multi-stage PIPELINE, not a list of pairs ─────────────────────────────
+//
+// `data` is a HEADER. Under it sits one or more PIPELINES, each a CHAIN of stages joined by
+// directional arrows. It is a flow graph, not a one-way list: direction is PER HOP, and one
+// chain may flow both ways (`a -> b <-> c <- d`).
+//
+//     data
+//       feed.col1 -> db.dbs1.col2 <-> db.lle.col3 -> json.src5 as dec.4
+//       order.total -> ledger.amount as.usd, order.id -> ledger.ref
+//
+// A STAGE is `<qualifier>.<path>`. The path is a dotted chain of ANY depth -- `json.src5` is
+// two levels, `db.dbs1.col2` three, `legacy.a.b.c.d` more -- and depth is deliberately NOT
+// fixed per qualifier, because a real source is as deep as it is.
+//
+// STRUCTURE-AWARE, NOT CONTENT-AWARE. The grammar parses the SHAPE of the chain and trusts
+// the qualifier to declare each stage's kind (`db.x.y` is a db stage). It does NOT check that
+// the path exists or that the types line up: that is error-checking, and error-checking is
+// the paid `miomap` engine's job, not free `map`'s parsing.
+//
+// `db.` stages arrive as a single DB_REF token (DB_REF.3 already lexes `db.a.b` whole), which
+// is the same "the qualifier declares the kind" idea the grammar already used elsewhere.
+// Every other qualifier is an ordinary dotted chain.
+map_pipeline_line: map_pipeline ("," map_pipeline)*
+map_pipeline: map_stage (map_hop map_stage)+
+map_hop: ARROW        -> hop_forward
+       | BIDIR_ARROW  -> hop_bidirectional
+       | BACK_ARROW   -> hop_reverse
+map_stage: map_stage_ref map_stage_fmt?
+// A stage is one of TWO kinds, and the shape of the reference is what says which:
+//   QUALIFIED (`db.ledger.amount`, `paypal.txn`) -- a place data comes from or goes to.
+//   BARE      (`normalize`)                      -- a TRANSFORM the value passes THROUGH.
+// PROTOTYPED 2026-08-25, needs a ruling to lock. The design's own worked example puts a bare
+// `normalize` mid-chain, which the qualified-only rule refused, so the two kinds were always
+// implied by the design -- this names them. A bare stage carries no qualifier because it is
+// not a location: it is a shape the value is reformed by on its way past.
+map_stage_ref: DB_REF            -> stage_db
+             | MAP_STAGE_PATH    -> stage_path
+             | NAME              -> stage_transform
+
+// Per-stage formatting, carried OPAQUELY on purpose. `as dec.4` and `as.usd` are both real
+// spellings; what they mean is the engine's business, and validating them here would be the
+// content-awareness this construct deliberately does not have.
+map_stage_fmt: _AS map_fmt_value
+             | MAP_FMT_DOT
+             | MAP_IN_DOT
+             | IN_USD
+             | AS_UC | AS_LC
+map_fmt_value: TYPE_NAME | NAME | NUMBER
+
+// The FREE transform set. These are the basics a developer writes out explicitly, so they ship
+// with the runtime. The advanced miomap transforms are NOT here -- see miomap_transform.
+map_transform: "round.to" NUMBER
+             | _SPLIT BY STRING
+             | "first part" | "last part" | _PART NUMBER | "all parts"
+             | "+" NAME
+             | NAME "+" NAME
+             | "as.uc" | "as.lc" | "as.title" | "as.sentence"
+             | _TRIM | "trim.front" | "trim.back"
+             | "pad.left" _TO NUMBER _WITH (NUMBER | STRING)
+             | "pad.right" _TO NUMBER _WITH (NUMBER | STRING)
 
 miomap_body: FROM SH_REF
            | TO SH_REF
@@ -781,8 +1028,20 @@ miomap_body: FROM SH_REF
 // miomap field direction:
 //   -> canonical (same symbol as check/when — "goes to")
 //   to accepted — mio fmt suggests ->
-//   <-> RESERVED — bidirectional sync, not yet designed
-//   <- NOT ADDED — conflicts with left-to-right reading
+//   <-> RESERVED here — bidirectional sync is not designed for miomap
+//   <- NOT in miomap_field
+//
+// CORRECTED 2026-08-24 (T1-MAP-EXTRACTION), because the line above used to read
+// "<- NOT ADDED — conflicts with left-to-right reading" and that ruling has been reversed for
+// DATA. `<-` is now ACTIVE in the free `map` construct's `data` classifier (see
+// map_data_entry): mapping a target BACK from a source is a real up/downstream middleware
+// need, and that use case is what decided it. Direction in `data` is semantic content, not
+// decoration -- `->` forward, `<->` bidirectional, `<-` reverse, all three real.
+//
+// `miomap_field` is deliberately left alone: miomap keeps its own directional vocabulary and
+// its own regression tests (`error_bidir_arrow_reserved` still requires `<->` inside a miomap
+// to warn), so widening it here would change a paid construct while extracting FROM it. The
+// reversal applies to `data`, which is where the use case lives.
 
 BIDIR_ARROW.3:  "<->"    // bidirectional. Valid in languages/translation map blocks; warns elsewhere (e.g. miomap). ASCII only -- unicode arrow forms not added (encoding issues).
 
@@ -817,7 +1076,15 @@ miomap_conflict_rule: NAME _TAKE _MOST_RECENT
 
 // ── mioconnect ───────────────────────────────────────────────
 
-mioconnect_decl: MIOCONNECT NAME (AS NAME)? mioconnect_body* closer
+// D-SWEEP 2026-09-02: mioconnect DOES hand-list its handlers and DOES lose vocabulary as a
+// result -- measured: on.failure yes, on.success yes, `otherwise` REFUSED, `when` REFUSED,
+// while a retrieve or a save accepts all four. The migration to `result_handlers` was BUILT
+// AND REVERTED, deliberately: result_handlers places handlers structurally last, and
+// mioconnect has real, tested usage that writes `on.failure` / `retry` / `on.success` BEFORE
+// an `operation` block (tests/test_run3_mioconnect_facade.py). Migrating it therefore NARROWS
+// what the construct accepts and breaks working programs, which is a ruling, not a mid-run
+// change. Left hand-listed on purpose; the lost vocabulary is logged under DECISIONS NEEDED.
+mioconnect_decl: MIOCONNECT NAME (AS NAME)? mioconnect_body* result_handlers closer
                | MIOCONNECT NAME FROM value_expr closer?    // shorthand: mioconnect Name from env.X
 
 mioconnect_body: _ADDRESS value_expr                  -> mc_address
@@ -829,8 +1096,8 @@ mioconnect_body: _ADDRESS value_expr                  -> mc_address
                | _TIMEOUT NUMBER time_unit             -> mc_timeout
                | mioconnect_operation
                | _RETRY NUMBER _TIMES                 -> mc_retry
-               | on_failure_handler
-               | on_success_handler
+
+
 
 mioconnect_operation: _OPERATION NAME mioconnect_op_body* closer
 
@@ -916,8 +1183,20 @@ task_decl: TASK NAME take_stmt* (RETURNS type_name)? body_stmt* closer
 // `as` is REQUIRED before a type; bare params are untyped. `and` joins type-groups on one line.
 // Optionality is a DEFAULT only (no required/optional -- a task is not a shape).
 // The header param form (`task t a as int b as int`) is RETIRED -- declare inputs with `take`.
+// THE MODIFIER SLOT IS HERE TO REFUSE, not to collect. `take a as text required` used to
+// parse, put nothing on the param (`is_required` stayed False), and quietly leave `required`
+// behind as a junk assignment in the task body -- a word accepted, doing nothing, saying
+// nothing. The optionality ruling above was already right; it just had no mechanism, so the
+// word was swallowed instead of refused. Now it lands on the param and the transformer
+// answers for it by name.
+//
+// A CLASS TAG IS THE ONE FAMILY THAT MEANS SOMETHING HERE, and it is not an exception to the
+// ruling, it is the existing one: classification is bound to the VALUE, not to the name it was
+// read through, so `take ssn as text [phi]` classifies what arrives. Everything else on this
+// list describes storage, display or validation -- a shape's job -- and is refused with that
+// sentence. As in a shape field, everything trailing applies to EVERY name in the group.
 take_stmt:  TAKE take_group (_AND take_group)*
-take_group: take_name ("," take_name)* (AS type_name)? (DEFAULT value_expr)?
+take_group: take_name ("," take_name)* (AS type_name)? (DEFAULT value_expr)? shape_field_mod*
 take_name:  NAME | TRANSACTION
 
 // ── journey / saga / page ────────────────────────────────────
@@ -991,14 +1270,19 @@ debug_checkpoint: DEBUG_KW "." CHECKPOINT_KW STRING debug_log_stmt* closer
 //   authorize: login/auth required before serve; depends on the real session-verified-role
 //              mechanism (`require role`/`grant role`), NOT `mioauth.*` (confirmed not built).
 //              One-job meaning: to give or need permission.
-// GRAMMAR/AST ONLY as of 2026-08-15: all four parse and transform into a correctly-tagged
-// JourneyMeta (see journey_body below). SERVE-LAYER ENFORCEMENT IS NOT WIRED -- next session's
-// build. Known, deliberate divergence in the meantime: `_exec_JourneyDecl` still runs the
-// PRE-EXISTING private:/public: mechanism (403-block via require role's session check, real,
-// tested, unchanged by this edit) -- that is the OLD semantics, not the locked served-but-
-// unlisted meaning above. `hidden:`/`authorize:` currently have ZERO runtime effect (declared,
-// parses, produces a real AST node, but nothing reads it) -- not a silent bug, a deliberately
-// scoped deferral, tracked in PRODUCTION-BUILD-PLAN.md.
+// SERVE-LAYER ENFORCEMENT WIRED 2026-08-27 (`_exec_JourneyDecl`, mohio_interpreter.py):
+// all four states now have real runtime effect over real HTTP, not just grammar/AST.
+// hidden: raises the same not_found (404) every other runtime error maps through;
+// authorize: takes over the OLD private: 403 mechanism verbatim (require role's
+// server-verified-session check); private: is genuinely served with NO gate (the OLD
+// 403-block private: used to run is now authorize:'s job, not private:'s -- a real
+// redefinition of an already-shipped keyword, not a silent-failure closure. private:
+// is currently inert at runtime beyond that -- served+unlisted has no listing feature
+// to exclude it FROM yet, so "unlisted" has nothing to consume it); public: overrides
+// all three. A `_`-prefixed path segment is always hidden (404) whether or not
+// hidden: declares it, the route-level equivalent of the file-naming block above --
+// scoped to journey route paths only, not the separate static-asset file server.
+// See mohio_interpreter.py's own comment on this block for the full account.
 journey_decl: JOURNEY NAME? journey_body* closer
 
 // The six alternatives below are aliased (-> ...) so the transformer can tell them
@@ -1016,6 +1300,7 @@ journey_body: _SERVES ":" "single tenant"    -> journey_serves_single
             | _FLOW      ":" path_list -> journey_flow
             | languages_block
             | enterprise_block
+            | limits_block
             | debug_decl
             | debug_checkpoint
             | debug_log_stmt
@@ -1076,7 +1361,17 @@ path_list: (PATH_LIT | STRING) ("," (PATH_LIT | STRING))*
 
 saga_decl: SAGA NAME saga_body* closer
 
+// A SAGA-LEVEL `on.failure`, which the construct whose entire purpose is partial failure did
+// not have. Only a STEP could declare one (see step_handler below), so there was no way to say
+// what happens when the saga as a whole does not commit. Measured before this was added: a saga
+// whose second step failed compensated correctly, logged "did not commit", and the handler then
+// ran straight on to `give back 201 "order placed"` -- the same response the successful run
+// gives, over a table with nothing in it.
+//
+// Listed BEFORE `statement` so the handler binds here rather than being read as an ordinary
+// statement in the saga body.
 saga_body: step_block
+         | on_failure_handler
          | statement
 
 step_block: STEP NAME body_stmt* step_handler* closer
@@ -1087,7 +1382,20 @@ step_handler: COMPENSATE body_stmt*           // canonical compensation keyword
             | on_failure_handler
             | on_success_handler
 
-page_decl: PAGE NAME? (AT (PATH_LIT | STRING))? body_stmt* closer
+// `page` AS A BLOCK IS REMOVED (2026-08-25). It was never a construct in its own right: it
+// was doing the FRAMEWORK's routing job in disguise, which is why a file could not serve
+// without one. Serve-by-default does that job now -- a file in a served folder answers at its
+// convention URL with whatever it renders, shows, or gives back -- so the block had nothing
+// left to do. Explicit routing lives in `map route`, and a request handler in `listen for`.
+//
+// The WORD stays RESERVED (the PAGE terminal below is kept deliberately) for future hardware
+// and desktop surfaces, and so an old `page at /x` fails loud with a migration message rather
+// than being read as something else entirely.
+//
+// NOT REMOVED, and not to be confused with this: the page CLASSIFICATION model
+// (`public:` / `private:` / `hidden:` / `authorize:` in a journey) is path-based ACCESS
+// CONTROL and stays exactly as it was. Removing it would break access control; it has nothing
+// to do with the block.
 
 AT.2: /at(?![A-Za-z0-9_])/
 
@@ -1507,7 +1815,17 @@ loop_block: LOOP NAME? body_stmt* closer
 
 check_block: CHECK value_expr (AS NAME)? check_when* otherwise_clause? closer   // `check score as grade` -- naming is on the action, never the closer
 
-check_when: WHEN where_condition ARROW? body_stmt*   // score is above 100
+// `not confident` written on a NON-AI block (a save, a retrieve, a check). It is an AI-only
+// form, but nothing refused it: `check_when`'s `NOT value_expr` alternative below swallowed it
+// as "when not confident" -- a test of an ordinary variable named `confident`, which is
+// undeclared, so the body silently ran on the wrong condition. Measured 2026-09-02: a save with
+// a `not confident` block reported "no errors, no warnings" from mio check and did nothing.
+// CONFIDENT is a dedicated terminal, so this is strictly more specific than `NOT value_expr`;
+// the priority makes that win rather than leaving it to ambiguity resolution.
+cw_not_confident.5: NOT CONFIDENT ARROW? body_stmt*   -> not_confident_outside_ai
+
+check_when: cw_not_confident
+          | WHEN where_condition ARROW? body_stmt*   // score is above 100
           | WHEN condition ARROW? body_stmt*           // score above 100
           | WHEN value_expr ARROW? body_stmt*          // "active" / true / varname
           | ABOVE value_expr ARROW? body_stmt*
@@ -1524,12 +1842,15 @@ otherwise_clause: _OTHERWISE ARROW? body_stmt*
 
 // ── each ─────────────────────────────────────────────────────
 
-each_block: EACH NAME IN value_expr body_stmt* closer
+// `repeat each stage in paydata.stripe take 3` -- bound the traversal with the word the
+// language already uses for bounding. Taking more than exists is not an error; it walks what
+// is there, because "up to N" is what a bound means.
+each_block: EACH NAME IN value_expr (TAKE NUMBER)? body_stmt* closer
 
 // ── repeat ───────────────────────────────────────────────────
 
 repeat_block: REPEAT value_expr TIMES body_stmt* closer
-            | REPEAT EACH NAME IN value_expr body_stmt* closer    -> repeat_each
+            | REPEAT EACH NAME IN value_expr (TAKE NUMBER)? body_stmt* closer    -> repeat_each
 
 // ── while ────────────────────────────────────────────────────
 
@@ -1653,6 +1974,21 @@ agg_func: NAME "." _SUM                              -> af_sum
         | _DIFFERENCE "." _P_VALUE                  -> af_p_value
         | _DIFFERENCE "." _COHENS_D                 -> af_cohens_d
         | _DIFFERENCE "." _PERCENTAGE_OF dotted_name -> af_percentage_of
+        // THE MARKED FORM (2026-09-01). The pretokenizer folds `amt.sum` into ONE
+        // USERVAR_DOTTED token whenever `amt` is a declared name -- and saving a field
+        // declares it, so every aggregate over a field you actually store arrived here as a
+        // single token and matched NONE of the alternatives above. summarize/calculate then
+        // failed at their own closer with "No terminal matches 's'", naming nothing.
+        //
+        // The fix cannot live in the pretokenizer: `colors.count` is a real member access and
+        // `amt.count` inside summarize is an aggregate -- same text, decided by context a
+        // line-based marker cannot see. Un-marking those suffixes would break .count/.first/
+        // .last/.position on every list. So the grammar accepts the folded token instead; the
+        // transformer splits it on the last dot and REFUSES an unknown suffix.
+        | USERVAR_DOTTED                              -> af_marked
+        | USERVAR_DOTTED BY NUMBER (NAME)?            -> af_marked
+        | USERVAR_DOTTED WITHIN NAME                  -> af_marked
+        | USERVAR_DOTTED NUMBER                       -> af_marked
 
 // ── calculate block ───────────────────────────────────────────
 
@@ -1679,7 +2015,7 @@ join_body: match_clause
 // exactly as it was (a name_list of one).
 save_block: SAVE TO source_ref (AS NAME)? (UNLESS name_list _EXISTS)? save_field* result_handlers closer
 
-save_field: NAME value_expr                    // static:  furnace_lit "true"
+save_field: (NAME | TYPE_NAME) value_expr                    // static:  furnace_lit "true"
           | dotted_name _TO value_expr          // dynamic: puzzle.flag_set to "true"
 
 // ── save or update / upsert ──────────────────────────────────
@@ -2063,7 +2399,7 @@ AI_AGENT.3:     "ai.agent"
 AI_COMPARE.3:   "ai.compare"
 AI_RESPOND.3:   "ai.respond"
 
-ai_agent_block: AI_AGENT NAME ai_agent_body* closer
+ai_agent_block: AI_AGENT NAME ai_agent_body* result_handlers closer
 
 ai_agent_body: ai_prompt_opts
              | _NAME    STRING               // human-readable agent name (logs, UI)
@@ -2082,15 +2418,12 @@ ai_agent_body: ai_prompt_opts
              | _MAX _STEPS NUMBER           -> ai_agent_max_steps_shorthand
              | _MAX _COST NUMBER            -> ai_agent_max_cost_shorthand
              | _MAX _TIME NUMBER time_unit  -> ai_agent_max_time_shorthand
-             | on_failure_handler
-             | on_success_handler
              | tools_block
              | limits_block
-             | _CONFIDENCE ABOVE value_expr
+             | _CONFIDENCE ABOVE value_expr      -> confidence_check
+             | _CONFIDENCE IS ABOVE value_expr  -> confidence_check_is_form
              | ai_audit_stmt
              | not_confident_block
-             | on_failure_handler
-             | on_success_handler
 
 tools_block: _TOOLS tools_entry* closer
 
@@ -2102,7 +2435,14 @@ tools_entry: MIOAI_REF | dotted_name
 
 limits_block: _LIMITS limits_body* closer
 
-limits_body: _MAX _STEPS NUMBER    -> limits_max_steps
+// `max requests N per second` -- the per-IP rate backstop (T0-RATE-LIMIT-BACKSTOP,
+// 2026-09-01). It reuses `limits` rather than inventing `rate limit N per second`, because
+// `limits` is ALREADY how this language says "numeric ceilings for this thing" and a second
+// way to express a ceiling is a second thing to learn. `requests` is the only new word, and it
+// is the operand, not a keyword. The MIDDLEWARE that enforces it is runtime-internal and never
+// appears in the source: the coder declares the intent, the runtime hides the mechanism.
+limits_body: _MAX _REQUESTS NUMBER _PER _SECOND -> limits_max_requests
+           | _MAX _STEPS NUMBER    -> limits_max_steps
            | _MAX _TOKENS NUMBER   -> limits_max_tokens
            | _MAX _CALLS NUMBER    -> limits_max_calls
            | _COST _CEILING NUMBER -> limits_cost_ceiling
@@ -2112,14 +2452,14 @@ limits_body: _MAX _STEPS NUMBER    -> limits_max_steps
 // Relational judgment — which of two or more inputs is better
 // Returns { winner, margin, explanation } — uses ai_decide_body
 
-ai_compare_block: AI_COMPARE NAME ai_decide_body* closer
+ai_compare_block: AI_COMPARE NAME ai_decide_body* result_handlers closer
 
 // ── ai.respond ──────────────────────────────────────────────
 // Interaction response — reacts to something that happened
 // Use cases: customer support, chatbots, game narration
 // Uses ai_decide_body — same options as ai.decide
 
-ai_respond_block: AI_RESPOND NAME ai_decide_body* closer
+ai_respond_block: AI_RESPOND NAME ai_decide_body* result_handlers closer
 
 // ── ai.create — compiler-enforced generation ─────────────────
 // limits block REQUIRED. not confident REQUIRED. ai.audit REQUIRED.
@@ -2131,7 +2471,24 @@ ai_respond_block: AI_RESPOND NAME ai_decide_body* closer
 // ai.decide — name only, no parens. Inputs live in weigh block.
 // ❌ ai.decide isFraudulent(transaction) returns boolean  <- retired
 // ✅ ai.decide isFraudulent returns boolean               <- canonical
-ai_decide_block: AI_DECIDE NAME RETURNS type_name ai_decide_body* closer
+// RULING 2026-09-02 (Ron): HANDLERS WORK THE SAME EVERYWHERE. One word, one job, different
+// context. `on.failure` means the same thing and sits in the same place on a save, a retrieve
+// and an ai.decide. Every non-AI verb block is shaped `VERB ... body* result_handlers closer`,
+// which is why an 88-cell matrix found no handler split on any of them: handlers are
+// structurally LAST, so no body line has anywhere to escape to. The AI family instead
+// hand-listed its handlers INSIDE its repeated body alternation, which both created that
+// ambiguity and silently lost vocabulary. Measured before this change:
+//     block        on.failure   on.success   otherwise   when
+//     retrieve/save   yes          yes          yes       yes
+//     ai.decide       yes          yes          NO        NO
+//     ai.create       yes        SILENT       SILENT    SILENT
+//     ai.rank       SILENT       SILENT         NO        NO
+// SILENT = the file parses, no handler node is ever built, the handler never runs. Writing
+// `on.success` on an ai.create did nothing and said nothing.
+// The AI blocks now take handlers from the one shared `result_handlers` rule, like every other
+// verb block. `not confident` STAYS in the body: it is not an error handler, it is the
+// CONDITION stage, and it keeps its place ahead of the handlers.
+ai_decide_block: AI_DECIDE NAME RETURNS type_name ai_decide_body* result_handlers closer
 
 // Name-only invocation of a declared decision: ai.decide resolve_noun
 // (no `returns`, no body, no closer). Distinct from the declaration above.
@@ -2140,13 +2497,22 @@ ai_decide_invoke: AI_DECIDE NAME
 // ai.rank — weighted multi-option ranking. Distinct from ai.decide (one typed
 // question): ai.rank picks the best from several weighted candidates and returns
 // the winner with a confidence score.
-ai_rank_block: AI_RANK NAME (RETURNS type_name)? (FOR value_expr)? ai_rank_body* closer
+ai_rank_block: AI_RANK NAME (RETURNS type_name)? (FOR value_expr)? ai_rank_body* result_handlers closer
 
 ?ai_rank_body: rank_option
             | _CONFIDENCE ABOVE value_expr        -> rank_confidence
+            | _CONFIDENCE IS ABOVE value_expr     -> confidence_check_is_form
             | not_confident_block
-            | ai_audit_stmt
+            // The SAME unbounded-`not confident` ambiguity as ai_decide_body, pointing the
+            // other way: here the fallback OVER-captured, swallowing an `ai.audit to <log>`
+            // written after it (measured 2026-09-02 -- the audit stopped being a clause of the
+            // rank block and became a statement that only ran on the not-confident path).
+            // ai.rank has no `statement` catch-all to penalise, so the real clause is boosted
+            // instead. Inlined: tree shape and transformer unchanged.
+            | _ai_rank_audit
             | ai_explain_block
+
+_ai_rank_audit.10: ai_audit_stmt
 
 rank_option: OPTION value_expr (IF condition)? rank_weight?    -> rank_opt
            | DEFAULT value_expr rank_weight?                     -> rank_default
@@ -2172,17 +2538,23 @@ ai_decide_body: CHECK _CONFIDENCE ABOVE value_expr -> confidence_check
               // wired -- three demo files use it, and an unwired form does not fail, it
               // silently becomes junk variables. Nothing may drop in silence.
               | _CONFIDENCE ABOVE value_expr -> confidence_check
+              // `confidence IS above N` -- the spoken form a coder reaches for by analogy with
+              // `when x is above n`. It had no confidence alternative, so it fell through the
+              // catch-all and became junk statements: no ConfidenceCheck node was built and the
+              // interpreter used its hardcoded 0.85 default. A block asking for 0.99 silently
+              // ran at 0.85, checked clean, and printed nothing (measured 2026-09-02). Same
+              // class as the orphaned-alias bug this rule's own comment records above. Refuse
+              // it by name and point at the canonical spelling.
+              | CHECK _CONFIDENCE IS ABOVE value_expr -> confidence_check_is_form
+              | _CONFIDENCE IS ABOVE value_expr -> confidence_check_is_form
               | using_chain
               | weigh_clause
               | ai_audit_stmt
               | ai_explain_block
               | not_confident_block
-              | on_failure_handler
-              | on_success_handler
-              | on_error_handler
               | ai_prompt_opts                    // prompt/persona/context/temperature/model
               | ai_decide_sec_bare
-              | statement
+              | _ai_decide_loose_stmt
 
 // `sec.<word>` used BARE (no trailing `NAME value`, e.g. bare `sec.non_critical` with no
 // `reason "..."`) inside ai.decide. None of the six real sec.* constructs (classify/encrypt/
@@ -2206,6 +2578,25 @@ ai_decide_body: CHECK _CONFIDENCE ABOVE value_expr -> confidence_check
 SEC_DOTTED_ANY.4: /sec\.[a-z_]+(?=[ \t]*[\r\n]|$)/
 ai_decide_sec_bare.4: SEC_DOTTED_ANY
 
+// A loose statement inside an ai.* body, at LOW priority. `not confident` has no closer
+// (not_confident_block: NOT CONFIDENT body_stmt*), so nothing in the grammar marks where its
+// body ends -- and the grammar is indentation-BLIND, so the indent the human reads means
+// nothing to the parser. That made two complete parses available for the statement written
+// under `not confident`: a body_stmt INSIDE the fallback, or its own ai_decide_body sibling
+// via the catch-all. Both are valid, so Earley's `ambiguity="resolve"` picked one on grounds
+// unrelated to intent: measured 2026-09-02, the fallback body was captured only when `check
+// confidence above` preceded `weigh`, and LOST in all three orderings where `weigh` came
+// first -- a fallback that silently never ran. A two-statement fallback split: one statement
+// stayed and the other escaped to sibling level, where the interpreter never executed it at
+// all (run-verified on both paths), so the fallback ran HALF of what was written, with no
+// error. That is what shipped in the README demo (Q111 / Finding 7).
+// Penalising the catch-all makes the nesting derivation score higher, so the fallback keeps
+// its body in every arrangement. The leading underscore INLINES the rule, so the tree shape
+// (and every transformer method) is exactly as before -- this steers ambiguity resolution
+// only. Real clauses (weigh, ai.audit, the confidence check, on.failure) keep full priority
+// and are still read as the block's own clauses, verified across nc-first/middle/last.
+_ai_decide_loose_stmt.-10: statement
+
 using_chain: USING NAME
 
 weigh_clause: WEIGH weigh_list
@@ -2217,7 +2608,11 @@ compare_weigh_line: WEIGH weigh_list
 
 weigh_list: dotted_name ("," dotted_name)*
 
-not_confident_block: NOT CONFIDENT body_stmt*
+// Priority 9 beats the cw_not_confident guard's 5. This rule is reachable ONLY from the AI
+// block bodies, so where `not confident` is legal it wins here, and where it is not legal
+// (a save, a retrieve) this rule is not an option at all and the guard is the only match.
+// One number does the whole job: no per-block wrappers, no second list to keep in step.
+not_confident_block.9: NOT CONFIDENT body_stmt*
 
 ai_audit_stmt: AI_AUDIT TO NAME
 
@@ -2268,14 +2663,32 @@ ai_connect_inline: AI_CONNECT (_ORDER)? order_provider_inline ("," order_provide
 order_provider_inline: NAME (_MODEL STRING)?
 
 // ai.create — block form with required limits
-ai_create_block: AI_CREATE NAME (RETURNS type_name)? (FROM dotted_name)? (AS NAME)? ai_create_full_body* closer
+ai_create_block: AI_CREATE NAME (RETURNS type_name)? (FROM dotted_name)? (AS NAME)? ai_create_full_body* result_handlers closer
 
-ai_create_full_body: _CONFIDENCE ABOVE value_expr
+ai_create_full_body: _CONFIDENCE ABOVE value_expr   -> confidence_check
+                   | _CONFIDENCE IS ABOVE value_expr   -> confidence_check_is_form
                    | weigh_clause
                    | limits_block
                    | ai_audit_stmt
+                   // ai.create-ONLY handler variants that REQUIRE a body (body_stmt+),
+                   // at high priority. Root cause, measured 2026-09-02: in this block
+                   // `name_value_pair` is the ONLY route for legitimate body content
+                   // (`tone "executive"`), so a statement written inside a handler has a
+                   // second valid home as a sibling pair -- and an assign-shaped fallback
+                   // body was LOST entirely (measured: 0 statements captured). Unit 1 tried
+                   // PENALISING the catch-all; that backfired because taxing the only route
+                   // to real content makes "stop parsing the block early" the cheapest
+                   // derivation, which broke the documented `ai.create x from y / tone` form
+                   // with an unmatched-closer error. Boosting a body-REQUIRED variant instead
+                   // removes the empty-handler-plus-floating-sibling derivation without
+                   // taxing the catch-all's legitimate use. The alias keeps the tree node
+                   // name, so the transformer is untouched, and the `*` rules below still
+                   // accept a genuinely empty handler.
+                   // STILL OPEN, deliberately: a handler body of TWO OR MORE assignments can
+                   // still split (one absorbed, one floating). Closing that needs handlers to
+                   // be positionally last in ai.create, which NARROWS the language, so it is
+                   // Ron's ruling, not a mid-flight change.
                    | not_confident_block
-                   | on_failure_handler
                    | create_template
                    | WITH name_value_pair*
                    | create_style
@@ -2287,7 +2700,19 @@ ai_create_full_body: _CONFIDENCE ABOVE value_expr
                    | create_source
                    | ai_prompt_opts
                    | ai_create_body
+                   // KNOWN GAP, deliberately NOT patched here (2026-09-02). `name_value_pair`
+                   // also matches an assignment written inside this block's `not confident`, so
+                   // an assign-shaped fallback body can still escape to sibling level in
+                   // ai.create -- the same ambiguity _ai_decide_loose_stmt fixes for ai.decide.
+                   // The identical low-priority treatment was tried here and REFUSED VALID
+                   // PROGRAMS: penalising this alternative made a higher-scoring whole-program
+                   // derivation win in which the block ends early, so the documented
+                   // `ai.create x from y / tone "..." / length "..."` form failed with
+                   // "unmatched block closer". A false refusal is the same wrong answer
+                   // pointing the other way, so the gap stays open and named rather than
+                   // half-closed. A `show`/`give back` fallback body in ai.create is unaffected.
                    | name_value_pair
+
 
 create_template: _USING _TEMPLATE NAME
 create_style:    _STYLE    value_expr          // image/audio/video style descriptor
@@ -2338,7 +2763,16 @@ try_modifier: UP TO NUMBER TIMES                       -> try_retry
 
 always_clause: ALWAYS body_stmt*
 
-catch_clause: CATCH body_stmt*
+// `catch` is RETIRED (2026-08-27), reserved not deleted -- same treatment as `on.error`
+// (`on_error_handler -> retired_on_error`). It drifted into a redundant alias for
+// `on.failure`: its original job was catching an issue DURING an action (jumping out of a
+// runaway loop), and that is now covered by the loop iteration/time guards, while
+// error-status-after-an-action is `on.failure` / `on.success`. Two words for one job.
+// The rule stays reachable so the word still PARSES and the transformer can fail loud
+// naming the replacement, instead of the developer getting a bare syntax error. The word
+// stays HELD -- `catch` may return with its original during-execution meaning inside
+// `mio test`, so it is never freed for use as an identifier.
+catch_clause: CATCH body_stmt*                         -> retired_catch
 
 transaction_block: TRANSACTION body_stmt* closer
 
@@ -2347,6 +2781,10 @@ transaction_block: TRANSACTION body_stmt* closer
 // ─────────────────────────────────────────────────────────────
 
 action_stmt: give_back_stmt
+           | flow_stmt
+           | walk_stmt
+           | check_flow_stmt
+           | grab_stage_stmt
            | give_stmt
            | jump_to_stmt
            | halt_stmt
@@ -2449,7 +2887,25 @@ give_back_val: CALL NAME WITH value_expr    // give back 201 call formatSummary 
              | value_expr
 
 give_back_mod: AS (NAME | TYPE_NAME) | WITH value_expr
-http_status: HTTP_STATUS_CODE | STATUS_ALIAS
+http_status: STATUS_LABEL | HTTP_STATUS_CODE | STATUS_ALIAS
+
+// A STATUS IS A LABEL, so it is bracketed -- the same convention as [pii] and [phi], and the
+// same `[status]` the route layer uses. Ruled 2026-09-04. Bracketing it removes a real
+// context-dependency: the status position accepts only a label, the body position is always a
+// value, so `give back 400` can finally mean the NUMBER 400 and a lexer needs no context to
+// tell the two apart -- which is what makes the form portable to a hand-written parser.
+//
+// ADDED ALONGSIDE the bare form rather than replacing it. Removing the bare form breaks 592
+// sites that are NOT the simple `give back <number> "<message>"` shape (408 with a non-string
+// body, 101 using an English alias, 77 with more after the string, 6 with no body at all), and
+// those need a person, not a script. The bracketed form is canonical from here; the bare form
+// stays parseable until that reviewed pass lands. Consequence, stated because it is the one
+// piece of the ruling this does NOT yet deliver: while the bare form still parses,
+// `give back 400` is still read as a status, not as the value 400.
+//
+// Distinct from TAG_REF (`"[" NAME "]"`) because a status is digits or an alias word, and the
+// alias set is closed -- no NAME, no overlap.
+STATUS_LABEL.5: /\[[1-5][0-9][0-9]\]/ | /\[(?:ok|created|unauthorized|missing|error|pending)\]/
 
 // Six English status aliases (locked). Numbers stay fully valid; mio fmt does
 // NOT auto-convert. ok=200 created=201 unauthorized=401 missing=404 error=500 pending=202.
@@ -2457,7 +2913,20 @@ http_status: HTTP_STATUS_CODE | STATUS_ALIAS
 STATUS_ALIAS.4: /ok(?![A-Za-z0-9_])/ | /created(?![A-Za-z0-9_])/ | /unauthorized(?![A-Za-z0-9_])/ | /missing(?![A-Za-z0-9_])/ | /error(?![A-Za-z0-9_])/ | /pending(?![A-Za-z0-9_])/
 
 // Only 3-digit numbers in HTTP ranges — unambiguous, won't consume value expressions
-HTTP_STATUS_CODE.4: /[1-5][0-9][0-9]/
+// THE MAGNITUDE SPLIT, closed 2026-09-04. This terminal used to match the first three digits
+// of ANY number in the give-back slot, so a number was silently CUT IN HALF -- measured:
+//     give back 12345  ->  status 123, body 45
+//     give back 1000   ->  status 100, body 0
+//     give back 99999  ->  status 200, body 99999   (correct only because 9 is outside [1-5])
+// A task returning one thousand answered status 100 with a body of 0, and nothing said so. The
+// lookahead makes a status a status only when the number ENDS there. ZERO files anywhere in the
+// tree give back a literal of four or more digits (measured across .mho, .py and .md before
+// landing), so nothing that works today changes.
+//
+// This is the additive half of the give-back ruling. Moving status OUT of `give back` entirely
+// is a separate, corpus-wide change: 1064 sites use `give back <status>`, 291 of them in .mho
+// including 112 in Zork, and it stops as a fork rather than being done here.
+HTTP_STATUS_CODE.4: /[1-5][0-9][0-9](?![0-9])/
 
 // ── trailing if qualifier — the ONE valid if form ─────────────
 // halt if condition, give back 404 if member not found
@@ -2658,9 +3127,23 @@ on_error_handler:   ON_ERROR   body_stmt*     -> retired_on_error
 // `set` still parses here ONLY so the transformer can reject it with a real message.
 // It is RETIRED. (Do not make SET a required token in its own rule: Earley's dynamic
 // lexer then matches `set` INSIDE identifiers -- `rset_skip` split into r+set+_skip.)
-assignment: SET? NAME "="? value_expr (DEFAULT value_expr)?
+assignment: SET? NAME "="? value_expr (DEFAULT value_expr)? (AS STRING)?
           | NAME AS type_name (NUMBER | STRING)      -> retired_typed_decl // fails loud (same-line type-before-value)
           | NAME AS TYPE_NAME                         -> empty_typed_decl   // `x as int` (no value): declare an empty typed variable
+          | NAME AS STRING                            -> rename_existing    // `n as "grand_total"`
+
+// A RENAME TAKES A QUOTED NAME. Ruled 2026-09-05, and the quotes are what make the rule possible
+// rather than what make it pretty: `n as int` and `n as grand_total` are the same shape to a
+// newline-blind parser, so a bare-word rename would compete with the empty typed declaration and
+// one of them would win on grounds unrelated to intent. A STRING and a TYPE_NAME are different
+// terminals, so the two rules cannot overlap by construction -- the same disambiguation the
+// bracketed status uses, and for the same reason.
+//
+// Before this rule existed, `total 5 as sum` did not parse as a rename at all. The grammar is
+// newline-blind, so `as sum` became a SECOND statement whose assignment name was `as`, and the
+// reserved-opener guard caught that fallback and reported it as a retired closer-naming form --
+// a message about closers, for someone who had written a value. The guard was right to fire; what
+// was missing was this rule.
 
 // ─────────────────────────────────────────────────────────────
 // MioQL CLAUSE PRIMITIVES
@@ -2681,7 +3164,7 @@ match_block.2:     MATCH match_pair+ (MATCH ":" DONE)
 match_any_block.2: MATCH ANY match_pair+ (MATCH ANY ":" DONE)
 no_match_block.2:  NO_MATCH match_pair+ (NO_MATCH ":" DONE)
 
-match_pair: NAME TO value_expr
+match_pair: (NAME | TYPE_NAME) TO value_expr
 where_is_pair: dotted_name IS value_expr
 
 NO_MATCH.2:   "no.match"
@@ -2721,6 +3204,18 @@ where_condition: dotted_name IS ABOVE value_expr                     -> wc_above
                | dotted_name STARTS_WITH STRING                       -> wc_starts_with
                | dotted_name ENDS_WITH STRING                         -> wc_ends_with
                | dotted_name _ENDS _WITH STRING                     -> wc_ends_with
+               // T1-SPACED-IS-NOT-COMPARISON (2026-08-23). The SPACED `is not above/below` is the
+               // canonical word-form inclusive per comparison-vocabulary-canonical-2026-08-07
+               // ("Built / locked"), but only the DOTTED `is.not` had a rule, so the spaced form
+               // fell through to the `wc_is` catch-all below with `not` read as the VALUE and
+               // died at runtime on "unknown_filter_value: where refers to 'not'". Same shape as
+               // the spaced `IS NOT EMPTY` alternative above, and aliased to the SAME rule names,
+               // so the evaluator (which already returns l <= r / l >= r) needs no change. These
+               // must sit BEFORE wc_is or the catch-all swallows them again.
+               | dotted_name IS NOT ABOVE value_expr                  -> wc_not_above
+               | dotted_name IS NOT BELOW value_expr                  -> wc_not_below
+               | dotted_name IS NOT _MORE _THAN value_expr            -> wc_not_above
+               | dotted_name IS NOT _LESS _THAN value_expr            -> wc_not_below
                | dotted_name IS value_expr                            -> wc_is
                | dotted_name IS_NOT value_expr                        -> wc_not_is
                | dotted_name IS NOT value_expr                        -> wc_not_is
@@ -2816,8 +3311,19 @@ dt_anchor_word: TODAY | YESTERDAY
 
 return_clause: RETURN_KW return_field ("," return_field)*
 
+// The aggregate alternatives carry their own alias because _SUM/_COUNT/_MAX/_MIN are
+// FILTERED terminals (leading underscore) -- they never reach the transformer, so a single
+// shared alias could not tell `return amount.sum` from the plain projection `return amount`,
+// and silently produced the projection. Found 2026-09-01: the same line answered 35 or handed
+// back the raw column, decided only by whether the field name happened to also be a declared
+// variable (a declared name is folded into one token by the pretokenizer, which the first
+// alternative then reads correctly). One line, two answers, no error either way.
 return_field: dotted_name ("." AVERAGE)? (AS NAME)?
-            | dotted_name "." (_SUM | _COUNT | _AVERAGE | _MAX | _MIN) (AS NAME)?
+            | dotted_name "." _SUM (AS NAME)?      -> return_field_sum
+            | dotted_name "." _COUNT (AS NAME)?    -> return_field_count
+            | dotted_name "." _AVERAGE (AS NAME)?  -> return_field_average
+            | dotted_name "." _MAX (AS NAME)?      -> return_field_max
+            | dotted_name "." _MIN (AS NAME)?      -> return_field_min
 
 // ── export ───────────────────────────────────────────────────
 
@@ -2988,6 +3494,11 @@ literal: STRING | NUMBER | TRUE | FALSE | NULL_KW | NONE_KW
 // Multi-line authored string: marker + string (string may span lines).
 paragraph_string: PARA_MARK STRING
 
+// A type-word FIELD (`msg.text`, `e.map`) is deliberately NOT parseable here: the type words are
+// reserved so `as text` is unambiguous, and widening this rule to TYPE_NAME puts that ambiguity
+// straight back. The PRETOKENIZER is the designed mechanism -- it marks a dotted user-var access
+// as one USERVAR_DOTTED token, sidestepping the collision and keeping dotted lookup O(1).
+// `tests/test_dotted_text_field.py` locks this: it asserts the raw parse FAILS.
 dotted_name: USERVAR_DOTTED
            | NAME ("." NAME)* ("." NUMBER)?    // collection.position.1 or collection.first.3
            | NAME ("." NAME)* ("." NUMBER "." NAME+)?  // collection.position.1.name
@@ -3467,14 +3978,20 @@ miofile_decl: MIOFILE_DECL miofile_decl_body* closer
                   | _CLOUD  NAME miofile_cloud_body*                 // cloud s3 / gcs / azure
                   | _TEMP   _AS? NAME? miofile_policy*              // bare temp
 
-!miofile_policy: _ACCEPT  name_list                     // accept jpg, png, pdf
+!miofile_policy: _ACCEPT  ext_list                      // accept jpg, png, pdf
                | _ACCEPT  _ALL                          // accept all
-               | _ACCEPT  _ALL _EXCEPT name_list       // accept all except exe, sh
+               | _ACCEPT  _ALL _EXCEPT ext_list        // accept all except exe, sh
                | _MAX _SIZE NUMBER NAME                 // max size 10mb
                | _EXPIRES (_IN | _AFTER)? duration_expr
                | _CLEAN _USING dotted_name              // clean using mioschedule.cleanup
 
-miofile_cloud_body: _BUCKET  (ENV_REF | STRING)
+// KEEP THE KEYWORD. `_BUCKET`, `_REGION`, `_KEY`, `_SECRET` and `_ENDPOINT` are all filtered
+// terminals, so without the `!` every one of these alternatives handed the transformer a bare
+// value token with nothing saying WHICH setting it was: `bucket "b"` and `region "auto"` were
+// indistinguishable. The transformer could only return the raw children, and the whole cloud
+// body was dropped -- bucket, region and endpoint, and `accept` and `max size` with them, so a
+// cloud area silently enforced none of the rules a local area enforces.
+!miofile_cloud_body: _BUCKET  (ENV_REF | STRING)
                   | _REGION  (ENV_REF | STRING)
                   | _KEY     (SECRET_REF | ENV_REF | STRING)
                   | _SECRET  (SECRET_REF | ENV_REF | STRING)
@@ -3540,24 +4057,50 @@ inject_stmt: INJECT NAME _INTO NAME closer?
 // ── hash — cryptographic hashing ─────────────────────────────
 // hash form.password as hashed_password using bcrypt
 // hash document.content using sha256
-// Algorithms: bcrypt, sha256, sha512, sha1, md5 (legacy — mio fmt warns)
+//
+// `using` is REQUIRED. It reads as optional here because `hash_field` makes it one, but the
+// transformer refuses a hash with no algorithm named. There is no safe default to pick: the
+// old one was sha256, so `hash / pw as hashed / hash: done` gave a password a single-round
+// unsalted digest and said nothing. Choosing wrong on the developer's behalf is worse in this
+// verb than in any other, so it asks.
+//
+// Algorithms, and what each is FOR (verified 2026-09-01 by running each one):
+//   bcrypt, pbkdf2  -- PASSWORDS. Salted and deliberately slow. `check against` verifies both,
+//                      because each stores its own scheme inside the hash.
+//   sha256, sha512  -- CHECKSUMS. Fast by design, which is what makes them wrong for passwords.
+//                      (sha384 and sha224 also run.)
+//   md5, sha1       -- REFUSED. Both are broken for any security use.
+// The previous version of this line listed md5 and sha1 as supported "(legacy — mio fmt
+// warns)". `mio fmt` did not warn, `mio check` did not warn, and no md5/sha1 warning existed
+// anywhere in the codebase -- the comment described a guardrail that had never been built.
 
 HASH_KW.2: /hash(?![A-Za-z0-9_])/
 hash_block: HASH_KW hash_field+ closer
           | HASH_KW value_expr AS NAME USING NAME    // inline: hash val as result using algo
           | HASH_KW value_expr USING NAME             // inline no alias
 
+// `hash_field+` above accepts several fields, but the transformer REFUSES more than one --
+// deliberately, and the refusal is the final design, not a placeholder (T1-HASH-MULTI-FIELD,
+// resolved 2026-09-01). It used to keep the FIRST value and the LAST alias, so a two-field
+// block filed the password's hash under the PIN's name and left the other name undefined.
+// Everything a multi-field block could mean is already writable: one `hash` per value, or
+// `hash (a & "|" & b) as fp using sha256` to combine them -- and that second form must stay
+// explicit, because choosing a joining convention makes "ab"+"c" collide with "a"+"bc".
+// The grammar stays permissive so the refusal can carry a message instead of a parse error.
 hash_field: value_expr AS NAME          // form.password as hashed_password
           | USING NAME               // using bcrypt
 
 // check [value] against [stored] — verify hash / password
 // check form.password against member.hashed_password
 // on.failure give back 401 "Invalid credentials"
-check_against_stmt: CHECK value_expr _AGAINST value_expr check_against_body*
+// D-SWEEP 2026-09-02. `check ... against` had its OWN handler list AND its own hand-rolled
+// `_OTHERWISE body_stmt*`, which built no otherwise_clause node at all: writing `otherwise` on
+// a check-against PARSED CLEAN and could never run -- a live silent no-op. Measured before the
+// change: on.failure yes, on.success yes, `otherwise` SILENT, `when` REFUSED. It takes all four
+// from the one shared rule now, so `check_against_body` no longer exists.
+check_against_stmt: CHECK value_expr _AGAINST value_expr result_handlers
 
-check_against_body: on_failure_handler
-                  | on_success_handler
-                  | _OTHERWISE body_stmt*
+
 
 // ── encode / decode ───────────────────────────────────────────
 // encode value as base64 / url / hex / html
@@ -3566,10 +4109,13 @@ check_against_body: on_failure_handler
 ENCODE_KW.2: /encode(?![A-Za-z0-9_])/
 DECODE_KW.2: /decode(?![A-Za-z0-9_])/
 
-encode_stmt: ENCODE_KW value_expr AS NAME (_AS NAME)?   // encode val as base64 as result
-           | ENCODE_KW value_expr AS NAME                 // encode val as base64
+// The FORMAT slot names an encoding, not a type, so it takes TYPE_NAME as well as NAME --
+// `base64` is the canonical format name here AND a reserved type word as of 2026-08-25, and
+// this rule's own comment has always spelled the example `encode val as base64`.
+encode_stmt: ENCODE_KW value_expr AS (NAME | TYPE_NAME) (_AS NAME)?   // encode val as base64 as result
+           | ENCODE_KW value_expr AS (NAME | TYPE_NAME)                 // encode val as base64
 
-decode_stmt: DECODE_KW value_expr _FROM NAME (_AS NAME)?
+decode_stmt: DECODE_KW value_expr _FROM (NAME | TYPE_NAME) (_AS NAME)?
 
 // ── parse — string to typed value ────────────────────────────
 // parse "2026-03-31" as date
@@ -3998,7 +4544,22 @@ source_ref: DB_REF
 
 name_list: NAME ("," NAME)*
 
-type_name: TYPE_NAME | NAME | SH_REF | LIST_KW TYPE_NAME | LIST_KW NAME | LIST_KW SH_REF    // list text / list sh.Shape / order as sh.Order
+// FILE EXTENSIONS, not identifiers. An extension legitimately spells the same word as a TYPE
+// word -- `accept jpg, png, pdf` is this grammar's own documented example -- so an extension
+// list must take TYPE_NAME as well as NAME. Reserving `pdf` as a type word (2026-08-25) broke
+// exactly that line while `accept jpg, png` kept working, which is the tell: the list was
+// NAME-only and `pdf` had stopped being a NAME. Extensions are a lexical class of their own,
+// so they get their own rule rather than widening `name_list` everywhere it is used.
+ext_list: (NAME | TYPE_NAME) ("," (NAME | TYPE_NAME))*
+
+type_name: TYPE_NAME | NAME | SH_REF | TABLE_KW | LIST_KW TYPE_NAME | LIST_KW NAME | LIST_KW SH_REF    // list text / list sh.Shape / order as sh.Order
+
+// `table` becomes a keyword so `shape_decl_unnamed` can require it. It was previously reachable
+// only as a bare NAME, which is why it must be re-admitted to `type_name` above -- without that
+// line `users as table` would stop parsing inside a NAMED shape, which is the form Phase 2 item 1
+// already ships. Zero .mho files in the repo use `table` as an identifier (all 13 occurrences of
+// the word are inside comments, measured 2026-09-04), so reserving it breaks nothing that exists.
+TABLE_KW.3: /table(?![A-Za-z0-9_])/
 
 // ============================================================================
 // ONE ANCHORED TERMINAL PER KEYWORD.
@@ -4317,6 +4878,7 @@ _RELOAD.2: /reload(?![A-Za-z0-9_])/
 _REMEMBER.2: /remember(?![A-Za-z0-9_])/
 _REPEATS.2: /repeats(?![A-Za-z0-9_])/
 _REQUEST.2: /request(?![A-Za-z0-9_])/
+_REQUESTS.2: /requests(?![A-Za-z0-9_])/   // `max requests N per second` -- the rate backstop's operand
 _REQUIRED.2: /required(?![A-Za-z0-9_])/
 _REQUIREMENTS.2: /requirements(?![A-Za-z0-9_])/
 _REQUIRES.2: /requires(?![A-Za-z0-9_])/
@@ -4334,6 +4896,40 @@ _REVIEWED.2: /reviewed(?![A-Za-z0-9_])/
 _ROLE.2: /role(?![A-Za-z0-9_])/
 _ROTATE.2: /rotate(?![A-Za-z0-9_])/
 _ROUTE.2: /route(?![A-Za-z0-9_])/
+// T1-MAP-EXTRACTION (2026-08-24): the redirect vocabulary for `map`'s route classifier.
+// A `map` name may not be a classifier word. Without this, `map / route / a.mho -> "/a"` was
+// SILENTLY MISPARSED: the legacy `MAP_KW NAME map_alias_entry*` alternative swallowed `route`
+// as the map NAME and read the arrow line as a legacy alias entry, so an arrow written in a
+// route section -- which must be refused, since route uses `to` -- quietly became something
+// else entirely. Scoped to map: `route` and `data` stay ordinary words everywhere else.
+MAP_NAME.2: /(?!(?:route|data)\b)[a-zA-Z_][a-zA-Z0-9_]*/
+// A stage path is ONE token. Building it from `NAME ("." NAME)+` could not work: a segment
+// like `json` is a reserved word excluded from NAME (it lexes as the filtered `_JSON`, which
+// Lark drops from the tree entirely), so `json.src5` had no way to be read as a path at all.
+// Matching the whole dotted chain as one token also matches how `db.` already works (DB_REF),
+// and keeps depth free-form rather than fixed per qualifier.
+MAP_STAGE_PATH.2: /[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+/
+MAP_FMT_DOT.2: /as\.[a-zA-Z_][a-zA-Z0-9_]*/   // as.usd -- opaque, not validated here
+MAP_IN_DOT.2:  /in\.[a-zA-Z_][a-zA-Z0-9_]*/   // in.EUR -- same
+// PROTOTYPED 2026-08-25, needs a ruling to lock. `flow` DRIVES a data map: `flow paydata`
+// runs every chain, `flow paydata.stripe` runs one. It is a RESERVED terminal by necessity,
+// not by preference -- measured that night, every unreserved candidate word (`drive`, `move`,
+// `apply`, `sync`, `push`, `carry`, `pipe`, `stream`) SILENTLY became a variable assignment
+// instead of a verb, which is the exact silent-misparse class this project refuses. A driver
+// verb must be reserved or it is a trap. (`run` was ruled out separately: it is already taken
+// by the retired task-invocation form, which fails loud pointing at `call`.)
+FLOW.2:      /flow(?![A-Za-z0-9_])/
+// T1-WALK (2026-08-25). `walk` is the opposite of `flow`: flow EXECUTES a data map front to
+// back and gets out of the way; walk TRAVERSES it deliberately, stopping at every stage so
+// the program can look at what is there. Flow it in production, walk it when something is
+// wrong. Reserved terminals by necessity, not preference -- measured 2026-08-24, every
+// unreserved candidate verb silently became a variable assignment instead.
+WALK.2:      /walk(?![A-Za-z0-9_])/
+STAGE_KW.2:  /stage(?![A-Za-z0-9_])/
+REPORT.2:    /report(?![A-Za-z0-9_])/
+REDIRECT.2:  /redirect(?![A-Za-z0-9_])/
+PERMANENT.2: /permanent(?![A-Za-z0-9_])/
+TEMPORARY.2: /temporary(?![A-Za-z0-9_])/
 _RULES.2: /rules(?![A-Za-z0-9_])/
 _RUN.2: /run(?![A-Za-z0-9_])/
 _RUNNING_SUM.2: /running_sum(?![A-Za-z0-9_])/

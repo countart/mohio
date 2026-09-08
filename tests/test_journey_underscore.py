@@ -27,8 +27,8 @@ def check(label, got, want):
     else:
         _failed += 1; print(f"  FAIL {label}: got {got!r} want {want!r}")
 
-PAGE = 'page at /\n    show "home"\npage: done\n'
-SPINE = 'page at /fromjourney\n    show "spine"\npage: done\n'
+PAGE = 'show "home"\n'
+SPINE = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /fromjourney\n        show "spine"\n    request: done\nlisten: done\n'
 
 
 def run_check(files):

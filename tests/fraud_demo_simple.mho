@@ -21,15 +21,18 @@ listen for
             confidence above 0.85
             weigh
                 transaction.amount, transaction.member_history, transaction.device_id
+            ai.audit to fraud_audit_log
             not confident
-                give back 202 "Referred to manual review"
+                give back [202] "Referred to manual review"
+            on.failure
+                give back [503] "Fraud screening unavailable"
         ai.decide: done
 
         check is_fraud
             when true
-                give back 403 "Transaction blocked"
+                give back [403] "Transaction blocked"
             otherwise
-                give back 200 "Transaction approved"
+                give back [200] "Transaction approved"
         check: done
     new: done
 listen: done

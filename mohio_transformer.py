@@ -290,6 +290,32 @@ def strip_quoted_string_contents(text):
     fallback, is unaffected) removes exactly the spoofable surface and nothing else."""
     return re.sub(r'"[^"]*"', '""', text)
 
+def has_real_block(tree, rule):
+    """True when `rule` appears AND carries at least one real statement.
+
+    C1 (T1-AI-GUARANTEE-STRUCTURAL, 2026-08-27). The AI-governance gates used to ask whether
+    the WORDS appeared in the block's flattened text -- `"not confident" in _scrubbed`. That
+    tests spelling, not protection, and an EMPTY block satisfied it: with the mis-grouping
+    spelling `check confidence above`, the parser hoists the fallback's body out to a sibling
+    statement, leaving `not_confident_block` present but with nothing in it. `mio check`
+    reported "no errors" over a fallback that could never run.
+
+    The substring approach had already been patched twice at the symptom
+    (strip_quoted_string_contents, for a quoted `reason "not confident ..."` note). This asks
+    the parse tree instead, which is the thing the guarantee is actually about: a block exists
+    and it contains statements. A keyword inside a string literal is not a subtree, and an
+    empty block has no statement children, so both bypasses die at the root rather than one
+    spelling at a time.
+
+    Body statements arrive as Tree children; the rule's own keyword tokens (NOT, CONFIDENT)
+    are Tokens, so counting Tree children counts real statements.
+    """
+    for sub in find_all_subtrees(tree, rule):
+        if any(isinstance(c, Tree) for c in sub.children):
+            return True
+    return False
+
+
 def extract_closer_name(closer_tree):
     """
     Extract the block name from a closer tree node.
@@ -371,8 +397,166 @@ class MohioValidator:
     def validate(self):
         self._scan_source()
         self._walk(self.tree)
+        self._check_duplicate_declarations()
+        self._check_write_on_get()
         self._check_unclosed()
         return self.ctx
+
+    # The declaration kinds whose NAME is how the rest of the program refers to them. A second
+    # declaration of the same name does not merge and does not error -- the later one simply
+    # wins wherever the runtime registers it.
+    _DECL_KINDS = (
+        ('shape_decl',      'shape',      'sh.NAME references it, and it is the allowlist'),
+        ('task_decl',       'task',       '`call NAME` runs it'),
+        ('journey_decl',    'journey',    'its routes and page rules are bound by name'),
+        ('mioconnect_decl', 'mioconnect', 'its address and operations are bound by name'),
+    )
+
+    # Write verbs. A GET route must be safe and idempotent, so none of these may appear inside
+    # a `request for` block. Names are the grammar's, so a new write verb has to be added here
+    # deliberately rather than inheriting the hole by default.
+    _WRITE_RULES = ('save_block', 'update_block', 'remove_block', 'upsert_block',
+                    'modify_block', 'save_all_block', 'remove_all_block')
+
+    def _check_write_on_get(self):
+        """A mutation inside a `request for` block is refused at CHECK time, not only at run.
+
+        Q62 (probed 2026-09-01). The runtime already refuses this correctly -- a real GET to
+        such a route returns 500 and writes nothing (`_refuse_write_on_get`). What it did NOT
+        do was tell anyone before the request arrived: `mio check` reported `no errors` on a
+        route whose whole body could never run. That is the W2-W5 class -- the compiler silent
+        on something the runtime catches -- and it is the more dangerous half, because a green
+        check is what a developer trusts before deploying.
+        Statically decidable: the handler and the write verb are both right there in the source.
+        """
+        for node in self.tree.iter_subtrees():
+            if str(getattr(node, 'data', '')) != 'request_inbound_block':
+                continue
+            for inner in node.iter_subtrees():
+                rule = str(getattr(inner, 'data', ''))
+                if rule in self._WRITE_RULES:
+                    verb = rule.replace('_block', '').replace('_', ' ')
+                    self.ctx.error(
+                        f"`{verb}` cannot run inside a `request for` block.",
+                        get_line(inner),
+                        hint=("A `request for` route answers a GET, and a GET must be safe to "
+                              "repeat -- a browser, a link preview or a crawler may fetch it "
+                              "more than once. The runtime already refuses this at the moment "
+                              "the request arrives; this says it before you deploy. Move the "
+                              "write into a `new sh.X` handler, which answers a POST."))
+                    break
+
+    # Constructs the OPEN runtime declines to run. Each is refused at run time already; the
+    # point here is to say so at check time, where the decision to deploy is made.
+    _COMMERCIAL_TIER = {
+        'miomail.queue':    "deferred delivery",
+        'miomail.template': "managed templates",
+    }
+    # The check-time message must carry the SAME information as the runtime one, including the
+    # full free-tier form. The first version said only "use `miomail.send` instead", which is
+    # less than the runtime already said -- and because `mio run` now stops at check, that
+    # SHORTER message replaced the better one at the moment a developer hits it. Caught by
+    # tests/test_retire_and_miomail_gate.py, which locks the 2026-07-31 decision that the
+    # refusal names the free alternative concretely rather than by name alone. Moving a refusal
+    # earlier must not quietly downgrade what it says.
+    _COMMERCIAL_FREE_FORM = "miomail.send to X subject Y body Z"
+
+    def _check_commercial_tier(self, raw, i):
+        """`miomail.queue` refuses at run time; `mio check` used to pass it clean.
+
+        Q64 (probed 2026-09-01). The runtime is right and the message is good -- it refuses
+        rather than silently sending immediately, which is what it did before 2026-07-31, and
+        `queue` is the entire promise of the word. But `mio check` said `no errors`, so a
+        program built around queued mail looked fine right up until it ran. Same W2-W5 shape as
+        Q62 above, and the same answer: say it where the developer is looking.
+        """
+        for _kw, _what in self._COMMERCIAL_TIER.items():
+            if _kw in raw:
+                self.ctx.error(
+                    f"`{_kw}` requires Mohio Commercial Runtime.", i,
+                    hint=(f"{_kw} is {_what}, which the open runtime does not provide. It "
+                          f"refuses rather than quietly sending immediately -- which is what "
+                          f"it did before 2026-07-31, making `queue` the whole promise and "
+                          f"the whole lie. For the open tier, send immediately with "
+                          f"{self._COMMERCIAL_FREE_FORM}."))
+
+    def _check_duplicate_declarations(self):
+        """A second declaration of the same name is REFUSED, not silently preferred.
+
+        Found 2026-09-01 by probing, because the queue item ("flow-collision declaration-time
+        fail-loud") had no spec left in the tree. All four kinds accepted a duplicate and
+        reported no errors:
+
+            shape Person / name as text   +   shape Person / email as text
+              -> mio check: no errors. BOTH survive the transform, and whichever registers
+                 last is the one the program actually gets.
+
+        For `shape` that is the sharp one: the shape IS the allowlist (Q13, and the agent
+        tool-input enforcement added the same day). A developer who duplicates a shape and then
+        edits the wrong copy keeps a green check and loses the protection they believe they
+        declared. `mioconnect` is the same shape with a different blast radius -- a second
+        declaration silently rebinds the ADDRESS, so calls, including an agent's granted tool
+        calls, go somewhere other than where the program appears to say.
+
+        Refused rather than merged: merging two declarations would invent a rule for what
+        happens when they disagree about a field's type or an operation's path, and picking
+        either side is the same guess the silent version was already making. The program has to
+        say which one it means.
+
+        Nothing in the corpus declares a duplicate (checked across cookbook / examples /
+        start-here / tests / drafts before building this), so the refusal breaks nothing today.
+        """
+        for rule, word, why in self._DECL_KINDS:
+            seen = {}
+            for node in self.tree.iter_subtrees():
+                if str(getattr(node, 'data', '')) != rule:
+                    continue
+                tok = first_token(node, 'NAME')
+                if not tok:
+                    continue                      # `journey` may be unnamed; nothing to collide
+                name = str(tok)
+                line = getattr(tok, 'line', None) or get_line(node)
+                if name in seen:
+                    self.ctx.error(
+                        f"`{word} {name}` is already declared on line {seen[name]}.",
+                        line,
+                        hint=(f"A second `{word} {name}` does not extend the first -- whichever "
+                              f"is registered last is the one the program gets, and until now "
+                              f"neither check nor run said so ({why}). Rename this one, or "
+                              f"merge the two declarations into one."))
+                else:
+                    seen[name] = line
+
+    def _in_map_data(self, line_no):
+        """True when line `line_no` sits inside a `map ... data ...` pipeline section.
+
+        T1-MAP-EXTRACTION (2026-08-25). Two line-based rules here predate `map` and fire wrongly
+        inside it: the `<->` reserved-arrow rule (all three directions are real in a data
+        pipeline) and the space-form-cast rule (a stage's `as dec.4` is per-stage FORMATTING, not
+        a cast of a value in an expression). Both already had context exemptions -- `in_languages`
+        for one -- so this follows the pattern rather than inventing a mechanism.
+
+        Walks BACKWARDS to the nearest section or block boundary: inside the `data` section of a
+        `map` if `data` is the last section header seen and the `map` block has not closed. Walks
+        the real lines rather than guessing from a window, because a pipeline chain can sit many
+        lines below its header.
+        """
+        idx = line_no - 1                       # self.lines is 0-based; line numbers are 1-based
+        seen_data = False
+        for j in range(idx - 1, -1, -1):
+            t = self.lines[j].strip()
+            if not t or t.startswith('//'):
+                continue
+            if t in ('map: done',) or t.startswith('map: done'):
+                return False                    # a closed map above us: we are outside it
+            if t == 'data' or t.startswith('data '):
+                seen_data = True
+                continue
+            if t == 'route' or t.startswith('route '):
+                return False                    # a different section of the same map
+            if t == 'map' or t.startswith('map '):
+                return seen_data                # reached the opener: inside data iff we saw it
+        return False
 
     def _scan_source(self):
         for i, raw in enumerate(self.lines, 1):
@@ -418,11 +602,43 @@ class MohioValidator:
                     self.ctx.error(
                         f"'{_verb}' connects with '{_want}', not '{_conn}'.", i,
                         hint=f"Use '{_verb} ... {_want} <source>'. {_other}.")
-            # Hardcoded secrets
+            self._check_commercial_tier(raw, i)
+            # Hardcoded secrets.
+            #
+            # Q61 (2026-09-01): the shape below only matches `[A-Za-z0-9_-]{20,}`, so it caught
+            # `sk_live_...` and missed everything containing a `:`, `/`, `@` or `.` -- which is
+            # every connection string, i.e. the MORE common leak by a distance. Verified before
+            # the fix: of `postgres://admin:pass@host/db`, a `redis://default:pw@host` and a
+            # JWT, the detector fired on NONE of them, and warned only about the `sk_live_`
+            # key beside them.
             for secret in re.findall(r'"([A-Za-z0-9_\-]{20,})"', raw):
                 if "env." not in raw and "secret." not in raw:
                     self.ctx.warn("Possible hardcoded credential.", i,
                         hint=f"Value '{secret[:8]}...' looks like a key. Use env.X or secret.X.")
+            # A URL with USERINFO is not a guess about shape -- a password written into a URL
+            # IS a credential, wherever it appears. This is the form DB, Redis, AMQP and SMTP
+            # credentials are almost always written in.
+            for _scheme, _user in re.findall(
+                    r'"([A-Za-z][A-Za-z0-9+.\-]*)://([^:@/"\s]+):[^@/"\s]+@', raw):
+                self.ctx.warn("Hardcoded credential in a connection URL.", i,
+                    hint=(f"The `{_scheme}://` URL carries a password for '{_user}' in the "
+                          f"text. Anyone who reads this file has the credential, and it "
+                          f"travels into every log and backup the file reaches. Move the "
+                          f"whole URL to `env.X` or `secret.X`."))
+            # A JWT is three base64url segments separated by dots, so the shape above can never
+            # match one -- the dots disqualify it. A signed token in source is a live credential
+            # until it expires, and often longer.
+            for _jwt in re.findall(r'"(eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[^"\s]{8,})"',
+                                   raw):
+                self.ctx.warn("Hardcoded token.", i,
+                    hint=(f"'{_jwt[:12]}...' is a signed token (JWT). It grants whatever it was "
+                          f"issued for until it expires. Use `env.X` or `secret.X`."))
+            # A private key pasted into source. No length or charset rule catches this, because
+            # the body is newline-wrapped base64 -- the header is the reliable tell.
+            if re.search(r'-----BEGIN [A-Z ]*PRIVATE KEY-----', raw):
+                self.ctx.warn("Private key in source.", i,
+                    hint=("A private key belongs in `env.X` or `secret.X`, never in a file that "
+                          "is committed, copied or pasted."))
             # Hardcoded CONNECTION source. A connect source must be env.X or secret.X,
             # never a literal string. A literal here hardcodes a credential (e.g. a
             # postgres URL with user:pass) -- non-suppressible by principle -- AND the
@@ -457,11 +673,21 @@ class MohioValidator:
             # field, assignment target, hold/lock/task-param): those have a single
             # leading identifier before `as`. Cast position has more (a value,
             # a default clause, or a close paren) before `as`.
-            if not s.startswith(('parse ', 'check ', 'miovalidate', 'task ', 'take ')):
+            # A `map ... data ...` stage carries its own per-stage formatting (`as dec.4`,
+            # `as.usd`, `in.EUR`). That is a property of the stage, not a cast of a value in an
+            # expression, so the space-form-cast rule does not apply there.
+            if not self._in_map_data(i) and not s.startswith(('parse ', 'check ', 'miovalidate', 'task ', 'take ')):
                 _cm = re.search(r'\bas\s+(int|integer|number|num|decimal|dec|boolean|bool|string|text)\b', s)
                 if _cm:
                     _prefix = s[:_cm.start()].strip()
-                    _is_decl = re.fullmatch(r'(set\s+|hold\s+|lock\s+)?[A-Za-z_][\w.]*', _prefix) is not None
+                    # A COMMA LIST IS A DECLARATION, not a cast. `a, b, c as text` declares
+                    # three fields sharing a type, the same convention `take` has always had,
+                    # and the prefix test only allowed ONE identifier, so a group was read as a
+                    # value being cast and refused. `take` never hit this because the whole
+                    # statement is skipped above; shape fields had no group until now.
+                    _is_decl = re.fullmatch(
+                        r'(set\s+|hold\s+|lock\s+)?[A-Za-z_][\w.]*(\s*,\s*[A-Za-z_][\w.]*)*',
+                        _prefix) is not None
                     if not _is_decl:
                         _ct = _cm.group(1)
                         _dotted = {'int':'as.int','integer':'as.int','number':'as.number','num':'as.number',
@@ -553,7 +779,9 @@ class MohioValidator:
                 # Note: match the WORD 'languages', not a loose 'map' (which would
                 # falsely match 'miomap' and suppress the error).
                 in_languages = bool(re.search(r'\blanguages\b', prior)) or bool(re.search(r'\busing\s+', s))
-                if not in_languages:
+                # Since T1-MAP-EXTRACTION a `map ... data ...` pipeline is the other place all
+                # three arrow directions are real and carry meaning, so it is exempt too.
+                if not in_languages and not self._in_map_data(i):
                     self.ctx.error(
                         "'<->' (bidirectional arrow) is reserved and not supported here.",
                         i,
@@ -639,7 +867,8 @@ class MohioValidator:
         head = next((c for c in tree.children if isinstance(c, Token)), None)
         what = str(head).strip() if head else "cm.*"
         self.ctx.warn(
-            f"'{what}' is a compliance action that is declared but not yet "
+            f"'{what}' is a compliance action (`cm.retain` / `cm.report` / `cm.notify`) "
+            f"that is declared but not yet "
             f"executed in this build -- retention / reporting / notification "
             f"will NOT actually run.",
             get_line(tree),
@@ -923,23 +1152,81 @@ class MohioValidator:
         # `reason "not confident this call is safe"` note) silently satisfied a
         # compliance-critical check with no real block present. See
         # strip_quoted_string_contents's own docstring.
+        # COMPILE-TIME REFUSAL is the standing rule where the compiler can SEE an unbuilt
+        # construct -- and it can see this one: `returns sh.X` is right there in the source.
+        # Refusing here rather than at runtime means the developer learns before deploying,
+        # not from a decision that quietly never ran.
+        _type_node = find_subtree(tree, 'type_name')
+        _rt = tree_to_str(_type_node).strip() if _type_node is not None else ''
+        if _rt:
+            from mohio_interpreter import AI_DECIDE_RETURN_TYPES, _ai_return_type_message
+            if _rt.lower() not in AI_DECIDE_RETURN_TYPES:
+                _msg = _ai_return_type_message(_rt).split(chr(10))
+                self.ctx.error(_msg[0], line,
+                               hint=chr(10).join(l.strip() for l in _msg[1:]))
+
         _scrubbed = strip_quoted_string_contents(text)
-        has_nc = "not confident" in _scrubbed.lower()
-        has_audit = "ai.audit" in _scrubbed
+        # C1: STRUCTURAL, not substring. `not confident` must be a real block carrying real
+        # statements -- see has_real_block. The old `"not confident" in _scrubbed` passed an
+        # EMPTY fallback, so the compliance guarantee could be satisfied by a dead shell.
+        has_nc = has_real_block(tree, 'not_confident_block')
+        _nc_present = bool(find_all_subtrees(tree, 'not_confident_block'))
+        # A + B: STRUCTURAL too, following C1's template rather than repeating the substring
+        # mistake. `ai_audit_stmt` is `AI_AUDIT TO NAME` -- a statement, not a body-carrying
+        # block, so its mere presence as a subtree IS the guarantee (its destination name is
+        # separately a hard build error already). `on.failure` DOES carry a body, so it goes
+        # through has_real_block: an empty handler is the same dead shell C1 refuses.
+        has_audit = bool(find_all_subtrees(tree, 'ai_audit_stmt'))
+        has_onfail = has_real_block(tree, 'on_failure_handler')
+        _onfail_present = bool(find_all_subtrees(tree, 'on_failure_handler'))
         audit_pos = _scrubbed.find("ai.audit")
         nc_pos = _scrubbed.lower().find("not confident")
         audit_first = audit_pos != -1 and nc_pos != -1 and audit_pos < nc_pos
 
         if not has_nc:
-            self.ctx.error(f"ai.decide '{name}' is missing a 'not confident' block.", line,
-                hint=f"Every ai.decide must define what happens when confidence falls below threshold.\nAdd 'not confident' inside 'ai.decide {name}'.")
+            if _nc_present:
+                # C1: the block is there and does nothing. Named separately from "missing"
+                # because it is a different mistake -- the developer believes they wrote a
+                # fallback. The hint used to blame the `check confidence above` mis-grouping and
+                # steer people off the LOCKED canonical spelling onto the bare one. That
+                # mis-grouping was fixed in the grammar (2026-09-02, Q111 / Finding 7): the
+                # fallback now keeps its body in every clause ordering, so the only way to reach
+                # this error is an actually-empty block, and the old advice would send a coder to
+                # change a line that is correct.
+                self.ctx.error(
+                    f"ai.decide '{name}' has an EMPTY 'not confident' block.", line,
+                    hint="A fallback that runs nothing is not a fallback. Put at least one "
+                         "statement inside it, indented under `not confident` -- what should "
+                         "happen when the AI is not sure enough: route to a human, return a safe "
+                         "default, or log the uncertainty.")
+            else:
+                self.ctx.error(f"ai.decide '{name}' is missing a 'not confident' block.", line,
+                    hint=f"Every ai.decide must define what happens when confidence falls below threshold.\nAdd 'not confident' inside 'ai.decide {name}'.")
         if has_audit and has_nc and not audit_first:
             self.ctx.error(f"ai.decide '{name}' -- ai.audit must appear before 'not confident'.", line,
                 hint="Move ai.audit above the 'not confident' block.")
+        # A (2026-08-27): was a WARNING, so two of the three advertised compile-time AI
+        # guarantees were not guarantees at all. Now an ERROR, consistent with ai.audit's
+        # DESTINATION name, which was already a hard build error -- it made no sense to refuse
+        # a badly-named audit log while permitting no audit log at all.
         if not has_audit:
-            self.ctx.warn(f"ai.decide '{name}' has no 'ai.audit' declaration.", line,
+            self.ctx.error(f"ai.decide '{name}' has no 'ai.audit' declaration.", line,
                 hint="Add 'ai.audit to [log_name]' so this AI decision produces an immutable record.\n"
-                     "Recommended for every decision; sector profiles (e.g. financial, healthcare) require it.")
+                     "An unaudited AI decision cannot be reviewed or defended after the fact.")
+        # B (2026-08-27): no detector existed at all -- removing on.failure produced nothing,
+        # not even a warning. Structural, per C1: an EMPTY handler is refused too, because a
+        # handler that runs nothing leaves the failure unhandled exactly as if it were absent.
+        if not has_onfail:
+            if _onfail_present:
+                self.ctx.error(
+                    f"ai.decide '{name}' has an EMPTY 'on.failure' handler.", line,
+                    hint="A handler that runs nothing does not handle anything. Put at least "
+                         "one statement inside it.")
+            else:
+                self.ctx.error(f"ai.decide '{name}' has no 'on.failure' handler.", line,
+                    hint=f"Add 'on.failure' inside 'ai.decide {name}' so the program says what "
+                         f"happens when the AI service itself is unreachable.\n"
+                         f"Without it a provider outage becomes an unhandled error at runtime.")
         self._block(tree, "ai.decide")
 
     def _v_ai_override_stmt(self, tree):
@@ -1165,10 +1452,106 @@ class MohioValidator:
         self._block(t, "journey")
     def _v_saga_decl(self, t): self._block(t, "saga")
     def _v_step_block(self, t): self._block(t, "step")
-    def _v_page_decl(self, t): self._block(t, "page")
     def _v_timespan_decl(self, t): self._block(t, "timespan")
     def _v_listen_block(self, t): self._block(t, "listen")
-    def _v_new_block(self, t): self._block(t, "new")
+    def _v_retrieve_body(self, t):
+        """`expect sh.X as NAME` inside a query body is declared but not built -- refuse it.
+
+        The clause is a BARE TOKEN alternative in the grammar (`EXPECT SH_REF AS NAME`), so it
+        produces no AST node, and the transformer's node-class body filter drops it without a
+        word. The consequence surfaced later and elsewhere: the program checked clean, then
+        died at runtime with `undeclared_variable: 'casted'` -- a name the developer plainly
+        DID declare, on a line the error never mentions.
+
+        Refused at CHECK time, per the standing rule and matching the guard just ported to
+        `find`: an unbuilt clause says so where it is written, rather than doing nothing and
+        letting a downstream read take the blame. Refused-now, wire-later -- the cast-capture
+        capability itself is a queued feature, not a deferred fix.
+        """
+        _toks = [c for c in t.children if isinstance(c, Token)]
+        _expect = next((tk for tk in _toks if tk.type == 'EXPECT'), None)
+        if _expect is not None and any(tk.type == 'SH_REF' for tk in _toks):
+            _shape = next((str(tk) for tk in _toks if tk.type == 'SH_REF'), 'sh.X')
+            _name = next((str(tk) for tk in _toks if tk.type == 'NAME'), 'name')
+            self.ctx.error(
+                f"`expect {_shape} as {_name}` is declared but not yet built.",
+                getattr(_expect, 'line', get_line(t)),
+                hint=(f"The clause parses and then does nothing: `{_name}` is never created, "
+                      f"so the next line that reads it fails with "
+                      f"\"variable '{_name}' is not declared\" -- pointing at the wrong "
+                      f"place.\n"
+                      f"    Remove it for now and read the rows directly; cast-capture is on "
+                      f"the roadmap."))
+        for c in t.children:
+            self._walk(c)
+
+    def _v_new_block(self, t):
+        self._block(t, "new")
+        self._q13_request_allowlist(t)
+
+    def _q13_request_allowlist(self, t):
+        """Q13: inside `new sh.X`, `request.<field>` must name a field the shape declares.
+
+        The shape IS the allowlist. Statically decidable here because the handler names its
+        shape (`SH_REF`), so a reference to a field that shape does not declare is a contract
+        violation the compiler can see -- no runtime payload needed.
+
+        SCOPE, deliberately narrow (2026-08-30): this rejects UNDECLARED fields only. It does
+        NOT enforce the shape's declared CONSTRAINTS (required/min/max/allowed) on the write
+        path -- that half needs a shape-to-table binding the language does not have yet, and
+        that design is paused. Allowlist-rejection is true under any binding design, so it can
+        land now; constraint-on-write cannot.
+
+        Only the explicit `request.<field>` form is checked. A BARE `<field>` also resolves
+        from the payload, but a bare name is ambiguous with an ordinary local variable, and
+        guessing there would produce false errors on correct programs.
+        """
+        sh_tok = next((c for c in t.children
+                       if isinstance(c, Token) and c.type == 'SH_REF'), None)
+        if sh_tok is None:
+            return
+        shape_name = str(sh_tok).split('.', 1)[-1]
+        shapes = getattr(self, '_q13_shapes', None)
+        if shapes is None:
+            shapes = self._q13_shapes = _shape_field_names(self.tree)
+        declared = shapes.get(shape_name)
+        if not declared:
+            # No such shape, or a shape with no fields: a different diagnostic owns that.
+            return
+        from mohio_pretokenizer import unmark_dotted
+        for sub in t.iter_subtrees():
+            if str(getattr(sub, 'data', '')) != 'dotted_name':
+                continue
+            toks = [c for c in sub.children if isinstance(c, Token)]
+            # TWO shapes reach here, and only one of them exists on the path `mio check`
+            # actually runs. The pretokenizer collapses a dotted user name into a single
+            # USERVAR_DOTTED token (`__USERVAR__request.is_admin`), so the plain two-child
+            # form appears only when the grammar is driven directly, as a test harness does.
+            # Reading just the two-child form made this check pass its own unit test while
+            # doing nothing for a real `mio check` -- the exact false exoneration the
+            # debugging protocol warns about.
+            if len(toks) == 1 and getattr(toks[0], 'type', '') == 'USERVAR_DOTTED':
+                # unmark_dotted returns (root, [rest...]) -- a flat list() of that nests the
+                # tail and yields a list where a field name is expected.
+                _root, _rest = unmark_dotted(str(toks[0]))
+                parts = [_root] + list(_rest)
+            else:
+                parts = [str(c) for c in toks]
+            if len(parts) < 2 or parts[0] != 'request':
+                continue
+            field = parts[1]
+            if field in declared or field in _REQUEST_BUILTINS:
+                continue
+            self.ctx.error(
+                f"`request.{field}` is not a field of shape {shape_name}.",
+                get_line(sub),
+                hint=(f"A shape is the request's contract: only the fields it declares can be "
+                      f"read from the payload.\n"
+                      f"    {shape_name} declares: {', '.join(sorted(declared))}\n"
+                      f"    Add `{field}` to the shape if it belongs there. If it does not, "
+                      f"this is how a caller smuggles an extra field into a write -- the "
+                      f"whole payload used to be readable whether the shape mentioned it or "
+                      f"not."))
     def _v_check_block(self, t): self._block(t, "check")
 
     def _v_each_block(self, tree):
@@ -1359,6 +1742,55 @@ class MohioValidator:
 
 
 
+def _shape_field_names(tree):
+    """Every shape declared in the program -> the set of field names it declares.
+
+    Q13 (mass assignment, 2026-08-30). A `shape` is the request's CONTRACT, but nothing
+    enforced it on the way in: `clean = {k: v for k, v in request.items() ...}` exposes the
+    WHOLE payload, so `request.<anything>` resolved whether the shape declared it or not.
+    Verified before the fix -- `shape Member` declaring only name+plan, a handler writing
+    `is_admin request.is_admin`, and a POST carrying `"is_admin": true`:
+
+        mio check -> no errors
+        row       -> {'id': 1, 'name': 'Al', 'plan': 'Pro', 'is_admin': '1'}
+
+    The shape looked like an allowlist and was decoration. This makes the existing
+    declaration mean what it already says, rather than adding a second `$fillable`-style list
+    beside it -- a list the developer would then have to keep in sync, which is the drift
+    Mohio exists to delete.
+    """
+    shapes = {}
+    for node in tree.iter_subtrees():
+        if str(getattr(node, 'data', '')) != 'shape_decl':
+            continue
+        name_tok = first_token(node, 'NAME')
+        if not name_tok:
+            continue
+
+        def _fields(n):
+            for child in getattr(n, 'children', []):
+                data = str(getattr(child, 'data', ''))
+                if 'shape_field' in data:
+                    yield child
+                elif 'shape_body' in data:
+                    for inner in _fields(child):
+                        yield inner
+
+        names = set()
+        for fnode in _fields(node):
+            ftok = first_token(fnode, 'NAME')
+            if ftok:
+                names.add(str(ftok))
+        shapes[str(name_tok)] = names
+    return shapes
+
+
+# Members of `request` that are NOT shape fields and must not be reported as undeclared.
+# `cookie` is attached by the runtime (request.cookie.NAME); the leading-underscore keys are
+# stripped before the payload is exposed, so they can never be read anyway.
+_REQUEST_BUILTINS = {'cookie'}
+
+
 def validate(tree, source="", filename="", symbol_table=None):
     v = MohioValidator(tree, source=source, symbol_table=symbol_table)
     ctx = v.validate()
@@ -1395,8 +1827,14 @@ def _check_ai_test_coverage(tree, ctx, filename):
         ctx.warn(
             f"ai.decide block(s) {names} have no AI compliance tests.",
             0,
+            # This used to end with "Run 'mio test --generate ai_compliance'". There is no `mio
+            # test` subcommand (the CLI is serve/run/check/walk/fmt/version/warmup/generate/
+            # translate/install-hooks/schema/audit/schedule/harvest/ai-check/help), so the
+            # flagship demo's own output sent every new user to a command that does not exist.
+            # A tool may not instruct an action it cannot perform: name the file to write, and
+            # say plainly that generation is not built yet rather than implying it is.
             hint=f"Create {os.path.basename(test_file)} or ai.test.mho with compliance tests.\n"
-                 f"Run 'mio test --generate ai_compliance' to generate a starter test suite."
+                 f"Generating them is not built yet -- write the cases by hand for now."
         )
 
 
@@ -1428,6 +1866,40 @@ _DEAD_STORE_VERBS = {
     'retrieve', 'listen', 'replace', 'update', 'modify', 'hold', 'lock', 'loop', 'while',
     'call', 'encode', 'verify', 'require', 'summarize', 'calculate', 'compare',
 }
+
+
+def _edit_distance_within(a, b, limit):
+    """Levenshtein distance, answered only as `is it <= limit`. Bails out early."""
+    if abs(len(a) - len(b)) > limit:
+        return False
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > limit:
+            return False
+        prev = cur
+    return prev[-1] <= limit
+
+
+def _find_misread_name(declared, reads, writes_all):
+    """The name a reader probably MEANT to write, when `declared` is never read.
+
+    Returns a read-but-never-assigned name that is one or two edits from `declared`, or None.
+    Deliberately conservative -- this replaces an existing warning, so a false positive sends
+    the reader somewhere wrong. Guards: both names at least 4 characters (short names collide
+    by chance), never a Mohio verb (those have their own tier-2 did-you-mean), and exactly ONE
+    candidate must match (two near-misses means we cannot tell which was meant).
+    """
+    if len(declared) < 4:
+        return None
+    limit = 1 if len(declared) < 6 else 2
+    hits = [r for r in reads
+            if r not in writes_all and r != declared and len(r) >= 4
+            and r.lower() not in _DEAD_STORE_VERBS
+            and _edit_distance_within(r, declared, limit)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _check_dead_stores(tree, ctx, filename=""):
@@ -1467,6 +1939,12 @@ def _check_dead_stores(tree, ctx, filename=""):
     # ---- reads, collected globally (every NAME used as a value, every dotted first-part) ----
     target_ids = set()   # id() of NAME tokens that are assignment TARGETS (writes, not reads)
     reads = set()
+    # T1-CHECK-UNDEFINED-SUBJECT (2026-08-27): the two halves needed to name a MISREAD name
+    # rather than blaming the innocent declaration. `writes_all` is every assignment target in
+    # any scope (not just top level, unlike the dead-store scan below); `read_lines` remembers
+    # where each name was read so the diagnostic can point at the typo, not at the declaration.
+    writes_all = set()
+    read_lines = {}
 
     def _assign_target(node):
         for c in node.children:
@@ -1480,6 +1958,7 @@ def _check_dead_stores(tree, ctx, filename=""):
                 t = _assign_target(node)
                 if t is not None:
                     target_ids.add(id(t))
+                    writes_all.add(str(t))
             for c in node.children:
                 _mark_targets(c)
     _mark_targets(tree)
@@ -1491,8 +1970,11 @@ def _check_dead_stores(tree, ctx, filename=""):
         elif isinstance(node, Token):
             if node.type == 'NAME' and id(node) not in target_ids:
                 reads.add(str(node))
+                read_lines.setdefault(str(node), getattr(node, 'line', 0))
             elif node.type == 'USERVAR_DOTTED':
-                reads.add(unmark_dotted(str(node))[0])
+                _root = unmark_dotted(str(node))[0]
+                reads.add(_root)
+                read_lines.setdefault(_root, getattr(node, 'line', 0))
     _collect_reads(tree)
 
     # ---- writes, TOP-LEVEL statements only ----
@@ -1572,6 +2054,21 @@ def _check_dead_stores(tree, ctx, filename=""):
             if name != low:
                 hint = "Mohio keywords are lowercase. " + hint
         else:
+            # T1-CHECK-UNDEFINED-SUBJECT (2026-08-27): before calling this an unused
+            # declaration, ask the question the pass already has the data to answer -- is there
+            # a READ of a near-miss name that is never assigned anywhere? That is a typo in the
+            # READ, and blaming the declaration sends the reader to the wrong line. The sweep
+            # case: `is_admin true` + `check is_adnim` reported "`is_admin` is set but never
+            # used" and never mentioned `is_adnim`, the name that actually broke the program.
+            _typo = _find_misread_name(name, reads, writes_all)
+            if _typo is not None:
+                warned.add(name)
+                ctx.warn(f"`{_typo}` is never declared, and `{name}` is declared but never "
+                         f"read. This is usually one typo, not two problems.",
+                         read_lines.get(_typo, line),
+                         hint=f"Did you mean `{name}`? A `check` on an undeclared name fails "
+                              f"loud at runtime rather than silently taking `otherwise`.")
+                continue
             # a plausible real variable, not a foreign keyword -- so this is an honest
             # unused-declaration notice, not a did-you-mean. Do not assume display intent.
             hint = "Declared but never read. Remove it, or read the value somewhere if it is needed."

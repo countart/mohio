@@ -53,7 +53,7 @@ listen for
         retrieve member from db.members
             match id to transaction.member_id
             on.failure
-                give back 404 "Member not found"
+                give back [404] "Member not found"
         retrieve: done
 
         find recent in db.transactions
@@ -69,21 +69,21 @@ listen for
             weigh transaction.amount, transaction.device_id, member.history, recent
             ai.audit to fraud_audit_log
             not confident
-                give back 202 "Referred to manual review"
+                give back [202] "Referred to manual review"
             on.failure
-                give back 503 "Fraud check unavailable"
+                give back [503] "Fraud check unavailable"
         ai.decide: done
 
         // ACT -- route on the decision
         check isFraudulent
             when true
                 miolog.alert "High-risk transaction flagged"
-                give back 422 "Transaction blocked pending review"
+                give back [422] "Transaction blocked pending review"
             otherwise
                 call clearTransaction
                     transaction transaction
                 call: done
-                give back 200 "Transaction approved"
+                give back [200] "Transaction approved"
         check: done
 
     new: done

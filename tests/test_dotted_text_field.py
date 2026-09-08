@@ -126,5 +126,49 @@ code_b, val_b = serve_field("msg.body")
 check("serve msg.body status", code_b, 200)
 check("serve msg.body resolves POSTed value", val_b, "a body")
 
+
+# 4. THE WHOLE RESERVED LIST, not just `text` (added 2026-08-24).
+#
+# The blind spot this closes: cases 1-3 above covered `text` only, so when `json` and the four
+# currency words joined NAME's reserved-word exclusion in e97ca6c, nothing here noticed. The
+# raw-parse behaviour of `result.json.name` changed silently, and the only thing that caught it
+# was tests/test_mioconnect_patterns.py failing for an unrelated-looking reason -- it had been
+# raw-parsing a program containing `result.json.name` and getting away with it until `json` was
+# reserved. The grammar gate could not have caught this and should not try: it raw-parses by
+# design, and a raw parse of a reserved dotted member SHOULD fail (case 1 asserts exactly that).
+# The guarantee that actually matters to a user is that the REAL path resolves every one of
+# them, so that is what is swept here, word by word, from the same list NAME excludes.
+RESERVED_MEMBERS = ["text", "decimal", "dec", "integer", "int", "boolean", "json",
+                    "USD", "CAD", "EUR", "GBP"]
+
+for _w in RESERVED_MEMBERS:
+    _raw_ok = True
+    try:
+        transform(_P.parse(f"give back msg.{_w}"), f"give back msg.{_w}")
+    except Exception:
+        _raw_ok = False
+    check(f"reserved `{_w}`: raw parse of msg.{_w} fails (the reservation is real)",
+          _raw_ok, False)
+
+def serve_named_field(field_name, value):
+    """POST a body carrying `field_name` and read it back through msg.<field_name>."""
+    src = PROG.replace("{FIELD}", f"msg.{field_name}")
+    try:
+        prog = _parse_real(src)
+    except Exception as e:
+        return -1, f"PARSE: {str(e).splitlines()[0][:80]}"
+    try:
+        server = MohioServer(prog, MohioInterpreter())
+        c = TestClient(create_app(server), raise_server_exceptions=False)
+        r = c.post("/echo", json={"body": "a body", field_name: value})
+        return r.status_code, unwrap(r)
+    except Exception as e:
+        return -2, f"RUNTIME: {str(e).splitlines()[0][:80]}"
+
+for _w in RESERVED_MEMBERS:
+    _code, _val = serve_named_field(_w, f"V-{_w}")
+    check(f"reserved `{_w}`: the REAL path resolves msg.{_w} over a live round-trip",
+          (_code, _val), (200, f"V-{_w}"))
+
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

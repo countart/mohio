@@ -98,9 +98,9 @@ SRC_FAIL = '''listen for
             match id to "1"
             on.failure
                 status "missing"
-                give back 404 "nope"
+                give back [404] "nope"
         retrieve: done
-        give back 200 "ok"'''
+        give back [200] "ok"'''
 print("\n=== assignment is the FIRST statement in on.failure (not stolen) ===")
 kinds_f = first_handler_stmt_kinds(SRC_FAIL, 'on_failure_handler')
 check("on.failure body has NO inline_action stealing the assignment",
@@ -118,9 +118,9 @@ check("on.failure give back (same line) parses",
     new sh.T
         retrieve x from db.t
             match id to "1"
-            on.failure give back 404 "nope"
+            on.failure give back [404] "nope"
         retrieve: done
-        give back 200 "ok"'''))
+        give back [200] "ok"'''))
 check("on.success give back (same line) parses",
       parses('''listen for
     new sh.T
@@ -128,7 +128,7 @@ check("on.success give back (same line) parses",
             match id to "1"
             on.success give back 200 x.name
         retrieve: done
-        give back 200 "ok"'''))
+        give back [200] "ok"'''))
 
 print(f"\nRESULTS: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

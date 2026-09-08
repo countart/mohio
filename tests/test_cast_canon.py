@@ -91,9 +91,9 @@ check('in math ((v as.int)+1), v="7" -> 8',
 # ── 2. space-form cast must FAIL LOUD (cast position only) ───────────────
 print("\n=== space-form 'as int' fails loud (cast position) ===")
 check("'(v) as int' fails loud",
-      space_cast_fails_loud('listen for GET "/x"\n    r (v as int)\n    give back 200 "ok"\nlisten: done'), True)
+      space_cast_fails_loud('listen for\n    r (v as int)\n    give back [200] "ok"\nlisten: done'), True)
 check("'v default \"0\" as int' (zork form) fails loud",
-      space_cast_fails_loud('listen for GET "/x"\n    mi m default "0" as int\n    give back 200 "ok"\nlisten: done'), True)
+      space_cast_fails_loud('listen for\n    mi m default "0" as int\n    give back [200] "ok"\nlisten: done'), True)
 check("'m val as number' fails loud",
       space_cast_fails_loud('mi val as number'), True)
 check("'m val as decimal' fails loud",

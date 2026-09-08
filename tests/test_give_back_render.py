@@ -30,7 +30,7 @@ _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 
 _H = ('connect db as sqlite\n    from env.DATABASE_URL\nconnect: done\n\n'
-      'shape Home\n    method GET\nshape: done\n\n')
+      'shape Home\n    note as text\nshape: done\n\n')
 _E = '    request for sh.Home at /home\n'
 
 
@@ -78,7 +78,7 @@ print("\n=== the correct forms stay clean (no false positives) ===")
 check("trailing `render` block alone -> clean",
       _errs(_E + '        render\n            <h1>hi</h1>\n        render: done\n    request: done\n') == [])
 check("`give back 201 \"ok\"` -> clean",
-      _errs(_E + '        give back 201 "ok"\n    request: done\n') == [])
+      _errs(_E + '        give back [201] "ok"\n    request: done\n') == [])
 check("`give back result_render` (variable, \\b guard) -> clean",
       _errs(_E + '        give back result_render\n    request: done\n') == [])
 

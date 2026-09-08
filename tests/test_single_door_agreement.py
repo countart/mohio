@@ -80,8 +80,8 @@ def _serve_starts(path):
     return "Listening" in out, out
 
 bad_serve = _write('shape Order\n    widget as Gadget\nshape: done\n'
-                    'shape H\n    method GET\nshape: done\n'
-                    'listen for\n    request for sh.H at /x\n        give back 200 "hi"\n'
+                    'shape H\n    note as text\nshape: done\n'
+                    'listen for\n    request for sh.H at /x\n        give back [200] "hi"\n'
                     '    request: done\nlisten: done\n')
 _started, _sout = _serve_starts(bad_serve)
 check("serve BLOCKS on a Layer-3 error (does not start)", not _started)

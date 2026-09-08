@@ -36,18 +36,18 @@ def warns(src):
 
 REQUEST_ROOTED = ('shape Login\n    role as text\nshape: done\n'
                   'listen for\n    new sh.Login\n        grant role request.role\n'
-                  '        give back 200 "ok"\n    new: done\nlisten: done\n')
+                  '        give back [200] "ok"\n    new: done\nlisten: done\n')
 SHAPE_VAR = ('shape Login\n    role as text\nshape: done\n'
              'listen for\n    new sh.Login\n        grant role login.role\n'
-             '        give back 200 "ok"\n    new: done\nlisten: done\n')
+             '        give back [200] "ok"\n    new: done\nlisten: done\n')
 LITERAL = ('shape Login\n    role as text\nshape: done\n'
            'listen for\n    new sh.Login\n        grant role "member"\n'
-           '        give back 200 "ok"\n    new: done\nlisten: done\n')
+           '        give back [200] "ok"\n    new: done\nlisten: done\n')
 DB_LOOKED_UP = ('shape Login\n    who as text\nshape: done\n'
                 'connect db as postgres from env.DATABASE_URL\n'
                 'listen for\n    new sh.Login\n        retrieve user from db.users\n'
                 '            match id to 1\n        retrieve: done\n'
-                '        grant role user.role\n        give back 200 "ok"\n    new: done\nlisten: done\n')
+                '        grant role user.role\n        give back [200] "ok"\n    new: done\nlisten: done\n')
 
 check("grant role request.role -> warns (client picks own role)", len(warns(REQUEST_ROOTED)) == 1,
       str(warns(REQUEST_ROOTED)))

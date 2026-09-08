@@ -13,7 +13,7 @@ A normal string is one physical line, in double quotes:
 
 ```
 greeting   "Welcome back."
-give back 200 "Saved."
+give back [200] "Saved."
 ```
 
 ### `\n` for a short inline break
@@ -22,7 +22,7 @@ For a line break inside an otherwise short string, use the `\n` escape — it
 renders as a real newline in the output:
 
 ```
-give back 200 "Line one.\nLine two."
+give back [200] "Line one.\nLine two."
 ```
 
 `\n`, `\t`, `\r`, `\"`, `\\`, and `\uXXXX` are all supported. Use `\n` for the
@@ -112,9 +112,9 @@ This is often the cleaner pattern for large blocks of content: logic in the
 `give back` takes an optional status before the value. Numbers always work:
 
 ```
-give back 200 "Saved."
-give back 404 "Not found."
-give back 202 "Queued for review."
+give back [200] "Saved."
+give back [404] "Not found."
+give back [202] "Queued for review."
 ```
 
 ### Five English aliases
@@ -151,7 +151,7 @@ identical:
 
 ```
 give back "Done."
-give back 200 "Done."
+give back [200] "Done."
 give back ok "Done."
 ```
 

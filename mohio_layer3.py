@@ -69,7 +69,7 @@ CANONICAL_CONSTRUCTS = {
     "listen":       ["VERB", "OBJECT", "LOCATION"],  # listen for sh.Order at /orders
     "new":          ["VERB", "OBJECT", "LOCATION"],  # new sh.Order at /orders
     "check":        ["VERB", "OBJECT"],              # check status
-    "give back":    ["VERB", "OBJECT"],              # give back 200 "ok"
+    "give back":    ["VERB", "OBJECT"],              # give back [200] "ok"
     "require role": ["VERB", "OBJECT"],              # require role "clinician"
 }
 

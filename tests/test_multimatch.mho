@@ -47,7 +47,7 @@ listen for
                     use_count 0
                 save: done
 
-                give back 200 "Seeded two rows: look/kitchen and look/cellar."
+                give back [200] "Seeded two rows: look/kitchen and look/cellar."
 
             // ── TEST 2: RETRIEVE with two-field match ────────
             // Should return ONLY the cellar row, not the kitchen row.
@@ -55,7 +55,7 @@ listen for
                 retrieve hit from db.test_cache
                     match command to "look"
                     match room to "cellar"
-                    on.failure give back 200 "FAIL: no row matched look+cellar"
+                    on.failure give back [200] "FAIL: no row matched look+cellar"
                 retrieve: done
                 // If multi-match works: hit.response = "You are in the cellar."
                 // If only first match honored: returns kitchen row (first inserted)
@@ -69,7 +69,7 @@ listen for
                     match room to "cellar"
                     use_count 99
                 update: done
-                give back 200 "Updated look+cellar use_count to 99."
+                give back [200] "Updated look+cellar use_count to 99."
 
             // ── TEST 4: VERIFY the update hit the right row ──
             // Kitchen row should STILL be 0. Cellar should be 99.
@@ -77,22 +77,22 @@ listen for
                 retrieve k from db.test_cache
                     match command to "look"
                     match room to "kitchen"
-                    on.failure give back 200 "FAIL: kitchen row gone"
+                    on.failure give back [200] "FAIL: kitchen row gone"
                 retrieve: done
                 // Expect: 0 (untouched). If update hit wrong row, this is 99.
-                give back 200 "kitchen use_count = {{k.use_count}} (expect 0)"
+                give back [200] "kitchen use_count = {{k.use_count}} (expect 0)"
 
             when "verify_cellar"
                 retrieve c from db.test_cache
                     match command to "look"
                     match room to "cellar"
-                    on.failure give back 200 "FAIL: cellar row gone"
+                    on.failure give back [200] "FAIL: cellar row gone"
                 retrieve: done
                 // Expect: 99. If update missed, this is 0.
-                give back 200 "cellar use_count = {{c.use_count}} (expect 99)"
+                give back [200] "cellar use_count = {{c.use_count}} (expect 99)"
 
             otherwise
-                give back 200 "Commands: seed, retrieve, update, verify_kitchen, verify_cellar"
+                give back [200] "Commands: seed, retrieve, update, verify_kitchen, verify_cellar"
         check: done
 
     new: done

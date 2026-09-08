@@ -45,9 +45,9 @@ def _app(src):
 
 
 # a routed tenant app with no root route and no index.html
-ROUTED = ('shape H\n    method GET\nshape: done\n'
+ROUTED = ('shape H\n    note as text\nshape: done\n'
           'listen for\n    request for sh.H at /hello\n'
-          '        give back 200 "hello from tenant app"\n    request: done\nlisten: done\n')
+          '        give back [200] "hello from tenant app"\n    request: done\nlisten: done\n')
 app = _app(ROUTED)
 paths = [r.path for r in app.routes]
 c = TestClient(app)

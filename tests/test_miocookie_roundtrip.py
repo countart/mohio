@@ -43,10 +43,10 @@ listen for
     new sh.Probe at /probe
         check miocookie.exists "probe_cookie"
             when true
-                give back 200 "COOKIE SEEN"
+                give back [200] "COOKIE SEEN"
             otherwise
                 miocookie.set "probe_cookie" to "abc123"
-                give back 200 "NO COOKIE"
+                give back [200] "NO COOKIE"
         check: done
     new: done
 listen: done

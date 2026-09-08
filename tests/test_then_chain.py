@@ -56,7 +56,7 @@ _P = _parser()
 
 
 def run(body):
-    prog = ("shape S\n    method POST\nshape: done\n"
+    prog = ("shape S\n    note as text\nshape: done\n"
             "listen for\n    new sh.S at /x\n"
             + "\n".join("        " + l for l in body.splitlines())
             + "\n    new: done\nlisten: done\n")
@@ -68,7 +68,7 @@ def run(body):
 
 def parses(body):
     """True if the program parses + transforms without raising."""
-    prog = ("shape S\n    method POST\nshape: done\n"
+    prog = ("shape S\n    note as text\nshape: done\n"
             "listen for\n    new sh.S at /x\n"
             + "\n".join("        " + l for l in body.splitlines())
             + "\n    new: done\nlisten: done\n")

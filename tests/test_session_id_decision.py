@@ -71,7 +71,7 @@ listen for
         first  session.id
         second session.id
         player_session session.id
-        give back 200 "first={{first}} second={{second}} player={{player_session}}"
+        give back [200] "first={{first}} second={{second}} player={{player_session}}"
     new: done
 listen: done
 '''

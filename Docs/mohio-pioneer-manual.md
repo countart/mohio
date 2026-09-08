@@ -33,7 +33,7 @@ listen for
         retrieve member from db.members
             match id to request.member_id
             on.failure
-                give back 404 "Member not found."
+                give back [404] "Member not found."
         retrieve: done
 
         ai.decide is_fraudulent returns boolean
@@ -44,9 +44,9 @@ listen for
                 device.fingerprint
             ai.audit to fraud_audit_log   // ai.audit goes BEFORE not confident
             not confident
-                give back 202 "Flagged for review."
+                give back [202] "Flagged for review."
             on.failure
-                give back 503 "AI service unavailable."
+                give back [503] "AI service unavailable."
         ai.decide: done
 
         check is_fraudulent
@@ -103,13 +103,13 @@ name request.name default "guest"   // with fallback
 // declare GET/POST. Each listener closes with its own named closer.
 listen for
     request for sh.Page at /path       // GET  -- read a page or data
-        give back 200 "Here you go."
+        give back [200] "Here you go."
     request: done
     new sh.Form at /submit             // POST -- a submission arrived
-        give back 201 "Created."
+        give back [201] "Created."
     new: done
     request for sh.User at /users/:id  // URL parameter -> request.id
-        give back 200 "User {{ request.id }}"
+        give back [200] "User {{ request.id }}"
     request: done
 listen: done
 ```
@@ -117,12 +117,12 @@ listen: done
 ### Responses
 
 ```mohio
-give back 200 "Success."
+give back [200] "Success."
 give back 200 data as json
-give back 201 "Created."
-give back 400 "Bad request."
-give back 404 "Not found."
-give back 503 "Service unavailable."
+give back [201] "Created."
+give back [400] "Bad request."
+give back [404] "Not found."
+give back [503] "Service unavailable."
 ```
 
 ### Decisions
@@ -152,7 +152,7 @@ save: done
 retrieve thing from db.table
     match id to request.id
     on.failure
-        give back 404 "Not found."
+        give back [404] "Not found."
 retrieve: done
 
 // Find multiple records
@@ -161,7 +161,7 @@ find things in db.table
     order.down by created_at
     limit 20
     on.failure
-        give back 500 "Could not load."
+        give back [500] "Could not load."
 find: done
 
 // Update
@@ -203,9 +203,9 @@ ai.decide name returns type
         field_two
     ai.audit to audit_log       // logs the decision; goes BEFORE not confident
     not confident               // REQUIRED — what if below threshold?
-        give back 202 "Needs review."
+        give back [202] "Needs review."
     on.failure                  // optional — handle the AI being unavailable
-        give back 503 "AI offline."
+        give back [503] "AI offline."
 ai.decide: done
 ```
 
@@ -224,7 +224,7 @@ ai.create summary from report
     tone "executive"
     length "brief"
     on.failure
-        give back 503 "Summary service unavailable."
+        give back [503] "Summary service unavailable."
 ai.create: done
 
 // ai.decide — a typed judgment call with a required fallback
@@ -235,9 +235,9 @@ ai.decide is_fraudulent returns boolean
         member.history
     ai.audit to fraud_audit_log
     not confident
-        give back 202 "Referred for review."
+        give back [202] "Referred for review."
     on.failure
-        give back 503 "AI unavailable."
+        give back [503] "AI unavailable."
 ai.decide: done
 
 // ai.explain — a plain-language reason for a decision (optional)
@@ -255,7 +255,7 @@ retrieve rates from db.rates
     where product is request.product
     cache for 5 minutes
     on.failure
-        give back 500 "Rate service unavailable."
+        give back [500] "Rate service unavailable."
 retrieve: done
 ```
 
@@ -267,7 +267,7 @@ Add `cache for N minutes` (or hours, days) to any retrieve or find block. Cache 
 try
     // risky operation
     on.failure
-        give back 500 "Something went wrong."
+        give back [500] "Something went wrong."
     always
         // runs whether try succeeded or failed
 try: done
@@ -347,7 +347,7 @@ listen for
             order.down by created_at
             paginate by 25
             on.failure
-                give back 500 "Could not load transactions."
+                give back [500] "Could not load transactions."
         find: done
 
         give back 200 transactions as json
@@ -378,9 +378,9 @@ ai.decide is_approved returns boolean
         application.dti_ratio
     ai.audit to credit_audit_log   // ai.audit goes BEFORE not confident
     not confident
-        give back 202 "Referred to underwriter."
+        give back [202] "Referred to underwriter."
     on.failure
-        give back 503 "Decisioning unavailable."
+        give back [503] "Decisioning unavailable."
 ai.decide: done
 
 // ECOA -- if not approved, refer to a human. (Generate a plain-language reason

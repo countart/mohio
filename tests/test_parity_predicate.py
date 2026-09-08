@@ -35,7 +35,7 @@ def check(label, got, expected):
 
 
 def raw_result(body):
-    prog = ("shape S\n    method POST\nshape: done\n"
+    prog = ("shape S\n    note as text\nshape: done\n"
             "listen for\n    new sh.S at /x\n"
             + "\n".join("        " + l for l in body.splitlines())
             + "\n    new: done\nlisten: done\n")

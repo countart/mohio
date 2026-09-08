@@ -81,7 +81,7 @@ export DATABASE_URL="postgresql://postgres:yourpassword@localhost/zork_local"
 # Seed Zork data
 curl -X POST "http://localhost:8080/mio/seed?secret=your_seed_secret" \
   -H "Content-Type: application/json" \
-  -d @tests/seed_zork.json
+  -d @your-seed-data.json   # the Zork seed is a private fixture and is not distributed; supply your own JSON
 ```
 
 Or once the server is running, visit:

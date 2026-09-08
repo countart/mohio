@@ -64,7 +64,13 @@ def test_pci_field_encrypts_masks_and_is_full_for_use():
                      'find rows in db.cards\nfind: done\nhold c rows.first.number\ngive back 200 ("x" & c)\n'))
     assert str(masked) == '****1234', f"[pci] not masked on display: {masked!r}"
     assert isinstance(at_rest, str) and at_rest.startswith('enc:v1:'), f"[pci] not sealed at rest: {at_rest!r}"
-    assert str(derived) == '****1234', f"[pci] derived value not masked on display (taint B): {derived!r}"
+    # RULED CHANGE, not a relaxed assertion. This used to require the WHOLE joined string to be
+    # the mask, so `"x" & c` had to come out as `****1234` and the `x` the program wrote was
+    # destroyed along with the PAN. Masking now covers only the stretch that came from the
+    # classified field, so the literal survives and the number does not. The no-leak half is
+    # asserted separately and explicitly, because that is the part that must never relax.
+    assert '4111111111111234' not in str(derived), f"[pci] PAN leaked via concat: {derived!r}"
+    assert str(derived) == 'x****1234', f"[pci] derived value masked wrongly (taint B): {derived!r}"
 
 
 def test_pci_concat_masked_on_show():

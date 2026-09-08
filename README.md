@@ -15,6 +15,7 @@
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97-mohiolang-FFD700.svg)](https://huggingface.co/mohiolang)
 [![Buy Me a Coffee](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00.svg)](https://buymeacoffee.com/mohiolang)
 [![Zork Demo](https://img.shields.io/badge/Live%20Demo-zork.mohio.io-0D7377.svg)](https://zork.mohio.io)
+[![Platform](https://img.shields.io/badge/Platform-getmohio.com-0D7377.svg)](https://getmohio.com)
 
 *Mohio (moh-hee-oh) — from te reo Māori: to understand.*
 
@@ -41,6 +42,22 @@ If you want a tool that generates an app from a description, other products do t
 
 ---
 
+## Getting it, and somewhere to put it
+
+Two pieces sit either side of the language itself, and both are in **soft release** right now.
+Early, usable, and moving: expect rough edges and tell us where they are.
+
+**Mohio Home** is the installer and console. It puts Mohio on your machine without the clone
+and `pip install` dance below, and gives you a place to see what your programs are doing.
+
+**[getmohio.com](https://getmohio.com)** is the platform: somewhere to serve a Mohio application
+once you have written one, rather than assembling hosting for it yourself.
+
+Neither is required. Everything in this README runs from a git clone on your own machine, which
+is what the rest of this page shows, and will keep working that way.
+
+---
+
 ## This just ran.
 
 ```
@@ -59,12 +76,12 @@ mio run tests/support_escalation_demo.mho --seed tests/seed_support_escalation.j
   [mohio.sector] note (line 9): using built-in baseline rules for 'demo_high' (no profile file found; field-type classifications inactive).
                  add sector-demo_high.sector (certified) or sector-demo_high.mho (community) on the search path for full enforcement.
 
-  Loading tests/support_escalation_demo.mho (27 lines)
+  Loading tests/support_escalation_demo.mho (32 lines)
   9 | sector: demo_high
   ! sector: demo_high is a community or unverified profile. Review carefully before production use.
     Use an official Mohio sector profile for production compliance.
 
-  Transformed -- 5 top-level statements
+  Transformed -- 6 top-level statements
   AI runtime: mock (use --ai for real Anthropic API)
   Seed data: 1 rows across ['tickets']
   [sector] demo_high
@@ -150,10 +167,72 @@ ai.decide critical_decision returns boolean
         show "AI reasoning unavailable"
 ai.decide: done
 
+ai.decide critical_decision
+
 show "critical_decision complete"
 ```
 
+Declaring an `ai.decide` does not run it. The bare name on its own line — `ai.decide critical_decision` — is what runs the block and binds the result to a variable of that name. Declare once, invoke wherever the decision is needed.
+
 `check confidence above 0.95` is not a typo — the program declares 0.95 up front because the active sector requires it. Try declaring less and `mio check` refuses to build the program at all (see the compliance section below). Zero API wiring in user code either way. The developer wrote intent. The runtime — and the sector profile — handled the rest.
+
+---
+
+## Your first program
+
+Shorter than the demo above, and it shows the thing Mohio is actually for. Save it as
+`first.mho` and run it. No API key, no database to install, nothing to configure.
+
+```mohio
+// A patient record. The [phi] tag is the whole of the protection.
+shape Patient
+    chart as text [phi]
+    name as text
+shape: done
+
+connect db as sqlite from env.DATABASE_URL
+
+save to db.patients
+    chart "diagnosis: acute bronchitis"
+    name "Ada Lovelace"
+save: done
+
+retrieve p from db.patients
+    match name to "Ada Lovelace"
+    on.failure
+        show "no record"
+retrieve: done
+
+show ("patient: " & p.name)
+show ("chart:   " & p.chart)
+```
+
+```bash
+MOHIO_ENCRYPTION_KEY=demo-key mio run first.mho
+```
+
+```
+  patient: Ada Lovelace
+  chart:   ****itis
+```
+
+One tag did three things. The chart was encrypted before it reached the disk, it came back
+masked on the way out, and the sentence around it survived: `chart:` is still there, only the
+diagnosis is hidden. The name was never tagged, so nothing happened to it.
+
+Point any SQLite browser at the file and this is what is stored:
+
+```
+  name  = Ada Lovelace
+  chart = enc:v1:Fuq1/GBeXw85aKoKA5Gzs05r1792x8IrkAt0B...
+```
+
+*(The encrypted value is different on every run by design, so yours will not match this one
+character for character. The `enc:v1:` marker and the absence of the diagnosis are the point.)*
+
+That protection is bound to the value, not to the column. Copy `p.chart` into a variable and
+save it somewhere else and it is still encrypted when it lands, because what is protected
+travelled with it.
 
 ---
 
@@ -174,20 +253,44 @@ mio check tests/no_fallback_illustration.mho
     Every ai.decide must define what happens when confidence falls below threshold.
     Add 'not confident' inside 'ai.decide critical_decision'.
 
-  x  tests/no_fallback_illustration.mho  13 lines . 2 warning(s) . 2 error(s)
+  x ai.decide 'critical_decision' has no 'ai.audit' declaration.
+    Add 'ai.audit to [log_name]' so this AI decision produces an immutable record.
+    An unaudited AI decision cannot be reviewed or defended after the fact.
+
+  x ai.decide 'critical_decision' has no 'on.failure' handler.
+    Add 'on.failure' inside 'ai.decide critical_decision' so the program says what happens
+    when the AI service itself is unreachable.
+    Without it a provider outage becomes an unhandled error at runtime.
+
+  x  tests/no_fallback_illustration.mho  13 lines . 1 warning(s) . 4 error(s)
 ```
 
-*(The real output currently reports this same error twice, in two slightly different wordings, from two separate checks in the compiler — a known duplicate-reporting quirk, not fixed here, not hidden either.)* And the real `--json` output for the same file — no invented error codes, just `"code": "ERROR"`:
+Three separate things are missing and the compiler names all three: what happens when the model
+is unsure, where the decision is recorded, and what happens when the provider is down. Each one
+is a way a governed decision quietly stops being governed.
+
+*(The count says four because the missing `not confident` block is reported twice, in two
+slightly different wordings, from two separate checks in the compiler. A known
+duplicate-reporting quirk, not fixed here, not hidden either.)* And the real `--json` output for
+the same file, with no invented error codes, just `"code": "ERROR"`:
 
 ```json
 {
+  "file": "tests/no_fallback_illustration.mho",
   "passed": false,
+  "lines": 13,
   "errors": [
     {
       "code": "ERROR",
       "line": 10,
       "message": "ai.decide 'critical_decision' is missing a 'not confident' block.",
       "hint": "Every ai.decide must define what happens when confidence falls below threshold.\nAdd 'not confident' inside 'ai.decide critical_decision'."
+    },
+    {
+      "code": "ERROR",
+      "line": 10,
+      "message": "ai.decide 'critical_decision' has no 'ai.audit' declaration.",
+      "hint": "Add 'ai.audit to [log_name]' so this AI decision produces an immutable record.\nAn unaudited AI decision cannot be reviewed or defended after the fact."
     }
   ]
 }
@@ -252,6 +355,8 @@ ai.decide shouldEscalate returns boolean
     ai.audit to compliance_audit_log
     not confident
         give back false
+    on.failure
+        give back false
 ai.decide: done
 
 give back flagged as.json
@@ -301,8 +406,11 @@ ai.decide isFraudulent returns boolean
     confidence above 0.85
     weigh
         transaction.amount
+    ai.audit to fraud_audit_log
     not confident
-        give back 202 "Referred for review."
+        give back [202] "Referred for review."
+    on.failure
+        give back [503] "Fraud screening unavailable."
 ai.decide: done
 ```
 
@@ -367,6 +475,72 @@ Language packs are in progress for Spanish, Portuguese, and Hindi, with the
 mechanism designed to extend to any language. (Examples of translated source are
 held back pending a provisional patent filing.)
 
+A privacy tag is not a readable keyword and never translates. `[phi]` stays `[phi]` when the
+source is written in Spanish and when the program is translated on the way to a deploy target,
+so protection does not depend on which language the author was working in.
+
+### 10. Protection follows the value, not the column
+
+A tag on a field is a statement about the data, so it travels with the data. Copy a `[phi]`
+value into a variable, hold it, pass it into a task, join it into a sentence, and write it to a
+column nobody tagged: it is still encrypted when it lands. This is the part that is easy to get
+wrong, because the obvious implementation asks the destination what to do, and the destination
+is innocent.
+
+Masking follows the same rule and stops where the protected part stops:
+
+```mohio
+give back 200 ("the ssn is " & p.ssn)
+```
+
+returns `the ssn is ****1111`. The number is hidden, the sentence the program wrote is not.
+Earlier versions masked the whole string, which protected four characters by destroying the
+text around them.
+
+`[pii]` seals at rest exactly like `[phi]` and `[pci]`, and deliberately does NOT mask on the
+way out, because the everyday reason to hold an email is to show a person their own email.
+Sealing on disk and hiding on screen are different questions and Mohio answers them separately.
+
+### 11. One contract, five engines
+
+A source is described once and referenced through its connection. The same program runs against
+PostgreSQL, MySQL, MariaDB, SQLite and MongoDB, with the engine named at the connection and
+nowhere else. MySQL and MariaDB share one driver, which is what wire compatibility is for.
+
+`save`, `retrieve`, `find`, `upsert` and `remove` mean the same thing on all of them, including
+the parts that usually leak through: a document store identifies a record differently from a
+relational table, and the language absorbs that rather than handing it to you.
+
+**What is not true today:** `modify` needs the database to say which columns identify a row, so
+that it changes one row and not another. SQLite, PostgreSQL and MongoDB can answer; the MySQL
+driver cannot yet, so `modify` on MySQL or MariaDB refuses with a message saying so rather than
+guessing. `update ... match <field> to <value>` addresses rows by the condition you write and
+works on every engine.
+
+### 12. Uploads that survive, and that nobody else can read
+
+An uploaded file goes to durable object storage, local or any S3-compatible bucket, chosen by a
+declaration rather than by code. It is outside the folder a deploy replaces, so it is still
+there after the next release, and outside the folder the web server offers, so no URL reaches
+it.
+
+If its field is tagged, the CONTENT is encrypted at rest, not just the database row that names
+it. Reading one back happens inside a handler you have already gated with `require role` or
+`authorize:`, so an unauthorised request is refused before any file is read, and the refusal is
+recorded.
+
+### 13. A refusal leaves a trace
+
+A control that stops something is only as good as the record it leaves. An erasure request
+refused because the table is under a legal hold, a partial erasure rolled back, a call stopped
+because a compliance profile could not verify its data, a request denied for the wrong role:
+each one writes a hash-chained audit entry saying what was asked for and what happened to the
+request. Silence and never-having-been-asked look identical in a trail, and that is the one
+thing an auditor cannot work with.
+
+Every file stored or read records whether it was protected, so the line between encrypted and
+plaintext is visible in the trail rather than only on disk.
+
 ---
 
 ## Firsts (as far as we know)
@@ -387,7 +561,7 @@ held back pending a provisional patent filing.)
 
 ## Current state
 
-Current release: 4.9.0
+Current release: 5.0.0
 
 Mohio is built in the open and moving fast — the compiler updates multiple times a
 day. The core language is solid and tested; the surface around it is filling in.
@@ -482,6 +656,8 @@ export ANTHROPIC_API_KEY=your_key
 mio run tests/support_escalation_demo.mho --seed tests/seed_support_escalation.json --memory --ai --verbose
 ```
 
+**Working on the compiler itself, not just writing Mohio programs?** `pip install -r requirements.txt` installs everything the test suite needs too, then `TESTING.md` has the one command to run it. That file also covers what needs a real database versus what skips cleanly without one, so a missing-package error never gets mistaken for a real test failure.
+
 ---
 
 ## Commercial features
@@ -540,6 +716,6 @@ For licensing: **hello@mohio.io**
 
 **Mohio Language Project · Particular LLC · BSL 1.1**
 
-*4.9.0 · Write intent. Execute reason. See everything.*
+*5.0.0 · Write intent. Execute reason. See everything.*
 
 </div>

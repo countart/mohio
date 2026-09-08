@@ -65,7 +65,7 @@ clean("`greeting \"hi\"` read by `show greeting` -> no diagnostic", 'greeting "h
 # a capitalized SHAPE name is untouched (capitalized identifiers already mean shapes)
 clean("a capitalized shape name is unaffected",
       'shape Order\n    id as text\nshape: done\n'
-      'listen for\n    new sh.Order\n        give back 200 "ok"\n    new: done\nlisten: done\n')
+      'listen for\n    new sh.Order\n        give back [200] "ok"\n    new: done\nlisten: done\n')
 # an ordinary capitalized non-verb bare variable is NOT blanket-errored (narrow, not broad):
 # it is only a dead-store warning if unread.
 _c2, _o2 = _check('Widget "x"\n')

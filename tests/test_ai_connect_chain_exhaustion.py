@@ -130,15 +130,21 @@ rt4._complete = lambda model, s, u, temperature=None, max_tokens=None: (
 chain4 = rt4.register_chain("good_chain", ["claude-good"])
 rt4.resolve_chain("good_chain")
 d4 = rt4.decide(name="x", inputs={}, threshold=0.85, return_type="boolean", chain_name="good_chain")
+# Q97 (2026-09-01): retargeted from `.model` to `.requested_model`. These assert MODEL
+# RESOLUTION ORDER -- which alias the chain/override/default logic chose -- which is
+# what `requested_model` now holds. `.model` was split off to record which weights the
+# PROVIDER actually ran, so that two decisions a year apart can be told apart in the
+# audit. The assertions below are unchanged in intent; they now name the field that
+# carries it.
 check("a chain that resolves successfully is used normally (regression guard, unchanged)",
-      d4.model == "claude-good" and d4.fell_back is False, str(d4))
+      d4.requested_model == "claude-good" and d4.fell_back is False, str(d4))
 
 # ── 5. Regression: no chain_name at all -> self._model used exactly as before ──────
 rt5 = make_rt()
 rt5._complete = lambda model, s, u, temperature=None, max_tokens=None: CompletionResult(text='{"result": true, "confidence": 0.9, "explanation": "fine"}')
 d5 = rt5.decide(name="x", inputs={}, threshold=0.85, return_type="boolean")
 check("no chain_name declared -> self._model used, no raise (this fix must not "
-      "touch the ordinary no-chain case)", d5.model == "claude-sonnet-4-6", str(d5))
+      "touch the ordinary no-chain case)", d5.requested_model == "claude-sonnet-4-6", str(d5))
 
 # ── 6. An explicit model_override alongside an unresolved chain IS honored -- it is
 #       itself an explicit instruction, not a silent default. ─────────────────────
@@ -156,7 +162,7 @@ d6 = rt6.decide(name="x", inputs={}, threshold=0.85, return_type="boolean",
                chain_name="dead_chain", model_override="claude-explicit-override")
 check("an explicit model_override is honored even when the named chain failed to "
       "resolve (an explicit instruction, not a silent default)",
-      d6.model == "claude-explicit-override" and d6.fell_back is False, str(d6))
+      d6.requested_model == "claude-explicit-override" and d6.fell_back is False, str(d6))
 
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

@@ -30,7 +30,7 @@ DEFINE = ('ai.decide resolve_noun returns text\n'
           '    confidence above 0.85\n'
           '    weigh noun, candidates\n'
           '    not confident\n'
-          '        give back 200 "FELLBACK"\n'
+          '        give back [200] "FELLBACK"\n'
           'ai.decide: done\n')
 APP = (DEFINE +
        'shape Cmd\nshape: done\n'

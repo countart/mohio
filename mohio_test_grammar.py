@@ -251,6 +251,9 @@ task greet
 task: done
 """)
     run("task_keyword_param", """
+shape Transaction
+    id as uuid required
+shape: done
 task clearTransaction
     take transaction as sh.Transaction
     returns text
@@ -261,6 +264,9 @@ task clearTransaction
 task: done
 """)
     run("task_step_param", """
+shape WorkflowStep
+    name as text required
+shape: done
 task processStep
     take step as sh.WorkflowStep
     returns text
@@ -311,7 +317,7 @@ retrieve.one: done
 retrieve member from db.members
     match id to request.id
     on.failure
-        give back 404 "Not found"
+        give back [404] "Not found"
 retrieve: done
 """)
 
@@ -408,9 +414,24 @@ find members in db.members
     cursor from request.cursor
 find: done
 """)
-    run("find_by_group", """
+    # 2026-09-01: `find ... by <field>` REFUSES when nothing says what each group comes back
+    # as. CORRECTED same day: the first version of this comment (and the message it asserted)
+    # said summarize "does not parse in this build" and that grouping had no working companion.
+    # Both were false -- summarize parses and groups; the pretokenizer folding `amount.sum`
+    # into one token was what broke it in any program that also saved that field. The refusal
+    # stands, the reason changed, so the assertion moved onto the text that is actually true.
+    run("find_by_group_refused", """
 find summary by merchant in db.transactions
     up to 10
+find: done
+""", expect="error", error_contains="nothing here says what each group")
+    # ...and the companion form the message points at must PARSE, or the message sends the
+    # developer somewhere that does not exist -- which is exactly the bug being corrected.
+    run("find_by_group_with_summarize", """
+find totals by status in db.orders
+    summarize
+        total amount.sum
+    summarize: done
 find: done
 """)
     run("find_cache", """
@@ -454,9 +475,9 @@ remove: done
     # ── Flow control ──────────────────────────────────────────
     run("check_when", """
 check status
-    when "active"  -> give back 200 "ok"
-    when "pending" -> give back 202 "pending"
-    otherwise        give back 400 "unknown"
+    when "active"  -> give back [200] "ok"
+    when "pending" -> give back [202] "pending"
+    otherwise        give back [400] "unknown"
 check: done
 """)
     run("check_above", """
@@ -473,12 +494,12 @@ each: done
 """)
     run("repeat_basic", """
 repeat 3 times
-    give back 200 "retry"
+    give back [200] "retry"
 repeat: done
 """)
     run("while_basic", """
 while queue.size > 0
-    give back 200 "processing"
+    give back [200] "processing"
 while: done
 """)
 
@@ -492,21 +513,95 @@ while: done
     run("halt_plain",       "halt")
     run("stop_stmt",        "stop")
 
+    # ── Shape line boundary (Q459 / FORK-6 / Q308) ────────────
+    # A shape line declares ONE field. Omitting `as` used to split the line in two and attach
+    # every modifier to the phantom second field, so `purpose` -- the strongest enforcement
+    # claim in the product -- silently vanished while `mio check` reported no errors.
+    run("shape_field_type_needs_as", """
+shape S
+    email text [pii] purpose "billing"
+shape: done
+""", expect="error", error_contains="declares 2 fields at once")
+
+    run("shape_field_bare_tag_refused", """
+shape S
+    email text pii purpose "billing"
+shape: done
+""", expect="error", error_contains="declares 3 fields at once")
+
+    run("shape_field_bare_words_refused", """
+shape S
+    foo bar baz
+shape: done
+""", expect="error", error_contains="declares 3 fields at once")
+
+    # Both CORRECT spellings still pass: with the type, and with no type at all.
+    run("shape_field_with_as_passes", """
+shape S
+    email as text [pii] purpose "billing"
+shape: done
+""")
+    run("shape_field_no_type_passes", """
+shape S
+    email [pii] purpose "billing"
+shape: done
+""")
+
+    # ── `as table` (Phase 2, recovered shape model) ────────────
+    run("shape_as_table_opens_a_scope", """
+shape S
+    users as table
+        email as text
+    orders as table
+        email as text
+shape: done
+""")
+
+    # ── Unnamed all-table shape (Phase 2 item 3) ──────────────
+    # The grammar is newline-blind, so an optional name would read `shape Person / email as
+    # text` two ways at once. Requiring `NAME AS table` right after `shape` makes the named and
+    # unnamed readings disjoint on every input; these four pin that both still parse and that
+    # neither swallowed the other.
+    run("shape_unnamed_all_tables", """
+shape
+    users as table
+        email as text
+    orders as table
+        total as int
+shape: done
+""")
+    run("shape_named_with_tables_still_parses", """
+shape Store
+    users as table
+        email as text
+shape: done
+""")
+    run("shape_named_ordinary_still_parses", """
+shape Person
+    email as text
+shape: done
+""")
+    run("shape_unnamed_with_loose_field_refused", """
+shape
+    email as text
+shape: done
+""", expect="error", error_contains="the shape above it has no name")
+
     # ── Listen for ────────────────────────────────────────────
     run("listen_new", """
 shape Transaction
-    method POST
+    amount as int
 shape: done
 listen for
     new sh.Transaction
         require role "screener"
-        give back 200 "ok"
+        give back [200] "ok"
     new: done
 listen: done
 """)
     run("listen_request_inbound", """
 shape InvoiceDownload
-    method GET
+    invoice_id as text
 shape: done
 listen for
     request for sh.InvoiceDownload
@@ -534,9 +629,9 @@ ai.decide isFraudulent returns boolean
     weigh transaction.amount, member.history
     ai.audit to fraud_audit_log
     not confident
-        give back 202 "Referred to manual review"
+        give back [202] "Referred to manual review"
     on.failure
-        give back 503 "Unavailable"
+        give back [503] "Unavailable"
 ai.decide: done
 """)
     # `ai.chain` is retired; `ai.connect` with an `order` block is canonical, and `try` inside a
@@ -587,17 +682,17 @@ pull: done
     run("request_outbound", """
 request ocr_result from GoogleVision.ocr
     with vision_request
-    on.failure give back 503 "unavailable"
+    on.failure give back [503] "unavailable"
 request: done
 """)
 
     # ── mioconnect ────────────────────────────────────────────
     run("mioconnect_full", """
 shape ChargeRequest
-    method POST
+    amount as int
 shape: done
 shape ChargeResult
-    method POST
+    status as text
 shape: done
 mioconnect Stripe
     address "https://api.stripe.com/v1"
@@ -648,9 +743,9 @@ saga: done
 """)
 
     # ── Actions ───────────────────────────────────────────────
-    run("give_back_200",    'give back 200 "OK"')
+    run("give_back_200",    'give back [200] "OK"')
     run("give_back_value",  "give back member")
-    run("give_back_422",    'give back 422 "Transaction blocked"')
+    run("give_back_422",    'give back [422] "Transaction blocked"')
     run("jump_to",          "jump to /dashboard")
     run("require_single",   'require role "admin"')
     run("require_or",       'require role "admin" or "screener"')
@@ -687,7 +782,7 @@ sign: done
     run("verify_token", """
 verify token from request.header "Authorization"
     scope "read:members"
-    on.failure give back 401 "Unauthorized"
+    on.failure give back [401] "Unauthorized"
 verify: done
 """)
 
@@ -758,9 +853,9 @@ shape: done
     # ── Error handling ────────────────────────────────────────
     run("try_block", """
 try
-    give back 200 "ok"
+    give back [200] "ok"
 on.failure
-    give back 503 "error"
+    give back [503] "error"
 always
     miolog.info "attempt complete"
 try: done
@@ -851,7 +946,7 @@ ai.decide isFraudulent returns boolean
     confidence above 0.85
     weigh transaction.amount
     not confident
-        give back 202 "Referred"
+        give back [202] "Referred"
     ai.audit to fraud_audit_log
 ai.decide: done
 """, expect="error", error_contains="before")
@@ -926,28 +1021,119 @@ task greet
 greet: done
 """, expect="warn", warn_contains="task: done")
 
-    # `check confidence above N` is CANONICAL -- locked Apr 3 (LDD v2.0), never overturned.
-    # This test used to assert it warned "retired", which CEMENTED a drift a compiler chat
-    # introduced off a stale marker. A test written against the implementation makes the
-    # implementation true by definition. It must assert the DESIGN.
+    # `check confidence above N` is CANONICAL as a SPELLING -- locked Apr 3 (LDD v2.0), never
+    # overturned. This test used to assert it warned "retired", which CEMENTED a drift a
+    # compiler chat introduced off a stale marker. A test written against the implementation
+    # makes the implementation true by definition. It must assert the DESIGN.
+    #
+    # THE OPEN DESIGN QUESTION THIS TEST CARRIED IS NOW SETTLED (2026-09-02, Q111 / Finding 7).
+    # It used to assert the opposite: that the canonical ordering `check confidence above`
+    # BEFORE the fallback fails loud with "EMPTY 'not confident' block". That error was real,
+    # but it was a symptom, not the design -- Earley mis-grouped the fallback's body out to a
+    # sibling statement, and the C1 structural check refused the wreckage. The comment here
+    # named the right end state ("FIX the grouping so the locked canonical spelling WORKS"),
+    # and that is what the grammar now does: the low-priority `_ai_decide_loose_stmt` catch-all
+    # makes the nesting derivation win, so the fallback keeps its body in EVERY clause ordering.
+    # This test now asserts the settled behaviour. The empty-block guard is still live and is
+    # pinned by nc_block_truly_empty_fails_loud below.
+    run("check_confidence_above_before_fallback_parses", """
+ai.decide isFraudulent returns boolean
+    check confidence above 0.85
+    weigh transaction.amount
+    ai.audit to fraud_audit_log
+    not confident
+        give back [202] "Referred"
+    on.failure
+        give back [503] "AI unavailable"
+ai.decide: done
+""", expect="pass")
+
+    # The guard the test above used to stand in for: a fallback with NOTHING under it is still
+    # refused. Mutation-relevant -- if a future ambiguity change made not_confident_block
+    # swallow the following clause, this is the case that would go quiet.
+    run("nc_block_truly_empty_fails_loud", """
+ai.decide isFraudulent returns boolean
+    check confidence above 0.85
+    weigh transaction.amount
+    ai.audit to fraud_audit_log
+    not confident
+    on.failure
+        give back [503] "AI unavailable"
+ai.decide: done
+""", expect="error", error_contains="EMPTY 'not confident' block")
+
+    # `confidence is above <n>` -- the spoken form borrowed from check/when. It matched no
+    # confidence clause, fell through the body catch-all, and the declared threshold was
+    # silently replaced by the 0.85 default. Refused by name now.
+    run("confidence_is_above_refused", """
+ai.decide isFraudulent returns boolean
+    confidence is above 0.99
+    weigh transaction.amount
+    ai.audit to fraud_audit_log
+    not confident
+        give back [202] "Referred"
+    on.failure
+        give back [503] "AI unavailable"
+ai.decide: done
+""", expect="error", error_contains="is not the confidence gate")
+
+    # The spelling itself is still canonical and accepted -- proof it was not retired.
+    # The gate now comes BEFORE the handlers, like every other verb block's clauses. Handlers
+    # moved to the shared `result_handlers` rule on 2026-09-02, which places them structurally
+    # last, so a clause written after them is no longer read as a clause. This test previously
+    # had the gate trailing the handlers; that ordering is now refused BY NAME (see
+    # confidence_gate_after_handlers_refused below), not silently misread.
     run("check_confidence_above_is_canonical", """
 ai.decide isFraudulent returns boolean
     check confidence above 0.85
     weigh transaction.amount
     ai.audit to fraud_audit_log
     not confident
-        give back 202 "Referred"
+        give back [202] "Referred"
+    on.failure
+        give back [503] "AI unavailable"
 ai.decide: done
 """, expect="pass")
 
-    run("warn_ai_decide_no_audit", """
+    # ...and the ordering it used to use now fails LOUD, naming the real cause. Saying "`when`
+    # is not available" to someone who wrote `check confidence above` would be true about the
+    # wrong thing.
+    run("confidence_gate_after_handlers_refused", """
+ai.decide isFraudulent returns boolean
+    weigh transaction.amount
+    ai.audit to fraud_audit_log
+    not confident
+        give back [202] "Referred"
+    on.failure
+        give back [503] "AI unavailable"
+    check confidence above 0.85
+ai.decide: done
+""", expect="error", error_contains="must come BEFORE the handlers")
+
+    # A (2026-08-27): missing ai.audit was a WARNING, so the advertised compile-time
+    # guarantee was not one. It is an ERROR now -- consistent with ai.audit's destination
+    # name, which was already a hard build error. Renamed from warn_ai_decide_no_audit.
+    run("error_ai_decide_no_audit", """
 ai.decide isFraudulent returns boolean
     confidence above 0.85
     weigh transaction.amount
     not confident
-        give back 202 "Referred"
+        give back [202] "Referred"
+    on.failure
+        give back [503] "AI unavailable"
 ai.decide: done
-""", expect="warn", warn_contains="audit")
+""", expect="error", error_contains="no 'ai.audit'")
+
+    # B (2026-08-27): missing on.failure produced NOTHING before -- no error, no warning.
+    run("error_ai_decide_no_on_failure", """
+ai.decide isFraudulent returns boolean
+    confidence above 0.85
+    weigh transaction.amount
+    ai.audit to fraud_audit_log
+    not confident
+        give back [202] "Referred"
+ai.decide: done
+""", expect="error", error_contains="no 'on.failure'")
 
     # ── Clean pass — no errors, no warnings ───────────────────
 
@@ -958,7 +1144,9 @@ ai.decide isFraudulent returns boolean
     weigh transaction.amount, member.history
     ai.audit to fraud_audit_log
     not confident
-        give back 202 "Referred to manual review"
+        give back [202] "Referred to manual review"
+    on.failure
+        give back [503] "AI unavailable"
 ai.decide: done
 """)
 

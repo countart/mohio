@@ -2,7 +2,7 @@
 <!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Language Reference
 
-*Generated from the grammar on 2026-07-31. Do not edit by hand -- edit `tools/langref/langref_meta.json` and regenerate.*
+*Generated from the grammar on 2026-09-04. Do not edit by hand -- edit `tools/langref/langref_meta.json` and regenerate.*
 
 ## How to use this reference
 
@@ -15,6 +15,7 @@ Status legend:
 - ⛔ **retired** -- Do not use.
 - 🔒 **reserved** -- Held for future use.
 - 🚧 **not-built** -- Recognized but not executable yet.
+- 💳 **commercial** -- Built and working, but a paid service -- not part of the free runtime.
 
 
 ## Comments and layout
@@ -937,19 +938,14 @@ journey.mho (folder-scoped spine)
 ```
 A folder-scoped shared spine auto-applied to every .mho in its folder. Main file is processed last and overrides (last-wins).
 
-### ✅ `page`  
-*canonical*
+### 🔒 `page`  
+*reserved*
 
 ```
-page at /path
+page as ...
+page [modifier]
 ```
-Example:
-```mohio
-page at /about
-    show "About"
-page: done
-```
-Render a page at a path under mio serve.
+A reserved word. `page` is held for possible future hardware and desktop use, in the forms `page as` and `page [modifier]`. It is not a block you write, and it does not create a route. Routing works two ways today. By convention: a page file's name becomes its URL, and inside the file you write `render` for the markup and `listen for` to handle requests. Explicitly: a `map` block declares routing. That construct is still being designed, so its syntax is not documented here yet.
 
 
 ## Modifiers (the dot connector)
@@ -2175,8 +2171,66 @@ Status keywords reserved for roadmap/declaration metadata.
 
 ---
 
-## Uncatalogued grammar keywords
+## Coverage against the grammar
 
-These keyword literals exist in the grammar but are not yet described above. They should be categorized:
+The word list comes from `mio harvest`, the compiler's own sweep of the grammar, so it sees every keyword including the ones defined as regex terminals. Every word lands in exactly ONE of the four columns below, in this priority order, so each row sums to its Total. **Entry**: the word appears in an entry's own name, syntax or example -- it is actually taught. **Mentioned**: it appears only in passing inside another entry's note. **Family-covered**: it has no entry of its own and is not mentioned, but a documented `<prefix>.*` entry already teaches the whole family it belongs to (`miofile.copy` under the documented `miofile.*`) -- not a real gap. **No entry**: none of the above -- genuinely undocumented, the real gap to triage.
 
-`pad.left`, `pad.right`
+| Group | Entry | Mentioned only | Family-covered | No entry | Total |
+|---|---:|---:|---:|---:|---:|
+| operators and symbols | 10 | 1 | 0 | 7 | 18 |
+| unit and currency families | 0 | 0 | 0 | 10 | 10 |
+| string, cast and condition words | 13 | 4 | 0 | 49 | 66 |
+| service calls | 29 | 5 | 43 | 17 | 94 |
+| everything else | 255 | 28 | 0 | 47 | 330 |
+| **all words** | **307** | **38** | **43** | **130** | **518** |
+
+### operators and symbols
+
+Mentioned in a note but with no entry of its own (1): `->`
+
+No entry (7): `!=`, `%`, `<-`, `<->`, `<=`, `==`, `>=`
+
+
+### unit and currency families
+
+No entry (10): `in.EUR`, `in.GBP`, `in.USD`, `in.celsius`, `in.fahrenheit`, `in.kelvin`, `in.kg`, `in.km`, `in.lbs`, `in.miles`
+
+
+### string, cast and condition words
+
+Mentioned in a note but with no entry of its own (4): `as.number`, `no.match`, `round.down`, `round.up`
+
+No entry (49): `apply.as`, `apply.in`, `as.absolute`, `as.csv`, `as.days`, `as.hours`, `as.html`, `as.json`, `as.lc`, `as.lowercase`, `as.minutes`, `as.pdf`, `as.seconds`, `as.sentence`, `as.title`, `as.uc`, `as.uppercase`, `as.weeks`, `case.no`, `case.yes`, `ends.with`, `ignore.case`, `is.empty`, `is.in`, `is.not`, `keep.whitespace`, `match.all`, `match.any`, `match.case`, `match.none`, `match.unique`, `not.empty`, `not.found`, `pad.left`, `pad.right`, `remove.all`, `remove.html`, `remove.special`, `remove.ws`, `round.to`, `show.as`, `show.to`, `show.with`, `starts.with`, `trim.back`, `trim.front`, `unique.id`, `with.all`, `with.required`
+
+
+### service calls
+
+Mentioned in a note but with no entry of its own (5): `miocache.set`, `miomail.queue`, `miomail.template`, `miomail.with`, `mioschedule.every`
+
+Family-covered, no entry of its own but a `<prefix>.*` entry already teaches it (43 words, under `mioauth.*`, `miocache.*`, `miochain.*`, `miocookie.*`, `miodata.*`, `miofile.*`, `miograph.*`, `miohttp.*`, `mioknow.*`, `miolog.*`, `miopush.*`, `mioresponse.*`, `mioschedule.*`, `miotest.*`, `miovault.*`): `mioauth.apikey`, `mioauth.biometric`, `mioauth.logout`, `mioauth.refresh`, `mioauth.verify`, `miocache.delete`, `miocache.exists`, `miocache.flush`, `miochain.execute`, `miochain.tx`, `miochain.wallet`, `miocookie.clear`, `miocookie.delete`, `miocookie.exists`, `miocookie.get`, `miodata.csv`, `miodata.validate`, `miodata.xml`, `miodata.yaml`, `miofile.copy`, `miofile.delete`, `miofile.exists`, `miofile.list`, `miofile.move`, `miograph.find`, `miohttp.delete`, `miohttp.patch`, `miohttp.post`, `miohttp.put`, `mioknow.forget`, `mioknow.recall`, `mioknow.reinforce`, `miolog.alert`, `miolog.error`, `miolog.metric`, `miolog.warn`, `miopush.broadcast`, `mioresponse.content-type`, `mioschedule.cancel`, `mioschedule.in`, `miotest.unit.ai`, `miovault.delete`, `miovault.set`
+
+No entry (17): `mioimage.compress`, `mioimage.convert`, `mioimage.crop`, `mioimage.resize`, `mioimage.watermark`, `miopublish.guaranteed`, `miostream.close`, `miostream.open`, `miostream.send`, `miosys.java`, `miosys.run`, `sec.audit`, `sec.classify`, `sec.encrypt`, `sec.headers`, `sec.nohardcode`, `sec.validate`
+
+
+### everything else
+
+Mentioned in a note but with no entry of its own (28): `ai.agent`, `characters`, `context`, `current`, `define`, `display`, `fields`, `flow`, `grant`, `loop`, `on.close`, `parse`, `permanent`, `range`, `release`, `release.now`, `rename`, `render`, `rerun.after`, `rerun.max`, `rerun.until`, `script`, `section`, `style`, `table`, `until`, `via`, `while.active`
+
+No entry (47): `ai.audit`, `ai.compare`, `ai.override`, `ai.resolve`, `ai.respond`, `app config`, `chars`, `check count`, `check exists`, `check unique`, `connect chain`, `do.after`, `do.encrypt`, `do.every`, `do.once`, `do.unless`, `false`, `for.purpose`, `html`, `layout`, `nav to`, `nav.back`, `nav.forward`, `nav.root`, `navigate to`, `navigate.back`, `navigate.root`, `now()`, `on chain`, `on.change`, `on.complete`, `on.error`, `on.pause`, `percentage`, `purpose`, `redirect`, `release.lock`, `require biometric`, `require camera`, `require location`, `require push`, `run mioschedule`, `sign via`, `stage`, `trusted`, `uuid()`, `walk`
+
+
+## Status disagreements (harvest vs this catalog)
+
+Harvest is authoritative for whether a word EXISTS. This catalog is authoritative for its STATUS and content. Where they differ the difference is reported here and never resolved automatically. A curated `reserved` or `retired` sitting against a harvested `canonical` is usually correct: the word is still in the grammar but is not for use.
+
+- ai.connect: meta says not-built, harvest says canonical
+- catch: meta says retired, harvest says canonical
+- conflict: meta says not-built, harvest says canonical
+- deploy: meta says reserved, harvest says canonical
+- import: meta says reserved, harvest says canonical
+- mioapp: meta says not-built, harvest says canonical
+- miomap: meta says not-built, harvest says canonical
+- page: meta says reserved, harvest says canonical
+- seed: meta says not-built, harvest says canonical
+- set: meta says retired, harvest says canonical
+- undo: meta says reserved, harvest says canonical

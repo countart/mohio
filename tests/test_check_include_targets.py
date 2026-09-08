@@ -33,9 +33,9 @@ def check(label, got, want):
     else:
         _failed += 1; print(f"  FAIL {label}: got {got!r} want {want!r}")
 
-GOOD_PAGE = 'page at /\n    show "home"\npage: done\n'
-GOOD_PRIV = 'page at /cheat\n    show "codes"\npage: done\n'
-BROKEN     = 'page at /cheat\n    show "codes"\n'          # never closed
+GOOD_PAGE = 'show "home"\n'
+GOOD_PRIV = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /cheat\n        show "codes"\n    request: done\nlisten: done\n'
+BROKEN     = 'check score\n    when score is more than 1\n        show "codes"\n'  # never closed
 FRAGMENT   = 'hold greeting "hi"\nhold farewell "bye"\n'    # leans on its includer
 
 

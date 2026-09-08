@@ -68,16 +68,23 @@ errs = [str(e) for e in ctx.errors]
 warns = [str(w) for w in ctx.warnings]
 check("ai.decide: a quoted string containing 'not confident' does NOT satisfy the real check",
       any('missing' in e.lower() and 'not confident' in e.lower() for e in errs), errs)
+# A (2026-08-27): a missing ai.audit moved from WARNING to ERROR, so the protection this
+# asserts now lands in `errs`. The guarantee got stronger; only the list to read changed.
 check("ai.decide: a quoted string containing 'ai.audit' does NOT satisfy the real check",
-      any('no' in w.lower() and 'ai.audit' in w.lower() for w in warns), warns)
+      any('no' in e.lower() and 'ai.audit' in e.lower() for e in errs), errs)
 
 REAL_DECIDE = (
     "ai.decide isSuspect2 returns boolean\n"
-    "    check confidence above 0.85\n"
+    # Bare `confidence above`: the `check confidence above` spelling mis-groups the fallback
+    # out of its own block, leaving it EMPTY -- which C1 now refuses, so this fixture would no
+    # longer be the "real, correct" control it exists to be.
+    "    confidence above 0.85\n"
     "    weigh transaction.amount\n"
     "    ai.audit to fraud_audit_log\n"
     "    not confident\n"
     "        give back pending \"Sent to a human\"\n"
+    "    on.failure\n"
+    "        give back 503 \"AI unavailable\"\n"
     "ai.decide: done\n")
 ctx2 = run(REAL_DECIDE)
 check("ai.decide: a REAL not confident + ai.audit produces no false positive",

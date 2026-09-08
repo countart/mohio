@@ -114,6 +114,13 @@ class CompletionResult:
     text: str
     input_tokens: int = 0
     output_tokens: int = 0
+    # The model id the PROVIDER says it actually ran (Q97, 2026-09-01). `claude-sonnet-5` is a
+    # moving alias the provider controls, so two decisions a year apart recorded identically
+    # while possibly running on different weights -- and the audit trail could not tell them
+    # apart. Every provider returns the concrete id in its response and this discarded it.
+    # Empty when the provider reported none; the caller marks that case rather than passing the
+    # requested alias off as a resolved one.
+    resolved_model: str = ""
 
 
 class AiProviderError(RuntimeError):
@@ -278,8 +285,14 @@ def _build_user_prompt(decision_name: str, inputs: dict,
             # Unwrap MohioValue
             if isinstance(value, MohioValue):
                 value = value.to_python()
-            # Format key: strip dotted prefix for readability
-            label = key.split(".")[-1].replace("_", " ")
+            # Q376. This was `key.split(".")[-1]`, which collapsed `customer.name` and
+            # `agent.name` to the same label `name`, and `applicant.income` and
+            # `coapplicant.income` to two identical `income` lines. The model was then asked to
+            # weigh two values it could not tell apart, and the audit recorded a decision made
+            # on inputs that read as duplicates. That is a governance-correctness bug, not a
+            # formatting one: whose income was weighed is exactly the question an adverse-action
+            # review asks. The owner is kept when there is one.
+            label = key.replace(".", " ").replace("_", " ")
             lines.append(f"  {label}: {value}")
     else:
         lines.append("No inputs provided.")
@@ -321,7 +334,33 @@ def _parse_response(raw: str, return_type: str) -> tuple[Any, float, str]:
             raise AiProviderError(f"No JSON found in response: {text[:100]}")
 
     result     = data.get("result")
-    confidence = float(data.get("confidence", 0.0))
+    # Q373/Q21B -- THE CONFIDENCE BYPASS. This was `float(data.get("confidence", 0.0))` with no
+    # bound, so a model (or anything that can influence one) returning `confidence: 7` cleared
+    # EVERY `check confidence above` threshold, including 0.99. That is the one defect that
+    # voids the earned claim "an AI decision without a working confidence gate does not
+    # compile": the gate compiled, ran, and was meaningless.
+    #
+    # RAISE rather than clamp, matching the raise-not-degrade discipline this function already
+    # uses three times above for unparseable JSON, missing JSON and a non-boolean boolean. A
+    # confidence of 7 is not a low-confidence opinion and it is not a high-confidence one; it is
+    # not a confidence at all, and silently rewriting it to 1.0 would invent an answer the model
+    # never gave. Out of range is a broken response, and a broken response is no opinion.
+    #
+    # A NON-NUMERIC value used to escape as a bare ValueError from float(), straight past the
+    # typed AiProviderError path every other failure here takes -- so `confidence: "high"`
+    # surfaced as an untyped crash instead of a provider error the runtime knows how to route.
+    _raw_conf = data.get("confidence", 0.0)
+    try:
+        confidence = float(_raw_conf)
+    except (TypeError, ValueError):
+        raise AiProviderError(
+            f"Model returned a non-numeric confidence: {_raw_conf!r}. Confidence must be a "
+            f"number between 0 and 1.")
+    if not (0.0 <= confidence <= 1.0):
+        raise AiProviderError(
+            f"Model returned a confidence outside 0..1: {confidence!r}. A value out of range "
+            f"is not a low-confidence answer and not a high-confidence one -- it is a broken "
+            f"response, and treating it as either would let it clear a threshold it never met.")
     explanation = str(data.get("explanation", ""))
 
     # Coerce result to the declared return type
@@ -373,8 +412,27 @@ def _parse_response(raw: str, return_type: str) -> tuple[Any, float, str]:
                 f"Model returned a number decision as an unusable value: {result!r} "
                 f"(type {type(result).__name__}). Expected a numeric value.")
 
+    elif return_type in ("dec", "int"):
+        # Canonical spellings of decimal/integer (CLAUDE.md retires `number`/`num` in their
+        # favour). They were absent here and in the mock, so the CANONICAL forms fell through
+        # every branch and returned the model's raw value uncoerced.
+        try:
+            result = float(result)
+        except (TypeError, ValueError):
+            raise AiProviderError(
+                f"Model returned {result!r}, which cannot be read as a number for "
+                f"`returns {return_type}`.")
     elif return_type == "text":
         result = str(result) if result is not None else ""
+
+    else:
+        # An UNSUPPORTED return type fell through every branch above and returned the model's
+        # raw value with no coercion and no validation -- a wrong-typed value passed off as a
+        # real decision. The compile-time refusal in the validator should stop this long
+        # before here; this is the backstop for the real-provider path.
+        from mohio_interpreter import AI_DECIDE_RETURN_TYPES, _ai_return_type_message
+        if str(return_type).lower() not in AI_DECIDE_RETURN_TYPES:
+            raise AiProviderError(_ai_return_type_message(return_type))
 
     return result, confidence, explanation
 
@@ -524,6 +582,7 @@ class AnthropicAiRuntime:
                 text=msg.content[0].text,
                 input_tokens=(getattr(usage, 'input_tokens', 0) or 0) if usage else 0,
                 output_tokens=(getattr(usage, 'output_tokens', 0) or 0) if usage else 0,
+                resolved_model=str(getattr(msg, 'model', '') or ''),
             )
         if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3") or m.startswith("openai"):
             return self._complete_openai(model, system, user, temperature, mt)
@@ -558,6 +617,7 @@ class AnthropicAiRuntime:
             text=data["choices"][0]["message"]["content"],
             input_tokens=usage.get("prompt_tokens", 0) or 0,
             output_tokens=usage.get("completion_tokens", 0) or 0,
+            resolved_model=str(data.get("model", "") or ""),
         )
 
     def _complete_gemini(self, model, system, user, temperature, max_tokens):
@@ -589,6 +649,9 @@ class AnthropicAiRuntime:
             text=data["candidates"][0]["content"]["parts"][0]["text"],
             input_tokens=usage.get("promptTokenCount", 0) or 0,
             output_tokens=usage.get("candidatesTokenCount", 0) or 0,
+            # `modelVersion` per Gemini's documented response shape. Carries the same
+            # not-live-verified caveat as the token counts directly above.
+            resolved_model=str(data.get("modelVersion", "") or ""),
         )
 
     # ── Pre-call token estimation (C, 2026-08-06 -- the cost-cap fix's second slice) ──
@@ -909,7 +972,7 @@ class AnthropicAiRuntime:
             return r.read()          # audio bytes (mp3)
 
     def agent_turn(self, *, messages, tools=None, model=None,
-                   temperature=None, max_tokens=None):
+                   temperature=None, max_tokens=None, system=None):
         """One real agent turn: a single Messages API call with tools, translated
         into the simple AgentTurn contract the loop understands. The provider
         either answers (text) or asks to use one tool; the content-block detail
@@ -938,7 +1001,8 @@ class AnthropicAiRuntime:
             try:
                 _user = "\n".join(str(x.get("content", "")) if isinstance(x, dict) else str(x)
                                   for x in (messages or []))
-                _res = self._complete(m, "You are an agent. Answer the request directly.",
+                _res = self._complete(m, system or "You are an agent. Answer the request "
+                                      "directly.",
                                       _user, temperature, mt)   # _complete ticks the cap
             except Exception as e:
                 raise AiProviderError(f"ai.agent provider call failed: {type(e).__name__}: {e}")
@@ -949,6 +1013,11 @@ class AnthropicAiRuntime:
         self._tick()
         kwargs = dict(model=m, max_tokens=mt, messages=messages,
                       temperature=temperature if temperature is not None else 1.0)
+        # The agent's GOAL travels in the system role, separate from the context/tool-result
+        # data in the user turns (Q99 Fix C). Passing it as another user message would put the
+        # instruction on the same footing as the data it is supposed to govern.
+        if system:
+            kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
         try:
@@ -1138,7 +1207,14 @@ class AnthropicAiRuntime:
                         return AiDecision(
                             result=result,
                             confidence=confidence,
-                            model=new_provider,
+                            # Q97, the chain-retry sibling: this recorded the alias the retry
+                            # ASKED for. A chain fallback is exactly when the recorded model
+                            # matters most -- the decision did not run where the program said
+                            # it would -- so the resolved id belongs here more than anywhere.
+                            model=(retry_res.resolved_model
+                                   if getattr(retry_res, 'resolved_model', '')
+                                   else f"requested:{new_provider}"),
+                            requested_model=new_provider,
                             inputs=inputs,
                             explanation=explanation,
                             fell_back=fell_back,
@@ -1166,10 +1242,25 @@ class AnthropicAiRuntime:
         return AiDecision(
             result=result,
             confidence=confidence,
-            model=model,   # the model ACTUALLY contacted -- chain/override/default, not
-                           # always self._model (pre-existing bug, found alongside Unit 1:
-                           # a resolved chain's decision.model still reported the runtime's
-                           # own default, undermining the very audit trail this ruling wants)
+            # Q97 (2026-09-01): the model the PROVIDER says it ran, not the alias that was
+            # ASKED for. `claude-sonnet-5` is a moving alias the provider controls, so two
+            # decisions a year apart recorded identically while possibly running on different
+            # weights, and the audit trail could not tell them apart -- the audit trail is the
+            # whole claim, so it has to record what happened, not what was requested.
+            #
+            # When the provider reports nothing, the requested alias is recorded PREFIXED
+            # rather than passed off as resolved. Silently substituting the request for the
+            # answer would make the record claim a precision it does not have, which is the
+            # same silent-default shape being removed everywhere else -- and in the one column
+            # whose entire job is to be trustworthy later. The prefix keeps it greppable
+            # without a schema change to the canonical audit columns.
+            #
+            # (`model` here is already the model ACTUALLY contacted -- chain/override/default,
+            # not always self._model. That was a separate fix; this one goes a level further,
+            # from "which alias did we contact" to "which weights answered".)
+            model=(res.resolved_model if getattr(res, 'resolved_model', '')
+                   else f"requested:{model}"),
+            requested_model=model,
             inputs=inputs,
             explanation=explanation,
             fell_back=fell_back,

@@ -365,9 +365,29 @@ class LangmapLoader:
                 lines_out.append(line)
                 continue
 
-            # Don't translate inside strings (simple heuristic)
-            # Split on string boundaries, only translate non-string segments
-            segments = re.split(r'("(?:[^"\\]|\\.)*")', line)
+            # PROTECTED SPANS: quoted strings, and anything in square brackets.
+            #
+            # A BRACKETED TOKEN IS A MARKER, NOT VOCABULARY. `[phi]`, `[pci]`, `[404]` and the
+            # scaffold labels are names the compiler matches literally; none of them is a word
+            # in the language being translated. Translating one does not produce a translated
+            # program, it produces a different program.
+            #
+            # Measured, and this is the whole case: with the shipped emoji pack,
+            # `a as text [show]` became `a as text [👁]`, because `show` is a keyword the pack
+            # maps and the substitution had no idea it was inside a marker. `[phi]` survived
+            # only because no shipped pack happens to map the word `phi` -- luck, not design,
+            # and luck that runs out the first time a pack translates a three-letter word that
+            # collides. The consequence is not cosmetic: a program authored in one language and
+            # DEPLOYED in another through the journey `languages` block would arrive with its
+            # classification tag renamed, the resolver would no longer recognise the field, and
+            # the deployed version would silently lose the protection the source declared. No
+            # error anywhere, because the tag it now carries is a perfectly legal label.
+            #
+            # One split, one fix, every path: preprocess_source (the runtime pre-pass), the
+            # journey languages deploy translation, `mio translate` and the formatter all route
+            # through this one method. The group stays single, so odd indices are still the
+            # protected segments and the loop below is unchanged.
+            segments = re.split(r'("(?:[^"\\]|\\.)*"|\[[^\]\n]*\])', line)
             new_segments = []
             for i, seg in enumerate(segments):
                 if i % 2 == 1:  # Inside quotes
@@ -530,7 +550,14 @@ def preprocess_source(source: str, lang: str | None,
     raise FileNotFoundError(
         f"No language pack found for '{lang}' in {maps_dir}.\n"
         f"Tried: {[str(c) for c in candidates]}\n"
-        f"Install with: mio langpack add {lang_lower}"
+        # This used to say "Install with: mio langpack add <lang>". There is no `mio langpack`
+        # subcommand and never has been (2026-09-02: one grep, one site, zero implementation),
+        # so the only instruction the user got pointed at a command that does not exist. Name
+        # the file to add instead, which is how a language pack is actually supplied.
+        f"A language pack is a .langmap file, not something to install: put "
+        f"{lang_lower}.langmap (or {lang_lower}-en.langmap / en-{lang_lower}.langmap) in "
+        f"{maps_dir}. That directory is a `maps` folder beside your source tree when one "
+        f"exists, and the compiler's own maps directory otherwise."
     )
 
 

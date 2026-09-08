@@ -86,37 +86,13 @@ def run_cli(src, path_arg='/home'):
         os.unlink(path)
 
 JOURNEY_TYPO = (
-    'journey MioScriptApp\n'
-    '    page Home at /home\n'
-    '        render\n'
-    '            <input id="inp">\n'
-    '            <div id="out"></div>\n'
-    '        render: done\n'
-    '    page: done\n'
-    '    listen for\n'
-    '        listen for change on "#inp"\n'
-    '            put wdth into "#out"\n'
-    '        listen: done\n'
-    '    listen: done\n'
-    'journey: done\n')
+    'shape Q\n    q as text\nshape: done\njourney MioScriptApp\n    listen for\n        request for sh.Q at /home\n                render\n                    <input id="inp">\n                    <div id="out"></div>\n                render: done\n        request: done\n    listen: done\n    listen for\n        listen for change on "#inp"\n            put wdth into "#out"\n        listen: done\n    listen: done\njourney: done\n')
 rc, out = run_cli(JOURNEY_TYPO)
 check("real `mio run`: a typo'd client-value exits non-zero", rc != 0, f"rc={rc} out={out[:300]}")
 check("real `mio run`: the error names the bad value", 'wdth' in out, out[:300])
 
 JOURNEY_VALID = (
-    'journey MioScriptApp2\n'
-    '    page Home at /home\n'
-    '        render\n'
-    '            <input id="inp">\n'
-    '            <div id="out"></div>\n'
-    '        render: done\n'
-    '    page: done\n'
-    '    listen for\n'
-    '        listen for change on "#inp"\n'
-    '            put value into "#out"\n'
-    '        listen: done\n'
-    '    listen: done\n'
-    'journey: done\n')
+    'shape Q\n    q as text\nshape: done\njourney MioScriptApp2\n    listen for\n        request for sh.Q at /home\n                render\n                    <input id="inp">\n                    <div id="out"></div>\n                render: done\n        request: done\n    listen: done\n    listen for\n        listen for change on "#inp"\n            put value into "#out"\n        listen: done\n    listen: done\njourney: done\n')
 rc2, out2 = run_cli(JOURNEY_VALID)
 check("real `mio run`: a legitimate mioscript listener still runs (regression)",
       rc2 == 0, f"rc={rc2} out={out2[:300]}")

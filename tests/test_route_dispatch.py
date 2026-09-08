@@ -55,7 +55,7 @@ def _run(src, req):
 
 # ── two GET endpoints, UNIQUE shapes -> route by path ─────────
 print("GET routing by path (unique shapes)")
-UNIQ = ('shape Home\n    method GET\nshape: done\nshape About\n    method GET\nshape: done\n'
+UNIQ = ('shape Home\n    note as text\nshape: done\nshape About\n    note as text\nshape: done\n'
         'listen for\n'
         '    request for sh.Home at /home\n        render\n            <p>[HOME]</p>\n        render: done\n    request: done\n'
         '    request for sh.About at /about\n        render\n            <p>[ABOUT]</p>\n        render: done\n    request: done\n'
@@ -66,7 +66,7 @@ check("/about -> ABOUT", _tag(_run(UNIQ, {'_method': 'GET', '_path': '/about'}))
 
 # ── two GET endpoints, SAME shape -> still route by path ──────
 print("GET routing by path (shared shape)")
-SAME = ('shape Page\n    method GET\nshape: done\n'
+SAME = ('shape Page\n    note as text\nshape: done\n'
         'listen for\n'
         '    request for sh.Page at /home\n        render\n            <p>[HOME]</p>\n        render: done\n    request: done\n'
         '    request for sh.Page at /about\n        render\n            <p>[ABOUT]</p>\n        render: done\n    request: done\n'
@@ -83,7 +83,7 @@ check("unknown route -> 404", _r.get('status') if isinstance(_r, dict) else None
 
 # ── single GET endpoint -> fallback works even without a path ─
 print("single-endpoint fallback")
-ONE = ('shape Page\n    method GET\nshape: done\n'
+ONE = ('shape Page\n    note as text\nshape: done\n'
        'listen for\n    request for sh.Page at /home\n        render\n            <p>[ONLY]</p>\n        render: done\n    request: done\nlisten: done\n')
 check("single route, exact path -> ONLY", _tag(_run(ONE, {'_method': 'GET', '_path': '/home'})), 'ONLY')
 check("single route, no path pinned -> ONLY", _tag(_run(ONE, {'_method': 'GET'})), 'ONLY')
@@ -93,8 +93,8 @@ check("single route, no path pinned -> ONLY", _tag(_run(ONE, {'_method': 'GET'})
 print("POST routing by path")
 POSTS = ('shape A\nshape: done\nshape B\nshape: done\n'
          'listen for\n'
-         '    new sh.A at /alpha\n        give back 201 "[ALPHA]"\n    new: done\n'
-         '    new sh.B at /beta\n        give back 201 "[BETA]"\n    new: done\n'
+         '    new sh.A at /alpha\n        give back [201] "[ALPHA]"\n    new: done\n'
+         '    new sh.B at /beta\n        give back [201] "[BETA]"\n    new: done\n'
          'listen: done\n')
 def _post_tag(resp):
     m = re.search(r'\[(.*?)\]', str(resp.get('body', '')) if isinstance(resp, dict) else '')

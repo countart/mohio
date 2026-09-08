@@ -127,7 +127,7 @@ shape: done
 listen for
     request for sh.Member at /
         name "World"
-        give back 200 "Hello, {{ name }}."
+        give back [200] "Hello, {{ name }}."
     request: done
 listen: done
 ```
@@ -183,16 +183,18 @@ ai.decide isFraudulent returns boolean
     weigh transaction.amount, transaction.device_id
     ai.audit to fraud_audit_log
     not confident
-        give back 202 "Flagged for manual review"
+        give back [202] "Flagged for manual review"
     on.failure
-        give back 503 "AI service unavailable"
+        give back [503] "AI service unavailable"
 ai.decide: done
+
+ai.decide isFraudulent
 
 check isFraudulent
     when true
-        give back 422 "Transaction blocked"
+        give back [422] "Transaction blocked"
     otherwise
-        give back 200 "Approved"
+        give back [200] "Approved"
 check: done
 ```
 
@@ -212,7 +214,9 @@ python mio.py run fraud.mho --ai --verbose
 
 **What just happened:**
 
-`ai.decide isFraudulent returns boolean` — you're declaring an AI decision block that returns true or false.
+`ai.decide isFraudulent returns boolean` — you're declaring an AI decision block that returns true or false. Declaring it does not run it.
+
+`ai.decide isFraudulent` — the bare name on its own line RUNS the block you declared, and binds the result to a variable of the same name. That is what the `check isFraudulent` below it reads. Declare once, invoke wherever you need the decision. Leave this line out and nothing runs: `isFraudulent` is never given a value, and the `check` below fails loud telling you the name is undeclared.
 
 `confidence above 0.85` — the AI must be at least 85% confident. If it isn't, the `not confident` block fires automatically. The compiler will refuse to build this file if `not confident` is missing.
 
@@ -224,12 +228,14 @@ python mio.py run fraud.mho --ai --verbose
 
 `on.failure` — if the AI service is unavailable entirely, this fires.
 
-**The compiler enforces three things you can't forget:**
+**Three things every AI decision should carry:**
 1. A fallback for low confidence (`not confident`)
 2. An audit trail (`ai.audit`)
 3. An error handler (`on.failure`)
 
-Leave any one of them out — the build fails with a clear message telling you exactly what's missing and where.
+**What the compiler enforces today:** leave out `not confident` and the build fails, with a clear message naming what's missing and where. That is the one the language guarantees — an AI decision cannot be written without saying what happens when the model isn't sure.
+
+`ai.audit` and `on.failure` are not build errors yet. Write them anyway: they are the difference between a decision you can defend afterwards and one you cannot, and the enforcement is coming to both.
 
 ---
 
@@ -249,7 +255,7 @@ shape: done
 listen for
     new sh.Payment at /pay
         require role "processor"
-        give back 200 "Payment received"
+        give back [200] "Payment received"
     new: done
 listen: done
 ```

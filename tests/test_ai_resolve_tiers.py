@@ -47,7 +47,7 @@ DECL = ('amt 100\n'
         '    not confident\n'
         '        give back false\n'
         'ai.decide: done\n'
-        'give back 200 "declared"\n')
+        'give back [200] "declared"\n')
 
 RESOLVE = ('ai.resolve fd\n'
            '    cache fc\n'

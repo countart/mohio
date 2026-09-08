@@ -64,15 +64,7 @@ except Exception:
 def _compile_mioscript(mioscript_src):
     """Parse a .mho fragment that contains client listeners, return compiled JS."""
     # Wrap in the required listen for ... listen: done structure
-    full = f"""\
-journey _test
-    page _p at /test
-        render
-            <p>placeholder</p>
-        render: done
-    page: done
-journey: done
-{mioscript_src}
+    full = f"""'shape Q\n    q as text\nshape: done\njourney _test\n    listen for\n        request for sh.Q at /test\n                render\n                    <p>placeholder</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n'{mioscript_src}
 """
     prog = transform(_P.parse(full), full)
     # Collect client listener AST nodes

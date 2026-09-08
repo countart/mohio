@@ -14,7 +14,9 @@ ai.decide narrator returns text
     weigh command, current_room
     ai.audit to game_audit_log
     not confident
-        give back 200 "I don't understand that."
+        give back [200] "I don't understand that."
+    on.failure
+        give back [503] "The AI service is unavailable."
 ai.decide: done
 
 // Fuzzy noun matcher for the self-healing resolver. Given a typed word that
@@ -28,5 +30,7 @@ ai.decide resolve_noun returns text
     weigh noun, candidates
     ai.audit to game_audit_log
     not confident
-        give back 200 ""
+        give back [200] ""
+    on.failure
+        give back [503] "The AI service is unavailable."
 ai.decide: done

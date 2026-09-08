@@ -64,6 +64,7 @@ from __future__ import annotations
 # ================================================================================
 
 import sys
+import copy as _copy
 from lark import Transformer, Token, Tree, v_args
 from lark.exceptions import VisitError
 
@@ -74,9 +75,9 @@ from mohio_ast import (
     ViewCallStmt, RespondAsStmt, TitleDecl, DescribeDecl,
     DebugDecl, DebugLogStmt, DebugCheckpoint,
     # Declarations
-    SectorDecl, ConnectDecl, ShapeDecl, ShapeField, ShapeFieldModifier,
+    SectorDecl, FrameworkDecl, ConnectDecl, ShapeDecl, ShapeField, ShapeFieldModifier,
     TaskDecl, TaskParam, HoldDecl, LockDecl, ReleaseStmt, VarStateStmt, ComplianceDecl, SecurityDecl,
-    JourneyDecl, JourneyMeta, PageDecl, SagaDecl, StepBlock, MioconnectDecl, IncludeDecl, RequireRoleDecl, GrantRoleDecl,
+    JourneyDecl, JourneyMeta, SagaDecl, StepBlock, MioconnectDecl, IncludeDecl, RequireRoleDecl, GrantRoleDecl,
     RateLimitDecl, TimespanDecl, TimespanAnchor, TimespanPrecision,
     TimespanTimezone, TimespanRecurring, TimespanExclude,
     # Closers
@@ -385,6 +386,133 @@ def _number_or_code(token_str: str):
 # TRANSFORMER
 # --------------------------------------------------------------
 
+# T1-TYPEWORD-FIELD-NAMES (2026-08-23). A field/member may be spelled the same as a type word:
+# `text as text`, `save ... text "v"`, `match text to ...`. The grammar accepts (NAME | TYPE_NAME)
+# in those slots, so the transformer must read BOTH -- filtering on `c.type == 'NAME'` alone was
+# the gap that let the grammar parse a type-word field while the extraction found no token, built
+# an AST with name='' and no value, and died at runtime on "_eval was asked to evaluate nothing".
+# One helper rather than the same isinstance test written out in five places.
+_FIELD_NAME_TOKENS = ('NAME', 'TYPE_NAME')
+
+_REDIRECT_NO_TYPE = (
+    "a redirect must declare its type: add `as permanent` or `as temporary`. "
+    "Mohio will not guess it. A permanent redirect (301) is cached aggressively by browsers, "
+    "sometimes indefinitely, so guessing wrong is a costly mistake that is very hard to undo "
+    "once it is out. `as 301` and `as 302` work too if you prefer the numbers. A mount needs no "
+    "such marker -- its default is safe -- which is why only redirects are asked for this.")
+
+
+def _field_name_token(children):
+    """The token naming a field, whether it tokenized as NAME or as a type word."""
+    return next((c for c in children
+                 if isinstance(c, Token) and c.type in _FIELD_NAME_TOKENS), None)
+
+
+# ── match_clause products: ONE place that knows every shape they can take ──────────────
+#
+# `match_clause` yields a BARE MatchClause for a single pair and a PYTHON LIST of them for
+# the comma-separated composite form (`match a to X, b to Y`). Every consumer used to
+# re-implement the unwrapping, and five of them only ever tested `isinstance(c, MatchClause)`
+# -- so the list fell straight through the allowlist and the ENTIRE filter was discarded with
+# no error: `find` returned the whole table, `check exists` answered true for a row that does
+# not exist. The same defect had already been found and patched one-verb-at-a-time at
+# retrieve, get/grab, remove, update, upsert and check unique; this is the shared
+# implementation those six patches should have been, so the seventh consumer cannot repeat it.
+#
+# It also refuses, LOUDLY, rather than dropping: a block form (`match.any` / `match.none`)
+# reaching a verb that cannot express OR/NOT is a compile error, never a silently unfiltered
+# query. Dropping a NOT-filter on `remove` would delete the whole table.
+_MATCH_NODE_NAMES = ('MatchClause', 'MatchBlock', 'MatchAnyBlock', 'NoMatchBlock')
+
+
+def _flatten_match(item):
+    """Every match node reachable from a match_clause product, as a flat list."""
+    if isinstance(item, (list, tuple)):
+        out = []
+        for x in item:
+            out.extend(_flatten_match(x))
+        return out
+    if type(item).__name__ in _MATCH_NODE_NAMES:
+        return [item]
+    return []
+
+
+def _take_match(items, verb, allow_blocks=()):
+    """Collect every match node from `items`, refusing block forms `verb` cannot apply.
+
+    `allow_blocks` names the block node types this verb really evaluates at runtime.
+    Anything else fails loud here instead of reaching the executor as no filter at all.
+    """
+    found = []
+    for it in items:
+        found.extend(_flatten_match(it))
+    for node in found:
+        tn = type(node).__name__
+        if tn != 'MatchClause' and tn not in allow_blocks:
+            spelling = {'MatchAnyBlock': 'match.any', 'NoMatchBlock': 'match.none',
+                        'MatchBlock': 'a match block'}.get(tn, tn)
+            raise MohioCompileError(
+                f"{verb}: `{spelling}` is not supported here -- {verb} can only apply a plain "
+                f"`match field to value` (or the comma-separated composite form, "
+                f"`match a to X, b to Y`, which is AND-ed). Rewrite the condition, or use "
+                f"`find`/`retrieve`, which do evaluate it.")
+    return found
+
+
+def _refuse_outcome_handlers_on_check(variant, handlers, line=None):
+    """`check exists` / `check unique` answer a QUESTION, so they have no outcome channel.
+
+    MIOQL-1/2 (2026-08-31). `on.success` ran on BOTH outcomes and `on.failure` never ran on a
+    miss, so the shipped guide's signup example reported "taken" for EVERY email -- present or
+    absent -- and an authorization gate written that way NEVER denied. `check unique` reported
+    the OPPOSITE of the truth, so duplicates were always permitted. The bound boolean was
+    correct in both; only the routing was wrong.
+
+    Per T1-OUTCOME-STRUCTURE (ruled 2026-08-11) the answer branches on `when empty` /
+    `otherwise`. `on.success` / `on.failure` are the OPERATIONAL channel -- did the query
+    break -- and a row count that came back is not a failure whichever number it is. Rather
+    than silently misroute a handler the developer reasonably expects to mean "found", this
+    refuses it and names the branch form that does work. A genuine operational error still
+    fails loud: it is raised, and a connection-level `on.failure` still catches it.
+    """
+    from mohio_ast import OnSuccess, OnFailure
+    bad = sorted({'on.success' if isinstance(h, OnSuccess) else 'on.failure'
+                  for h in (handlers or [])
+                  if isinstance(h, (OnSuccess, OnFailure))})
+    if not bad:
+        return
+    word = 'check ' + variant
+    raise MohioCompileError(
+        (('Line ' + str(line) + ' -- ') if line else '') +
+        '`' + ', '.join(bad) + '` on a `' + word + '` does not mean what it looks like.\n'
+        '    `' + word + '` asks a question, so its answer is a ROW COUNT, not an outcome: '
+        'on.success used to run whichever way the answer came out, and on.failure never ran '
+        'on a miss at all.\n'
+        '    Branch on the answer instead:\n'
+        '        ' + word + ' found in db.users\n'
+        '            match email to request.email\n'
+        '            when empty\n'
+        '                ... no row matched\n'
+        '            otherwise\n'
+        '                ... a row matched\n'
+        '        check: done')
+
+
+def _match_condition(children, verb):
+    """The single `condition` slot shared by check exists / check count / the bare check form.
+
+    Returns one MatchClause, or a LIST of them for a composite match (the interpreter ANDs
+    every clause in the list -- it has always handled the list shape; only the transformer
+    dropped it). Falls back to a WhereClause. The point is that a composite match can no
+    longer resolve to None, which is what made `check exists` answer true for a row that
+    matches neither field.
+    """
+    found = _take_match(children, verb)
+    if found:
+        return found[0] if len(found) == 1 else found
+    return next((c for c in children if isinstance(c, WhereClause)), None)
+
+
 class MohioTransformer(Transformer):
     """
     Transforms the Lark parse tree into Mohio AST nodes.
@@ -594,6 +722,329 @@ class MohioTransformer(Transformer):
         """Return children with Closer nodes removed."""
         return [c for c in children if not isinstance(c, Closer)]
 
+    # Which AI blocks actually produce a confidence number, MEASURED by running each one
+    # (2026-09-02), not by reading:
+    #
+    #   block       real confidence?                      gate fires?  not confident fires?
+    #   ai.decide   YES  provider returns 0.91            YES          YES, below the gate
+    #   ai.rank     YES  computed, winner share of weight YES          YES, below the gate
+    #   ai.compare  no   returns winner/margin, ungated   no           never
+    #   ai.respond  no   returns text                     no           never
+    #   ai.create   no   returns generated text           no           never
+    #   ai.agent    no   nothing computes confidence      no           fires, but on FAILURE
+    #
+    # `not confident` is the COMPLEMENT OF A GATE: it is meaningful only where the block
+    # produces a real confidence number to be below. A decision has one. A generation has
+    # quality, not decision confidence. Where the number is not real the GATE is decorative: it
+    # parsed, checked clean, and could never change what the block did, which is the same class
+    # as a decorative shape constraint and worse here, because this is the AI guardrail path.
+    # The gate is refused on those blocks.
+    # The FALLBACK is a different story, and the first reading of it was wrong. On ai.create and
+    # ai.agent `not confident` is genuinely WIRED -- to provider failure, not to confidence
+    # (tests/test_ai_create.py drives a failing provider and asserts the block runs). So it is
+    # not decoration to delete, it is a second word for `on.failure`: one job, two words, which
+    # is the opposite of the house rule. Refusing it would remove working behaviour, so it
+    # stays and the naming is reported for a ruling instead.
+    # Corpus blast radius before this landed: ZERO files declared a confidence gate on any of
+    # these blocks.
+    _NO_REAL_CONFIDENCE = {
+        'ai.compare': 'it returns a winner and a margin, which is a comparison, not a gated decision',
+        'ai.respond': 'it returns generated text, which has quality, not decision confidence',
+        'ai.create':  'it generates content, which has quality, not decision confidence',
+    }
+
+    @staticmethod
+    def _scan_members(members):
+        """Members, with single-child body wrappers opened up.
+
+        Each AI body alternative arrives wrapped (`ai_create_full_body` holding one
+        NotConfidentBlock, and so on), so a scan over the raw children sees the wrapper and
+        not the node. Missing that made the ai.create refusal silently never fire -- the exact
+        shape of bug these refusals exist to remove, one layer up.
+        """
+        out = []
+        for m in members or []:
+            if isinstance(m, Tree) and len(getattr(m, 'children', [])) == 1:
+                out.append(m.children[0])
+            else:
+                out.append(m)
+        return out
+
+    def _refuse_decorative_confidence(self, verb, members, line, gate_only=False):
+        """Refuse a confidence gate / fallback on a block that produces no confidence."""
+        members = self._scan_members(members)
+        why = self._NO_REAL_CONFIDENCE.get(verb, 'it produces no confidence value')
+        gate = next((m for m in members if isinstance(m, ConfidenceCheck)), None)
+        if gate is not None:
+            raise MohioCompileError(
+                f"`confidence above` is not available on {verb}: {why}. It was accepted here "
+                f"and never consulted -- the number you wrote could not change what the block "
+                f"did. A confidence gate belongs on ai.decide or ai.rank, which produce a real "
+                f"confidence value.",
+                line=getattr(gate, 'line', None) or line)
+        if gate_only:
+            return
+        nc = next((m for m in members if isinstance(m, NotConfidentBlock)), None)
+        if nc is not None:
+            raise MohioCompileError(
+                f"`not confident` is not available on {verb}: {why}, so there is no confidence "
+                f"to fall short of and this block could never run. It is the complement of a "
+                f"confidence gate, and belongs on ai.decide or ai.rank. To handle {verb} "
+                f"failing, use `on.failure`.",
+                line=getattr(nc, 'line', None) or line)
+
+    def _refuse_when_on_ai_block(self, verb, members, line):
+        """`when` on an AI block. The shared result_handlers spec says a block carries exactly
+        ONE conditional set (`when* otherwise?`). On an AI block that set is already spoken
+        for: the condition IS confidence, so `not confident` is the case that matched and
+        `otherwise` is its fallback. A user-written `when` would be a second conditional set in
+        a stage that already has one, and it parsed while never running -- measured 2026-09-02,
+        `when true` printed nothing while `otherwise` fired. Refuse it and name the form that
+        works, verified by running: `check <name>` after the block."""
+        members = self._scan_members(members)
+        w = next((m for m in members if type(m).__name__ == 'CheckWhen'), None)
+        if w is None:
+            return
+        # A confidence gate written AFTER the handlers lands here rather than as a gate,
+        # because handlers are structurally last now. Saying "`when` is not available" to
+        # someone who wrote `check confidence above` would be a true statement about the wrong
+        # thing -- name the real cause and the fix instead.
+        # Detected by SHAPE, not by the word: `check confidence above 0.85` in this position
+        # parses with `confidence` absorbed by the CHECK and only `above 0.85` reaching the
+        # handler, so the word is not in the node to look for. What is left is the bare
+        # `above <value>` form of check_when, in a block that has no confidence gate -- which
+        # together is the misplaced gate and nothing else.
+        # CheckWhen.condition is one of "when" | "above" | "below" | ... and is always set by
+        # the transformer, so it is read directly rather than through a defaulted getattr --
+        # a `getattr(..., '')` here was flagged by the silent-shape ratchet as a silent default,
+        # correctly: it would have hidden a renamed field instead of failing.
+        _bare_above = str(w.condition).lower() in ('above', 'below')
+        _has_gate = any(isinstance(m, ConfidenceCheck) for m in members)
+        if _bare_above and not _has_gate:
+            raise MohioCompileError(
+                f"`check confidence above` must come BEFORE the handlers in {verb}, with the "
+                f"block's other clauses (weigh, ai.audit). Written after `not confident` / "
+                f"`on.failure` it is no longer read as the confidence gate at all, because "
+                f"handlers close the block -- the same ordering every other verb block "
+                f"already uses. Move the line up with the rest of the clauses.",
+                line=getattr(w, 'line', None) or line)
+        raise MohioCompileError(
+            f"`when` is not available inside {verb}. The condition stage of an AI block is "
+            f"confidence itself: `not confident` is the case that fires below the gate, and "
+            f"`otherwise` is the confident path. To branch on the RESULT, run the block and "
+            f"test the value it binds -- run the block, then `check <name>` with its own "
+            f"`when` / `otherwise`, which is the documented form and does work.",
+            line=getattr(w, 'line', None) or line)
+
+    def _split_shape_tables(self, fields):
+        """Turn a flat field list into a real table/field HIERARCHY, by SOURCE ORDER.
+
+        PHASE 2 of the recovered shape model, and its single most important structural
+        requirement: `users as table` must open a GENUINE field scope, not decorate a flat list.
+        `db.users.email` and `db.orders.email` are two different fields that share a name, and
+        the hierarchy is the only thing keeping them distinct. Flat here means the collision bug.
+
+        DONE IN THE TRANSFORMER, NOT THE GRAMMAR, and that is the design decision worth keeping.
+        The grammar is newline-blind and has no indentation tokens, so expressing "these fields
+        belong to that table" as a nested grammar rule (`table_decl: NAME AS TABLE shape_field*`)
+        would make every field after a table line parseable BOTH as the table's and as the
+        shape's own -- the unbounded-body ambiguity that has produced silent mis-grouping three
+        times in this codebase already. Earley would pick one on grounds unrelated to intent.
+        Source ORDER carries the answer unambiguously and the AST has it: a field belongs to the
+        most recent table line above it. No ambiguity to resolve, so none can be resolved wrongly.
+
+        ADDITIVE BY CONSTRUCTION: a shape with no `as table` line returns its fields untouched
+        and an empty table map, which is byte-identical to what every existing program gets. The
+        MVP is the minimum valid expression of this model, not a legacy form.
+        """
+        from mohio_ast import ShapeTable
+        loose, tables, current = [], {}, None
+        for f in fields:
+            if str(getattr(f, 'type_name', '') or '').lower() == 'table':
+                name = str(getattr(f, 'name', '') or '')
+                # A table declared twice in ONE shape is the same collision as two shapes
+                # declaring it, caught here because this is where both names are in hand.
+                if name in tables:
+                    raise MohioCompileError(
+                        f"This shape declares the table `{name}` twice. A table name is "
+                        f"declared once; the second line silently replaced the first, so every "
+                        f"field under the first was lost. Keep one `{name} as table` and put "
+                        f"its fields under it.",
+                        line=getattr(f, 'line', None))
+                current = ShapeTable(name=name, fields=[],
+                                     line=getattr(f, 'line', 0) or 0)
+                tables[name] = current
+                continue
+            if current is not None:
+                current.fields.append(f)
+            else:
+                loose.append(f)
+        return loose, tables
+
+    def _refuse_two_shape_fields_on_one_line(self, fields):
+        """A shape line declares ONE field, so a modifier cannot attach to a phantom.
+
+        Q459 / FORK-6 / Q308, and it silently disarmed the strongest claim in the product.
+        `shape_field` is `(NAME | TYPE_NAME) ("." NAME)? (AS type_name)? shape_field_mod*` and the
+        grammar is NEWLINE-BLIND, so a bare word becomes a SECOND field and every modifier after
+        it attaches to that second field instead of the one the author meant. AST-dumped before
+        fixing, 2026-09-03:
+
+            email as text [pii] purpose "billing"   ->  1 field: email  [tag, purpose]   CORRECT
+            email [pii] purpose "billing"           ->  1 field: email  [tag, purpose]   CORRECT
+            email text [pii] purpose "billing"      ->  2 fields: email []  +  text [tag, purpose]
+            email text pii purpose "billing"        ->  3 fields: email []  +  text []  +  pii [purpose]
+            foo bar baz            (control)        ->  3 fields
+
+        In the third and fourth spellings `email` carries NO tag and NO purpose. Purpose
+        limitation is enforced at runtime with taint propagation and it is the strongest claim
+        this project makes; it worked in one spelling and vanished in the others, with `mio check`
+        reporting no errors for all four. That is the claim failing in front of the person testing
+        it, which is why this refuses rather than warns.
+
+        REFUSED BY LINE, NOT BY WORD, the same discriminator the save_field fix uses. Refusing the
+        bare words would be a false-refusal machine, because `text`, `pii`, `method` and their
+        kin are all legitimate FIELD NAMES on their own line. The signal is that one line declared
+        more than one field, which the grammar cannot see and every AST node carries.
+
+        ZERO corpus files declare two fields on one shape line (measured before landing). The one
+        place in the repo that did was the grammar gate's own `shape InvoiceDownload / method GET`
+        -- and a shape field named `method` is consumed by NOTHING, so that line enforced nothing
+        either. It is now a refusal case in the gate rather than a passing one.
+        """
+        by_line = {}
+        for f in fields:
+            # A COMMA GROUP IS THE ONE LEGITIMATE WAY to put several fields on one line, and
+            # it is the form this guard was written before there was one. Skipped by the flag
+            # the transformer sets, not by re-reading the source: by the time the guard runs,
+            # `a, b, c as text` and `a b c as text` are the same three fields on the same line,
+            # and only the flag still knows which was written.
+            if getattr(f, 'grouped', False):
+                continue
+            ln = getattr(f, 'line', None)
+            if ln:
+                by_line.setdefault(ln, []).append(f)
+        for ln, group in sorted(by_line.items()):
+            if len(group) < 2:
+                continue
+            names = [str(getattr(g, 'name', '?')) for g in group]
+            # A LINE THAT STARTS WITH `as` IS NOT A TWO-FIELD LINE, it is a shape that was
+            # written without a name. `shape / email as text` parses as a shape NAMED `email`
+            # whose first body line is `as text`, so this guard fires and, left alone, reports
+            # "declares 2 fields at once: `as`, `text`" -- true of the parse tree and useless to
+            # the person reading it. An unnamed shape is legal only when its content is all
+            # tables (they are reached through `db.`); anything else needs a name to be reached
+            # through `sh.` at all, so that is what the message says.
+            if names and names[0] == 'as':
+                raise MohioCompileError(
+                    f"Line {ln} begins with `as`, which means the shape above it has no name. A "
+                    f"shape can go unnamed only when everything in it is a table, because a "
+                    f"table is reached through `db.<table>` and the shape's own name is never "
+                    f"used. This one declares an ordinary field, which is reached through "
+                    f"`sh.<Name>`: give the shape a name.",
+                    line=ln)
+            carriers = [n for n, g in zip(names, group)
+                        if (getattr(g, 'modifiers', None) or [])]
+            lost = names[0]
+            detail = ""
+            if carriers and carriers[0] != lost:
+                detail = (f" Everything after `{names[1]}` attached to `{carriers[0]}`, so "
+                          f"`{lost}` was left with none of it.")
+            # NEVER POINT AT A FORM THAT DOES NOT WORK. `method GET` splits the same way as
+            # `email text`, but `GET` is not a type, so suggesting `method as GET` would hand
+            # the reader a line that fails on the next run. The `as` repair is offered ONLY when
+            # the second word really is a type.
+            from mohio_reachability import _KNOWN_TYPES as _TYPES
+            _second = names[1]
+            _fix = ""
+            if _second.lower() in _TYPES:
+                _fix = (f" If `{_second}` was meant as the TYPE of `{lost}`, write "
+                        f"`{lost} as {_second}` -- the type needs `as`.")
+            raise MohioCompileError(
+                f"Line {ln} declares {len(group)} fields at once: "
+                + ", ".join(f"`{n}`" for n in names)
+                + f". A shape line declares ONE field." + detail + _fix
+                + f" If `{_second}` was meant as a tag, write it in brackets (`[{_second}]`). "
+                + f"If they are genuinely separate fields, put them on separate lines.",
+                line=ln)
+
+    def _refuse_two_fields_on_one_line(self, fields, verb):
+        """Two fields on ONE line is never a thing anyone meant to write.
+
+        THE BOGUS-COLUMN CLASS (FORK-6 / Q308 root). `save_field` is
+        `(NAME | TYPE_NAME) value_expr` and the grammar is NEWLINE-BLIND, so two fields on one
+        line are indistinguishable from two fields on two lines. AST-dumped 2026-09-03:
+
+            st "ZZZ" allowed "c"   ->  save_field[st, "ZZZ"]  +  save_field[allowed, "c"]
+            age 15 min 13          ->  save_field[age, 15]    +  save_field[min, 13]
+
+        Both wrote REAL GARBAGE COLUMNS to a real database, silently: a developer reaching for
+        a shape modifier on a write got a column called `allowed` or `min` instead, and nothing
+        said so. Same root as `save ... as sh.X` producing a column called `as` (fixed run 4)
+        and the shape-body `email text [pii]` case.
+
+        REFUSED BY LINE, NOT BY NAME, and that distinction is the whole design. Refusing the
+        modifier WORDS would be a false-refusal machine: `status`, `format`, `label`, `range`,
+        `default` and `pattern` are all ordinary, legitimate column names, and a language that
+        refused `status "shipped"` on a write would be broken in a more annoying way than the
+        bug it fixed. The real signal is the LINE, which the grammar cannot see and the AST can:
+        every node carries one. A field on its own line is always fine, whatever it is called.
+
+        This does NOT close the general newline-blindness of block bodies -- a bare `foo bar
+        baz` still breaks its enclosing block (loudly, with an unmatched-closer error). That is
+        a grammar-level change with a large blast radius and it is named as a queued item, not
+        built mid-run.
+        """
+        by_line = {}
+        for f in fields:
+            # A COMMA GROUP IS THE ONE LEGITIMATE WAY to put several fields on one line, and
+            # it is the form this guard was written before there was one. Skipped by the flag
+            # the transformer sets, not by re-reading the source: by the time the guard runs,
+            # `a, b, c as text` and `a b c as text` are the same three fields on the same line,
+            # and only the flag still knows which was written.
+            if getattr(f, 'grouped', False):
+                continue
+            ln = getattr(f, 'line', None)
+            if ln:
+                by_line.setdefault(ln, []).append(f)
+        for ln, group in sorted(by_line.items()):
+            if len(group) < 2:
+                continue
+            names = [str(getattr(g, 'name', '?')) for g in group]
+            raise MohioCompileError(
+                f"Line {ln} sets {len(group)} fields at once: "
+                + ", ".join(f"`{n}`" for n in names)
+                + f". {'An' if verb[0] in 'aeiou' else 'A'} `{verb}` takes ONE field per "
+                + f"line, so this wrote "
+                + f"`{names[1]}` as a column of its own rather than doing what it looks like "
+                + f"it does. If `{names[1]}` was meant as a rule about `{names[0]}`, that "
+                + f"belongs on the shape that declares the field, not on the write. If both "
+                + f"are genuinely fields, put them on separate lines.",
+                line=ln)
+
+    def _flatten_result_handlers(self, body: list) -> list:
+        """Replace a `result_handlers` wrapper in an AI block's body with its handlers.
+
+        The AI blocks took their handlers from the shared `result_handlers` rule on
+        2026-09-02, so that `on.failure` sits in the same place and means the same thing on an
+        ai.decide as on a save (Ron's ruling: one word, one job, different context). That put a
+        wrapper Tree where the interpreter expects handler nodes in `body` -- every AI lookup
+        is `next(b for b in node.body if isinstance(b, NotConfidentBlock))` and the same for
+        OnFailure. Flattening here keeps the AST shape exactly as it was, so the migration is
+        grammar-only and no interpreter path changes.
+
+        Found by the silent-no-op lint, which reported the raw Tree surviving into
+        AiAgentBlock.body[0] -- the gate catching an unconverted node is precisely the class it
+        exists for, and it caught this one the same hour it was introduced.
+        """
+        out = []
+        for c in body:
+            if _is_tree(c, 'result_handlers'):
+                out.extend(c.children)
+            else:
+                out.append(c)
+        return out
+
     # -- DECLARATIONS -----------------------------------------
 
     def declaration(self, children):
@@ -625,6 +1076,29 @@ class MohioTransformer(Transformer):
             sector = _token_str(type_node)
         return SectorDecl(sector=sector)
 
+    def framework_decl(self, children):
+        # children: [FRAMEWORK, framework_name]. Same segment-joining as sector_decl above --
+        # framework_name reuses SECTOR_SEG, so a dotted sub-profile (`mobile.ios`) arrives as
+        # separate tokens and must be rejoined here. Leaving it as an unresolved Tree is exactly
+        # what broke sector's warning path once; do not repeat it.
+        node = children[-1]
+        if isinstance(node, Tree) and str(getattr(node, 'data', '')) == 'framework_name':
+            segs = [str(t) for t in node.children
+                    if isinstance(t, Token) and t.type == 'SECTOR_SEG']
+            framework = '.'.join(segs)
+        elif isinstance(node, str):
+            framework = node
+        else:
+            framework = _token_str(node)
+        # An unknown value is refused HERE, at transform time, so `mio check` reports it
+        # instead of the first request discovering it. A declared-but-unbuilt framework
+        # (mobile/desktop/...) is deliberately NOT refused here -- it is valid to declare and
+        # fails loud at serve time, which is a different situation and must read differently.
+        from mohio_framework import is_known, unknown_value_message
+        if framework and not is_known(framework):
+            raise MohioCompileError(unknown_value_message(framework))
+        return FrameworkDecl(framework=framework)
+
     def connect_decl(self, children):
         # CONNECT NAME AS conn_access? NAME FROM (ENV_REF | SECRET_REF)
         # The grammar embeds ENV_REF/SECRET_REF as raw terminals directly in this rule
@@ -640,6 +1114,18 @@ class MohioTransformer(Transformer):
         name_tokens = [t for t in tokens if t.type == 'NAME']
         alias = str(name_tokens[0]) if len(name_tokens) > 0 else ""
         driver = str(name_tokens[1]) if len(name_tokens) > 1 else ""
+        # The access mode was parsed and then dropped on the floor -- ConnectDecl had no field
+        # for it. Carry it so the enforcement the design locked can actually see it.
+        # `conn_access` is a RULE, so its token arrives nested in that subtree rather than as
+        # a direct child -- reading only the direct tokens found nothing and quietly left the
+        # mode empty, which is how this stayed invisible.
+        _acc = ""
+        for _c in children:
+            for _t in ([_c] if isinstance(_c, Token) else
+                       (getattr(_c, 'children', []) if _is_tree(_c, 'conn_access') else [])):
+                if isinstance(_t, Token) and _t.type in (
+                        'CONN_READONLY', 'CONN_WRITEONLY', 'CONN_READWRITE'):
+                    _acc = str(_t)
         env_tok = next((t for t in tokens if t.type == 'ENV_REF'), None)
         secret_tok = next((t for t in tokens if t.type == 'SECRET_REF'), None)
         if env_tok is not None:
@@ -675,7 +1161,8 @@ class MohioTransformer(Transformer):
                     "query verb's found/empty. Use on.failure for a connection error.",
                     line=_open_line)
             self._validate_closer('connect', children, _open_line)
-        return ConnectDecl(name=alias, driver=driver, source=source, handlers=handlers)
+        return ConnectDecl(name=alias, driver=driver, source=source, handlers=handlers,
+                           access=_acc)
 
     # ── mioconnect declaration ──────────────────────────────────
     # Each body/op-body alias returns a tagged tuple; the parent decl /
@@ -760,6 +1247,7 @@ class MohioTransformer(Transformer):
         name  = str(name_toks[0]) if name_toks else ""
         alias = str(name_toks[1]) if (has_as and len(name_toks) > 1) else None
         decl  = MioconnectDecl(name=name, alias=alias)
+        children = self._flatten_result_handlers(children)
         if has_from:
             # shorthand: mioconnect Name from value_expr  (source is the lone value node)
             src = next((c for c in children
@@ -820,16 +1308,59 @@ class MohioTransformer(Transformer):
     def shape_decl(self, children):
         # SHAPE NAME shape_field* closer
         name_token = next((c for c in children if isinstance(c, Token) and c.type == 'NAME'), None)
-        open_line = _line(name_token)
-        fields = [c for c in children if isinstance(c, ShapeField)]
+        return self._build_shape(children, str(name_token) if name_token else "",
+                                 _line(name_token))
+
+    def shape_decl_unnamed(self, children):
+        """`shape / users as table / ...` -- an all-table shape needs no name.
+
+        PHASE 2 ITEM 3. A shape whose content is entirely tables is reached through `db.` in
+        every case, so its own name is never written anywhere and requiring one is ceremony.
+
+        The grammar rule swallows the FIRST table line into its own head (`SHAPE NAME AS
+        TABLE_KW`) because that is what makes it unambiguous against the named form under a
+        newline-blind Earley parser -- see the disambiguator note in mohio.lark. So the first
+        table has to be handed back to the field list here before the shared builder runs, and
+        the ordinary `<name> as table` path in `_split_shape_tables` takes it from there.
+        Rebuilding it rather than special-casing it downstream keeps ONE table-scope mechanism:
+        a named and an unnamed shape produce the same node, differing only in the name.
+        """
+        name_token = next((c for c in children if isinstance(c, Token) and c.type == 'NAME'), None)
+        first = ShapeField(name=str(name_token) if name_token else "",
+                           type_name='table', line=_line(name_token))
+        return self._build_shape(children, "", _line(name_token), lead=[first])
+
+    def _build_shape(self, children, name, open_line, lead=None):
+        # FLATTENED HERE, once. A comma group is a list of ShapeFields and must end up
+        # indistinguishable from the same fields written on separate lines, so every consumer
+        # downstream keeps working without knowing groups exist.
+        fields = list(lead or [])
+        for c in children:
+            if isinstance(c, ShapeField):
+                fields.append(c)
+            elif isinstance(c, list) and c and all(isinstance(x, ShapeField) for x in c):
+                fields.extend(c)
+        self._refuse_two_shape_fields_on_one_line(fields)
+        fields, tables = self._split_shape_tables(fields)
         zone_tok = next((c for c in children if isinstance(c, Token) and c.type == 'TAG_REF'), None)
         zone_tag = str(zone_tok).strip('[]').strip() if zone_tok is not None else None
         if zone_tag is None and any(isinstance(c, Token) and c.type == 'SEC_ENCRYPT' for c in children):
             zone_tag = 'encrypt'   # generic zone seal: shape X sec.encrypt
         self._validate_closer('shape', children, open_line)
+        if not name and not tables:
+            # An unnamed shape is only legal because everything in it is reached through `db.`.
+            # Loose fields have no `db.` path, so an unnamed shape holding them would declare
+            # something that can never be referred to -- silently, and forever.
+            raise MohioCompileError(
+                "This shape has no name and declares no table. A shape can go unnamed only when "
+                "everything in it is a table, because a table is reached through `db.<table>` "
+                "and the shape's own name is never used. Anything else is reached through "
+                "`sh.<Name>`, so it needs one: give this shape a name.",
+                line=open_line)
         return ShapeDecl(
-            name=str(name_token) if name_token else "",
+            name=name,
             fields=fields,
+            tables=tables,
             zone_tag=zone_tag,
             line=open_line,
         )
@@ -844,19 +1375,80 @@ class MohioTransformer(Transformer):
         for c in children:
             if isinstance(c, ShapeField):
                 return c
+            # A comma group arrives as a LIST of ShapeFields. Passed straight through; the
+            # flattening happens once, in _build_shape.
+            if isinstance(c, list) and c and all(isinstance(x, ShapeField) for x in c):
+                return c
         return children[0] if len(children) == 1 else children
 
-    def shape_field(self, children):
-        name_token = next((c for c in children if isinstance(c, Token) and c.type == 'NAME'), None)
+    def _shape_field_parts(self, children):
+        """The pieces every shape field is built from, however many names it carries."""
+        name_tokens = [c for c in children
+                       if isinstance(c, Token) and c.type in _FIELD_NAME_TOKENS]
         type_node = _first_tree(children, 'type_name')
         type_name = _token_str(type_node) if type_node else None
         mods = [c for c in children if isinstance(c, ShapeFieldModifier)]
+        return name_tokens, type_name, mods
+
+    def _make_shape_field(self, tok, type_name, mods, grouped):
+        # A FRESH COPY OF EVERY MODIFIER PER FIELD. Sharing one list would make two fields
+        # point at the same objects, so anything that later annotated a modifier in place
+        # would silently annotate its siblings too.
         return ShapeField(
-            name=str(name_token) if name_token else "",
+            name=str(tok) if tok is not None else "",
             type_name=type_name,
-            modifiers=mods,
-            line=_line(name_token),
+            modifiers=[_copy.copy(m) for m in mods],
+            grouped=grouped,
+            line=_line(tok),
         )
+
+    def shape_field(self, children):
+        """ONE field. A dotted name (`mfa.verified`) is still one field, named by its first part.
+
+        This is the rule a comma group is deliberately NOT folded into. A dotted name also puts
+        two NAME tokens on this line, so a version of this method that counted tokens to decide
+        "is this a group" read `mfa.verified as boolean` as two fields and, because a group is
+        exempt from the two-fields-on-one-line guard, let it through. Measured against HEAD,
+        which returns exactly one field here. The comma form has its own grammar alternative
+        and its own method below, so nothing has to be inferred from a count.
+        """
+        name_tokens, type_name, mods = self._shape_field_parts(children)
+        return self._make_shape_field(name_tokens[0] if name_tokens else None,
+                                      type_name, mods, False)
+
+    def shape_field_group(self, children):
+        """Several fields sharing everything written after them.
+
+        `a, b, c as text [phi]` declares three fields, all text, ALL classified. The modifiers
+        are COPIED onto each field rather than shared, and that is the load-bearing part: a
+        modifier that bound to the last name only would be a silent compliance leak for every
+        safety-carrying modifier there is, since `never store`, `sec.encrypt` and a class tag
+        would silently protect one field out of three while reading as though they protected all
+        of them.
+
+        Returns a LIST. `shape_body` passes it through and `_build_shape` flattens, so a group
+        is exactly the same downstream as the same fields written on separate lines.
+        """
+        name_tokens, type_name, mods = self._shape_field_parts(children)
+        return [self._make_shape_field(t, type_name, mods, True) for t in name_tokens]
+
+    def field_pad_left(self, children):
+        return self._field_pad('pad.left', children)
+
+    def field_pad_right(self, children):
+        return self._field_pad('pad.right', children)
+
+    def _field_pad(self, which, children):
+        """`value as text pad.left to 5 with "0"` -- an EXISTING transform verb, declared as
+        part of the field's description. Carried as (width, fill) so the runtime applies the
+        same pad the language already has rather than a second implementation of it."""
+        toks = [c for c in children if isinstance(c, Token)]
+        num = next((t for t in toks if t.type == 'NUMBER'), None)
+        fill_tok = next((t for t in toks if t.type == 'STRING'), None)
+        fill = _mohio_decode_string(str(fill_tok)) if fill_tok is not None else (
+            str(next((t for t in toks if t.type == 'NUMBER' and t is not num), ' ')))
+        return ShapeFieldModifier(modifier_type=which,
+                                  value=(int(str(num)) if num is not None else 0, fill))
 
     def shape_field_mod(self, children):
         # Identify the modifier by its leading keyword token and capture its
@@ -1044,21 +1636,59 @@ class MohioTransformer(Transformer):
         tok = next((c for c in children if isinstance(c, Token)), None)
         return str(tok) if tok is not None else ""
 
+    # A CLASS TAG IS THE ONE MODIFIER FAMILY A TAKE PARAM CAN HONOUR. Classification is bound
+    # to the value, not to the name it was read through -- that is the standing rule the whole
+    # value-bound work rests on -- and a take param is precisely where a value arrives. So
+    # `take ssn, dob as text [phi]` classifies what comes in, and the tag travels from there
+    # exactly as it does from a field read.
+    _TAKE_MOD_KEPT = ('tag',)
+
+    # Everything else describes STORAGE, DISPLAY or VALIDATION, which is a shape's job. Each is
+    # refused by name rather than accepted and ignored: `take a as text required` used to parse,
+    # set nothing, and leave `required` behind as a junk assignment in the task body.
+    _TAKE_MOD_REFUSED = {
+        'required': "a take param with no `default` is already required, and one with a default "
+                    "is already optional -- optionality on a take is the default, not a word",
+        'optional': "a take param with no `default` is already required, and one with a default "
+                    "is already optional -- optionality on a take is the default, not a word",
+    }
+
     def take_group(self, children):
-        """take_group: take_name ("," take_name)* (AS type_name)? (DEFAULT value_expr)?
-        One comma group shares a type and an optional default across ALL its names.
-        Returns a list of TaskParam (one per name)."""
+        """take_group: take_name ("," take_name)* (AS type_name)? (DEFAULT value_expr)? mods*
+        One comma group shares a type, an optional default, and its modifiers across ALL its
+        names. Returns a list of TaskParam (one per name)."""
         # NOTE: Lark's Token is a str subclass, so filter on `type(c) is str` to pick
         # ONLY the plain-string results of take_name (never the AS/DEFAULT tokens).
         names = [c for c in children if type(c) is str]
         type_node = _first_tree(children, 'type_name')
         type_name = _token_str(type_node) if type_node else "any"
+        mods = [c for c in children if isinstance(c, ShapeFieldModifier)]
         default = None
         if any(isinstance(c, Token) and c.type == 'DEFAULT' for c in children):
             default = next((c for c in children
                             if type(c) is not str and not isinstance(c, Token)
-                            and not _is_tree(c, 'type_name')), None)
-        return [TaskParam(name=n, type_name=type_name, default=default) for n in names]
+                            and not _is_tree(c, 'type_name')
+                            and not isinstance(c, ShapeFieldModifier)), None)
+
+        # REFUSE BY NAME, and name every parameter it was written across, because a group is
+        # the case where "which field did this apply to" is the question being asked.
+        _who = ", ".join(f"`{n}`" for n in names) if names else "the parameter"
+        for m in mods:
+            kind = str(getattr(m, 'modifier_type', '') or '')
+            if kind in self._TAKE_MOD_KEPT:
+                continue
+            why = self._TAKE_MOD_REFUSED.get(
+                kind,
+                "it describes how a value is stored, shown or validated, which is a shape's "
+                "job -- a task is not a shape")
+            raise MohioCompileError(
+                f"`{kind.replace('_', ' ')}` cannot be written on a `take` ({_who}): {why}. "
+                f"Declare a shape with that field and take the shape, or drop the word.")
+
+        # A FRESH COPY PER NAME, for the reason a shape field copies: sharing one list would
+        # make the params of a group point at the same objects.
+        return [TaskParam(name=n, type_name=type_name, default=default,
+                          modifiers=[_copy.copy(m) for m in mods]) for n in names]
 
     def take_stmt(self, children):
         """take_stmt: TAKE take_group (_AND take_group)* -- flat list of TaskParam."""
@@ -1427,6 +2057,8 @@ class MohioTransformer(Transformer):
                            if isinstance(c, Token) and c.type == 'LISTEN'), None)
         open_line = _line(open_token)
         self._validate_closer('listen', children, open_line)
+        _body_items = [c for c in children if not isinstance(c, Token)]
+        self._refuse_method_first_route(_body_items, open_line)
         # Shape-on-listener: `listen for sh.X [at /path]` binds the shape directly
         # and the body IS the handler (no `new` wrapper). A SH_REF token sitting
         # directly on the listen (nested new/request blocks keep their SH_REF
@@ -1442,6 +2074,7 @@ class MohioTransformer(Transformer):
             body = self._body_without_closer(
                 [c for c in children if not isinstance(c, Token)]
             )
+            self._refuse_path_on_listener_with_handlers(body, path, shape_name, open_line)
             listener = NewBlock(shape=shape_name, path=path, body=body, line=open_line)
             return ListenBlock(listeners=[listener], line=open_line)
         # Multi-handler form: new/request/connection/change/from blocks inside.
@@ -1449,6 +2082,114 @@ class MohioTransformer(Transformer):
             [c for c in children if not isinstance(c, Token)]
         )
         return ListenBlock(listeners=body, line=open_line)
+
+    # The HTTP methods, for the method-first misread below. Not a routing vocabulary: the
+    # language has never had a method-first form, which is exactly the problem -- the line
+    # parsed as something else entirely instead of being refused.
+    _HTTP_METHODS = ('get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace')
+
+    def _refuse_method_first_route(self, body_items, open_line):
+        """`listen for POST "/path"` is not a route. It is an assignment, and it 404s in silence.
+
+        MEASURED, not read. The AST for `listen for POST "/submit" / give back 200 "ok"`:
+
+            ListenBlock(listeners=[
+                Assignment(name='POST', value=Literal('/submit')),
+                GiveBackStmt(status=200, ...)])
+
+        A variable named `POST` holding the string "/submit", sitting inside the listener.
+        `_exec_ListenBlock` filters its candidates to NewBlock and RequestInboundBlock, so an
+        Assignment is never a routing candidate: nothing mounts, nothing errors, and a real POST
+        to that path comes back `No route matches POST /submit` -- verified over real HTTP.
+        `mio check` reported no errors the whole time, which is why four separate lanes could
+        look at routing and disagree about what worked.
+
+        This is the silent-misparse class CLAUDE.md already names for the two-word verb-modifier
+        forms: a sequence of known words groups a second way, the wrong grouping wins quietly,
+        and the failure surfaces somewhere that describes a different problem.
+
+        SWEPT BEFORE LANDING, and the sweep covered `.mho` files AND `.mho` source embedded in
+        Python tests, because a `.mho`-only sweep is what under-counted the last one:
+          * 1 `.mho` file -- tests/boundary_gate_demo.mho, migrated to `new sh.X at /path`.
+          * 5 uses in 2 test files (test_cast_canon, test_strings_status), all of them a wrapper
+            hosting a `give back` line whose subject is the give-back, not the route; migrated.
+        """
+        from mohio_ast import Assignment, Literal
+        for item in (body_items or []):
+            if not isinstance(item, Assignment):
+                continue
+            name = str(getattr(item, 'name', '') or '')
+            val = getattr(item, 'value', None)
+            # UPPERCASE, and that is the false-refusal guard rather than a stylistic choice.
+            # `get`, `post` and `delete` are ordinary English words and perfectly good variable
+            # names -- `post "hello"` inside a listener is somebody's data, not a broken route.
+            # The misread form is written the way HTTP writes methods, and Mohio names are
+            # lowercase by convention (the pretokenizer's own user-name pattern starts
+            # `[a-z_]`), so the capital letters are what separate the two.
+            if name != name.upper() or name.lower() not in self._HTTP_METHODS:
+                continue
+            if not (isinstance(val, Literal)
+                    and str(getattr(val, 'literal_type', '')) == 'string'):
+                continue
+            path = str(getattr(val, 'value', '') or '')
+            shown = path if path.startswith('/') else '/' + path
+            raise MohioCompileError(
+                f"`{name} \"{path}\"` is not a route. There is no method-first routing form, so "
+                f"this line was read as a variable called `{name}` holding the text "
+                f"\"{path}\" -- it registers nothing, and a real {name.upper()} to {shown} comes "
+                f"back with no route matching. The handler carries the path, and the path is "
+                f"unquoted: write `new sh.<Shape> at {shown}` for a write, or "
+                f"`request for sh.<Shape> at {shown}` for a read, inside the `listen for` block. "
+                f"The method follows from which handler you use.",
+                line=getattr(item, 'line', None) or open_line)
+
+    def _refuse_path_on_listener_with_handlers(self, body, path, shape_name, open_line):
+        """A path on `listen for` SWALLOWS the handlers inside it. Refuse rather than discard.
+
+        `listen for` is a container: it groups handlers, and the HANDLER carries the path
+        (ruled 2026-09-04). When a shape sits on the `listen for` line, this transformer
+        synthesizes a single NewBlock and folds the ENTIRE listener body into it -- so an inner
+        `new` or `request for` stops being a route and becomes a body statement of the outer one.
+        Measured over real HTTP, every case silent, `mio check` clean throughout:
+
+            listen for sh.X at /outer + request for sh.X at /inner   -> BOTH 404
+            listen for sh.X at /outer + request for sh.X (no at)     -> /outer 404
+            listen for sh.X at /outer + new sh.X (no at)             -> 500, and the message
+                says the handler must live inside a `listen for` block, which it does
+
+        That last one is the worst: it describes a different problem than the one the developer
+        has. The middle one is the second worst: a correctly written inner handler, with a
+        correct unquoted path, disabled by the line above it.
+
+        SCOPED DELIBERATELY NARROW, and this is a departure from the brief that the measurement
+        forced. The brief asked for `at` to be removed from `listen for` outright. It cannot be,
+        additively: `listen for sh.X at /path` with a DIRECT `give back` body genuinely mounts
+        and serves -- `POST /contact -> 200` over real HTTP -- and that form is asserted by
+        tests/test_shape_on_listener.py (whose entire subject it is), by four assertions in
+        tests/test_framework_serve_by_default.py, and is named in PRODUCTION-BUILD-PLAN.md as
+        the shape-on-listener form. Removing it wholesale breaks six working assertions, so it
+        stops here as a fork for Ron rather than being done quietly.
+
+        What this closes is every case where the path on `listen for` SWALLOWS something, which
+        is the entire silent set. What it leaves alone is the one shape that works.
+        """
+        from mohio_ast import NewBlock, RequestInboundBlock
+        inner = [b for b in (body or [])
+                 if isinstance(b, (NewBlock, RequestInboundBlock))]
+        if not inner:
+            return
+        kinds = ", ".join(sorted({('new' if isinstance(b, NewBlock) else 'request for')
+                                  for b in inner}))
+        where = f" at {path}" if path else ""
+        raise MohioCompileError(
+            f"`listen for sh.{shape_name}{where}` has {len(inner)} handler(s) inside it "
+            f"({kinds}), and it swallows them: the shape on the `listen for` line makes the "
+            f"whole block one handler, so nothing inside it is routed and those paths answer "
+            f"nothing. `listen for` groups handlers; the HANDLER carries the path, unquoted. "
+            f"Write `listen for` on its own line and put the path on each handler inside it: "
+            f"`new sh.{shape_name} at /your/path` for a write, `request for sh.{shape_name} at "
+            f"/your/path` for a read.",
+            line=open_line)
 
     def listener_body(self, children):
         return children[0] if children else None
@@ -1927,33 +2668,6 @@ class MohioTransformer(Transformer):
                 f"will not serve. Run `mio fmt --write` to fix it automatically.",
                 line=_line(str_tok))
 
-    def page_decl(self, children):
-        self._reject_quoted_path(children, 'page')
-        open_token = next((c for c in children
-                           if isinstance(c, Token) and c.type == 'PAGE'), None)
-        open_line = _line(open_token)
-        name_token = next((c for c in children
-                           if isinstance(c, Token) and c.type == 'NAME'), None)
-        name = str(name_token) if name_token else None
-        path_token = next((c for c in children
-                           if isinstance(c, Token) and c.type == 'PATH_LIT'), None)
-        path = str(path_token) if path_token else None
-        self._validate_closer('page', children, open_line)
-        body = [c for c in children
-                if not isinstance(c, Token)
-                and not isinstance(c, Closer)
-                and c is not None]
-        return PageDecl(name=name, path=path, body=body, line=open_line)
-
-    # -- SAGA / STEP -------------------------------------------
-    # Mechanical plumbing only: builds distinguishable nodes. The step handler
-    # keywords (compensate / undo / best effort) are now named terminals, so a
-    # step's compensation body, best-effort flag, and on.failure/on.success
-    # handlers are each recovered distinctly (previously the bare-literal keywords
-    # lost to NAME and compensation bodies were mis-parsed as assignments).
-    # Saga *execution* semantics are intentionally NOT wired here -- see the
-    # interpreter (fail-loud) and Docs/saga-step-semantics-for-design-chat.md.
-
     def step_handler(self, children):
         comp = next((c for c in children if isinstance(c, Token) and c.type == 'COMPENSATE'), None)
         undo = next((c for c in children if isinstance(c, Token) and c.type == 'UNDO'), None)
@@ -2008,7 +2722,11 @@ class MohioTransformer(Transformer):
         name = str(name_token) if name_token else ""
         self._validate_closer('saga', children, open_line)
         steps = [c for c in children if isinstance(c, StepBlock)]
-        return SagaDecl(name=name, steps=steps, line=open_line)
+        # SAGA-LEVEL HANDLERS. This used to keep only the StepBlocks and drop every other
+        # child on the floor, so a saga-level `on.failure` parsed and then did not exist: the
+        # exact silent-drop shape a declaration must never have.
+        handlers = [c for c in children if isinstance(c, (OnFailure, OnSuccess))]
+        return SagaDecl(name=name, steps=steps, body=handlers, line=open_line)
 
     # -- FLOW CONTROL ------------------------------------------
 
@@ -2145,8 +2863,7 @@ class MohioTransformer(Transformer):
             name_tok = next((c for c in children
                              if isinstance(c, Token) and c.type == 'NAME'), None)
             name = str(name_tok) if name_tok else ''
-            condition = next((c for c in children
-                              if isinstance(c, (MatchClause, WhereClause))), None)
+            condition = _match_condition(children, 'check exists')
         elif variant == 'count':
             # CHECK_COUNT (AS NAME)? IN source (where|match)? handlers closer. The grammar
             # accepts EITHER a where_clause or a match_clause here, but this only ever looked
@@ -2157,8 +2874,7 @@ class MohioTransformer(Transformer):
             name_tok = next((c for c in children
                              if isinstance(c, Token) and c.type == 'NAME'), None)
             name = str(name_tok) if name_tok else ''
-            condition = next((c for c in children
-                              if isinstance(c, (MatchClause, WhereClause))), None)
+            condition = _match_condition(children, 'check count')
         elif variant == 'unique':
             # CHECK_UNIQUE IN source_ref match_clause handlers closer (redesigned
             # 2026-08-11, T1-CHECK-UNIQUE-REDESIGN) -- routed through the shared match_clause
@@ -2173,22 +2889,15 @@ class MohioTransformer(Transformer):
             # the instance. match_clause returns a LIST when the source has more than one
             # comma-separated pair -- a composite key (`match a to X, b to Y`); a single
             # MatchClause otherwise.
-            condition = next((c for c in children
-                              if isinstance(c, (MatchClause, WhereClause, list))), None)
-            if condition is None:
-                # match_clause's OTHER two shapes (match any / no.match block forms) parse
-                # here structurally (same shared rule as exists/count) but are not wired for
-                # a count-based uniqueness check -- silently falling through to "no filter"
-                # would count the WHOLE table and report a false "available". Fail loud.
-                _block = next((c for c in children
-                               if type(c).__name__ in
-                               ('MatchBlock', 'MatchAnyBlock', 'NoMatchBlock')), None)
-                if _block is not None:
-                    raise MohioCompileError(
-                        f"check unique: a {type(_block).__name__} match condition isn't "
-                        f"supported here yet -- only `match field to value` (or "
-                        f"comma-separated composite fields, `match a to X, b to Y`) can be "
-                        f"evaluated for uniqueness.")
+            # match_clause's block shapes (match any / no.match) parse here structurally
+            # (same shared rule as exists/count) but are not wired for a count-based
+            # uniqueness check -- silently falling through to "no filter" would count the
+            # WHOLE table and report a false "available". _match_condition fails loud on
+            # them, the same refusal this branch already carried, now shared with its
+            # siblings so all four check forms behave identically.
+            condition = _match_condition(children, 'check unique')
+        if variant in ('exists', 'unique'):
+            _refuse_outcome_handlers_on_check(variant, handlers)
         return CheckMioqlBlock(variant=variant, name=name, source=source,
                               condition=condition, handlers=handlers)
 
@@ -2201,12 +2910,12 @@ class MohioTransformer(Transformer):
         name = str(name_tok) if name_tok else ''
         source = next((c for c in children
                        if type(c).__name__ in ('DbRef', 'DottedName')), None)
-        condition = next((c for c in children
-                          if isinstance(c, (MatchClause, WhereClause))), None)
+        condition = _match_condition(children, 'check')
         rh = next((c for c in children
                    if isinstance(c, Tree) and getattr(c, 'data', '') == 'result_handlers'),
                   None)
         handlers = list(rh.children) if rh is not None else []
+        _refuse_outcome_handlers_on_check('exists', handlers)
         return CheckMioqlBlock(variant='exists', name=name, source=source,
                                condition=condition, handlers=handlers)
 
@@ -2220,7 +2929,13 @@ class MohioTransformer(Transformer):
                       if not isinstance(c, (Token, Closer))]
         collection = non_tokens[0] if non_tokens else None
         body = non_tokens[1:]
+        # `take N` bounds the traversal, reusing the word the language already uses for
+        # bounding. The NUMBER is the only bare numeric token on the header, so it cannot be
+        # confused with anything in the body.
+        _take = next((int(str(c)) for c in children
+                      if isinstance(c, Token) and c.type == 'NUMBER'), None)
         return EachBlock(
+            take_n=_take,
             item=str(name_token) if name_token else "",
             collection=collection,
             body=body, line=open_line,
@@ -2249,7 +2964,13 @@ class MohioTransformer(Transformer):
                       if not isinstance(c, (Token, Closer))]
         collection = non_tokens[0] if non_tokens else None
         body = non_tokens[1:]
+        # `take N` bounds the traversal, reusing the word the language already uses for
+        # bounding. The NUMBER is the only bare numeric token on the header, so it cannot be
+        # confused with anything in the body.
+        _take = next((int(str(c)) for c in children
+                      if isinstance(c, Token) and c.type == 'NUMBER'), None)
         return EachBlock(
+            take_n=_take,
             item=str(name_token) if name_token else "",
             collection=collection,
             body=body, line=open_line,
@@ -2297,16 +3018,19 @@ class MohioTransformer(Transformer):
         _body_types = (MatchClause, MatchBlock, MatchAnyBlock, NoMatchBlock,
                        WhereClause, AndClause, OrderClause, LimitClause, CacheClause,
                        SqlBlock)
+        # retrieve evaluates all three block forms at runtime (see _exec_RetrieveBlock's
+        # and/or/not spec builder), so none of them are refused here.
+        _RETR_BLOCKS = ('MatchBlock', 'MatchAnyBlock', 'NoMatchBlock')
         body_items = []
         for c in children:
             if _is_tree(c, 'retrieve_body'):
                 for item in c.children:
                     if isinstance(item, list):          # comma match -> list of MatchClause
-                        body_items.extend(x for x in item if isinstance(x, _body_types))
+                        body_items.extend(_take_match([item], 'retrieve', _RETR_BLOCKS))
                     elif isinstance(item, _body_types):
                         body_items.append(item)
             elif isinstance(c, list):
-                body_items.extend(x for x in c if isinstance(x, _body_types))
+                body_items.extend(_take_match([c], 'retrieve', _RETR_BLOCKS))
             elif isinstance(c, _body_types):
                 body_items.append(c)
         handlers_node = next((c for c in children
@@ -2419,10 +3143,20 @@ class MohioTransformer(Transformer):
         for c in children:
             if _is_tree(c, 'pull_body'):
                 for item in c.children:
-                    if isinstance(item, _body_types):
+                    if isinstance(item, list) or type(item).__name__ in _MATCH_NODE_NAMES:
+                        body_items.extend(_flatten_match(item))
+                    elif isinstance(item, _body_types):
                         body_items.append(item)
+            elif isinstance(c, list) or type(c).__name__ in _MATCH_NODE_NAMES:
+                body_items.extend(_flatten_match(c))
             elif isinstance(c, _body_types):
                 body_items.append(c)
+        # T1-PULL-FILTER-UNBUILT (2026-08-24): a `match`/`where` here is carried into node.body
+        # but the EXECUTOR never reads it (see _exec_PullBlock). The refusal lives there, at the
+        # layer that actually cannot do the work -- `pull ... where ...` is a grammar-valid form
+        # the language accepts (mohio_test_grammar.py's `pull_bounded` asserts exactly that), so
+        # refusing it at transform time would shrink the accepted surface rather than report a
+        # missing capability.
         # handlers
         handlers_node = next((c for c in children
                               if _is_tree(c, 'result_handlers')), None)
@@ -2650,14 +3384,53 @@ class MohioTransformer(Transformer):
                  ReturnClause, SummarizeBlock, CalculateBlock,
                  PaginateClause, CursorClause, SkipClause,
                  MatchBlock, MatchAnyBlock, NoMatchBlock, ExportClause, TimespanRef)
+        # A composite `match a to X, b to Y` arrives as a LIST of MatchClause, which is not an
+        # instance of anything in _BODY -- it used to fall straight through this allowlist and
+        # find silently returned the WHOLE table (`match location to "hall", status to "NOPE"`
+        # answered every row instead of none). Collect match nodes through the shared helper;
+        # find evaluates all three block forms at runtime, so none of them are refused here.
+        _FIND_BLOCKS = ('MatchBlock', 'MatchAnyBlock', 'NoMatchBlock')
         body_items = []
         for c in children:
             if _is_tree(c, 'find_body'):
                 for item in c.children:
-                    if isinstance(item, _BODY):
+                    if isinstance(item, list):
+                        body_items.extend(_take_match([item], 'find', _FIND_BLOCKS))
+                    elif isinstance(item, _BODY):
                         body_items.append(item)
+            elif isinstance(c, list):
+                body_items.extend(_take_match([c], 'find', _FIND_BLOCKS))
             elif isinstance(c, _BODY):
                 body_items.append(c)
+        # A SINGULAR clause written twice used to silently keep the LAST one. Found while
+        # fixing the multi-key sort (2026-09-02): `up to 3` then `up to 1` returned one row,
+        # and `skip 1` then `skip 3` skipped three -- the earlier line discarded, no error,
+        # `mio check` clean. `order.` is the ONE clause that legitimately repeats (that is the
+        # multi-key form), so it is not in this list. Refused at compile time because the
+        # duplicate is visible in the source, and the message names which line lost.
+        _ONCE_ONLY = {
+            'LimitClause':    'up to',
+            'SkipClause':     'skip',
+            'PaginateClause': 'paginate by',
+            'CursorClause':   'cursor',
+            'ExportClause':   'export',
+        }
+        _seen = {}
+        for _item in body_items:
+            _kind = type(_item).__name__
+            _word = _ONCE_ONLY.get(_kind)
+            if _word is None:
+                continue
+            if _kind in _seen:
+                raise MohioCompileError(
+                    f"`{_word}` is written twice in this find. Only one is used and the other "
+                    f"is discarded, which is why this is refused rather than guessed at: there "
+                    f"is no reading of two `{_word}` lines that is obviously right. Keep the "
+                    f"one you meant and delete the other. (`order.up` / `order.down` is the "
+                    f"exception -- those DO repeat, and sort by each key in the order written.)",
+                    line=getattr(_item, 'line', None) or open_line)
+            _seen[_kind] = _item
+
         # find ... random.N  — RANDOM_N token lands inside a find_body wrapper;
         # extract the integer (random.3 -> 3) so the executor can sample.
         random_n = None
@@ -2698,6 +3471,42 @@ class MohioTransformer(Transformer):
         # result_handlers wrapper -- so RUN 2's C1 fix (in that wrapper's transformer) never
         # reached find at all. Same shared check as every other block now.
         self._validate_lone_otherwise(handlers, open_line)
+        # `find ... by <field>` GROUPS, but the interpreter only ever reads `group_by` when a
+        # `summarize` block is present -- so without one it was set and silently dropped, and
+        # `find totals by status in db.orders` returned every row ungrouped (3 rows for 2
+        # statuses) with no error. The shipped mioql-user-guide taught exactly that form, under
+        # the heading "Group with `by`".
+        #
+        # CORRECTED 2026-09-01, and the correction is the point. The first version of this
+        # message said grouping was "not built in this release" and that `summarize` "does not
+        # parse in this build". BOTH WERE FALSE. `_apply_summarize` groups correctly and has
+        # all along; summarize parses fine. What was actually broken was the pretokenizer
+        # folding `amount.sum` into a single token whenever `amount` was also a declared name --
+        # and saving a field is what declares it, so every realistic program failed at the
+        # summarize closer with an error naming nothing. One broken form was read as three
+        # missing features, and the fix shipped a message telling developers a working feature
+        # did not exist. Verified before rewriting this: grouping returns
+        # [{'status': 'open', 'total': 30}, {'status': 'shut', 'total': 5}].
+        #
+        # The refusal itself stays. `by` alone still groups nothing, and with no aggregates
+        # there is no answer to what each group's row should CONTAIN -- inventing one would be
+        # a second guess on top of the first. What changes is that the message can now point at
+        # the form that fixes it, because that form works.
+        if group_by and not any(type(b).__name__ == 'SummarizeBlock' for b in body_items):
+            _g = str(group_by)
+            _nl = chr(10)
+            raise MohioCompileError(
+                (f"Line {open_line} -- " if open_line else "") +
+                "`find ... by " + _g + "` groups the rows, but nothing here says what each "
+                "group should come back AS, so the grouping would be dropped and every row "
+                "handed back as though it had been applied." + _nl +
+                "    Add a `summarize` block naming the totals you want:" + _nl +
+                "        find totals by " + _g + " in db.<table>" + _nl +
+                "            summarize" + _nl +
+                "                total <field>.sum" + _nl +
+                "            summarize: done" + _nl +
+                "        find: done" + _nl +
+                "    Or drop the `by " + _g + "` to read the rows as they are.")
         return FindBlock(
             name=str(name_token) if name_token else "",
             group_by=group_by,
@@ -2724,6 +3533,7 @@ class MohioTransformer(Transformer):
         # got written); it is one of the three collection sites that made every
         # DynamicFieldValue executor branch unreachable dead code.
         fields = [c for c in children if isinstance(c, (FieldValue, DynamicFieldValue))]
+        self._refuse_two_fields_on_one_line(fields, 'save')
         handlers_node = next((c for c in children
                               if _is_tree(c, 'result_handlers')), None)
         handlers = []
@@ -2911,10 +3721,19 @@ class MohioTransformer(Transformer):
         body = []
         for c in children:
             if isinstance(c, list):                 # comma match -> list of MatchClause
+                body.extend(_take_match([c], 'update'))
                 body.extend(x for x in c
-                            if isinstance(x, (MatchClause, FieldValue, DynamicFieldValue)))
-            elif isinstance(c, (MatchClause, FieldValue, DynamicFieldValue)):
+                            if isinstance(x, (FieldValue, DynamicFieldValue)))
+            elif type(c).__name__ in _MATCH_NODE_NAMES:
+                body.extend(_take_match([c], 'update'))
+            elif isinstance(c, (FieldValue, DynamicFieldValue)):
                 body.append(c)
+        # SIBLING of the save case: `update` collects the same FieldValue nodes from the same
+        # newline-blind grammar, so `set st "ZZZ" allowed "c"` splits the same way and writes
+        # the same garbage column. Swept and closed with the save fix rather than left to be
+        # found separately.
+        self._refuse_two_fields_on_one_line(
+            [c for c in body if isinstance(c, (FieldValue, DynamicFieldValue))], 'update')
         handlers_node = next((c for c in children
                               if _is_tree(c, 'result_handlers')), None)
         handlers = []
@@ -2948,8 +3767,8 @@ class MohioTransformer(Transformer):
         for c in cond_items:
             if isinstance(c, MatchClause):
                 matches.append(c)
-            elif isinstance(c, list):
-                matches.extend(x for x in c if isinstance(x, MatchClause))
+            elif isinstance(c, list) or type(c).__name__ in _MATCH_NODE_NAMES:
+                matches.extend(_take_match([c], 'remove'))
         match  = matches[0] if len(matches) == 1 else (matches if matches else None)
         wheres = [c for c in cond_items if isinstance(c, WhereClause)]
         if len(wheres) > 1:
@@ -2986,12 +3805,7 @@ class MohioTransformer(Transformer):
         # entirely, so a composite `match a to X, b to Y` on get/grab silently dropped the
         # WHOLE condition to None (worse than "first field only": get/grab then treats "no
         # match" as "bind nothing", so the query silently returned nothing with no error).
-        matches = []
-        for c in children:
-            if isinstance(c, MatchClause):
-                matches.append(c)
-            elif isinstance(c, list):
-                matches.extend(x for x in c if isinstance(x, MatchClause))
+        matches = _take_match(children, open_type.lower())
         match = matches[0] if len(matches) == 1 else (matches if matches else None)
         self._validate_closer(open_type.lower(), children, open_line)
         handlers_node = next((c for c in children
@@ -3106,6 +3920,21 @@ class MohioTransformer(Transformer):
         pairs = [c for c in children
                  if isinstance(c, tuple) and len(c) == 3 and c[0] == '__pair__']
         if pairs:
+            # The MATCH_MOD token (`match.any` / `match.none` / `match.all` / `match.unique`)
+            # used to be read off the tree and then THROWN AWAY: every modifier collapsed to a
+            # plain AND-equality filter, so `match.none location to "hall"` returned exactly the
+            # hall rows -- the precise inverse of what it says. The block spellings
+            # (`no.match ... no.match: done`) were correct all along because they are separate
+            # grammar rules with their own transformers; only the inline dotted form was silently
+            # reinterpreted. Route each modifier to the node that already carries its meaning.
+            mod_tok = next((c for c in children
+                            if isinstance(c, Token) and c.type == 'MATCH_MOD'), None)
+            mod = str(mod_tok).strip().lower() if mod_tok is not None else 'match'
+            if mod == 'match.any':
+                return MatchAnyBlock(pairs=[(n, v) for (_t, n, v) in pairs])
+            if mod == 'match.none':
+                return NoMatchBlock(pairs=[(n, v) for (_t, n, v) in pairs])
+            # `match`, `match.all` and `match.unique` are all AND across the pairs.
             clauses = [MatchClause(field=name, value=value)
                        for (_tag, name, value) in pairs]
             return clauses if len(clauses) > 1 else clauses[0]
@@ -3117,8 +3946,8 @@ class MohioTransformer(Transformer):
         return MatchClause(field=str(name_token) if name_token else "", value=value)
 
     def match_pair(self, children):
-        name = next((str(c) for c in children
-                     if isinstance(c, Token) and c.type == 'NAME'), "")
+        _nt = _field_name_token(children)
+        name = str(_nt) if _nt is not None else ""
         value = next((c for c in children if not isinstance(c, Token)), None)
         return ('__pair__', name, value)
 
@@ -3160,8 +3989,14 @@ class MohioTransformer(Transformer):
         'after': 'after', 'before': 'before',
         'above_avg': 'above_avg', 'pattern': 'pattern',
     }
+    # ENDS_WITH / ENDS were MISSING from this set while CONTAINS, STARTS and STARTS_WITH were
+    # present, so `where name ends.with "v"` collected the KEYWORD as its value and compared
+    # every row against the literal text "ends.with". It matched nothing, ever, in either case
+    # -- a silent wrong answer, `mio check` clean (measured 2026-09-02). Same incomplete-list
+    # shape as the find-clause allowlist: the sibling that was simply never added.
     _WC_SKIP = {'IS', 'IS_NOT', 'ABOVE', 'BELOW', 'BETWEEN', 'AND', 'CONTAINS',
-                'STARTS', 'STARTS_WITH', 'NOT', 'THAN', 'OLDER', 'NEWER', 'EMPTY',
+                'STARTS', 'STARTS_WITH', 'ENDS', 'ENDS_WITH', 'NOT', 'THAN',
+                'OLDER', 'NEWER', 'EMPTY',
                 'OF', 'SINCE', 'STR_AFTER', 'STR_BEFORE', 'IS_IN'}
     # STR_AFTER/STR_BEFORE are the `after`/`before` tokens; in a `<field> is after <value>`
     # datetime comparison they are OPERATOR keywords (aliases for above/below), not values, so
@@ -3336,13 +4171,27 @@ class MohioTransformer(Transformer):
 
     def order_clause(self, children):
         dotted = next((c for c in children if isinstance(c, DottedName)), None)
-        direction = 'up'
+        direction = None
         for c in children:
             if isinstance(c, Token):
                 if c.type == 'ORDER_DOWN':
                     direction = 'down'
                 elif c.type == 'ORDER_UP':
                     direction = 'up'
+        if direction is None:
+            # Q18 (2026-08-31): the grammar carries a third alternative,
+            # `"order.{{ direction }}" BY dotted_name` -- a LITERAL STRING, not an
+            # interpolation. It matches those exact characters and nothing else: any real
+            # variable (`order.{{ dir }}`) fails to parse. It also produces neither
+            # ORDER_UP nor ORDER_DOWN, so `direction` defaulted to 'up' and the form that
+            # LOOKS parameterised was permanently ascending -- decorative, and silent about it.
+            raise MohioCompileError(
+                "`order.{{ direction }}` is not a real setting -- it is a literal in the "
+                "grammar, so it always sorted ascending no matter what you meant.\n"
+                "    A dynamic sort direction is not built. Say which way you want:\n"
+                "        order.up by <field>      -- smallest first\n"
+                "        order.down by <field>    -- largest first\n"
+                "    To choose at runtime, branch on the value and use the one you want.")
         return OrderClause(
             field='.'.join(dotted.parts) if dotted else "",
             direction=direction,
@@ -3514,6 +4363,31 @@ class MohioTransformer(Transformer):
         fields = [c for c in children if isinstance(c, dict)]
         return ReturnClause(fields=fields)
 
+    def _return_field_agg(self, children, func):
+        """`return amount.sum as grand` where the field name is NOT a declared variable.
+
+        _SUM/_COUNT/_MAX/_MIN are filtered terminals, so they never reached `return_field` and
+        the line was read as the plain projection `return amount as grand` -- the alias was
+        bound to a column, no total was computed, and nothing said so. The same line worked
+        when the field name happened to also be declared, because the pretokenizer folds
+        `amount.sum` into one token that `return_field` already splits correctly. The grammar
+        now names which function it matched, so both spellings reach the same place.
+        """
+        dn = next((c for c in children if isinstance(c, DottedName)), None)
+        parts = dn.parts if dn else []
+        alias_tok = next((c for c in children
+                          if isinstance(c, Token) and c.type == 'NAME'), None)
+        field = ".".join(parts)
+        return {'kind': 'agg', 'func': func, 'field': field or None,
+                'alias': str(alias_tok) if alias_tok else (
+                    "_".join(parts + [func]) if parts else func)}
+
+    def return_field_sum(self, c):      return self._return_field_agg(c, 'sum')
+    def return_field_count(self, c):    return self._return_field_agg(c, 'count')
+    def return_field_average(self, c):  return self._return_field_agg(c, 'average')
+    def return_field_max(self, c):      return self._return_field_agg(c, 'max')
+    def return_field_min(self, c):      return self._return_field_agg(c, 'min')
+
     def return_field(self, children):
         # dotted_name is already a DottedName; the loose NAME token is the alias.
         dn    = next((c for c in children if isinstance(c, DottedName)), None)
@@ -3573,6 +4447,51 @@ class MohioTransformer(Transformer):
     def af_cohens_d(self, c):       return self._af(c, 'cohens_d')
     def af_percentage_of(self, c):  return self._af(c, 'percentage_of')
 
+    # The aggregate functions a summarize/calculate block can name. Kept beside the af_*
+    # methods above so the two lists cannot drift apart: every name here has an af_ method,
+    # and the runtime (_apply_summarize / _apply_calculate) refuses the ones it has not built.
+    _MARKED_AGG_FUNCS = ('sum', 'count', 'average', 'max', 'min', 'running_sum',
+                         'moving_average', 'rank', 'std_deviation', 'variance', 'percentile')
+
+    def af_marked(self, children):
+        """`amt.sum` after the pretokenizer folded it into ONE token.
+
+        The pretokenizer marks a dotted name by its ROOT, so any aggregate over a field that is
+        also a declared name (which a saved field always is) reached the grammar as
+        `__USERVAR__amt.sum` and matched none of the NAME "." FUNC alternatives -- summarize
+        and calculate then failed at their own closer, naming nothing. Split it back here: the
+        token carries both halves unambiguously, so nothing is guessed.
+        """
+        from mohio_pretokenizer import unmark
+        tok = next((c for c in children
+                    if isinstance(c, Token) and c.type == 'USERVAR_DOTTED'), None)
+        raw = unmark(str(tok)) if tok is not None else ''
+        source, _, func = raw.rpartition('.')
+        if not source or func not in self._MARKED_AGG_FUNCS:
+            # Refuse rather than guess. Without this a mistyped or unsupported suffix would
+            # fall through as func='' and summarize would report the empty string as an
+            # "analytic function", which explains nothing about the line that caused it.
+            raise MohioCompileError(
+                "'" + raw + "' is not an aggregate. A summarize or calculate line reads "
+                "`<result name> <field>.<function>`, and the function must be one of: "
+                + ", ".join(self._MARKED_AGG_FUNCS) + ".",
+                line=getattr(tok, 'line', None))
+
+        names = [str(c) for c in children if isinstance(c, Token) and c.type == 'NAME']
+        nums  = [str(c) for c in children if isinstance(c, Token) and c.type == 'NUMBER']
+        spec = {'func': func, 'source': source}
+        # The trailing operands, read the same way _af reads them -- except that here the
+        # source came from the token, so names[0] is the operand, not the field.
+        if func == 'rank' and names:
+            spec['partition'] = names[0]
+        if func == 'moving_average':
+            spec['window'] = int(nums[0]) if nums else None
+            if names:
+                spec['window_unit'] = names[0]
+        if func == 'percentile' and nums:
+            spec['p'] = float(nums[0])
+        return spec
+
     def agg_field(self, children):
         from mohio_ast import AggField
         result_name = next((str(c) for c in children
@@ -3606,6 +4525,10 @@ class MohioTransformer(Transformer):
     # -- AI PRIMITIVES -----------------------------------------
 
     def ai_decide_block(self, children):
+        # Handlers now arrive wrapped by the shared `result_handlers` rule (2026-09-02).
+        # Flatten first so every lookup below sees handler nodes as direct children,
+        # exactly as it did when this block hand-listed them.
+        children = self._flatten_result_handlers(children)
         open_token = next((c for c in children
                            if isinstance(c, Token) and c.type == 'AI_DECIDE'), None)
         open_line = _line(open_token)
@@ -3639,6 +4562,8 @@ class MohioTransformer(Transformer):
                     f'    It declared a VARIABLE called `{b.name}`, and the real gate '
                     f'silently stayed at its default.\n'
                     f'    The form is:  check confidence above 0.99')
+
+        self._refuse_when_on_ai_block('ai.decide', body, open_line)
 
         has_not_confident = any(isinstance(b, NotConfidentBlock) for b in body)
         if not has_not_confident:
@@ -3680,6 +4605,10 @@ class MohioTransformer(Transformer):
         is a gated decision, so demanding a confidence gate on them would be enforcement
         theatre rather than a real guarantee.
         """
+        # Handlers now arrive wrapped by the shared `result_handlers` rule (2026-09-02).
+        # Flatten first so every lookup below sees handler nodes as direct children,
+        # exactly as it did when this block hand-listed them.
+        children = self._flatten_result_handlers(children)
         open_token = next((c for c in children
                            if isinstance(c, Token) and c.type == token_type), None)
         open_line = _line(open_token)
@@ -3695,6 +4624,8 @@ class MohioTransformer(Transformer):
                     and not _is_tree(c, 'type_name')]
         ai_opts, remaining = self._extract_ai_opts(all_body)
         body = self._body_without_closer(remaining)
+        self._refuse_decorative_confidence(verb, body, open_line, gate_only=True)
+        self._refuse_when_on_ai_block(verb, body, open_line)
 
         return node_cls(
             name=name, return_type=return_type, body=body, line=open_line,
@@ -3741,6 +4672,10 @@ class MohioTransformer(Transformer):
         return ('__confidence__', vals[-1] if vals else None)
 
     def ai_rank_block(self, children):
+        # Handlers now arrive wrapped by the shared `result_handlers` rule (2026-09-02).
+        # Flatten first so every lookup below sees handler nodes as direct children,
+        # exactly as it did when this block hand-listed them.
+        children = self._flatten_result_handlers(children)
         open_token = next((c for c in children
                            if isinstance(c, Token) and c.type == 'AI_RANK'), None)
         open_line = _line(open_token)
@@ -3758,6 +4693,9 @@ class MohioTransformer(Transformer):
                               if isinstance(c, NotConfidentBlock)), None)
         audit = next((c for c in children if isinstance(c, AiAuditStmt)), None)
         explain = next((c for c in children if isinstance(c, AiExplainBlock)), None)
+        # ai.rank's confidence is REAL (the winner's share of matched weight, computed in
+        # _exec_AiRankBlock), so the gate and the fallback both stay. Only `when` is refused.
+        self._refuse_when_on_ai_block('ai.rank', children, open_line)
         # The FOR subject is the leftover value node (not a token, not a body piece).
         known = (RankOption, NotConfidentBlock, AiAuditStmt, AiExplainBlock, Closer)
         subject = next((c for c in children
@@ -3797,9 +4735,9 @@ class MohioTransformer(Transformer):
         for child in children:
             if _is_ai_opt(child):
                 _, key, val = child
-                if key == 'goal':        goal = str(val)
-                elif key == 'persona':   persona = str(val)
-                elif key == 'context':   context = str(val)
+                if key == 'goal':        goal = val
+                elif key == 'persona':   persona = val
+                elif key == 'context':   context = val
                 elif key == 'model':     model = str(val)
                 elif key == 'temperature': temperature = float(val) if val else 1.0
             else:
@@ -3828,12 +4766,62 @@ class MohioTransformer(Transformer):
                 if v: return v
         return ""
 
+    def _instruction_opt(self, children, keyword):
+        """`goal` / `persona` -- the INSTRUCTION half. Literal text only.
+
+        These had the same silent discard `context` did (Q99): `_opt_val` cannot flatten a
+        DottedName, so `goal ticket.title` became "" and the agent ran with no goal at all,
+        unreported. Unlike `context`, the answer here is NOT to wire it up. The goal is what
+        the agent is told to DO, and building it out of data is the prompt-injection vector
+        stated as a feature -- whatever wrote that data would be writing the instruction. The
+        separation this release just built (instruction in the system role, data in the user
+        turn) would be undone by a goal that IS data.
+
+        So the silence is closed by refusing, which is both the safe answer and a real
+        property worth saying out loud. An empty literal stays legal -- it is a literal, just
+        an empty one, and refusing it would report the wrong problem.
+        """
+        val = self._opt_val(children)
+        if val:
+            return ('ai_opt', keyword, val)
+        node = next((c for c in children if not isinstance(c, Token)), None)
+        if node is not None and type(node).__name__ != 'Literal':
+            raise MohioCompileError(
+                "`" + keyword + "` must be written as text, not taken from a value." + chr(10) +
+                "    " + keyword + " \"...\" is the instruction the model is given, and an "
+                "instruction built out of data is how injected text becomes a command." + chr(10) +
+                "    To pass a value TO the model, put it in `context` instead, which is "
+                "kept separate from the instruction:" + chr(10) +
+                "        context ticket.body" + chr(10) +
+                "    Or interpolate it into the text deliberately: " + keyword +
+                " \"Handle {{ ticket.title }}\".",
+                line=getattr(node, 'line', None))
+        return ('ai_opt', keyword, val)
+
     def ai_opt_goal(self, children):
-        return ('ai_opt', 'goal', self._opt_val(children))
+        return self._instruction_opt(children, 'goal')
     def ai_opt_persona(self, children):
-        return ('ai_opt', 'persona', self._opt_val(children))
+        return self._instruction_opt(children, 'persona')
     def ai_opt_context(self, children):
-        return ('ai_opt', 'context', self._opt_val(children))
+        """`context <value>` -- a literal stays a string; anything else keeps its NODE.
+
+        Q99 (2026-09-01): `_opt_val` flattens a child to text by reading `.value` or recursing
+        into `.children`. A DottedName has neither, so `context ticket.body` returned "" and the
+        context was SILENTLY DISCARDED -- verified on both consumers:
+
+            ai.agent   context ticket.body  -> context=''
+            ai.decide  context ticket.body  -> context=''
+            (a literal on either -> the literal text, so it looked like it worked)
+
+        A developer passing the live ticket body to the model passed nothing, with no error at
+        check time or run time. Keeping the node lets the interpreter evaluate it at run time,
+        which is the only place its value exists. The literal path is untouched.
+        """
+        val = self._opt_val(children)
+        if val:
+            return ('ai_opt', 'context', val)
+        node = next((c for c in children if not isinstance(c, Token)), None)
+        return ('ai_opt', 'context', node if node is not None else "")
     def ai_opt_temperature(self, children):
         val = self._opt_val(children)
         try: return ('ai_opt', 'temperature', float(val))
@@ -3851,6 +4839,41 @@ class MohioTransformer(Transformer):
     def confidence_check(self, children):
         value = next((c for c in children if not isinstance(c, Token)), None)
         return ConfidenceCheck(operator='above', threshold=value)
+
+    def not_confident_outside_ai(self, children):
+        # `not confident` on a non-AI block. Before this guard it matched check_when's
+        # `NOT value_expr` alternative and was read as "when not confident" -- a test of an
+        # ordinary variable named `confident`, undeclared, so the body ran on a meaningless
+        # condition and mio check reported no errors and no warnings at all.
+        # The replacements named here are verified to work on these blocks: on.failure,
+        # on.success, when and otherwise all parse and capture their bodies on save/retrieve
+        # (tests/test_battery_handler_vocabulary.py).
+        tok = next((c for c in children if isinstance(c, Token)), None)
+        raise MohioCompileError(
+            "`not confident` is an AI-block form. It belongs inside ai.decide, ai.compare, "
+            "ai.respond, ai.create or ai.rank, where it is the fallback for a decision that "
+            "did not clear its confidence gate. On any other block there is no confidence to "
+            "fall short of, and this line was being read as `when not confident` -- a test of "
+            "an ordinary variable named `confident` -- so it ran on the wrong condition and "
+            "said nothing. For a verb that can fail, use `on.failure`. For the path where "
+            "nothing failed, use `otherwise`.",
+            line=_line(tok) if tok is not None else 0)
+
+    def confidence_check_is_form(self, children):
+        # `confidence is above N` / `check confidence is above N`. Reached for by analogy with
+        # `when x is above n`, which IS valid -- in check/when, a different rule. Before this
+        # guard the line had no confidence alternative to match, fell through the body's generic
+        # statement catch-all, and built no ConfidenceCheck at all, so the interpreter used its
+        # hardcoded 0.85: a block declaring 0.99 silently ran at 0.85, with mio check clean.
+        # Refuse at compile time and name the one canonical spelling.
+        tok = next((c for c in children if isinstance(c, Token)), None)
+        raise MohioCompileError(
+            "`confidence is above <n>` is not the confidence gate. The gate is written "
+            "`check confidence above <n>` -- no `is`. `is above` is a check/when comparison "
+            "(`when score is above 100`), a different form in a different block. Written here "
+            "it matched no confidence clause at all, so the threshold you declared was dropped "
+            "and the decision ran at the 0.85 default.",
+            line=_line(tok) if tok is not None else 0)
 
     def using_chain(self, children):
         name = next((str(c) for c in children
@@ -3918,6 +4941,13 @@ class MohioTransformer(Transformer):
     def ai_create_stmt(self, children):
         from mohio_ast import AiCreateStmt
         from lark import Token
+        # Handlers now arrive wrapped by the shared `result_handlers` rule (2026-09-02).
+        # Flatten first so every lookup below sees handler nodes as direct children,
+        # exactly as it did when this block hand-listed them.
+        children = self._flatten_result_handlers(children)
+        _cline = _line(next((c for c in children if isinstance(c, Token)), None))
+        self._refuse_decorative_confidence('ai.create', children, _cline, gate_only=True)
+        self._refuse_when_on_ai_block('ai.create', children, _cline)
         # modality: stmt form uses ai_create_type; block form uses `returns type_name`
         type_node = _first_tree(children, 'ai_create_type')
         if type_node:
@@ -4056,7 +5086,9 @@ class MohioTransformer(Transformer):
                             f"    Put the `{word}` on the verb block whose result you are "
                             f"testing, inside the try.")
         always = next((c for c in children if isinstance(c, AlwaysClause)), None)
-        catch = next((c for c in children if isinstance(c, CatchClause)), None)
+        # No `catch` extraction: `retired_catch` raises before a CatchClause can ever be built
+        # (2026-08-27). CatchClause itself stays defined -- the word is reserved for a possible
+        # return inside `mio test`, not deleted.
         # modifiers arrive as ('retry'|'per'|'total'|'backoff', value) tuples
         mods = {k: v for (k, v) in
                 (c for c in children if isinstance(c, tuple) and len(c) == 2)}
@@ -4068,7 +5100,7 @@ class MohioTransformer(Transformer):
                                    CatchClause, Closer))
             and not _is_tree(c, 'result_handlers')
         ])
-        return TryBlock(body=body, catch=catch,
+        return TryBlock(body=body,
                         on_failure=on_failure, on_success=on_success,
                         always=always, line=open_line,
                         retry_times=mods.get('retry'),
@@ -4102,10 +5134,26 @@ class MohioTransformer(Transformer):
             return PurposeBlock(purpose=fp[1], body=[stmt], line=getattr(stmt, 'line', 0))
         return stmt
 
-    def catch_clause(self, children):
-        body = self._body_without_closer([
-            c for c in children if not isinstance(c, Token)])
-        return CatchClause(body=body)
+    def retired_catch(self, children):
+        """`catch` is retired (2026-08-27). It became a redundant alias for `on.failure`.
+
+        Its ORIGINAL job was catching an issue DURING an action -- jumping out of a runaway
+        loop mid-execution. That is now covered by the loop guards (MOHIO_MAX_LOOP_ITERATIONS,
+        MOHIO_MAX_RUN_SECONDS), leaving `catch` orphaned onto the same job `on.failure`
+        already does: reporting an error AFTER an action. One job, one word.
+
+        Retiring it also closes a real bug rather than only tidying vocabulary: `catch` and
+        `on.failure` in the SAME try block both fired (the interpreter looped over both
+        handlers), so an error path ran twice. A retired `catch` cannot double-fire.
+
+        RESERVED, not freed: the word may return with its original during-execution meaning
+        inside `mio test`, so it stays a keyword and is still refused as an identifier.
+        """
+        raise MohioCompileError(
+            "`catch` is retired: it means the same thing as `on.failure` (the action broke), "
+            "and one job takes one word. Use `on.failure` for the error path, `on.success` for "
+            "the success path. To stop a runaway loop, use the loop limits -- that was `catch`'s "
+            "original job and the loop guards cover it now.")
 
     _TRY_UNIT_SECONDS = {
         'second': 1, 'seconds': 1, 'minute': 60, 'minutes': 60,
@@ -4157,8 +5205,19 @@ class MohioTransformer(Transformer):
             # HTTP_STATUS_CODE terminal (3-digit), STATUS_ALIAS keyword, or NUMBER fallback
             num = next((c for c in status_node.children
                         if isinstance(c, Token) and
-                        c.type in ('HTTP_STATUS_CODE', 'NUMBER', 'STATUS_ALIAS')), None)
-            if num is not None and num.type == 'STATUS_ALIAS':
+                        c.type in ('STATUS_LABEL', 'HTTP_STATUS_CODE', 'NUMBER',
+                                   'STATUS_ALIAS')), None)
+            # `[404]` and `[ok]` are the canonical spellings. The brackets are the LABEL marker,
+            # exactly as in `[pii]`; what is inside is the same status the bare form carried, so
+            # it is unwrapped here and everything downstream is untouched.
+            if num is not None and num.type == 'STATUS_LABEL':
+                inner = str(num).strip()[1:-1].strip()
+                status = ({'ok': 200, 'created': 201, 'unauthorized': 401, 'missing': 404,
+                           'error': 500, 'pending': 202}[inner.lower()]
+                          if inner.lower() in ('ok', 'created', 'unauthorized', 'missing',
+                                               'error', 'pending')
+                          else _coerce_number(inner))
+            elif num is not None and num.type == 'STATUS_ALIAS':
                 status = {'ok': 200, 'created': 201, 'unauthorized': 401,
                           'missing': 404, 'error': 500, 'pending': 202}[str(num).strip().lower()]
             elif num is not None:
@@ -4296,8 +5355,39 @@ class MohioTransformer(Transformer):
         from mohio_ast import DebugLogStmt
         target_tree = next((c for c in children
                              if hasattr(c, 'data') and c.data == 'debug_log_target'), None)
-        names = [str(t) for t in (target_tree.children if target_tree is not None else [])
-                 if isinstance(t, Token) and t.type == 'NAME']
+        # WALK THE SUBTREE, and strip the marker. This looked only at DIRECT children that
+        # were Tokens, and under the pretokenizer there are none: `p.chart` is folded into one
+        # `USERVAR_DOTTED` token carrying a `__USERVAR__` marker, and it arrives wrapped two
+        # levels down in `value_expr -> dotted_name -> Token`. So `names` came out EMPTY and the
+        # statement was built with `target=''`. Measured in a real run's journey.log, which is
+        # where both halves of the symptom showed at once:
+        #
+        #       = MohioValue(None, 'any')        <- no name, and no value
+        #     plain = MohioValue('hello', 'string')
+        #
+        # The blank to the left of the `=` is the tell: it was never a lookup that missed, it
+        # was a target that was never assembled. A plain single NAME was unaffected, which is
+        # why this survived: the simplest case is the one that works.
+        # THE TRANSFORMER RUNS BOTTOM-UP, so by the time this method is called the subtree is
+        # no longer raw: `value_expr -> dotted_name` has already become a DottedName node with
+        # `.parts`, and there is no Token left to find. Both shapes are read, because which one
+        # arrives depends on whether the pretokenizer folded the name, and that is not something
+        # this method should have to know.
+        def _target_names(node):
+            out = []
+            if isinstance(node, Token):
+                if node.type in ('NAME', 'USERVAR_DOTTED'):
+                    out.append(str(node).replace('__USERVAR__', ''))
+                return out
+            parts = getattr(node, 'parts', None)
+            if parts:
+                out.extend(str(p).replace('__USERVAR__', '') for p in parts)
+                return out
+            for child in (getattr(node, 'children', None) or []):
+                out.extend(_target_names(child))
+            return out
+
+        names = _target_names(target_tree) if target_tree is not None else []
         return DebugLogStmt(target='.'.join(names))
 
     def debug_checkpoint(self, children):
@@ -4623,13 +5713,44 @@ class MohioTransformer(Transformer):
         has_default = any(isinstance(c, Token) and c.type == 'DEFAULT' for c in children)
         value   = value_exprs[0] if value_exprs else None
         default = value_exprs[1] if (has_default and len(value_exprs) > 1) else None
-        return Assignment(
+        # THE QUOTED RENAME TAIL: `total (price + tax) as "grand_total"`. A STRING here is a
+        # NAME, never a value -- the only other STRING an assignment can carry is the value
+        # itself, and that has already been taken as a `value_expr`, so a bare STRING token
+        # sitting loose in the children is the tail and nothing else.
+        _rename_tok = next((c for c in children
+                            if isinstance(c, Token) and c.type == 'STRING'), None)
+        node = Assignment(
             name=name,
             type_name=type_name,
             value=value,
             default=default,
             line=_line(name_token),
         )
+        if _rename_tok is not None:
+            node.rename_to = _mohio_decode_string(str(_rename_tok))
+        return node
+
+    def rename_existing(self, children):
+        """`n as "grand_total"` -- rename an existing value.
+
+        A rename takes a QUOTED name, and the quotes are what make the rule possible rather than
+        what make it pretty. `n as int` and `n as grand_total` are the same shape to a
+        newline-blind parser, so a bare-word rename would compete with the empty typed
+        declaration and one of them would win on grounds unrelated to intent. A STRING and a
+        TYPE_NAME are different terminals, so the two cannot overlap by construction. Confirmed
+        by running, not assumed: `n as int` parses as `empty_typed_decl`, `n as "grand_total"` as
+        this rule, and a bare `n as total` as neither.
+        """
+        from mohio_ast import Assignment
+        name_token = next((c for c in children
+                           if isinstance(c, Token) and c.type == 'NAME'), None)
+        str_token = next((c for c in children
+                          if isinstance(c, Token) and c.type == 'STRING'), None)
+        node = Assignment(name=str(name_token) if name_token else "",
+                          value=None, line=_line(name_token))
+        node.rename_to = _mohio_decode_string(str(str_token)) if str_token else ""
+        node.rename_only = True
+        return node
 
     # -- CONDITIONS --------------------------------------------
 
@@ -5274,7 +6395,7 @@ class MohioTransformer(Transformer):
         from mohio_ast import LimitsBlock
         from lark import Token
         max_steps = 0; max_tokens = 0; cost_ceiling = 0.0; timeout = None
-        max_calls = 0
+        max_calls = 0; max_requests = 0
         for child in children:
             if not hasattr(child, 'data'): continue
             rule = str(child.data)
@@ -5297,8 +6418,12 @@ class MohioTransformer(Transformer):
             elif rule == 'limits_timeout':
                 try: timeout = float(n)
                 except: pass
+            elif rule == 'limits_max_requests':
+                try: max_requests = int(float(n))
+                except: pass
         return LimitsBlock(max_steps=max_steps, max_tokens=max_tokens, max_calls=max_calls,
-                           cost_ceiling=cost_ceiling, timeout=timeout)
+                           cost_ceiling=cost_ceiling, timeout=timeout,
+                           max_requests_per_second=max_requests)
 
     # -- sql_block and run_block (Zork critical) -------------------------------
     def raw_sql_content(self, children): return children
@@ -5365,8 +6490,8 @@ class MohioTransformer(Transformer):
                 fields.append(child)
                 continue
             # match_clause returns a LIST of MatchClause for multiple comma-separated pairs.
-            if isinstance(child, list):
-                matches.extend(c for c in child if type(c).__name__ == 'MatchClause')
+            if isinstance(child, list) or type(child).__name__ in _MATCH_NODE_NAMES:
+                matches.extend(_take_match([child], 'upsert'))
                 continue
 
             # Handle already-transformed AST objects (Lark transforms bottom-up)
@@ -5453,13 +6578,22 @@ class MohioTransformer(Transformer):
                              if not (isinstance(c, Token) and c.type == 'MAP_KW')), None)
         # Action form if first child after MAP_KW is NOT a NAME token
         # (it's a transformed value -- Literal, DottedName, etc.)
+        # T1-MAP-EXTRACTION (2026-08-24): the map name tokenizes as MAP_NAME, not NAME. MAP_NAME
+        # exists so `route` and `data` cannot be swallowed as a map's name -- without it,
+        # `map / route / a.mho -> "/a"` SILENTLY MISPARSED, the legacy alias rule taking `route`
+        # as the name and reading the arrow line as an alias entry. Both token types must be
+        # accepted here: testing NAME alone sent every declaration-form map down the ACTION
+        # branch, which returns source/through/alias and DISCARDS the entries and their
+        # modifiers outright. The silent-no-op lint caught exactly that (`map modifier` and
+        # `map ignore vs match` collapsed to identical ASTs), which is what the lint is for.
+        _MAP_NAME_TOKENS = ('NAME', 'MAP_NAME')
         is_action = (first_non_kw is not None and
                      not (isinstance(first_non_kw, Token) and
-                          first_non_kw.type == 'NAME'))
+                          first_non_kw.type in _MAP_NAME_TOKENS))
         if is_action:
             # Action form: map source through map_name as alias
             name_toks = [str(c) for c in children
-                         if isinstance(c, Token) and c.type == 'NAME']
+                         if isinstance(c, Token) and c.type in _MAP_NAME_TOKENS]
             source = first_non_kw  # the value_expr tree
             through = name_toks[0] if name_toks else ""
             alias   = name_toks[1] if len(name_toks) > 1 else ""
@@ -5467,10 +6601,326 @@ class MohioTransformer(Transformer):
         else:
             # Declaration form: map name / entries / map: done
             name_tok = next((c for c in children
-                             if isinstance(c, Token) and c.type == 'NAME'), None)
+                             if isinstance(c, Token) and c.type in _MAP_NAME_TOKENS), None)
             name = str(name_tok) if name_tok else ""
             entries = [c for c in children if isinstance(c, MapAliasEntry)]
             return MapDecl(name=name, entries=entries)
+
+    # ── `map` sections: route (mount / redirect) and data ────────────────────────────────
+    # T1-MAP-EXTRACTION (2026-08-24). The FREE mapping construct. Everything here is explicit,
+    # developer-written mapping; the intelligent middleware stays in paid `miomap`.
+
+    def map_mount_entry(self, children):
+        from mohio_ast import MapMount
+        # `about.mho to "/about"`. The file may be bare (a DottedName after the pretokenizer) or
+        # quoted when it holds a separator; the path is always a string, because `/` is exactly
+        # where a bare token turns ambiguous.
+        vals = [c for c in children if not (isinstance(c, Token) and c.type in ('TO',))]
+        source = self._map_text(vals[0]) if vals else ""
+        path = self._map_text(vals[-1]) if len(vals) > 1 else ""
+        return MapMount(source=source, path=path)
+
+    def map_redirect_entry(self, children):
+        from mohio_ast import MapRedirect
+        strs = [self._map_text(c) for c in children
+                if isinstance(c, Token) and c.type == 'STRING']
+        if len(strs) < 2:
+            strs = [self._map_text(c) for c in children
+                    if not (isinstance(c, Token) and c.type in ('TO',))][:2]
+        kind = next((c for c in children if isinstance(c, tuple)
+                     and len(c) == 3 and c[0] == '__redirect__'), None)
+        if kind is None:
+            # Unreachable in practice -- the grammar routes a typeless redirect to
+            # `redirect_missing_type` below, which raises. Kept as a belt-and-braces refusal
+            # rather than a silent default, because the default it would have to invent is the
+            # dangerous one.
+            raise MohioCompileError(_REDIRECT_NO_TYPE)
+        return MapRedirect(source=strs[0] if strs else "", target=strs[1] if len(strs) > 1 else "",
+                           kind=kind[1], status=kind[2])
+
+    def redirect_missing_type(self, children):
+        # A redirect MUST declare its type. No default, and this is a hard error rather than a
+        # warning: a permanent (301) redirect is cached aggressively by browsers, sometimes
+        # indefinitely, so a guessed type is a costly and hard-to-undo, user-facing mistake.
+        # Mount has a safe default and gets one; a redirect type does not and does not.
+        raise MohioCompileError(_REDIRECT_NO_TYPE)
+
+    def redirect_permanent(self, children): return ('__redirect__', 'permanent', 301)
+    def redirect_temporary(self, children): return ('__redirect__', 'temporary', 302)
+
+    def redirect_numeric(self, children):
+        raw = str(children[0]).strip()
+        try:
+            code = int(float(raw))
+        except (TypeError, ValueError):
+            code = 0
+        if code == 301:
+            return ('__redirect__', 'permanent', 301)
+        if code == 302:
+            return ('__redirect__', 'temporary', 302)
+        raise MohioCompileError(
+            f"`as {raw}` is not a redirect Mohio knows. The numeric forms are `as 301` "
+            f"(permanent) and `as 302` (temporary), which are aliases for `as permanent` and "
+            f"`as temporary`. Write the word where you can -- it reads as English and it is "
+            f"harder to get wrong.")
+
+    # ── `data`: a multi-stage PIPELINE ───────────────────────────────────────────────────
+    # A chain of stages joined by per-hop arrows, not a list of pairs. Structure-aware only:
+    # the qualifier declares the stage's kind and the path is carried as text, unresolved.
+
+    @staticmethod
+    def _stage_split(raw):
+        """Split a stage reference into (qualifier, path), unmarking the pretokenizer first.
+
+        The pretokenizer rewrites a dotted reference whose head is a known symbol into
+        `__USERVAR__db.ledger.amount`. Found by RUNNING the pipeline: the marker rode into the
+        stage, so the qualifier read `__USERVAR__db` instead of `db`, the driver's db-stage test
+        missed, and the value was written to a context variable instead of the database -- with
+        no error anywhere. Strip the marker here, once, where every stage kind passes through.
+        """
+        text = str(raw)
+        marker = '__USERVAR__'
+        if text.startswith(marker):
+            text = text[len(marker):]
+        head, _, rest = text.partition('.')
+        return head, rest
+
+    def stage_db(self, children):
+        # A `db.` stage: the qualifier declares the kind, exactly as DB_REF already does
+        # elsewhere in the grammar.
+        head, rest = self._stage_split(children[0])
+        return ('__stage_ref__', head, rest)
+
+    def stage_path(self, children):
+        head, rest = self._stage_split(children[0])
+        return ('__stage_ref__', head, rest)
+
+    # ── the flow/walk USABILITY layer (T1-FLOW-USABILITY, 2026-08-25) ────────────────────
+    # Every form here reuses a word the language already has. `flow` and `walk` were the two
+    # additions; a usability layer needing a third would be a design smell.
+
+    def flow_one_chain_block(self, children):
+        return self._flow_with_handlers(children, dotted=True)
+
+    def flow_all_chains_block(self, children):
+        return self._flow_with_handlers(children, dotted=False)
+
+    def _flow_with_handlers(self, children, dotted):
+        """`flow <map>[.chain]` with on.success / on.failure -- the STATUS primitive.
+
+        Status is the existing two-stage outcome channel, not a new return form. A flow either
+        moved its data or a hop broke, and both are outcomes every other verb block already
+        knows how to report.
+        """
+        from mohio_ast import FlowStmt
+        raw = next((str(c) for c in children
+                    if isinstance(c, Token) and c.type in ('MAP_STAGE_PATH', 'NAME')), "")
+        head, rest = (raw.partition('.')[0], raw.partition('.')[2]) if dotted else (raw, "")
+        handlers = []
+        for c in children:
+            if _is_tree(c, 'result_handlers'):
+                handlers.extend(h for h in c.children
+                                if isinstance(h, (OnFailure, OnSuccess, OnError, OtherwiseClause)))
+            elif isinstance(c, (OnFailure, OnSuccess, OnError, OtherwiseClause)):
+                handlers.append(c)
+        return FlowStmt(map_name=head, chain=rest, handlers=handlers)
+
+    def check_flow_one(self, children):
+        return self._check_flow(children, dotted=True)
+
+    def check_flow_all(self, children):
+        return self._check_flow(children, dotted=False)
+
+    def _check_flow(self, children, dotted):
+        """`check flow <map>[.chain] [as NAME]` -- run it, report what landed at the END."""
+        from mohio_ast import CheckFlowStmt
+        toks = [c for c in children if isinstance(c, Token)
+                and c.type in ('MAP_STAGE_PATH', 'NAME')]
+        raw = str(toks[0]) if toks else ""
+        alias = str(toks[1]) if len(toks) > 1 else ""
+        head, rest = (raw.partition('.')[0], raw.partition('.')[2]) if dotted else (raw, "")
+        return CheckFlowStmt(map_name=head, chain=rest, alias=alias)
+
+    def grab_stage_end(self, children):
+        """`grab first stage` / `grab last stage` -- the two SEMANTIC ends of a chain."""
+        from mohio_ast import GrabStageStmt
+        which = 'first' if any(isinstance(c, Token) and c.type == 'FIRST' for c in children) \
+            else 'last'
+        toks = [c for c in children if isinstance(c, Token)
+                and c.type in ('MAP_STAGE_PATH', 'NAME')]
+        raw = str(toks[0]) if toks else ""
+        alias = str(toks[1]) if len(toks) > 1 else ""
+        head, _, rest = raw.partition('.')
+        return GrabStageStmt(map_name=head, chain=rest, which=which, alias=alias)
+
+    def grab_stage_at(self, children):
+        """`grab stage at N` / `grab stage at "name"` -- direct access, convenience only."""
+        from mohio_ast import GrabStageStmt
+        num = next((c for c in children if isinstance(c, Token) and c.type == 'NUMBER'), None)
+        sname = next((c for c in children if isinstance(c, Token) and c.type == 'STRING'), None)
+        toks = [c for c in children if isinstance(c, Token)
+                and c.type in ('MAP_STAGE_PATH', 'NAME')]
+        raw = str(toks[0]) if toks else ""
+        alias = str(toks[1]) if len(toks) > 1 else ""
+        head, _, rest = raw.partition('.')
+        return GrabStageStmt(map_name=head, chain=rest, which='at', alias=alias,
+                             at_position=int(str(num)) if num is not None else 0,
+                             at_name=_mohio_decode_string(str(sname)) if sname is not None else "")
+
+    def walk_report(self, children): return ('__walk__', 'report', None)
+    def walk_log(self, children):    return ('__walk__', 'log', None)
+
+    def walk_do(self, children):
+        # Any other statement runs with the stage bound, so a walk can ACT at a handoff rather
+        # than only look at it. A `then` chain is an ordinary statement and needs nothing special.
+        body = [c for c in children if not isinstance(c, Token)]
+        return ('__walk__', 'do', body)
+
+    def walk_body(self, children):
+        return next((c for c in children
+                     if isinstance(c, tuple) and len(c) == 3 and c[0] == '__walk__'), None)
+
+    def _walk(self, children, dotted):
+        from mohio_ast import WalkStmt
+        raw = next((str(c) for c in children
+                    if isinstance(c, Token) and c.type in ('MAP_STAGE_PATH', 'NAME', 'MAP_NAME')),
+                   "")
+        if dotted:
+            head, _, rest = raw.partition('.')
+        else:
+            head, rest = raw, ""
+        actions = [c for c in children
+                   if isinstance(c, tuple) and len(c) == 3 and c[0] == '__walk__']
+        return WalkStmt(map_name=head, chain=rest, actions=actions)
+
+    def walk_one_chain(self, children):  return self._walk(children, True)
+    def walk_all_chains(self, children): return self._walk(children, False)
+
+    def flow_all_chains(self, children):
+        from mohio_ast import FlowStmt
+        name = next((str(c) for c in children if isinstance(c, Token) and c.type != 'FLOW'), "")
+        return FlowStmt(map_name=name, chain="")
+
+    def flow_one_chain(self, children):
+        from mohio_ast import FlowStmt
+        raw = next((str(c) for c in children if isinstance(c, Token) and c.type != 'FLOW'), "")
+        head, _, rest = raw.partition('.')
+        return FlowStmt(map_name=head, chain=rest)
+
+    def stage_transform(self, children):
+        # A BARE stage: no qualifier, because it is not a place. It names a shape the value is
+        # reformed by as it passes through. Carried with an empty qualifier so the driver can
+        # tell the two kinds apart without re-parsing the text.
+        raw = str(children[0])
+        marker = '__USERVAR__'
+        return ('__stage_ref__', '', raw[len(marker):] if raw.startswith(marker) else raw)
+
+    def map_fmt_value(self, children):
+        return ('__fmt__', ' '.join(str(c) for c in children))
+
+    def map_stage_fmt(self, children):
+        for c in children:
+            if isinstance(c, tuple) and len(c) == 2 and c[0] == '__fmt__':
+                return ('__stagefmt__', c[1])
+        return ('__stagefmt__', ' '.join(str(c) for c in children if isinstance(c, Token)))
+
+    def map_stage(self, children):
+        from mohio_ast import MapStage
+        ref = next((c for c in children if isinstance(c, tuple)
+                    and len(c) == 3 and c[0] == '__stage_ref__'), None)
+        fmt = next((c for c in children if isinstance(c, tuple)
+                    and len(c) == 2 and c[0] == '__stagefmt__'), None)
+        return MapStage(qualifier=ref[1] if ref else "", path=ref[2] if ref else "",
+                        fmt=fmt[1] if fmt else "")
+
+    # `is_transform` on MapStage distinguishes the two kinds; see mohio_ast.MapStage.
+
+    def hop_forward(self, children):       return ('__hop__', 'forward')
+    def hop_bidirectional(self, children): return ('__hop__', 'bidirectional')
+    def hop_reverse(self, children):       return ('__hop__', 'reverse')
+
+    def map_pipeline(self, children):
+        from mohio_ast import MapPipeline, MapStage
+        stages = [c for c in children if isinstance(c, MapStage)]
+        hops = [c[1] for c in children
+                if isinstance(c, tuple) and len(c) == 2 and c[0] == '__hop__']
+        if len(hops) != len(stages) - 1:
+            # A chain of N stages has exactly N-1 hops. Anything else means a stage or an arrow
+            # was dropped between the parse and here, and a pipeline with the wrong number of
+            # hops would map the wrong stages to each other -- silently.
+            raise MohioCompileError(
+                f"map data: this pipeline has {len(stages)} stage(s) but {len(hops)} arrow(s) "
+                f"between them. A chain of N stages needs exactly N-1 arrows.")
+        return MapPipeline(stages=stages, hops=hops)
+
+    def map_pipeline_line(self, children):
+        from mohio_ast import MapPipeline
+        return ('__pipelines__', [c for c in children if isinstance(c, MapPipeline)])
+
+    def map_route_mount(self, children):
+        # A `route` section holds mounts and status responses side by side, so the section
+        # hands back both rather than one -- a response declared next to a mount is the same
+        # section talking about the same routing table.
+        from mohio_ast import MapMount, MapStatusResponse
+        _resp = [c for c in children if isinstance(c, MapStatusResponse)]
+        if _resp:
+            return ('__map_section__multi__',
+                    [('mounts', [c for c in children if isinstance(c, MapMount)]),
+                     ('responses', _resp)])
+        return ('__map_section__', 'mounts',
+                [c for c in children if isinstance(c, MapMount)])
+
+    def map_status_response(self, children):
+        """`[404] /page` -> serve that page at 404. `[404] "gone"` -> that text at 404."""
+        from mohio_ast import MapStatusResponse
+        label = next((c for c in children
+                      if isinstance(c, Token) and c.type == 'STATUS_LABEL'), None)
+        inner = str(label).strip()[1:-1].strip() if label is not None else ''
+        status = ({'ok': 200, 'created': 201, 'unauthorized': 401, 'missing': 404,
+                   'error': 500, 'pending': 202}.get(inner.lower())
+                  or _coerce_number(inner))
+        rest = next((c for c in children if c is not label), None)
+        is_string = isinstance(rest, Token) and rest.type == 'STRING'
+        target = self._map_text(rest) if rest is not None else ''
+        return MapStatusResponse(status=int(status), kind='message' if is_string else 'page',
+                                 target=target, line=_line(label))
+
+    def map_route_redirect(self, children):
+        from mohio_ast import MapRedirect
+        return ('__map_section__', 'redirects',
+                [c for c in children if isinstance(c, MapRedirect)])
+
+    def map_data_section(self, children):
+        pipelines = []
+        for c in children:
+            if isinstance(c, tuple) and len(c) == 2 and c[0] == '__pipelines__':
+                pipelines.extend(c[1])
+        return ('__map_section__', 'data', pipelines)
+
+    def map_sections_decl(self, children):
+        from mohio_ast import MapSectionsDecl
+        name_tok = next((c for c in children
+                         if isinstance(c, Token) and c.type in ('NAME', 'MAP_NAME')), None)
+        node = MapSectionsDecl(name=str(name_tok) if name_tok else "")
+        for c in children:
+            if isinstance(c, tuple) and len(c) == 3 and c[0] == '__map_section__':
+                getattr(node, c[1]).extend(c[2])
+            elif isinstance(c, tuple) and len(c) == 2 and c[0] == '__map_section__multi__':
+                for slot, items in c[1]:
+                    getattr(node, slot).extend(items)
+        return node
+
+    def _map_text(self, node):
+        """The plain text of a map entry side: a quoted string without its quotes, or a bare
+        dotted file name rejoined."""
+        if isinstance(node, Token):
+            raw = str(node)
+            return raw[1:-1] if raw[:1] == '"' and raw[-1:] == '"' else raw
+        parts = getattr(node, 'parts', None)
+        if parts:
+            return '.'.join(str(p) for p in parts)
+        val = getattr(node, 'value', None)
+        return str(val) if val is not None else str(node)
 
     def map_alias_entry(self, children):
         from mohio_ast import MapAliasEntry
@@ -5526,6 +6976,21 @@ class MohioTransformer(Transformer):
         return AppendStmt(value=val, target=str(name_tok) if name_tok else "",
                           strict_list=True)
 
+    # Algorithms this build actually runs, split by what they are FOR. The split is the whole
+    # point: bcrypt and pbkdf2 are slow and salted because a password must be expensive to
+    # guess; sha256/sha512 are fast because a checksum must be cheap. Naming them in one
+    # undifferentiated list is how a password ends up under a checksum digest.
+    _HASH_FOR_PASSWORDS = ('bcrypt', 'pbkdf2', 'pbkdf2_sha256')
+    _HASH_FOR_CHECKSUMS = ('sha256', 'sha512', 'sha384', 'sha224')
+    # Refused outright. Both are broken for security work, and neither had ANY warning before
+    # 2026-09-01 -- the grammar comment claimed `mio fmt` warned on them, `mio fmt` reported
+    # "already canonical", and `mio check` (which announces "full compliance and security
+    # analysis") reported no errors on `hash pw as hashed using md5`.
+    _HASH_REFUSED = {
+        'md5':  "MD5 is broken -- collisions are trivial to produce.",
+        'sha1': "SHA-1 is broken -- a practical collision was published in 2017.",
+    }
+
     def hash_block(self, children):
         from mohio_ast import HashBlock
         from lark import Token, Tree
@@ -5538,24 +7003,98 @@ class MohioTransformer(Transformer):
                 items.extend(c.children)
             else:
                 items.append(c)
-        value = None
-        alias = None
+
+        # Collect EVERY value/alias pair, not just the first. The previous version kept the
+        # first value and the last alias, so a two-field block wrote the FIRST value's hash
+        # under the SECOND field's name and never set the first name at all -- verified
+        # 2026-09-01: `pw as hashed_pw` + `pin as hashed_pin` left `hashed_pw` undefined and
+        # put sha256("hunter2") into `hashed_pin`. In a credential block that is a password
+        # hash filed under the PIN column, silently.
+        pairs = []          # [{'value': node, 'alias': str|None}]
         algorithm = None
+        line = next((c.line for c in items
+                     if isinstance(c, Token) and getattr(c, 'line', None)), None)
         i = 0
         while i < len(items):
             c = items[i]
             if isinstance(c, Token) and c.type == 'AS' and i + 1 < len(items):
-                alias = str(items[i + 1]); i += 2; continue
+                if pairs:
+                    pairs[-1]['alias'] = str(items[i + 1])
+                i += 2; continue
             if isinstance(c, Token) and c.type == 'USING' and i + 1 < len(items):
                 algorithm = str(items[i + 1]); i += 2; continue
-            if isinstance(c, Token):
+            # The closer arrives as a Closer AST NODE, not a Tree, so `_is_tree(c,
+            # 'closer')` alone never matched it. The old code's `if value is None`
+            # guard swallowed the surplus item silently; counting pairs exposes it.
+            if (isinstance(c, Token) or _is_tree(c, 'closer')
+                    or type(c).__name__ == 'Closer'):
                 i += 1; continue
-            if _is_tree(c, 'closer'):
-                i += 1; continue
-            if value is None:
-                value = c
+            pairs.append({'value': c, 'alias': None})
             i += 1
-        return HashBlock(value=value, alias=alias, algorithm=(algorithm or 'sha256'))
+
+        _named = ", ".join(p['alias'] for p in pairs if p['alias'])
+        if len(pairs) > 1:
+            # RESOLVED 2026-09-01, not deferred. The complete list of things a developer could
+            # legitimately mean by a multi-field hash was enumerated before deciding:
+            #   (a) several values, each to its own name  -> one `hash` per value, already works
+            #   (b) several values into ONE digest        -> `hash (a & "|" & b) as fp using ...`
+            #   (c) one value under several algorithms    -> two `hash` statements
+            # All three are already writable, so building a multi-field form would add a second
+            # way to say what Mohio can already say. Worse, (b) is the only case that could not
+            # be expressed otherwise, and a built-in version would have to pick a JOINING
+            # convention on the developer's behalf -- joining with nothing makes "ab"+"c"
+            # collide with "a"+"bc", silently, inside a fingerprint. That is the silent default
+            # the no-silent-failures rule exists to stop. The concat form keeps the separator
+            # visible and is canonical Mohio already.
+            #
+            # So this message teaches the two real forms rather than promising a future one:
+            # the distinction between "declared but not yet built" (wait for it) and "this is
+            # not how Mohio says it" (write it differently) has to be readable from the message.
+            raise MohioCompileError(
+                "`hash` takes one value, and this block names " + str(len(pairs))
+                + " (" + _named + ")." + chr(10) +
+                "    To hash each one separately, write a `hash` for each:" + chr(10) +
+                "        hash pw as hashed_pw using bcrypt" + chr(10) +
+                "        hash pin as hashed_pin using bcrypt" + chr(10) +
+                "    To combine them into ONE digest, join them first, so you choose the "
+                "separator:" + chr(10) +
+                "        hash (device & \"|\" & owner) as fingerprint using sha256" + chr(10) +
+                "    (Joining without a separator would let \"ab\" + \"c\" and \"a\" + \"bc\" "
+                "produce the same digest, which is why Mohio does not do it for you.)",
+                line=line)
+
+        if algorithm is None:
+            raise MohioCompileError(
+                "`hash` needs `using <algorithm>` -- it will not choose one for you." + chr(10)
+                + "    For a PASSWORD:  using bcrypt   (or `using pbkdf2`, no extra package)"
+                + chr(10)
+                + "    For a CHECKSUM:  using sha256   (or sha512)" + chr(10)
+                + "    It used to default to sha256 silently, which gave a password a "
+                "single-round unsalted digest -- fast to compute is exactly what makes it "
+                "fast to crack.",
+                line=line)
+
+        algo = algorithm.lower()
+        if algo in self._HASH_REFUSED:
+            raise MohioCompileError(
+                "`using " + algorithm + "` is refused. " + self._HASH_REFUSED[algo] + chr(10)
+                + "    For a PASSWORD:  using bcrypt   (or `using pbkdf2`)" + chr(10)
+                + "    For a CHECKSUM:  using sha256   (or sha512)",
+                line=line)
+
+        if algo not in self._HASH_FOR_PASSWORDS + self._HASH_FOR_CHECKSUMS:
+            # Caught here rather than at run time: the algorithm is a bare word in the source,
+            # so the compiler can already see it is not one Mohio runs. A typo like
+            # `using bcrpyt` should not reach a live login route to be discovered there.
+            raise MohioCompileError(
+                "`hash` does not know the algorithm '" + algorithm + "'." + chr(10)
+                + "    For a PASSWORD:  " + ", ".join(self._HASH_FOR_PASSWORDS) + chr(10)
+                + "    For a CHECKSUM:  " + ", ".join(self._HASH_FOR_CHECKSUMS),
+                line=line)
+
+        return HashBlock(value=pairs[0]['value'] if pairs else None,
+                         alias=pairs[0]['alias'] if pairs else None,
+                         algorithm=algo)
 
     def replace_block(self, children):
         from mohio_ast import ReplaceBlock
@@ -5797,8 +7336,8 @@ class MohioTransformer(Transformer):
             for k in c.children:
                 if isinstance(k, MatchClause):
                     matches.append(k)
-                elif isinstance(k, list):
-                    matches.extend(x for x in k if isinstance(x, MatchClause))
+                elif isinstance(k, list) or type(k).__name__ in _MATCH_NODE_NAMES:
+                    matches.extend(_take_match([k], 'cm.purge'))
         if has_from:
             return CmPurgeBlock(source=subject, matches=matches, reason=reason)
         return CmPurgeBlock(target=subject, reason=reason)
@@ -5916,6 +7455,10 @@ class MohioTransformer(Transformer):
 
     def ai_agent_block(self, children):
         from mohio_ast import AiAgentBlock, ToolsBlock
+        # Handlers now arrive wrapped by the shared `result_handlers` rule (2026-09-02).
+        # Flatten first so every lookup below sees handler nodes as direct children,
+        # exactly as it did when this block hand-listed them.
+        children = self._flatten_result_handlers(children)
         name_tok = next((c for c in children
                          if isinstance(c, Token) and c.type == 'NAME'), None)
         non_name = [c for c in children if not (isinstance(c, Token) and c.type == 'NAME')]
@@ -5924,6 +7467,11 @@ class MohioTransformer(Transformer):
         # children. So none of them were found and `goal` came out empty -- an agent declared
         # with a goal ran with no instructions at all, silently. Flatten single-item wrappers
         # first so the shared extractor sees what every other ai.* block gives it.
+        self._refuse_decorative_confidence(
+            'ai.agent',
+            [c for c in children if not isinstance(c, Token)],
+            _line(next((c for c in children if isinstance(c, Token)), None)),
+            gate_only=True)
         _flat = []
         for _c in non_name:
             if _is_tree(_c, 'ai_agent_body') and len(getattr(_c, 'children', [])) == 1:
@@ -6166,14 +7714,40 @@ class MohioTransformer(Transformer):
         return StringOpExpr(operation=op, operand=operand)
 
 
-    def sec_classify_block(self, children): return None
+    # ── sec.* — DECLARED, NOT YET BUILT (fail loud, 2026-08-25) ──────────────────────────
+    # These five transformed to None, which meant no AST node was produced, nothing reached the
+    # interpreter, and the dispatcher's own unknown-node fail-loud was bypassed: the program
+    # parsed, ran, did NOTHING, and `mio check` reported "no errors". For a SECURITY primitive
+    # that is the worst possible failure -- `sec.headers` promises CSP/HSTS and delivered
+    # nothing while reporting success, so the app looked hardened and was not.
+    #
+    # This is a DEFERRAL, not a resolution: the message says "declared but not yet built" so a
+    # reader can tell it apart from "you wrote this wrong", and each is tracked in
+    # CLAUDE-CODE-BACKLOG.md (T1-SEC-PRIMITIVES-UNBUILT).
+    #
+    # NOT affected, because both are really implemented and must keep working:
+    #   * `sec.encrypt`      -- a field tag, enforced through _encrypted_fields at every write.
+    #   * `sec.non_critical` -- enforced at validate time via noncritical_status().
+    def _sec_unbuilt(self, form, promise):
+        raise MohioCompileError(
+            f"`{form}` is declared but NOT YET BUILT, so it would do nothing at all. Refusing "
+            f"rather than letting a security declaration report success while absent -- "
+            f"{promise} is not enforced by this build. Remove it, or enforce that rule another "
+            f"way, until it is built (backlog: T1-SEC-PRIMITIVES-UNBUILT).")
+
+    def sec_classify_block(self, children):
+        self._sec_unbuilt('sec.classify', 'data classification / strip-on-output')
     def sec_classify_body(self, children): return None
     def sec_classify_rule(self, children): return None
-    def sec_validate_stmt(self, children): return None
+    def sec_validate_stmt(self, children):
+        self._sec_unbuilt('sec.validate', 'input threat validation')
     def sec_threat_list(self, children): return None
-    def sec_audit_stmt(self, children): return None
-    def sec_nohardcode_stmt(self, children): return None
-    def sec_headers_block(self, children): return None
+    def sec_audit_stmt(self, children):
+        self._sec_unbuilt('sec.audit', 'the audit requirement it states')
+    def sec_nohardcode_stmt(self, children):
+        self._sec_unbuilt('sec.nohardcode', 'the no-hardcoded-secrets rule')
+    def sec_headers_block(self, children):
+        self._sec_unbuilt('sec.headers', 'the security headers it lists (CSP, HSTS, X-Frame-Options)')
     def sec_header_entry(self, children): return None
 
 
@@ -6230,8 +7804,31 @@ class MohioTransformer(Transformer):
         alias_tok = next((c for c in children
                           if isinstance(c, Token) and c.type == 'NAME'), None)
         alias = str(alias_tok) if alias_tok is not None else ""
-        vals = [c for c in children if not isinstance(c, Token)]
-        return MioCacheStmt(op=op, key=key, values=vals, alias=alias)
+        # `for NUMBER time_unit` -- captured, not dropped. It parsed all along and was
+        # thrown away here, so `miocache.set "k" v for 10 minutes` cached forever (Q66).
+        # `time_unit` is a `!`-prefixed rule, so it keeps its own word.
+        _ttl = None
+        _unit_node = _first_tree(children, 'time_unit')
+        if _unit_node is not None:
+            _num = next((c for c in children
+                         if isinstance(c, Token) and c.type == 'NUMBER'), None)
+            _unit = (_token_str(_unit_node) or '').strip().lower()
+            _mult = self._TRY_UNIT_SECONDS.get(_unit)
+            if _num is None or not _mult:
+                # No silent default here. `... or 'seconds'` would turn a unit this cannot read
+                # into SECONDS, so `for 10 hours` would quietly cache for ten seconds -- a
+                # wrong lifetime, chosen without saying so. Caught by the silent-shape ratchet
+                # on the day it was written, which is the point of the ratchet.
+                raise MohioCompileError(
+                    "`miocache.set` could not read the expiry `for " + str(_num or '?') + " "
+                    + (_unit or '?') + "`." + chr(10) +
+                    "    Use one of: " + ", ".join(sorted(set(self._TRY_UNIT_SECONDS))) + ".")
+            _ttl = float(str(_num)) * _mult
+        # The time_unit tree rides in `children` as a non-Token, so it would otherwise land in
+        # `values` and sit behind the real value as a stray operand.
+        vals = [c for c in children
+                if not isinstance(c, Token) and not _is_tree(c, 'time_unit')]
+        return MioCacheStmt(op=op, key=key, values=vals, alias=alias, ttl_seconds=_ttl)
 
     # -- mio* service stubs (not yet implemented) -----------------
     # miomail_stmt and miohttp_stmt are implemented above
@@ -6300,7 +7897,10 @@ class MohioTransformer(Transformer):
         non_toks = [c for c in children if not isinstance(c, Token)]
         value = non_toks[0] if non_toks else None
         stored = non_toks[1] if len(non_toks) > 1 else None
-        # Flatten check_against_body wrappers so on.failure/on.success land directly
+        # Handlers arrive through the shared `result_handlers` rule now (D-sweep 2026-09-02);
+        # `check_against_body` is gone, and with it its hand-rolled `otherwise` that built no
+        # node and could never run.
+        non_toks = self._flatten_result_handlers(non_toks)
         body = []
         for c in non_toks[2:]:
             if isinstance(c, list):
@@ -6311,11 +7911,14 @@ class MohioTransformer(Transformer):
                 body.append(c)
         return CheckAgainstStmt(value=value, stored=stored, body=body)
 
-    def check_against_body(self, children): return children
 
     def encode_stmt(self, children):
         from mohio_ast import EncodeStmt
-        toks = [c for c in children if isinstance(c, Token) and c.type == 'NAME']
+        # The format slot accepts TYPE_NAME as well as NAME (`base64` is both a format name and a
+        # reserved type word), so filtering on NAME alone silently dropped the format token and
+        # promoted the ALIAS into its place -- a wrong-but-plausible result, not a parse error.
+        toks = [c for c in children
+                if isinstance(c, Token) and c.type in ('NAME', 'TYPE_NAME')]
         fmt = str(toks[0]) if toks else "base64"
         alias = str(toks[1]) if len(toks) > 1 else ""
         val = next((c for c in children if not isinstance(c, Token)), None)
@@ -6323,7 +7926,9 @@ class MohioTransformer(Transformer):
 
     def decode_stmt(self, children):
         from mohio_ast import DecodeStmt
-        toks = [c for c in children if isinstance(c, Token) and c.type == 'NAME']
+        # Same as encode_stmt above: the format slot takes TYPE_NAME too.
+        toks = [c for c in children
+                if isinstance(c, Token) and c.type in ('NAME', 'TYPE_NAME')]
         fmt = str(toks[0]) if toks else "base64"
         alias = str(toks[1]) if len(toks) > 1 else ""
         val = next((c for c in children if not isinstance(c, Token)), None)
@@ -6409,8 +8014,14 @@ class MohioTransformer(Transformer):
         paths = [str(c) for c in children
                  if isinstance(c, Token) and getattr(c, 'type', '') in ('REL_PATH', 'PATH_LIT', 'STRING')]
         policies = [c for c in children if isinstance(c, dict) and 'policy' in c]
+        # A cloud area's connection settings, kept beside its policies rather than mixed in with
+        # them: they answer different questions, and only one of the two governs what may be
+        # stored.
+        settings = {c['setting']: c for c in children
+                    if isinstance(c, dict) and 'setting' in c}
         return {'kind': kind, 'name': (names[0] if names else None),
-                'path': (paths[0] if paths else None), 'policies': policies}
+                'path': (paths[0] if paths else None), 'policies': policies,
+                'settings': settings}
 
     def miofile_policy(self, children):
         _kw = {'accept', 'all', 'except', 'max', 'size', 'expires', 'clean', 'using', 'in', 'after'}
@@ -6420,7 +8031,33 @@ class MohioTransformer(Transformer):
                  if not (isinstance(c, Token) and str(c) in _kw)]
         return {'policy': policy, 'parts': parts}
 
-    def miofile_cloud_body(self, children): return children
+    def miofile_cloud_body(self, children):
+        """One line inside a `cloud` area: a connection setting, or a policy it shares with a
+        local area.
+
+        THIS RETURNED ITS CHILDREN UNREAD, and everything in a cloud area was thrown away with
+        them: the bucket, the region and the endpoint the coder wrote, and `accept` and
+        `max size` too, so a cloud area enforced none of the rules the same words enforce on a
+        local one. Verified before the fix, on an area declaring all five:
+
+            {'kind': 'cloud', 'name': 'vault', 'path': None, 'policies': []}
+
+        A policy dict is passed straight through so `miofile_decl_body` collects it exactly as it
+        collects a local area's, which is what makes `accept` and `max size` mean one thing in
+        both places.
+        """
+        for c in children:
+            if isinstance(c, dict) and 'policy' in c:
+                return c
+        setting = next((str(c).lower() for c in children
+                        if isinstance(c, Token)
+                        and str(c).lower() in ('bucket', 'region', 'key', 'secret', 'endpoint')),
+                       None)
+        value = next((c for c in children
+                      if isinstance(c, Token) and str(c).lower() != setting), None)
+        if setting is None or value is None:
+            return children
+        return {'setting': setting, 'value': value, 'token_type': getattr(value, 'type', '')}
 
     def miolog_decl(self, children): return None
     def miolog_decl_body(self, children): return children
@@ -6504,6 +8141,7 @@ class MohioTransformer(Transformer):
 
     def sql_block(self, children):
         from mohio_ast import SqlBlock, Closer
+        from mohio_pretokenizer import unmark_text
         alias = None
         sql_lines = []
         def gather(node):
@@ -6523,11 +8161,19 @@ class MohioTransformer(Transformer):
                 alias = child.as_name
             else:
                 gather(child)
-        sql_text = "\n".join(l for l in sql_lines if l.strip())
+        # SAME CAPTURE, SAME LEAK. `sql` gathers raw lines exactly as `show` does, and a
+        # first probe appeared to exonerate it -- but that probe had put the dotted name
+        # inside single quotes, and the pretokenizer skips quoted text, so it was measuring
+        # nothing. Unquoted, `SELECT contact.name FROM messages` pretokenizes to
+        # `SELECT __USERVAR__contact.name FROM messages` and the marker would ride into the
+        # statement sent to the database. A false exoneration deletes the real suspect, so
+        # this one was re-run under the right conditions before being called a sibling.
+        sql_text = unmark_text("\n".join(l for l in sql_lines if l.strip()))
         return SqlBlock(sql=sql_text, alias=alias)
 
     def show_block(self, children):
         from mohio_ast import ShowBlock
+        from mohio_pretokenizer import unmark_text
         # Gather raw HTML lines from raw_show_content (mirrors sql_block).
         html_lines = []
         for child in children:
@@ -6538,9 +8184,22 @@ class MohioTransformer(Transformer):
                             html_lines.append(str(tok))
                     elif isinstance(line_tree, Token):
                         html_lines.append(str(line_tree))
-            elif isinstance(child, Token) and child.type not in ('SHOW', 'RENDER', 'DONE', 'DOTTED_CLOSER'):
+            # RENDER_KIND is the container's NAME (`render scripts`), not content. It was not
+            # excluded here, so the literal word `scripts` was gathered as an HTML line and
+            # served inside <body> -- visible on the page, in every scripts render.
+            elif isinstance(child, Token) and child.type not in (
+                    'SHOW', 'RENDER', 'DONE', 'DOTTED_CLOSER', 'RENDER_KIND'):
                 html_lines.append(str(child))
-        html_text = "\n".join(l for l in html_lines if l.strip())
+        # UNDO THE PRETOKENIZER MARK BEFORE THE BODY BECOMES TEXT. A raw markup line is
+        # captured verbatim, and the pretokenizer had already welded a dotted user name
+        # inside it into `__USERVAR__contact.name` -- so the marker rode all the way to
+        # `_interpolate_output`, which split on the dot and looked up a variable literally
+        # called `__USERVAR__contact`. `examples/contact.mho`, a copyable reference example,
+        # answered a real POST with `unknown_variable: {{ __USERVAR__contact.name }}` because
+        # of it. Verified by running, not by reading: `show "{{ contact.name }}"` in the same
+        # handler worked, because a STRING literal is never marked, while the render body two
+        # lines below it failed.
+        html_text = unmark_text("\n".join(l for l in html_lines if l.strip()))
         return ShowBlock(html=html_text)
 
     def render_block(self, children):
@@ -6581,7 +8240,25 @@ class MohioTransformer(Transformer):
         return DescribeDecl(text=_mohio_decode_string(str(tok)) if tok else "")
 
     def save_field(self, children):
-        from mohio_ast import FieldValue, DynamicFieldValue
+        from mohio_ast import FieldValue, DynamicFieldValue, ShRef
+        # `save to db.d as sh.D` is NOT the alias form -- the grammar's alias slot is
+        # `(AS NAME)?`, and `sh.D` is not a NAME. So the line fell through to here and produced
+        # a FIELD literally named `as` whose value was a shape reference, which then reached the
+        # SQL binder and died as "type 'ShapeDecl' is not supported" -- a confusing error three
+        # layers from the mistake, for a line that should never have been accepted.
+        # Found 2026-09-02 while measuring `allowed`. Same shape as the B18-1 finding queued for
+        # the next run (`email text [pii]` silently becoming a field named `text`): two words on
+        # one line producing a bogus field instead of a refusal. Refused here by NAME, at compile
+        # time, naming both real forms.
+        _toks = [c for c in children if isinstance(c, Token)]
+        if _toks and str(_toks[0]).lower() == 'as':
+            raise MohioCompileError(
+                "`as` is not a field name. If you meant to name the saved row, the form is "
+                "`save to <table> as <name>` with a plain name, not `sh.<Shape>`. If you meant "
+                "to validate the write against a shape, that is not a form this build has -- "
+                "declare the shape and write the fields directly. Left as written, this became "
+                "a column called `as` holding a shape reference.",
+                line=_line(_toks[0]))
         # Grammar: save_field: NAME value_expr            // static:  troll_dead "true"
         #                    | dotted_name _TO value_expr // dynamic: puzzle.flag_set to "true"
         #
@@ -6596,7 +8273,7 @@ class MohioTransformer(Transformer):
         # same way (verified: static -> [Token(NAME), ...], dynamic -> [DottedName, ...]).
         tokens = [c for c in children if isinstance(c, Token)]
         non_tokens = [c for c in children if not isinstance(c, Token)]
-        name_tok = next((t for t in tokens if t.type == 'NAME'), None)
+        name_tok = next((t for t in tokens if t.type in _FIELD_NAME_TOKENS), None)
         if name_tok is None:
             # Dynamic: the field NAME is a node (resolved at runtime), not a NAME token.
             field_name = non_tokens[0] if non_tokens else None

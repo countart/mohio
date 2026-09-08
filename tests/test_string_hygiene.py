@@ -87,8 +87,12 @@ expect_run("b1: escaped inner quote prints the quote", 'show "she said \\"hi\\""
 expect_run("b2: apostrophe inside a string", 'show "it\'s fine"\n', "it's fine")
 expect_run("b3: single quotes inside a string", 'show "the \'best\' one"\n', "the 'best' one")
 expect_run("b4: closed interpolation resolves", 'name "Bo"\nshow "hi {{ name }}"\n', "hi Bo")
+# want_exit=1 since 2026-09-02: `mio run` now exits non-zero on a 5xx runtime failure, and an
+# unknown variable IS one. This case never meant to assert exit 0 -- it took the helper's
+# default while its own label says the program fails. The file's own convention two cases up is
+# "fails at run, exits 1"; this is now consistent with it.
 expect_run("b5: undefined interpolation -> unknown_variable (unchanged)",
-           'show "{{ undefined }}"\n', "unknown_variable")
+           'show "{{ undefined }}"\n', "unknown_variable", want_exit=1)
 expect_run("b7: empty string still empty, no error", 'show ""\n', "", want_exit=0)
 expect_run("log-only: unknown escape passes through literally, no error",
            'show "\\qescape"\n', "\\qescape")

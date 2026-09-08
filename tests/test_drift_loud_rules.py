@@ -70,7 +70,7 @@ valid("naming on the action (`check score as grade`)",
 
 # 14. Route paths after `at` are unquoted
 loud("quoted route path after `at`",
-     'request for sh.C at "/c"\n    give back 200 "ok"\nrequest: done\n')
+     'request for sh.C at "/c"\n    give back [200] "ok"\nrequest: done\n')
 
 # 15. A not-built service fails at CHECK, not just RUN
 loud("not-built service (`miosearch.index`)", 'miosearch.index "doc"\n')

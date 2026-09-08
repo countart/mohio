@@ -10,20 +10,25 @@ sector: financial
 
 connect db as sqlite from env.DATABASE_URL
 
-listen for POST "/demo/agent/bounded"
+shape BoundedRequest
+    transaction as text
+shape: done
 
-    ai.agent fraudResearcher
-        goal "Analyze this transaction for fraud indicators."
-        limits
-            max steps    3
-            max tokens   1500
-            cost ceiling 0.25
-        limits: done
+listen for
+    new sh.BoundedRequest at /demo/agent/bounded
 
-        not confident
-            give back 503 "Boundary gate intercepted -- routed to manual review."
-    ai.agent: done
+        ai.agent fraudResearcher
+            goal "Analyze this transaction for fraud indicators."
+            limits
+                max steps    3
+                max tokens   1500
+                cost ceiling 0.25
+            limits: done
 
-    give back 200 fraudResearcher as json
+            not confident
+                give back [503] "Boundary gate intercepted -- routed to manual review."
+        ai.agent: done
 
+        give back 200 fraudResearcher as json
+    new: done
 listen: done

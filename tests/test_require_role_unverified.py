@@ -36,7 +36,7 @@ def check(label, cond, detail=""):
 
 SRC = ('shape AdminAction\n    action as text required\nshape: done\n'
        'listen for\n    new sh.AdminAction\n        require role "admin"\n'
-       '        give back 200 "ADMIN OK"\n    new: done\nlisten: done\n')
+       '        give back [200] "ADMIN OK"\n    new: done\nlisten: done\n')
 
 def hit(roles):
     req = {'method': 'POST', 'path': '/', 'action': 'wipe', '_roles': roles}

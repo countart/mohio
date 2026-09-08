@@ -906,6 +906,45 @@ def _parse_and_validate(source, filename, verbose=False):
     # reject every non-Latin pack (Devanagari, Cyrillic, Greek) before Layer 1 could
     # translate it, which is what happened. The gate belongs on the canonical output.
 
+    # -1a''. Sector hierarchy moved from dots to commas (2026-08-25). Checked BEFORE the parser
+    # runs, because the parser's own answer is "No terminal matches '.'", which tells a coder
+    # nothing about what changed or what to write instead. The levels and their order are
+    # unchanged; only the separator moved, because a dot is a plausible character inside a
+    # sector NAME and would silently split one into levels nobody asked for.
+    import re as _re_sector
+
+    # The `page` BLOCK was removed (2026-08-25). Checked before the parser, because the parser's
+    # answer is a bare "no terminal matches" that says nothing about what changed. The WORD stays
+    # reserved, so this is a migration message rather than an unknown-word error.
+    _page_block = _re_sector.compile(
+        r'^\s*page\b(?!\s*:)\s*(?:[A-Za-z_][A-Za-z0-9_]*)?\s*(?:at\b|$)')
+    for _pln, _praw in enumerate(source.split(chr(10)), 1):
+        if _page_block.match(_praw):
+            print(f"  Syntax error  {filename}")
+            print(f"  {_pln} | {_praw.rstrip()}")
+            print(f"  x the `page` block was removed. A file serves itself now.")
+            print(f"    Drop the `page ... page: done` wrapper: a file in a served folder answers")
+            print(f"    at its own name with whatever it renders, shows, or gives back.")
+            print(f"    For a different address, mount it in a `map route` block.")
+            print(f"    For a request handler, use `listen for ... request for ... at /path`.")
+            print(f"    The page CLASSIFICATION model (public:/private:/hidden:/authorize:) is")
+            print(f"    unchanged -- that is access control, and separate from this.")
+            sys.exit(1)
+
+    _sector_dotted = _re_sector.compile(
+        r'^\s*sector\s*:\s*([A-Za-z][A-Za-z0-9_-]*(?:\s*\.\s*[A-Za-z][A-Za-z0-9_-]*)+)\s*$')
+    for _ln, _raw in enumerate(source.split(chr(10)), 1):
+        _m = _sector_dotted.match(_raw)
+        if _m:
+            _levels = [p.strip() for p in _m.group(1).split('.')]
+            print(f"  Syntax error  {filename}")
+            print(f"  {_ln} | {_raw.rstrip()}")
+            print(f"  x sector levels are separated by commas, not dots.")
+            print(f"    Write: sector: {', '.join(_levels)}")
+            print(f"    The levels and their order are unchanged -- only the separator moved, so")
+            print(f"    a dot inside a sector name can never be mistaken for a level boundary.")
+            sys.exit(1)
+
     # -1b. Langmap pre-pass -- translate non-English keywords to canonical
     # Detect language from source file header comment or declaration
     # e.g: // language: klingon  OR  yoS: Huch (sector: financial in Klingon)
@@ -1468,6 +1507,26 @@ def cmd_run(args):
     elif verbose:
         _print_result(result, verbose)
 
+    # A RUNTIME FAILURE MUST NOT EXIT 0. Measured 2026-09-02: `mio run` exited 0 for every
+    # runtime failure -- an unhandled `raise`, a missing database connection, and the
+    # compliance `audit.no_durable_store` refusal alike. So a script, a CI step or a pioneer
+    # running `mio run` in a pipeline could not tell a refused program from a clean one, which
+    # made every loud runtime refusal in the language silent at the process level.
+    #
+    # Keyed on "did the RUNTIME fail", not on the status number. A first version of this keyed
+    # on `status >= 500` and was wrong in a way the cross-lane sweep caught: a program that
+    # deliberately answers `give back 503 "AI unavailable"` from an `on.failure` handler has
+    # WORKED -- it handled an outage exactly as its author wrote it -- and it was exiting 1.
+    # That contradicted this change's own rationale for leaving 4xx alone.
+    # The discriminator is the FAILURE ENVELOPE, which `format_runtime_error` builds and nothing
+    # else does: it carries `code` and `trace`. A raise, a refusal and an internal error all
+    # produce it; a deliberate `give back` of any status never does.
+    # `sys.exit`, not `return`: the dispatcher calls `fn(args)` and DISCARDS the return value,
+    # so returning a code here would have been its own silent no-op. It re-raises SystemExit
+    # untouched, which is the path every other command already uses to signal a refusal.
+    if isinstance(result, dict) and result.get('_mohio_runtime_error'):
+        sys.exit(1)
+
 
 # -- mio serve -----------------------------------------------------------------
 
@@ -1676,9 +1735,22 @@ def cmd_translate(args=None):
             translated = loader.translate(canonical, direction='forward')
             print(f"  [translate] canonical -> {to_lang}: {to_map_path}")
 
-        # Add language header if not present
-        if '// language:' not in translated[:200]:
-            header = f'// language: {to_lang}\n// langmap: maps/en-{to_lang}.langmap\n// Translated from: {source_file.name}\n\n'
+        # THE HEADER DESCRIBES THE FILE IN HAND, so translating BACK to the base language
+        # must take it off rather than leave the old one standing. A round trip
+        # (en -> klingon -> en) produced English source still declaring
+        # `// language: klingon`: the file said it was one thing while being another,
+        # checked clean, and would have been translated a second time by anything that
+        # trusted the declaration.
+        import re as _re_hdr
+        _to_base = str(to_lang).strip().lower() in ('en', 'english', 'canonical')
+        if _to_base:
+            translated = _re_hdr.sub(
+                r'^//\s*(?:language|langmap|Translated from)\s*:.*\n', '', translated, flags=_re_hdr.M)
+            translated = translated.lstrip(chr(10))
+        elif '// language:' not in translated[:200]:
+            header = (f'// language: {to_lang}\n'
+                      f'// langmap: mohio_data/maps/en-{to_lang}.langmap\n'
+                      f'// Translated from: {source_file.name}\n\n')
             translated = header + translated
 
         # Write output
@@ -1931,6 +2003,31 @@ def _cmd_serve_directory(args, directory, verbose=False):
             interp.run_declarations(program)
             programs[url_path] = program
             interps[url_path] = interp
+            # STATIC detection, at startup, before a single request. A convention-served GET
+            # is read-only; a page that changes state on a bare page view is reported HERE so
+            # the developer sees it while starting the server, not when a crawler finds it.
+            # The serve layer refuses it too -- this is the early warning, that is the
+            # guarantee.
+            try:
+                from mohio_framework import (unsafe_on_get, ai_cost_on_get,
+                                             ai_cost_warning, resolve as _rfw,
+                                             SERVES_BY_CONVENTION)
+                if _rfw(program) in SERVES_BY_CONVENTION:
+                    # AI on a page view is ALLOWED (ruled 2026-08-24) -- it is
+                    # corruption-safe, so re-running it on a repeat view cannot leave
+                    # the app wrong. It is expensive, though, and that is the coder's
+                    # call to make, so this warns and never refuses.
+                    _ai = ai_cost_on_get(program)
+                    if _ai:
+                        print(f"  {yellow('!')}  {ai_cost_warning(url_path, _ai)}")
+                    _bad = unsafe_on_get(program)
+                    if _bad:
+                        _verbs = ", ".join(f"{v} (line {ln})" if ln else v for v, ln in _bad)
+                        print(f"  {yellow('!')}  {url_path} -- a convention-served page is "
+                              f"read-only, and this one changes state: {_verbs}. It will "
+                              f"refuse the GET. Move the change into a `listen for` handler.")
+            except Exception:
+                pass          # a reporting aid must never stop the server from starting
             print(f"  {green('v')}  {url_path}")
         except Exception as e:
             print(f"  {red('x')}  {url_path} -- {e}")
@@ -1938,10 +2035,62 @@ def _cmd_serve_directory(args, directory, verbose=False):
     if not programs:
         _die("No files compiled successfully.")
 
+    # T1-MAP-EXTRACTION (2026-08-24): apply the `map` route classifier.
+    #
+    # Convention gets a file to its own name; `map` is where a developer says otherwise. A
+    # MOUNT re-points an existing compiled file at a different address; a REDIRECT answers
+    # instead of any file. Both are settled HERE, before the server is built, for the same
+    # reason the framework is: routing is decided before a request arrives, never during one.
+    #
+    # A mount names the file the way the coder wrote it (`about.mho`, or `"blog/post.mho"`),
+    # which is matched against the discovered files by relative path. A mount naming a file
+    # that is not there is REFUSED, not skipped: it is a typo, and a silently-ignored mount
+    # leaves the page answering at its convention address while the coder is looking for it at
+    # the one they wrote.
+    redirects = {}
+    status_responses = {}
+    try:
+        from mohio_framework import (resolve_map, resolve_map_responses, MapError,
+                                     _normalise_path)
+        _mounts, redirects = {}, {}
+        # Declared status responses are APP-level: a `[404] /page` in any map section answers
+        # for the whole app, which is the point -- an unmatched route and a static file deleted
+        # after deploy are the same class of miss, and only one of the two is visible to
+        # `mio check` at compile time.
+        status_responses = {}
+        for _u, _prog in list(programs.items()):
+            _m, _r = resolve_map(_prog)
+            _mounts.update(_m); redirects.update(_r)
+            status_responses.update(resolve_map_responses(_prog))
+        if _mounts:
+            _by_file = {}
+            for _u, _fp in mho_files:
+                _rel = os.path.relpath(_fp, str(directory)).replace(os.sep, "/")
+                _by_file[_rel] = _u
+                _by_file[os.path.basename(_rel)] = _u
+            for _path, _src in _mounts.items():
+                _key = str(_src).replace(os.sep, "/")
+                _from = _by_file.get(_key)
+                if _from is None:
+                    _die(f"map: `{_src}` is mounted at {_path} but there is no such file in "
+                         f"{directory}. Check the spelling, or drop the mount and let the file "
+                         f"answer at its own name.")
+                if _from in programs:
+                    programs[_path] = programs[_from]
+                    interps[_path]  = interps[_from]
+                    if _path != _from:
+                        programs.pop(_from, None); interps.pop(_from, None)
+                    print(f"  {green('v')}  {_path} {dim(f'(map: mounted {_src})')}")
+        for _src, (_dst, _code) in sorted(redirects.items()):
+            print(f"  {green('v')}  {_src} {dim(f'(map: -> {_dst}, {_code})')}")
+    except MapError as _me:
+        _die(str(_me))
+
     # Build multi-route FastAPI app
     try:
         from mohio_server import create_multi_app
-        app = create_multi_app(programs, interps, verbose=verbose, app_dir=directory)
+        app = create_multi_app(programs, interps, verbose=verbose, app_dir=directory,
+                               redirects=redirects, status_responses=status_responses)
     except (ImportError, AttributeError):
         # Fallback: build basic multi-route app inline
         try:
@@ -2459,7 +2608,11 @@ def _check_never_store(program):
             return
         seen.add(id(node))
         if node.__class__.__name__ == 'ShapeDecl':
-            for fld in (getattr(node, 'fields', None) or []):
+            # EVERY field, loose or table-owned. A `never store` field declared under a
+            # `<name> as table` scope is still `never store`; walking the flat list alone
+            # skipped it entirely once the Phase 2 hierarchy existed.
+            for fld in (node.every_field() if hasattr(node, 'every_field')
+                        else (getattr(node, 'fields', None) or [])):
                 mods = getattr(fld, 'modifiers', []) or []
                 if any(getattr(m, 'modifier_type', None) == 'never_store' for m in mods):
                     never.add(fld.name)
@@ -2496,6 +2649,84 @@ def _check_never_store(program):
     return errors
 
 
+def cmd_walk(args):
+    """`mio walk <file.mho> [map]` -- walk every data map in a file and print each stage.
+
+    A standalone terminal diagnostic: something is wrong, you run `mio walk paydata.mho`, and
+    you see where it breaks -- without writing a program to look. A CLI subcommand, like
+    `mio serve` and `mio check`, so it adds no language vocabulary.
+
+    It is a RAW DUMP on purpose. It prints what is at every stage and flags a hop that broke;
+    it does not decide which stage looks suspicious or what the fix is. Interpreting is a tool,
+    and tools belong in the paid tier, built on this. The free capability is seeing clearly.
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(args.file)
+    if not path.exists():
+        _die(f"File not found: {args.file}")
+    source = path.read_text(encoding='utf-8')
+
+    print(f"\n  {bold('mio walk')} {dim(f'v{VERSION}')} -- {bold(str(path))}")
+
+    tree, ctx = _parse_and_validate(source, str(path), verbose=getattr(args, 'verbose', False))
+    if ctx.errors:
+        for e in ctx.errors:
+            print(f"  {red('x')} {e}")
+        sys.exit(1)
+    from mohio_transformer_ast import transform as _transform
+    program = _transform(tree, source)
+
+    from mohio_interpreter import MohioInterpreter, MockAiRuntime
+    interp = MohioInterpreter(ai=MockAiRuntime(), verbose=False,
+                              db_path=_resolve_sqlite_db_path(str(path), args))
+    interp.run_declarations(program)
+    interp.shown = []
+
+    # Run the file first so the stages hold real values. A walk of a program that has never run
+    # shows empty everywhere, which is true but not useful -- the point is what is actually
+    # sitting at each stage. A failure here is REPORTED and the walk continues, because seeing
+    # the stages is exactly what you came for when something is broken.
+    run_error = None
+    try:
+        interp.run(program)
+    except Exception as e:
+        run_error = f"{type(e).__name__}: {e}"
+
+    chains = interp.walk_all_maps()
+
+    if not chains:
+        print(f"  {yellow('!')} No data map found in this file.")
+        print(f"    A map is declared with `map <name> ... data ... map: done`.")
+        if run_error:
+            print(f"  {red('x')} while running: {run_error}")
+        sys.exit(1)
+
+    wanted = getattr(args, 'map_name', None)
+    total = 0
+    for map_name, by_chain in sorted(chains.items()):
+        if wanted and map_name != wanted:
+            continue
+        print(f"\n  {bold('map ' + (map_name or '(unnamed)'))}")
+        for chain_key, stages in by_chain.items():
+            print(f"    {dim('chain')} {chain_key}  ({len(stages)} stages)")
+            for st in stages:
+                arrow = {'forward': '->', 'bidirectional': '<->', 'reverse': '<-'}.get(
+                    st.get('arrives', ''), '  ')
+                value = st.get('value', '')
+                kind = st.get('kind', '')
+                mark = green('v') if (value != '' or kind == 'transform') else yellow('!')
+                print(f"      {mark} {arrow:3} {st.get('position')}. {st.get('name'):28} "
+                      f"{dim('[' + kind + ']'):18} = {value!r}")
+                total += 1
+    print(f"\n  {total} stage(s) walked.")
+    if run_error:
+        # A broken hop names itself in the message flow already produced; the walk above shows
+        # exactly how far the data got before it stopped.
+        print(f"  {red('x')} the run stopped: {run_error}")
+        sys.exit(1)
+    print()
+
 def cmd_check(args):
     """
     Parse and validate -- no execution.
@@ -2519,6 +2750,13 @@ def cmd_check(args):
         mode = "--fast" if fast else "full"
         print(f"  [mio check] Checking {len(files)} .mho file(s) [{mode}]...")
         failed = []
+        # `args.all` MUST be cleared before recursing. Leaving it set meant every recursive
+        # call re-entered this same branch, re-globbed all the files and looped again -- so
+        # `mio check --all` never checked anything: it recursed until the stack ran out and
+        # printed "Internal error ... maximum recursion depth exceeded". Found 2026-09-01 by
+        # running the flag CLAUDE.md documents ("--all checks every file"); it had never
+        # worked. A one-file check is what each iteration was always meant to be.
+        args.all = False
         for f in files:
             args.file = f
             try:
@@ -2526,6 +2764,7 @@ def cmd_check(args):
             except SystemExit as e:
                 if e.code != 0:
                     failed.append(f)
+        args.all = True
         if failed:
             print(f"  x {len(failed)} file(s) failed:")
             for f in failed:
@@ -2759,7 +2998,8 @@ def cmd_check(args):
                     return
                 _seen.add(id(node))
                 if node.__class__.__name__ == 'ShapeDecl':
-                    for fld in (getattr(node, 'fields', None) or []):
+                    for fld in (node.every_field() if hasattr(node, 'every_field')
+                                else (getattr(node, 'fields', None) or [])):
                         ln = getattr(fld, 'line', 0) or 0
                         # pattern (any field): the regex must compile
                         pat = next((getattr(m, 'value', None) for m in (getattr(fld, 'modifiers', None) or [])
@@ -3496,6 +3736,14 @@ def build_arg_parser():
     c.add_argument("--langmap",  action="store_true", help="List every keyword this file's langmap does not map (unmapped words fall back to English)")
     c.add_argument("file",       nargs="?",           help="File to check (omit with --all)")
 
+    # walk -- terminal diagnostic for data maps
+    wk = sub.add_parser("walk", add_help=False)
+    wk.add_argument("file", help="The .mho file whose data maps to walk")
+    wk.add_argument("map_name", nargs="?", default=None, help="Only this map")
+    wk.add_argument("--memory", action="store_true", dest="memory",
+                    help="Use a throwaway in-memory database")
+    wk.add_argument("--verbose", "-v", action="store_true")
+
     # fmt
     fp = sub.add_parser("fmt", add_help=False)
     fp.add_argument("file")
@@ -3768,6 +4016,7 @@ def main():
         "audit":         cmd_audit,
         "install-hooks": cmd_install_hooks,
         "harvest":       cmd_harvest,
+        "walk":          cmd_walk,
         "fmt":           cmd_fmt,
         "ai-check":      cmd_ai_check,
         "version": cmd_version,

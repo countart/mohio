@@ -37,9 +37,17 @@ def check(label, cond, detail=""):
     if not cond and detail: print(f"          {detail}")
     _p += bool(cond); _f += (not cond)
 
-CONNECTOR = ('mioconnect Stripe\n    address "https://api.stripe.com"\n'
-             '    operation refund\n        path "/refund"\n    operation: done\n'
-             '    operation charge\n        path "/charge"\n    operation: done\n'
+# Every operation declares a `sends` shape. It did not have to before 2026-09-01, when an
+# operation with no `sends` meant "no contract, so send anything" -- and this file's granted-tool
+# call went through on exactly that hole. No `sends` is now an EMPTY allowlist: an operation that
+# describes nothing permits nothing. Declaring the shape is what makes the granted-tool case
+# below a real positive control rather than a test of the gap.
+CONNECTOR = ('shape RefundInput\n    amount as int\nshape: done\n'
+             'mioconnect Stripe\n    address "https://api.stripe.com"\n'
+             '    operation refund\n        path "/refund"\n'
+             '        sends sh.RefundInput\n    operation: done\n'
+             '    operation charge\n        path "/charge"\n'
+             '        sends sh.RefundInput\n    operation: done\n'
              'mioconnect: done\n')
 
 def agent_src(tools_block):
@@ -89,7 +97,8 @@ check("grant to an UNKNOWN OPERATION fails loud at setup (named)", _ok, _msg)
 # 5. TOOL_NOT_GRANTED enforcement -- drive the agent to request granted vs ungranted tools.
 class DrivenMock(MockAiRuntime):
     def __init__(self, tool): super().__init__(); self._tool = tool; self._turns = 0
-    def agent_turn(self, *, messages, tools=None, model=None, temperature=None, max_tokens=None):
+    def agent_turn(self, *, messages, tools=None, model=None, temperature=None,
+                   max_tokens=None, system=None):
         self._turns += 1
         if self._turns == 1:
             return AgentTurn(kind='tool', tool_name=self._tool, tool_input={'amount': 1}, tool_id='t1')

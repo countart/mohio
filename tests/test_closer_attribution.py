@@ -116,7 +116,7 @@ def big_file(reps):
                 retrieve: done
                 give back 200 trace
             otherwise
-                give back 404 "no"
+                give back [404] "no"
         check: done
     new: done''')
     return 'listen for\n' + '\n'.join(blocks) + '\nlisten: done\n'
@@ -156,7 +156,7 @@ TRY_CLOSED = '''listen for
                 match id to current_room
             retrieve: done
         on.failure
-            give back 500 "err"
+            give back [500] "err"
         try: done
     new: done
 listen: done
@@ -168,9 +168,9 @@ check("nested try WITH try: done builds clean", ok_tc,
 TRY_NO_CLOSER = '''listen for
     new sh.Room at /x
         try
-            give back 200 "ok"
+            give back [200] "ok"
         on.failure
-            give back 500 "err"
+            give back [500] "err"
     new: done
 listen: done
 '''

@@ -61,13 +61,7 @@ check("a list nests under a singular tag",
       _xml_body({"items": [{"title": "a"}]}), True)
 
 # GET -- the path a feed is actually fetched on, and the one that was broken.
-GET_APP = ('page at /feed\n'
-           '    create posts\n'
-           '        title "First post"\n'
-           '        link "https://example.com/1"\n'
-           '    create: done\n'
-           '    give back posts as xml\n'
-           'page: done\n')
+GET_APP = ('shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /feed\n        create posts\n            title "First post"\n            link "https://example.com/1"\n        create: done\n        give back posts as xml\n    request: done\nlisten: done\n')
 gi = MohioInterpreter()
 gc = TestClient(create_app(MohioServer(transform(_P.parse(GET_APP), GET_APP), gi)),
                 raise_server_exceptions=False)
@@ -94,8 +88,7 @@ check("POST body is XML too", pr.text.startswith('<?xml version="1.0"'), True)
 check("  with the value inside", "<response>pong</response>" in pr.text, True)
 
 # json and html must be untouched by any of this.
-JSON_APP = ('page at /d\n    create x\n        a "1"\n    create: done\n'
-            '    give back x as json\npage: done\n')
+JSON_APP = ('shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /d\n        create x\n            a "1"\n        create: done\n        give back x as json\n    request: done\nlisten: done\n')
 ji = MohioInterpreter()
 jc = TestClient(create_app(MohioServer(transform(_P.parse(JSON_APP), JSON_APP), ji)),
                 raise_server_exceptions=False)

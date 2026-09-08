@@ -106,7 +106,7 @@ def run_check(source, lang_pack=None, pack_name=None):
 # whose body is already English -- a stale header, a partly translated file -- still compiles,
 # and refusing it would break working code over a comment. What it must not do is stay silent.
 _code_stale, _out_stale = run_check(
-    '// language: nosuchlang\nshape Order\n    method POST\nshape: done\ngive back 200 "ok"\n')
+    '// language: nosuchlang\nshape Order\n    note as text\nshape: done\ngive back [200] "ok"\n')
 check("an English body with a stale language header still COMPILES", _code_stale == 0,
       _out_stale[-220:])
 check("a missing pack is announced rather than passed over silently",
@@ -130,7 +130,7 @@ check("the refusal names the specific integrity failure",
 
 # ── an INCOMPLETE pack still compiles (the growth path stays open) ────────────────────
 _code_inc, _out_inc = run_check(
-    '// language: partialp\ngive back 200 "ok"\n',
+    '// language: partialp\ngive back [200] "ok"\n',
     lang_pack='version = "1.0"\nsave <-> guardar\n', pack_name='partialp')
 check("an incomplete pack is NOT refused (unmapped keywords fall back to English)",
       'cannot be used' not in _out_inc, _out_inc[-220:])
@@ -164,10 +164,10 @@ try:
         finally:
             os.unlink(path)
 
-    _with = _ast('// language: accenttest\nforma S\n    m\u00e9todo GET\nshape: done\n'
-                 'give back 200 "ok"\n')
-    _without = _ast('// language: accenttest\nforma S\n    metodo GET\nshape: done\n'
-                    'give back 200 "ok"\n')
+    _with = _ast('// language: accenttest\nforma S\n    m\u00e9todo as text\nshape: done\n'
+                 'give back [200] "ok"\n')
+    _without = _ast('// language: accenttest\nforma S\n    metodo as text\nshape: done\n'
+                    'give back [200] "ok"\n')
     check("a keyword typed WITH its accent translates", "name='method'" in _with, _with[:120])
     check("the same keyword typed WITHOUT the accent also translates",
           "name='method'" in _without, _without[:120])

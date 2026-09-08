@@ -20,7 +20,7 @@ internally consistent chain. Detecting that requires external anchoring, which i
 This test asserts that limitation explicitly so nobody later mistakes it for a bug or overstates
 what the chain proves.
 """
-import os, sys, tempfile
+import os, re, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import mohio_data
@@ -136,8 +136,17 @@ check("ordinary data tables are unaffected by the restriction", _ordinary)
 
 # and the enforcement is wired into every SQL runtime, not just one
 for _cls in ('DbRuntime', 'PostgresRuntime', 'MySQLRuntime'):
-    _i = src.index(f'class {_cls}:')
-    _seg = src[_i:_i + 12000]
+    # Match `class X:` OR `class X(Base):` -- PostgresRuntime and MySQLRuntime gained a base
+    # class when connection pooling landed (2026-08-30), and an anchor that assumed no
+    # inheritance broke on a change that had nothing to do with audit enforcement.
+    _m = re.search(rf'^class {_cls}[(:]', src, re.M)
+    assert _m, f'class {_cls} not found in the interpreter source'
+    _i = _m.start()
+    # Bound the segment by the NEXT class, not by a fixed character count. A 12000-char window
+    # silently stopped covering DbRuntime.save once unrelated comments were added above it, so
+    # a passing assertion turned into a failing one with nothing about audit having changed.
+    _next = re.search(r'^class ', src[_i + 1:], re.M)
+    _seg = src[_i: _i + 1 + _next.start()] if _next else src[_i:]
     check(f"{_cls}.save enforces the audit-relation restriction",
           'assert_write_allowed' in _seg)
 
@@ -344,7 +353,7 @@ _AI = ('connect db as sqlite from env.DATABASE_URL\namt 100\n'
        # invocation below does, matching test_ai_decide_invoke.py's documented pattern.
        # Without it the decision never runs and phi_audit_log stays empty (rows=0).
        'ai.decide d\n'
-       'give back 200 "ok"\n')
+       'give back [200] "ok"\n')
 
 
 def _run_ai():

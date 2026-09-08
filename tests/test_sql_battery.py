@@ -115,17 +115,17 @@ CASES = [
 # ---- error / guardrail cases: (label, src, keyword-in-error) ------------------
 ERROR_CASES = [
     ('bad SQL fails loud',
-     DB + 'retrieve r from db.*\n    sql\n        SELECT * FROM ghost_table\n    sql: done\nretrieve: done\ngive back 200 "ran"\n', 'sql.error'),
+     DB + 'retrieve r from db.*\n    sql\n        SELECT * FROM ghost_table\n    sql: done\nretrieve: done\ngive back [200] "ran"\n', 'sql.error'),
     ('syntax error fails loud',
-     DB + 'retrieve r from db.*\n    sql\n        SELECT FROM WHERE\n    sql: done\nretrieve: done\ngive back 200 "ran"\n', 'sql.error'),
+     DB + 'retrieve r from db.*\n    sql\n        SELECT FROM WHERE\n    sql: done\nretrieve: done\ngive back [200] "ran"\n', 'sql.error'),
     ('blocked in financial sector',
-     'sector: financial\n' + DB + 'retrieve r from db.*\n    sql\n        SELECT 1\n    sql: done\nretrieve: done\ngive back 200 "ran"\n',
+     'sector: financial\n' + DB + 'retrieve r from db.*\n    sql\n        SELECT 1\n    sql: done\nretrieve: done\ngive back [200] "ran"\n',
      'blocked_in_certified_sector'),
     ('blocked in healthcare sector',
-     'sector: healthcare\n' + DB + 'retrieve r from db.*\n    sql\n        SELECT 1\n    sql: done\nretrieve: done\ngive back 200 "ran"\n',
+     'sector: healthcare\n' + DB + 'retrieve r from db.*\n    sql\n        SELECT 1\n    sql: done\nretrieve: done\ngive back [200] "ran"\n',
      'blocked_in_certified_sector'),
     ('blocked in hierarchical financial sector',
-     'sector: financial.banking.retail\n' + DB + 'retrieve r from db.*\n    sql\n        SELECT 1\n    sql: done\nretrieve: done\ngive back 200 "ran"\n',
+     'sector: financial, banking, retail\n' + DB + 'retrieve r from db.*\n    sql\n        SELECT 1\n    sql: done\nretrieve: done\ngive back [200] "ran"\n',
      'blocked_in_certified_sector'),
 ]
 

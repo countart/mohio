@@ -151,7 +151,7 @@ listen for
                         pending_verb      ""
                         pending_noun      ""
                         pending_canonical ""
-                        give back 200 "Okay."
+                        give back [200] "Okay."
                     otherwise
                         pending_verb      ""
                         pending_noun      ""
@@ -233,7 +233,7 @@ listen for
                             match location to current_room
                             match takeable to "true"
                             when takeables is empty
-                                give back 200 "There is nothing here to take."
+                                give back [200] "There is nothing here to take."
                         retrieve.all: done
                         took_text ""
                         took_score 0
@@ -304,7 +304,7 @@ listen for
                 ai.decide resolve_noun
                 check resolve_noun
                     when ""
-                        give back 200 "You don't see anything like that here."
+                        give back [200] "You don't see anything like that here."
                     otherwise
                         pending_verb      verb
                         pending_noun      noun
@@ -362,7 +362,7 @@ listen for
                                 retrieve: done
                                 check lo_lost_ok
                                     when "true"
-                                        give back 200 "There's nothing left to knock loose. Whatever fell is gone for good."
+                                        give back [200] "There's nothing left to knock loose. Whatever fell is gone for good."
                                     otherwise
                                         retrieve lo_under from db.flags
                                             match session_id to player_session
@@ -395,7 +395,7 @@ listen for
                                                 loscore_int score as.int
                                                 loscore_add_int loscore_add as.int
                                                 score       (loscore_int + loscore_add_int)
-                                                give back 200 "You push the letter opener into the keyhole. After a moment you hear a metallic clink -- the key has fallen onto the leaflet on the other side!"
+                                                give back [200] "You push the letter opener into the keyhole. After a moment you hear a metallic clink -- the key has fallen onto the leaflet on the other side!"
                                             otherwise
                                                 retrieve lo_p2 from db.flags
                                                     match session_id to player_session
@@ -411,7 +411,7 @@ listen for
                                                             session_id player_session
                                                             flag_name  "key_lost"
                                                         save: done
-                                                        give back 200 "You give one last push through the keyhole and hear the clink of a key hitting the floor. Shame you can't pull it from under the door."
+                                                        give back [200] "You give one last push through the keyhole and hear the clink of a key hitting the floor. Shame you can't pull it from under the door."
                                                     otherwise
                                                         retrieve lo_p1 from db.flags
                                                             match session_id to player_session
@@ -427,13 +427,13 @@ listen for
                                                                     session_id player_session
                                                                     flag_name  "key_push_2"
                                                                 save: done
-                                                                give back 200 "It feels as if you are pushing on something important. There may be a way in after all if you could only get to it..."
+                                                                give back [200] "It feels as if you are pushing on something important. There may be a way in after all if you could only get to it..."
                                                             otherwise
                                                                 save to db.flags
                                                                     session_id player_session
                                                                     flag_name  "key_push_1"
                                                                 save: done
-                                                                give back 200 "You push the letter opener through the keyhole but something is blocking it from going in."
+                                                                give back [200] "You push the letter opener through the keyhole but something is blocking it from going in."
                                                         check: done
                                                 check: done
                                         check: done
@@ -449,7 +449,7 @@ listen for
         // ── COMMAND ROUTER ───────────────────────────────────
         check verb
             when ""
-                give back 200 "ready"
+                give back [200] "ready"
 
             when "look"
                 retrieve room from db.rooms
@@ -486,7 +486,7 @@ listen for
                             when "true"
                                 give back 200 (room.description & room_items_text)
                             otherwise
-                                give back 200 "It is pitch dark. You are likely to be eaten by a grue."
+                                give back [200] "It is pitch dark. You are likely to be eaten by a grue."
                         check: done
                     otherwise
                         give back 200 (room.description & room_items_text)
@@ -497,7 +497,7 @@ listen for
                     match session_id to player_session
                     match location to "inventory"
                     when carrying is empty
-                        give back 200 "You are empty-handed."
+                        give back [200] "You are empty-handed."
                 retrieve.all: done
                 inv_text ""
                 each obj in carrying
@@ -506,10 +506,10 @@ listen for
                 give back 200 ("You are carrying:" & "\n" & inv_text)
 
             when "score"
-                give back 200 "Your score is {{score}} in {{moves}} moves."
+                give back [200] "Your score is {{score}} in {{moves}} moves."
 
             when "cache"
-                give back 200 "APPLANG Cache is active. Novel commands are banked on first use — free on every repeat. Your AI cost scales with novelty, not traffic."
+                give back [200] "APPLANG Cache is active. Novel commands are banked on first use — free on every repeat. Your AI cost scales with novelty, not traffic."
 
             when "give up"
                 // The pitiful surrender — three-strike escalation ending in a lame death.
@@ -517,9 +517,9 @@ listen for
                 give_up_count (give_up_int + 1)
                 check give_up_count
                     when "1"
-                        give back 200 "Give up? Don't do it! You're standing in the middle of the Great Underground Empire with treasures yet unclaimed — and besides, you're helping build the future just by being here. Shake it off. Onward."
+                        give back [200] "Give up? Don't do it! You're standing in the middle of the Great Underground Empire with treasures yet unclaimed — and besides, you're helping build the future just by being here. Shake it off. Onward."
                     when "2"
-                        give back 200 "The air turns cold. A lattice of glowing code knits itself into a tall, spectacled figure: the Compiler. He studies you with weary patience. 'Giving up,' he says, 'is merely an unhandled exception you have chosen not to catch. There is always a more elegant path. Refactor your approach.' He dissolves into a cloud of unresolved tokens. (You sense he will not intervene a third time.)"
+                        give back [200] "The air turns cold. A lattice of glowing code knits itself into a tall, spectacled figure: the Compiler. He studies you with weary patience. 'Giving up,' he says, 'is merely an unhandled exception you have chosen not to catch. There is always a more elegant path. Refactor your approach.' He dissolves into a cloud of unresolved tokens. (You sense he will not intervene a third time.)"
                     otherwise
                         // Third strike — the lame death and respawn
                         give_up_count "0"
@@ -529,11 +529,11 @@ listen for
                         remove from db.saved_games
                             where session_id is player_session
                         remove: done
-                        give back 200 "The Compiler reappears, regards you for a long moment, and simply shrugs. 'Ok.' You lie down in the dirt, self-defeated. You stop eating. You stop drinking. Slowly, peacefully, you wither away, while all around you the world keeps growing — new rooms, new code, new adventurers stepping over your bones. Time passes. A great deal of it. — And then, impossibly, you open your eyes. You are standing in an open field west of a white house, with a boarded front door. There is a small mailbox here. Perhaps this time you will not give up."
+                        give back [200] "The Compiler reappears, regards you for a long moment, and simply shrugs. 'Ok.' You lie down in the dirt, self-defeated. You stop eating. You stop drinking. Slowly, peacefully, you wither away, while all around you the world keeps growing — new rooms, new code, new adventurers stepping over your bones. Time passes. A great deal of it. — And then, impossibly, you open your eyes. You are standing in an open field west of a white house, with a boarded front door. There is a small mailbox here. Perhaps this time you will not give up."
                 check: done
 
             when "quit"
-                give back 200 "Your score was {{score}} in {{moves}} moves. Thanks for playing Zork, built with Mohio."
+                give back [200] "Your score was {{score}} in {{moves}} moves. Thanks for playing Zork, built with Mohio."
 
             when "put"
                 // Deposit a treasure in the trophy case. Accepts "put <treasure>" or
@@ -545,7 +545,7 @@ listen for
                     match id to "trophy_case"
                     match session_id to "__world__"
                     when tc is empty
-                        give back 200 "You need to be in the living room, where the trophy case is."
+                        give back [200] "You need to be in the living room, where the trophy case is."
                 retrieve: done
                 check current_room
                     when tc.location
@@ -554,7 +554,7 @@ listen for
                             match short_name to item_name
                             match location to "inventory"
                             when treasure is empty
-                                give back 200 "You aren't carrying that."
+                                give back [200] "You aren't carrying that."
                         retrieve: done
                         check treasure.is_treasure
                             when "true"
@@ -582,7 +582,7 @@ listen for
                                         give back 200 ("The " & treasure.name & " settles into the trophy case. (" & secured & " of 20 secured, score " & score & ".)")
                                 check: done
                             otherwise
-                                give back 200 "Only treasures belong in the trophy case."
+                                give back [200] "Only treasures belong in the trophy case."
                         check: done
                     otherwise
                         // Not the trophy case -- try a generic room puzzle for "put"
@@ -596,7 +596,7 @@ listen for
                             match verb to "put"
                             match target to put_target
                             when pputzl is empty
-                                give back 200 "You need to be in the living room, where the trophy case is."
+                                give back [200] "You need to be in the living room, where the trophy case is."
                         retrieve: done
                         check pputzl.requires_item
                             when ""
@@ -642,7 +642,7 @@ listen for
                 remove from db.saved_games
                     where session_id is player_session
                 remove: done
-                give back 200 "Game reset. Type 'look' to begin."
+                give back [200] "Game reset. Type 'look' to begin."
 
             when "go"
                 // Single data-driven movement handler. Exits live in db.exits
@@ -660,7 +660,7 @@ listen for
                             match room to current_room
                             match verb to noun
                             when blockmsg is empty
-                                give back 200 "You can't go that way."
+                                give back [200] "You can't go that way."
                             otherwise
                                 give back 200 blockmsg.failure
                         retrieve: done
@@ -686,7 +686,7 @@ listen for
                         retrieve dest_room from db.rooms
                             match id to current_room
                             when dest_room is empty
-                                give back 200 "Room not found."
+                                give back [200] "Room not found."
                         retrieve: done
                         room_items_text ""
                         retrieve.all room_objs from db.items
@@ -764,11 +764,11 @@ listen for
                     match short_name to noun
                     match location to current_room
                     when item is empty
-                        give back 200 "You don't see that here."
+                        give back [200] "You don't see that here."
                 retrieve: done
                 check item.takeable
                     when "false"
-                        give back 200 "You can't take that."
+                        give back [200] "You can't take that."
                     otherwise
                         update db.items
                             match session_id to player_session
@@ -780,7 +780,7 @@ listen for
                         moves_int   moves as.int
                         score       (score_int + item_score)
                         moves       (moves_int + 1)
-                        give back 200 "Taken."
+                        give back [200] "Taken."
                 check: done
 
             when "drop"
@@ -789,7 +789,7 @@ listen for
                     match short_name to noun
                     match location to "inventory"
                     when item is empty
-                        give back 200 "You aren't carrying that."
+                        give back [200] "You aren't carrying that."
                 retrieve: done
                 update db.items
                     match session_id to player_session
@@ -798,7 +798,7 @@ listen for
                 update: done
                 moves_int moves as.int
                 moves     (moves_int + 1)
-                give back 200 "Dropped."
+                give back [200] "Dropped."
 
             when "examine"
                 // Special: examining the architect can trigger a scripted ejection --
@@ -812,7 +812,7 @@ listen for
                             match verb to "examine"
                             match target to "architect"
                             when arch_puzzle is empty
-                                give back 200 "There is no architect here — only the memory of a figure you may have glimpsed somewhere deeper."
+                                give back [200] "There is no architect here — only the memory of a figure you may have glimpsed somewhere deeper."
                             otherwise
                                 create list ejection_rooms
                                 create: done
@@ -838,7 +838,7 @@ listen for
                                 retrieve dest from db.rooms
                                     match id to current_room
                                     when dest is empty
-                                        give back 200 "You tumble through darkness and land somewhere unknown. The Architect's chamber is gone."
+                                        give back [200] "You tumble through darkness and land somewhere unknown. The Architect's chamber is gone."
                                 retrieve: done
                                 give back 200 (arch_puzzle.success & dest.description)
                         retrieve: done
@@ -853,7 +853,7 @@ listen for
                         location to current_room
                     match any: done
                     when seen is empty
-                        give back 200 "You don't see that here."
+                        give back [200] "You don't see that here."
                 retrieve: done
                 // Item is confirmed present — now handle marble easter egg or generic
                 check noun
@@ -876,17 +876,17 @@ listen for
                                     when "true"
                                         check marble_maze
                                             when "true"
-                                                give back 200 "The swirling green pattern moves slowly now, as if resting. It remembers what it showed you."
+                                                give back [200] "The swirling green pattern moves slowly now, as if resting. It remembers what it showed you."
                                             otherwise
-                                                give back 200 "The pattern swirls slowly. It is still waiting. You feel it wants to be somewhere specific."
+                                                give back [200] "The pattern swirls slowly. It is still waiting. You feel it wants to be somewhere specific."
                                         check: done
                                     otherwise
                                         marble_seen "true"
-                                        give back 200 "You hold the marble up. The green pattern inside quickens. Then the floor is gone. You are suspended in a space that has no walls, no ceiling — only a deep green luminescence swirling around you in slow, enormous currents. You are not falling. You are not afraid, though you know you should be. The currents move through you as much as around you, and for a moment you understand something — not in words, but in the way you understand your own name. You understand that the marble is a key. That it remembers a place. That it will show you the way through, but only if you carry it there, and only if you know the word. The word forms in the swirling light before you. You try to read it. It dissolves. The floor returns. You are sitting on the floor of the room. The marble is in your hand, cool and perfectly still. Somewhere underground, a door you did not know existed is waiting to be found."
+                                        give back [200] "You hold the marble up. The green pattern inside quickens. Then the floor is gone. You are suspended in a space that has no walls, no ceiling — only a deep green luminescence swirling around you in slow, enormous currents. You are not falling. You are not afraid, though you know you should be. The currents move through you as much as around you, and for a moment you understand something — not in words, but in the way you understand your own name. You understand that the marble is a key. That it remembers a place. That it will show you the way through, but only if you carry it there, and only if you know the word. The word forms in the swirling light before you. You try to read it. It dissolves. The floor returns. You are sitting on the floor of the room. The marble is in your hand, cool and perfectly still. Somewhere underground, a door you did not know existed is waiting to be found."
                                 check: done
                             otherwise
                                 // Marble seen in room but not yet taken — just the description
-                                give back 200 "A small glass marble. Inside it, a deep green pattern swirls slowly, too slowly, as if it isn't obeying the usual rules. It seems to be waiting for something. You should pick it up."
+                                give back [200] "A small glass marble. Inside it, a deep green pattern swirls slowly, too slowly, as if it isn't obeying the usual rules. It seems to be waiting for something. You should pick it up."
                         check: done
                     otherwise
                         give back 200 seen.description
@@ -910,7 +910,7 @@ listen for
                                 location to current_room
                             match any: done
                             when readable is empty
-                                give back 200 "There is nothing here to read."
+                                give back [200] "There is nothing here to read."
                             otherwise
                                 give back 200 readable.description
                         retrieve: done
@@ -985,7 +985,7 @@ listen for
                             match verb to "open"
                             match target to noun
                             when opuzzle is empty
-                                give back 200 "You can't open that."
+                                give back [200] "You can't open that."
                             otherwise
                                 check opuzzle.requires_flag
                                     when ""
@@ -1072,24 +1072,24 @@ listen for
                             match short_name to noun
                             match location to "inventory"
                             when item is empty
-                                give back 200 "You aren't carrying that."
+                                give back [200] "You aren't carrying that."
                         retrieve: done
                         lantern_lit "true"
                         moves_int moves as.int
                         moves     (moves_int + 1)
-                        give back 200 "The lantern is now on, a steady circle of light pushing back the dark."
+                        give back [200] "The lantern is now on, a steady circle of light pushing back the dark."
                     when "torch"
                         retrieve item from db.items
                             match session_id to player_session
                             match short_name to noun
                             match location to "inventory"
                             when item is empty
-                                give back 200 "You aren't carrying that."
+                                give back [200] "You aren't carrying that."
                         retrieve: done
                         lantern_lit "true"
                         moves_int moves as.int
                         moves     (moves_int + 1)
-                        give back 200 "The torch flares to life, throwing light and a little heat."
+                        give back [200] "The torch flares to life, throwing light and a little heat."
                 check: done
                 // Not a portable light source you carry -- route to the puzzle table
                 // (e.g. "light candles", where the candles are scenery, not inventory).
@@ -1158,7 +1158,7 @@ listen for
                     match room to current_room
                     match verb to "sit"
                     when sit_puzzle is empty
-                        give back 200 "There is nothing here to sit on."
+                        give back [200] "There is nothing here to sit on."
                     otherwise
                         retrieve cvseen from db.flags
                             match session_id to player_session
@@ -1188,7 +1188,7 @@ listen for
                     match room to current_room
                     match verb to "sit"
                     when stand_puzzle is empty
-                        give back 200 "You are already standing."
+                        give back [200] "You are already standing."
                     otherwise
                         retrieve cvseen2 from db.flags
                             match session_id to player_session
@@ -1210,7 +1210,7 @@ listen for
                                 retrieve: done
                                 check kdisl_ok
                                     when "true"
-                                        give back 200 "You stand. The throne is just a chair now."
+                                        give back [200] "You stand. The throne is just a chair now."
                                     otherwise
                                         save to db.flags
                                             session_id player_session
@@ -1221,10 +1221,10 @@ listen for
                                             match id to "mohio_key"
                                             location current_room
                                         update: done
-                                        give back 200 "You rise from the throne. As you do, something works loose from the chair behind you and falls to the stone floor with a bright metallic clink. It rolls, wobbles, and settles. It looks like a key — though not like any key you have seen. One end is a tight spiral of machined metal. It must have been lodged in the throne. The Architect, wherever he is, did not seem to know it was there."
+                                        give back [200] "You rise from the throne. As you do, something works loose from the chair behind you and falls to the stone floor with a bright metallic clink. It rolls, wobbles, and settles. It looks like a key — though not like any key you have seen. One end is a tight spiral of machined metal. It must have been lodged in the throne. The Architect, wherever he is, did not seem to know it was there."
                                 check: done
                             otherwise
-                                give back 200 "You are already standing."
+                                give back [200] "You are already standing."
                         check: done
                 retrieve: done
 
@@ -1237,7 +1237,7 @@ listen for
                     match verb to "attack"
                     match target to noun
                     when puzzle is empty
-                        give back 200 "Attacking that accomplishes nothing."
+                        give back [200] "Attacking that accomplishes nothing."
                 retrieve: done
                 check puzzle.requires_item
                     when ""
@@ -1349,7 +1349,7 @@ listen for
                 call: done
 
             when "help"
-                give back 200 "Commands: look (l), go [n/s/e/w/u/d], take [item], drop [item], examine (x) [item], inventory (i), score, open, unlock, attack, light, read, say [word], discord, cache, quit, start over. The database is the game — mohio.io"
+                give back [200] "Commands: look (l), go [n/s/e/w/u/d], take [item], drop [item], examine (x) [item], inventory (i), score, open, unlock, attack, light, read, say [word], discord, cache, quit, start over. The database is the game — mohio.io"
 
             // ── TEST / CHEAT COMMANDS ─────────────────────────────
             // Dev-only helpers to reach and test any puzzle fast. Not advertised in help.
@@ -1362,7 +1362,7 @@ listen for
                 retrieve target from db.rooms
                     match id to noun
                     when target is empty
-                        give back 200 "No such room: {{noun}}"
+                        give back [200] "No such room: {{noun}}"
                 retrieve: done
                 current_room noun
                 give back 200 ("[TP] Now in {{noun}}.\n\n" & target.description)
@@ -1389,7 +1389,7 @@ listen for
                     match verb to "break"
                     match target to noun
                     when puzzle is empty
-                        give back 200 "You can't break that."
+                        give back [200] "You can't break that."
                 retrieve: done
                 check puzzle.requires_item
                     when ""
@@ -1417,7 +1417,7 @@ listen for
                         check: done
                         give back 200 puzzle.success
                     otherwise
-                        give back 200 "You can't break that."
+                        give back [200] "You can't break that."
                 check: done
 
             when "kick"
@@ -1428,7 +1428,7 @@ listen for
                             match room to "any"
                             match verb to "kick"
                             when puzzle is empty
-                                give back 200 "You kick at the air. Nothing happens."
+                                give back [200] "You kick at the air. Nothing happens."
                         retrieve: done
                         check puzzle.flag_set
                             when ""
@@ -1447,7 +1447,7 @@ listen for
                         give back 200 puzzle.success
                     otherwise
                         compiler_warned "true"
-                        give back 200 "You kick at nothing in particular. A faint voice somewhere whispers: 'That command fails the Walk-By Test.' You feel watched."
+                        give back [200] "You kick at nothing in particular. A faint voice somewhere whispers: 'That command fails the Walk-By Test.' You feel watched."
                 check: done
 
             otherwise
@@ -1494,7 +1494,7 @@ listen for
                                         retrieve adest from db.rooms
                                             match id to current_room
                                             when adest is empty
-                                                give back 200 "The door opens onto humming light."
+                                                give back [200] "The door opens onto humming light."
                                         retrieve: done
                                         give back 200 (door_puzzle.success & adest.description)
                                 check: done

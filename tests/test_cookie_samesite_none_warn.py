@@ -34,7 +34,7 @@ def warns(body_lines):
            'listen for\n    new sh.Cmd\n'
            '        miocookie.set "sid"\n            value "x"\n'
            + body_lines +
-           '        miocookie.set: done\n        give back 200 "ok"\n    new: done\nlisten: done\n')
+           '        miocookie.set: done\n        give back [200] "ok"\n    new: done\nlisten: done\n')
     errs, ws = run_scans(transform(_P.parse(src), src))
     return [w for w in ws if getattr(w, 'code', None) == 'cookie_samesite_none_insecure']
 

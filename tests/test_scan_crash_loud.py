@@ -34,7 +34,7 @@ import mohio_enforce  # noqa: E402
 _p = _f = 0
 
 # A minimal, VERIFIED-clean program: declared var returned from a page.
-CLEAN_SRC = 'page at /\n    greeting "hello"\n    give back 200 greeting\npage: done\n'
+CLEAN_SRC = 'greeting "hello"\ngive back 200 greeting\n'
 
 
 def _run_check_capturing(src):

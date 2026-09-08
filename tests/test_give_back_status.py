@@ -55,7 +55,7 @@ _PARSER = Lark(_clean, parser="earley", ambiguity="resolve", propagate_positions
 
 
 def _client(body: str) -> TestClient:
-    source = "page at /\n" + body + "\npage: done\n"
+    source = "" + body + "\n"
     prog = transform(_PARSER.parse(source), source)
     app = create_app(MohioServer(prog, MohioInterpreter()))
     return TestClient(app, raise_server_exceptions=False)
@@ -94,7 +94,7 @@ def test_status_plus_value_returns_status_and_body():
 
 
 def test_status_404_with_body():
-    r = _client('    give back 404 "gone"').get("/")
+    r = _client('    give back [404] "gone"').get("/")
     assert r.status_code == 404
     assert "gone" in r.text
 
@@ -102,8 +102,7 @@ def test_status_404_with_body():
 def test_no_root_route_still_falls_through_to_placeholder():
     # A program with no `/` route must still show the neutral placeholder at 200,
     # never a bare 404 -- the explicit-give-back fix must not break this.
-    source = ('journey App\n    page Other at /other\n        render\n'
-              '            <p>elsewhere</p>\n        render: done\n    page: done\njourney: done\n')
+    source = ('shape Q\n    q as text\nshape: done\njourney App\n    listen for\n        request for sh.Q at /other\n                render\n                    <p>elsewhere</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n')
     prog = transform(_PARSER.parse(source), source)
     app = create_app(MohioServer(prog, MohioInterpreter()))
     r = TestClient(app, raise_server_exceptions=False).get("/")

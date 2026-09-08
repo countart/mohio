@@ -57,7 +57,7 @@ def compile_err(src):
         return str(e)
 
 AGENT = ('ai.agent triage\n    goal "x"\n    {clause}\n'
-         '    not confident\n        give back 200 "x"\nai.agent: done\n')
+         '    not confident\n        give back [200] "x"\nai.agent: done\n')
 
 # ── all three retired inline forms: fail loud, each naming its OWN redirect ────────
 CASES = [
@@ -91,7 +91,7 @@ check("the time redirect correctly says 'timeout', never the retired 'max time' 
 LIMITS_OK = ('ai.agent triage\n    goal "x"\n'
              '    limits\n        max steps 10\n        cost ceiling 5.00\n'
              '        timeout 30 seconds\n    limits: done\n'
-             '    not confident\n        give back 200 "x"\nai.agent: done\n')
+             '    not confident\n        give back [200] "x"\nai.agent: done\n')
 check("the real `limits` block form (all three settings) still parses with no error "
       "(regression guard)",
       compile_err(LIMITS_OK) is None, compile_err(LIMITS_OK))

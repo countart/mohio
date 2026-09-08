@@ -40,7 +40,7 @@ def case(label, body, want_exit, want_msg=None):
     """Run through the REAL door -- `mio check` -- and assert exit code (and
     optionally that the give-back message is present)."""
     global _p, _f
-    src = "page at /\n" + body + "\npage: done\n"
+    src = "" + body + "\n"
     fd, path = tempfile.mkstemp(suffix=".mho")
     os.write(fd, src.encode())
     os.close(fd)

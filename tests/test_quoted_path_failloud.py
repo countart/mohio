@@ -37,13 +37,12 @@ def _compile(src):
 # ── 1. quoted paths fail loud, across every construct ────────────────────────
 
 QUOTED_CASES = {
-    "page": 'page at "/about"\n    give back 200 "hi"\npage: done\n',
     "request for": ('listen for\n    request for sh.X at "/y"\n'
-                    '        give back 200 "ok"\n    request: done\nlisten: done\n'),
+                    '        give back [200] "ok"\n    request: done\nlisten: done\n'),
     "new": ('listen for\n    new sh.X at "/z"\n'
-            '        give back 200 "ok"\n    new: done\nlisten: done\n'),
+            '        give back [200] "ok"\n    new: done\nlisten: done\n'),
     "connection": ('listen for\n    connection at "/ws"\n'
-                   '        give back 200 "ok"\n    connection: done\nlisten: done\n'),
+                   '        give back [200] "ok"\n    connection: done\nlisten: done\n'),
 }
 
 
@@ -62,7 +61,7 @@ def test_quoted_path_fails_loud_everywhere():
 # ── 2. unquoted paths still serve ────────────────────────────────────────────
 
 def test_unquoted_path_serves():
-    prog = _compile('page at /about\n    give back 200 "<h1>About</h1>"\npage: done\n')
+    prog = _compile('shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /about\n        give back [200] "<h1>About</h1>"\n    request: done\nlisten: done\n')
     c = TestClient(create_app(MohioServer(prog, MohioInterpreter())),
                    raise_server_exceptions=False)
     r = c.get("/about")
@@ -73,7 +72,7 @@ def test_unquoted_path_serves():
 
 def test_body_slash_string_is_not_a_path():
     # The "/redirect" here is a give-back value, not an `at` path. Must compile+serve.
-    prog = _compile('page at /go\n    give back 200 "/redirect"\npage: done\n')
+    prog = _compile('shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /go\n        give back [200] "/redirect"\n    request: done\nlisten: done\n')
     c = TestClient(create_app(MohioServer(prog, MohioInterpreter())),
                    raise_server_exceptions=False)
     assert c.get("/go").status_code == 200
@@ -82,7 +81,7 @@ def test_body_slash_string_is_not_a_path():
 # ── 4. mio fmt rewrites the quoted path, and the result checks clean ─────────
 
 def test_fmt_rewrites_quoted_path():
-    src = 'page at "/about"\n    give back 200 "<h1>About</h1>"\npage: done\n'
+    src = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at "/about"\n        give back [200] "<h1>About</h1>"\n    request: done\nlisten: done\n'
     with tempfile.NamedTemporaryFile("w", suffix=".mho", delete=False) as f:
         f.write(src)
         path = f.name
@@ -91,7 +90,7 @@ def test_fmt_rewrites_quoted_path():
         subprocess.run([sys.executable, "mio.py", "fmt", path, "--write"],
                        env=env, capture_output=True, text=True, timeout=120)
         fixed = open(path, encoding='utf-8').read()
-        assert 'page at /about' in fixed, f"fmt did not unquote: {fixed!r}"
+        assert 'at /about' in fixed, f"fmt did not unquote: {fixed!r}"
         assert '"/about"' not in fixed, f"quote remained: {fixed!r}"
         chk = subprocess.run([sys.executable, "mio.py", "check", path],
                              env=env, capture_output=True, text=True, timeout=120)

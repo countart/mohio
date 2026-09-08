@@ -99,9 +99,9 @@ listen for
                     match id to patient.id
                 update: done
                 miolog.alert "AI triage below confidence threshold -- manual assessment required"
-                give back 202 "Referred to charge nurse for manual triage"
+                give back [202] "Referred to charge nurse for manual triage"
             on.failure
-                give back 503 "Triage service unavailable"
+                give back [503] "Triage service unavailable"
         ai.decide: done
 
         //  ACT ON THE TRIAGE DECISION ------------------------------------
@@ -138,7 +138,7 @@ listen for
         check: done
 
         miolog.info "Patient intake complete"
-        give back 200 "Patient registered and triaged"
+        give back [200] "Patient registered and triaged"
 
     new: done
 

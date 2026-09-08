@@ -36,8 +36,8 @@ def check(label, got, want):
 
 # Small enough to run fast, real enough to exercise include resolution.
 PAGE = ('include "_bits.mho"\n\n'
-        'page at /\n    show "home"\npage: done\n')
-BITS = 'page at /extra\n    show "extra"\npage: done\n'
+        'show "home"\n')
+BITS = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /extra\n        show "extra"\n    request: done\nlisten: done\n'
 
 
 def run(args, cwd, timeout=400):
@@ -99,7 +99,7 @@ try:
 
     # A changed include must never be replayed from a stale cache.
     with open(os.path.join(d, "_bits.mho"), "a") as fh:
-        fh.write('\npage at /more\n    show "more"\npage: done\n')
+        fh.write('shape Q\n    q as text\nshape: done\n\nlisten for\n    request for sh.Q at /more\n        show "more"\n    request: done\nlisten: done\n')
     code, _ = run(["check", "index.mho"], d)
     check("an edited include target still checks clean", code, 0)
 finally:

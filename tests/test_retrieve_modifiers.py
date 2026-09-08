@@ -69,7 +69,7 @@ check("no-match returns empty list (not None)", none, [])
 # ─────────────────────────────────────────────────────────────
 print("transformer (modifier + closer forgiveness)")
 HEAD = ('connect db as sqlite\n    from env.DATABASE_URL\nconnect: done\n'
-        'shape Page\n    method GET\nshape: done\n')
+        'shape Page\n    note as text\nshape: done\n')
 
 def _first_retrieve(prog):
     found = []
@@ -123,9 +123,9 @@ except Exception as e:
 print("interpreter end-to-end")
 SEED = ('connect db as sqlite\n    from env.DATABASE_URL\nconnect: done\n'
         'shape Room\n    name as text required\n    zone as text required\nshape: done\n'
-        'shape Page\n    method GET\nshape: done\n')
+        'shape Page\n    note as text\nshape: done\n')
 ADD = ('    new sh.Room at /add\n        save to db.rooms\n            name room.name\n            zone room.zone\n'
-       '        save: done\n        give back 201 "ok"\n    new: done\n')
+       '        save: done\n        give back [201] "ok"\n    new: done\n')
 
 def _run_single(retrieve_block_lines, dbfile):
     if os.path.exists(dbfile):

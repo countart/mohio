@@ -27,7 +27,7 @@ def run(src, cmd="run"):
         os.unlink(path)
 
 # 1. default give back ESCAPES an injected <script> (the XSS attack is neutralized)
-c, out = run('evil "<script>alert(1)</script>"\ngive back 200 "<p>{{ evil }}</p>"\n')
+c, out = run('evil "<script>alert(1)</script>"\ngive back [200] "<p>{{ evil }}</p>"\n')
 rec("default give back escapes injected {{ }} (no raw <script>)",
     "&lt;script&gt;" in out and "<script>alert(1)" not in out, out[-200:])
 
@@ -36,11 +36,11 @@ c, out = run('markup "<b>bold</b>"\ngive back 200 "<p>{{ markup }}</p>" trusted\
 rec("`trusted` opts out to raw markup", "<b>bold</b>" in out and "&lt;b&gt;" not in out, out[-200:])
 
 # 3. authored markup is untouched by escaping (only the VALUE is escaped)
-c, out = run('name "Bo"\ngive back 200 "<h1>Hello {{ name }}</h1>"\n')
+c, out = run('name "Bo"\ngive back [200] "<h1>Hello {{ name }}</h1>"\n')
 rec("authored <h1> markup preserved; value escaped", "<h1>Hello Bo</h1>" in out, out[-200:])
 
 # 4. plain-text {{ }} data unchanged (numbers/names have no HTML chars -> no double-escaping regressions)
-c, out = run('score 42\ngive back 200 "Your score is {{ score }}."\n')
+c, out = run('score 42\ngive back [200] "Your score is {{ score }}."\n')
 rec("plain-text {{ }} unchanged (corpus give-backs keep working)", "Your score is 42." in out, out[-200:])
 
 # 5. the render view block still escapes (no regression on the path that was already safe)
@@ -73,7 +73,7 @@ rec("relative /path href preserved", 'href="/dashboard/home"' in out, out[-200:]
 
 # 11. text context is unaffected by the URL allowlist -- a javascript: string in body text is escaped,
 #     not stripped (it is not a live vector there, and stripping would corrupt legitimate content).
-c, out = run('u "javascript:alert(1)"\ngive back 200 "<p>see {{ u }}</p>"\n')
+c, out = run('u "javascript:alert(1)"\ngive back [200] "<p>see {{ u }}</p>"\n')
 rec("javascript: in TEXT context escaped, not stripped",
     "javascript:alert(1)" in out and "<p>see javascript:alert(1)</p>" in out, out[-200:])
 

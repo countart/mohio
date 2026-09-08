@@ -72,12 +72,12 @@ check("cast (x as.dec.2) still truncates", run('give back 200 ((1/3) as.dec.2)')
 
 # ── .pad now renders zero-filled display (value stays numeric) ────────────────────────
 check("dec.2.pad renders 10 as 10.00 in text",
-      run('x as dec.2.pad\nx 10\ngive back 200 "{{x}}"') == "10.00")
+      run('x as dec.2.pad\nx 10\ngive back [200] "{{x}}"') == "10.00")
 check("dec.2.pad value stays numeric for math",
       run('x as dec.2.pad\nx 10\ngive back 200 (x + 1)') == 11.0)
 check("dec.2.pad in a shape field renders padded",
       run('shape M\n    amount as dec.2.pad\nshape: done\n'
-          'create m as sh.M\n    amount 7\ncreate: done\ngive back 200 "{{m.amount}}"') == "7.00")
+          'create m as sh.M\n    amount 7\ncreate: done\ngive back [200] "{{m.amount}}"') == "7.00")
 
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

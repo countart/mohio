@@ -124,7 +124,7 @@ DECIDE_NO_ONFAILURE = (
     '    confidence above 0.85\n'
     '    weigh\n        amount\n'
     '    not confident\n'
-    '        give back 200 "FELLBACK-NOTCONFIDENT"\n'
+    '        give back [200] "FELLBACK-NOTCONFIDENT"\n'
     'ai.decide: done\n'
     'shape Cmd\nshape: done\n'
     'listen for\n    new sh.Cmd at /go\n'
@@ -146,15 +146,15 @@ DECIDE_WITH_ONFAILURE = (
     '    confidence above 0.85\n'
     '    weigh\n        amount\n'
     '    not confident\n'
-    '        give back 200 "FELLBACK-NOTCONFIDENT"\n'
+    '        give back [200] "FELLBACK-NOTCONFIDENT"\n'
     '    on.failure\n'
-    '        give back 200 "ONFAILURE-RAN"\n'
+    '        give back [200] "ONFAILURE-RAN"\n'
     'ai.decide: done\n'
     'shape Cmd\nshape: done\n'
     'listen for\n    new sh.Cmd at /go\n'
     '        hold amount = 100\n'
     '        ai.decide risky\n'
-    '        give back 200 "MAIN-PATH-RAN"\n'
+    '        give back [200] "MAIN-PATH-RAN"\n'
     '    new: done\nlisten: done\n')
 _prog_of = transform(_P.parse(DECIDE_WITH_ONFAILURE), DECIDE_WITH_ONFAILURE)
 resp2 = MohioInterpreter(ai=_HardFailAi()).run(_prog_of, {'_method': 'POST', '_path': '/go', 'cmd': {}})
@@ -165,13 +165,13 @@ COMPARE_SRC = (
     'ai.compare pick\n'
     '    weigh\n        a, b\n'
     '    on.failure\n'
-    '        give back 200 "COMPARE-ONFAILURE-RAN"\n'
+    '        give back [200] "COMPARE-ONFAILURE-RAN"\n'
     'ai.compare: done\n'
     'shape Cmd\nshape: done\n'
     'listen for\n    new sh.Cmd at /go\n'
     '        hold a = "x"\n        hold b = "y"\n'
     '        ai.compare pick\n'
-    '        give back 200 "COMPARE-MAIN-RAN"\n'
+    '        give back [200] "COMPARE-MAIN-RAN"\n'
     '    new: done\nlisten: done\n')
 _prog_cmp = transform(_P.parse(COMPARE_SRC), COMPARE_SRC)
 resp3 = MohioInterpreter(ai=_HardFailAi()).run(_prog_cmp, {'_method': 'POST', '_path': '/go', 'cmd': {}})
@@ -193,13 +193,13 @@ RESPOND_SRC = (
     'ai.respond reply\n'
     '    weigh\n        msg\n'
     '    on.failure\n'
-    '        give back 200 "RESPOND-ONFAILURE-RAN"\n'
+    '        give back [200] "RESPOND-ONFAILURE-RAN"\n'
     'ai.respond: done\n'
     'shape Cmd\nshape: done\n'
     'listen for\n    new sh.Cmd at /go\n'
     '        hold msg = "hi"\n'
     '        ai.respond reply\n'
-    '        give back 200 "RESPOND-MAIN-RAN"\n'
+    '        give back [200] "RESPOND-MAIN-RAN"\n'
     '    new: done\nlisten: done\n')
 _prog_resp = transform(_P.parse(RESPOND_SRC), RESPOND_SRC)
 resp4 = MohioInterpreter(ai=_HardFailAi()).run(_prog_resp, {'_method': 'POST', '_path': '/go', 'cmd': {}})

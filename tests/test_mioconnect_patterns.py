@@ -50,6 +50,35 @@ _raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 
+# T1-MIOCONNECT-REAL-PARSE-PATH (2026-08-24). Every case below used to call
+# `_parse_real(src)` -- a RAW Lark parse, skipping the pretokenizer. That is not the
+# path any Mohio program takes: `mio.py`'s _parse_and_validate pretokenizes first, and the
+# pretokenizer is LOAD-BEARING, not decorative. It collapses a dotted user-var access into one
+# USERVAR_DOTTED token, which is the only reason a member named after a type word resolves at all
+# -- `result.json.name`, `msg.text`, `msg.int`. tests/test_dotted_text_field.py asserts exactly
+# this and locks the raw parse of `msg.text` as a FAILURE, deliberately.
+#
+# This file's `src_shape` case reads `result.json.name`. `json` joined NAME's reserved-word
+# exclusion in e97ca6c, so the raw parse of that member started failing then -- correctly, and
+# for the same designed reason `text` and `int` already did. The raw parse had merely been
+# getting away with `json` until the reservation list caught up; the grammar is behaving as
+# specified. Verified on the real path throughout: `mio run` resolves `payload.json.name`,
+# `payload.text.name` and `payload.int.name` without error, and `mio check` reports the
+# `result.json.name` program clean.
+#
+# So the fix is to stop testing a path no user takes. Same helper shape as
+# tests/test_dotted_text_field.py's `_parse_real`.
+from mohio_symbol_table import extract_symbols
+from mohio_transformer import MOHIO_RESERVED_EXACT
+from mohio_pretokenizer import pretokenize
+
+
+def _parse_real(src):
+    """Mirror mio.py _parse_and_validate: pretokenize, then parse + transform."""
+    st = extract_symbols(src)
+    psrc = pretokenize(src, st.all_user_names(), MOHIO_RESERVED_EXACT)
+    return transform(_P.parse(psrc), psrc)
+
 class MockAI:
     def register_chain(self, *a, **k): pass
     def decide(self, name='', inputs=None, **k):
@@ -126,7 +155,7 @@ listen: done
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory(
         status=200, body='{"id":"ch_123","amount":1000}')):
-    prog = transform(_P.parse(src), src)
+    prog = _parse_real(src)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)
@@ -169,7 +198,7 @@ listen: done
 
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory()):
-    prog = transform(_P.parse(src_bearer), src_bearer)
+    prog = _parse_real(src_bearer)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)
@@ -205,7 +234,7 @@ listen: done
 
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory()):
-    prog = transform(_P.parse(src_basic), src_basic)
+    prog = _parse_real(src_basic)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)
@@ -241,7 +270,7 @@ listen: done
 
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory()):
-    prog = transform(_P.parse(src_header), src_header)
+    prog = _parse_real(src_header)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)
@@ -290,7 +319,7 @@ listen: done
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory(
         status=200, body='{"name":"Alice","age":30}')):
-    prog = transform(_P.parse(src_shape), src_shape)
+    prog = _parse_real(src_shape)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)
@@ -333,7 +362,7 @@ listen: done
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory(
         status=422, body='{"error":"validation failed"}')):
-    prog = transform(_P.parse(src_err), src_err)
+    prog = _parse_real(src_err)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)
@@ -377,7 +406,7 @@ listen: done
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory(
         status=200, body='{"ok":true}')):
-    prog = transform(_P.parse(src_multi), src_multi)
+    prog = _parse_real(src_multi)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)
@@ -416,7 +445,7 @@ listen: done
 
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory()):
-    prog = transform(_P.parse(src_get), src_get)
+    prog = _parse_real(src_get)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)
@@ -456,7 +485,7 @@ listen: done
 
 _captured_requests.clear()
 with unittest.mock.patch('urllib.request.urlopen', mock_urlopen_factory()):
-    prog = transform(_P.parse(src_reuse), src_reuse)
+    prog = _parse_real(src_reuse)
     interp = MohioInterpreter(ai=MockAI())
     server = MohioServer(prog, interp)
     app = create_app(server)

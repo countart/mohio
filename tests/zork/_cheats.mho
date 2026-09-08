@@ -6,15 +6,15 @@
 // router-scope current_room and would not persist as an isolated task.)
 
 task egg_discord
-        give back 200 "A shimmering portal appears. Through it you hear voices discussing code. The URL resolves: discord.gg/9tq7tGSNYE — the Mohio community awaits."
+        give back [200] "A shimmering portal appears. Through it you hear voices discussing code. The URL resolves: discord.gg/9tq7tGSNYE — the Mohio community awaits."
 task: done
 
 task egg_mohio
-        give back 200 "You said the magic word. Something underground stirs. Find the swirling marble and carry it to the maze."
+        give back [200] "You said the magic word. Something underground stirs. Find the swirling marble and carry it to the maze."
 task: done
 
 task egg_mio
-        give back 200 "[mio check] tests/zork/zork_demo.mho — 0 errors. 24 puzzles active. APPLANG cache running. The dungeon is structurally sound."
+        give back [200] "[mio check] tests/zork/zork_demo.mho — 0 errors. 24 puzzles active. APPLANG cache running. The dungeon is structurally sound."
 task: done
 
 task cheat_gimme
@@ -84,11 +84,11 @@ task cheat_gimme
             match id to "sword"
             location "inventory"
         update: done
-        give back 200 "[GIMME] All 13 puzzle items are now in your inventory."
+        give back [200] "[GIMME] All 13 puzzle items are now in your inventory."
 task: done
 
 task cheat_setflag
         // Flag system isn't wired yet (Batch 2b). For now this is a no-op stub that
         // acknowledges — real flag-gated puzzle testing waits for the flag engine.
-        give back 200 "[SETFLAG] Flag engine not wired yet (Batch 2b). Use gimme + tp to reach item-gated puzzles for now."
+        give back [200] "[SETFLAG] Flag engine not wired yet (Batch 2b). Use gimme + tp to reach item-gated puzzles for now."
 task: done

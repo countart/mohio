@@ -154,7 +154,10 @@ check("concat_term accepts random_expr (unique.id / random.uuid in a `&`)",
 # no re-raise. Every schema failure -- a table that could not be created, a column that
 # could not be added -- passed in total silence.
 # ---------------------------------------------------------------------------
-_ensure = re.search(r'def ensure_table\(self, table, columns, id_value=None\):(.*?)(?=\n    def )',
+# The signature is matched loosely on purpose. Pinning every parameter made this invariant
+# break when an unrelated argument was added (allow_new_columns, 2026-08-30) -- which says
+# nothing about whether schema failures are still swallowed, the thing actually under test.
+_ensure = re.search(r'def ensure_table\(self, table, columns[^)]*\):(.*?)(?=\n    def )',
                     INTERP[INTERP.find('class PostgresRuntime'):], re.S)
 check("PostgresRuntime.ensure_table does not swallow schema failures",
       _ensure is not None and 'raise' in _ensure.group(1),

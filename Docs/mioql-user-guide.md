@@ -85,12 +85,36 @@ Multiple `match` lines are ANDed together (all must hold).
 
 ### Grouping and paging
 
-Group with `by`:
+Group with `by`, and say what each group comes back as with a `summarize` block:
 
 ```
 find totals by status in db.orders
+    summarize
+        total amount.sum
+        howmany amount.count
+    summarize: done
 find: done
 ```
+
+That returns one row per group: `[{status: "open", total: 30, howmany: 2}, {status: "shut",
+total: 5, howmany: 1}]`.
+
+`summarize` does the reducers that collapse rows to one value per group: `sum`, `count`,
+`average`, `max`, `min`. The analytic functions that add a column to every row and keep all the
+rows belong to a `calculate` block instead: `running_sum`, `moving_average by N`, `rank within
+<field>`, `std_deviation`, `variance`, `percentile N`.
+
+```
+find rows in db.orders
+    order.up by id
+    calculate
+        sofar amount.running_sum
+    calculate: done
+find: done
+```
+
+A `by` with no `summarize` is refused at `mio check`. Grouping without aggregates has no answer
+to what each group's row should contain, so it asks for the block rather than picking one.
 
 Page through large results. The page accessors come back on the list:
 
@@ -129,14 +153,22 @@ its own keyword, and each closes with `check: done`.
 ```
 check exists found in db.users
     match email to "taken@x.com"
-    on.success
-        show "taken"
-    on.failure
+    when empty
         show "available"
+    otherwise
+        show "taken"
 check: done
 ```
 
-`on.success` fires when a row exists, `on.failure` when none does.
+`when empty` is the no-row case; `otherwise` is a match. `found` is also bound as a
+boolean, so you can read it afterwards.
+
+`on.success` / `on.failure` are REFUSED here, and the compiler says so. They are the
+operational channel -- did the query break -- and a row count that came back is not a
+failure whichever number it is. This guide used to teach them for the answer, and the
+routing did not do what the words promised: `on.success` ran whichever way the answer came
+out, and `on.failure` never ran on a miss, so every email reported "taken" and an
+authorization gate written this way never denied.
 
 ### check count — how many?
 
@@ -153,9 +185,9 @@ Add a `where` or `match` to count a subset.
 
 ### check unique — is this value free?
 
-`on.success` / `on.failure` are operational here (did the query run) — not the
-answer. The answer branches on `when empty` (available) and `otherwise`
-(taken), the same mechanism as `check <name> / when empty / otherwise`.
+The answer branches on `when empty` (available) and `otherwise` (taken), the same
+mechanism as `check <name> / when empty / otherwise` and the same one `check exists`
+uses. `on.success` / `on.failure` are refused here, for the reason given above.
 
 ```
 check unique in db.users

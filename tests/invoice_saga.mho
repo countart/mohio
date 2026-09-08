@@ -36,6 +36,15 @@ mioconnect: done
 
 //  SHAPES ------------------------------------------------------------------------
 
+// The customer this order belongs to. `fulfillOrder` takes one (`take customer as sh.Customer`)
+// and step 4 reads `customer.email` to send the confirmation, so the shape has to exist for
+// that parameter to carry any contract at all. It was referenced and never declared, which the
+// compiler used to pass in silence.
+shape Customer
+    id              as uuid         required    default uuid()
+    email           as text         required
+shape: done
+
 shape Order
     id              as uuid         required    default uuid()
     customer_id     as uuid         required
@@ -146,7 +155,7 @@ task fulfillOrder
             Stripe.charge with charge_payload as charge_result
             check charge_result.ok
                 when false
-                    give back 402 "Payment declined"
+                    give back [402] "Payment declined"
             check: done
         step: done
 
@@ -167,9 +176,9 @@ task fulfillOrder
     // The response follows the status -- the code is the policy.
     check fulfill_order.status
         when "COMMITTED"
-            give back 201 "Order confirmed"
+            give back [201] "Order confirmed"
         otherwise
-            give back 402 "Payment declined -- order rolled back"
+            give back [402] "Payment declined -- order rolled back"
     check: done
 
 task: done
@@ -184,14 +193,14 @@ listen for
         retrieve customer from db.customers
             match id to order.customer_id
             on.failure
-                give back 404 "Customer not found"
+                give back [404] "Customer not found"
         retrieve: done
 
         call fulfillOrder
             order    order
             customer customer
         call: done
-        give back 201 "Order confirmed"
+        give back [201] "Order confirmed"
 
     new: done
 

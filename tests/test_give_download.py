@@ -50,7 +50,9 @@ _g = "\n".join(l for l in _g.splitlines() if not l.strip().startswith("//"))
 _P = Lark(_g, parser="earley", ambiguity="resolve", propagate_positions=True)
 
 def page(stmt):
-    return f'page at /i\n    {stmt}\npage: done\n'
+    return ('shape Q\n    q as text\nshape: done\n'
+            'listen for\n    request for sh.Q at /i\n'
+            f'        {stmt}\n    request: done\nlisten: done\n')
 
 def node_of(stmt):
     from dataclasses import fields, is_dataclass
@@ -72,7 +74,11 @@ def node_of(stmt):
                     if r is not None:
                         return r
         return None
-    return find(prog.statements[0])
+    for st in prog.statements:
+        r = find(st)
+        if r is not None:
+            return r
+    return None
 
 def errs(stmt):
     src = page(stmt)
@@ -92,7 +98,7 @@ check("a field with a filename parses as give", type(n).__name__, "GiveStmt")
 check("  the filename is kept", n.filename, "invoice.pdf")
 
 # `give` must not disturb `give back`, which is used everywhere.
-check("give back is untouched", type(node_of('give back 200 "x"')).__name__,
+check("give back is untouched", type(node_of('give back [200] "x"')).__name__,
       "GiveBackStmt")
 check("give back with a format is untouched",
       type(node_of('give back 200 report as json')).__name__, "GiveBackStmt")
@@ -116,18 +122,7 @@ check("  and names the service that owns that job",
       "miomail" in errs('give x as email "a"')[0].message, True)
 
 # ---------------------------------------------------------------- end to end
-APP = ('page at /ok\n    give "reports/q3.pdf" as download\npage: done\n\n'
-       'page at /rename\n    hold who "Smith"\n'
-       '    give "reports/q3.pdf" as download "invoice-{{ who }}.pdf"\npage: done\n\n'
-       'page at /bytes\n    hold rows "name,total"\n'
-       '    give rows as download "export.csv"\npage: done\n\n'
-       'page at /esc\n    give "../../etc/passwd" as download\npage: done\n\n'
-       'page at /abs\n    give "/etc/passwd" as download\npage: done\n\n'
-       'page at /priv\n    give "_private/seed.json" as download\npage: done\n\n'
-       'page at /conf\n    give ".env" as download\npage: done\n\n'
-       'page at /src\n    give "thing.py" as download\npage: done\n\n'
-       'page at /link\n    give "link.txt" as download\npage: done\n\n'
-       'page at /cache\n    give "index.mho.cache" as download\npage: done\n')
+APP = ('shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /ok\n        give "reports/q3.pdf" as download\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /rename\n        hold who "Smith"\n        give "reports/q3.pdf" as download "invoice-{{ who }}.pdf"\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /bytes\n        hold rows "name,total"\n        give rows as download "export.csv"\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /esc\n        give "../../etc/passwd" as download\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /abs\n        give "/etc/passwd" as download\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /priv\n        give "_private/seed.json" as download\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /conf\n        give ".env" as download\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /src\n        give "thing.py" as download\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /link\n        give "link.txt" as download\n    request: done\nlisten: done\n\nlisten for\n    request for sh.Q at /cache\n        give "index.mho.cache" as download\n    request: done\nlisten: done\n')
 
 _dir = tempfile.mkdtemp(prefix="mohio_give_")
 _cwd = os.getcwd()

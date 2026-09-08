@@ -83,8 +83,8 @@ SECTOR = 'sector: demo_regulated\n'
 
 # ── a never-store field REFUSES THE BUILD ─────────────────────────────────────────────
 _code, _out = check_program(
-    SECTOR + 'shape Patient\n    method POST\n    ssn as text\nshape: done\n'
-             'give back 200 "x"\n')
+    SECTOR + 'shape Patient\n    note as text\n    ssn as text\nshape: done\n'
+             'give back [200] "x"\n')
 check("a shape storing a never-store field is refused at compile time", _code != 0)
 check("the refusal names the field and the sector",
       'ssn' in _out and 'demo_regulated' in _out)
@@ -93,15 +93,19 @@ check("the refusal says what to do instead",
 
 # ── an ordinary field still compiles ──────────────────────────────────────────────────
 _code_ok, _out_ok = check_program(
-    SECTOR + 'shape Patient\n    method POST\n    region as text\nshape: done\n'
-             'give back 200 "x"\n')
+    SECTOR + 'shape Patient\n    note as text\n    region as text\nshape: done\n'
+             'give back [200] "x"\n')
 check("a field with no never-store classification compiles", _code_ok == 0, _out_ok[-200:])
 
 # ── the confidence floor REFUSES THE BUILD ────────────────────────────────────────────
 _DECIDE = ('amt 1\nai.decide critical_decision returns boolean\n'
            '    confidence above %s\n    weigh amt\n'
-           '    not confident\n        give back false\nai.decide: done\n'
-           'give back 200 "x"\n')
+           # ai.audit + on.failure are compile-ENFORCED as of 2026-08-27 (batch A/B), so a
+           # fixture that omits them now fails for that reason instead of the one under test.
+           '    ai.audit to decision_audit_log\n'
+           '    not confident\n        give back false\n'
+           '    on.failure\n        give back false\nai.decide: done\n'
+           'give back [200] "x"\n')
 _code_low, _out_low = check_program(SECTOR + _DECIDE % '0.50')
 check("a decision below the sector's confidence floor is refused at compile time",
       _code_low != 0)
@@ -113,7 +117,7 @@ check("a decision at or above the floor compiles", _code_hi == 0)
 
 # ── without the sector declared, neither constraint applies ───────────────────────────
 _code_nos, _ = check_program(
-    'shape Patient\n    method POST\n    ssn as text\nshape: done\ngive back 200 "x"\n')
+    'shape Patient\n    note as text\n    ssn as text\nshape: done\ngive back [200] "x"\n')
 check("with no sector declared the same program compiles (nothing is activated)",
       _code_nos == 0)
 

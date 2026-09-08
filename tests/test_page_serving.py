@@ -18,7 +18,7 @@ def run(body_app, req):
     prog = transform(_P.parse(H + body_app), H + body_app)
     return MohioInterpreter().run(prog, req)
 def test_render_endpoint_returns_html_response():
-    app = ('shape Home\n    method GET\nshape: done\n'
+    app = ('shape Home\n    note as text\nshape: done\n'
            'listen for\n    request for sh.Home at /home\n'
            '        render\n            <h1>Hi</h1>\n        render: done\n'
            '    request: done\nlisten: done\n')
@@ -31,7 +31,7 @@ def test_render_endpoint_returns_html_response():
 def test_give_back_api_endpoint_still_works():
     app = ('shape Ping\nshape: done\n'
            'listen for\n    new sh.Ping at /ping\n'
-           '        give back 201 "pong"\n    new: done\nlisten: done\n')
+           '        give back [201] "pong"\n    new: done\nlisten: done\n')
     resp = run(app, {'_method': 'POST', '_path': '/ping', 'ping': {}})
     assert isinstance(resp, dict) and resp['status'] == 201 and resp['body'] == 'pong', resp
 if __name__ == '__main__':

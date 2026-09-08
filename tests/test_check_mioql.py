@@ -3,12 +3,11 @@
 """
 test_check_mioql.py -- A1: check exists / check count / check unique (MioQL).
 
-- check exists -> boolean. on.success fires when found; on.failure is now RESERVED for a
-  genuine driver error (T1-GUARD-FAILOPEN Part B, 2026-08-19 -- supersedes the old "on.failure
-  when not found" pattern this file used to lock). A real not-found is a legitimate answer,
-  not a failure: on.success does not fire either (there's nothing to acknowledge succeeding),
-  and when/otherwise is the correct channel to branch on found vs not-found -- same shape
-  check unique already had (below), now consistent across both.
+- check exists -> boolean. on.success / on.failure are REFUSED at compile time (MIOQL-1,
+  2026-08-31): on.success used to fire on EITHER outcome and on.failure never fired on a miss,
+  so the shipped guide's signup example reported "taken" for every email. when/otherwise --
+  either `when empty` or a condition on the bound boolean -- is the channel that branches on
+  found vs not-found, the same shape check unique already had.
 - check count  -> integer bound to `as NAME`; fail loud without `as`.
 - check unique -> boolean. on.success / on.failure are operational (did the
   query run); the answer branches on when-empty (available, count 0) /
@@ -39,11 +38,23 @@ def check(name, cond):
     if cond: PASS += 1
     else: FAIL += 1; print(f"  FAIL: {name}")
 
-check("exists found -> on.success",
-      run('check exists f in db.users match email to "taken@x.com"\n    on.success\n        show "YES"\n    on.failure\n        show "NO"\ncheck: done\n') == ["YES"])
-check("exists not found -> on.failure does NOT fire; on.success DOES (STATE channel: the "
-      "query ran fine, superseded 'on.failure=not-found', RUN-1/Part-B consistent)",
-      run('check exists f in db.users match email to "missing@x.com"\n    on.success\n        show "YES"\n    on.failure\n        show "NO"\ncheck: done\n') == ["YES"])
+# MIOQL-1 (2026-08-31) SUPERSEDES the two cases that used to sit here. They locked
+# `on.success` firing on `check exists` -- on EITHER outcome, which is precisely the bug: the
+# shipped guide's signup example therefore reported "taken" for every email, and an auth gate
+# written that way never denied. `on.success`/`on.failure` are now refused at COMPILE time for
+# this variant, naming `when empty` / `otherwise`. The when/otherwise cases below are the
+# supported channel and still pass unchanged.
+def _refused(src):
+    try:
+        run(src)
+        return False
+    except Exception as e:
+        return 'does not mean what it looks like' in str(e)
+
+check("exists + on.success is REFUSED (it used to fire on either outcome)",
+      _refused('check exists f in db.users match email to "taken@x.com"\n    on.success\n        show "YES"\ncheck: done\n'))
+check("exists + on.failure is REFUSED (it never fired on a miss)",
+      _refused('check exists f in db.users match email to "missing@x.com"\n    on.failure\n        show "NO"\ncheck: done\n'))
 check("exists not found -> when-empty/otherwise IS the correct channel now",
       run('check exists f in db.users match email to "missing@x.com"\n'
           '    when f is true\n        show "YES"\n    otherwise\n        show "NO"\ncheck: done\n') == ["NO"])

@@ -276,3 +276,62 @@ web pages a browser will let talk to you. It proves nothing about who the caller
 front end hosted elsewhere still needs something that proves it is permitted, and that is
 a separate question from this setting.
 
+
+## A page answers on every view, so watch what it does
+
+A file in a served folder answers its address by being run. Every visit runs it again: a
+person clicking a link, someone refreshing, a chat app fetching a preview, a search engine
+indexing you. That is normally exactly what you want, and it is why a page needs no routing
+code at all. It also means two things are worth knowing.
+
+**A page may read, but it may not change things.** Reading a database and rendering what
+you found is the ordinary case and it is fine. Changing something is not, and Mohio refuses
+it rather than letting it happen quietly:
+
+```
+save to db.hits
+    page "about"
+save: done
+```
+
+Put that at the top of a page and every single view writes a row, including views you never
+made. So a page that changes state is refused, with the file, the verb and the line named.
+Move the change into a handler, which is the explicit place for it and runs only for the
+request it declares:
+
+```
+listen for
+    new sh.Click at /about
+        save to db.hits
+            page "about"
+        save: done
+        give back [200] "recorded"
+    new: done
+listen: done
+```
+
+`listen for` is the container: it groups handlers and carries no path of its own. The HANDLER
+carries the path, and the path is unquoted -- `new` for a write, `request for` for a read. Run
+verified: a POST to /about answers `recorded`.
+
+The page still renders as normal. Only the handler writes, and only when something actually
+posts to it.
+
+**AI on a page is allowed, and it costs money on every view.** An AI call does not corrupt
+anything by running twice, so Mohio permits it and warns you when the server starts:
+
+```
+!  /triage calls AI on a plain page view: ai.decide (line 1). This page runs on EVERY view,
+   including crawler hits if it is indexed, and every view is a real AI cost. Set rate limits.
+```
+
+Mohio does not edit your `robots.txt` and does not try to guess which visitors are bots. You
+may well want that page indexed, and that is your decision about your own site, not the
+compiler's. Bot-spotting is also the wrong tool: it misjudges real people and misses anything
+that wants to look ordinary.
+
+**Rate limiting is the control that actually works here.** It puts a ceiling on how often a
+page can be fetched no matter who is asking, so it protects you from a crawler, a script and
+a bad afternoon equally, and it does not affect whether search engines can see your site. Set
+it in front of your app for now, at your host or proxy. A built-in form of this is a candidate
+for a later release; today it lives outside Mohio.

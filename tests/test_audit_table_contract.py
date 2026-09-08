@@ -92,8 +92,12 @@ _PROG = ('amt 100\n'
          '    ai.audit to %s\n'
          '    not confident\n'
          '        give back false\n'
+         # on.failure is compile-ENFORCED as of 2026-08-27 (batch B). Without it this fixture
+         # fails for a reason unrelated to the audit-destination contract under test here.
+         '    on.failure\n'
+         '        give back false\n'
          'ai.decide: done\n'
-         'give back 200 "ok"\n')
+         'give back [200] "ok"\n')
 
 
 def _check(dest):

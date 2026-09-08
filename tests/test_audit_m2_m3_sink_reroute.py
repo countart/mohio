@@ -120,7 +120,7 @@ AI_SRC = (
     'listen for\n    new sh.Cmd at /go\n'
     '        hold amt 100\n'
     '        ai.decide riskCheck\n'
-    '        give back 200 "ok"\n'
+    '        give back [200] "ok"\n'
     '    new: done\nlisten: done\n'
 )
 

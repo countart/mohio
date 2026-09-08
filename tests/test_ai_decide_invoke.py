@@ -29,7 +29,7 @@ DEFINE = ('ai.decide resolve_noun returns text\n'
           '    context "Typed: {{noun}}. Present: {{candidates}}."\n'
           '    weigh noun, candidates\n'
           '    not confident\n'
-          '        give back 200 ""\n'
+          '        give back [200] ""\n'
           'ai.decide: done\n')
 
 def test_invocation_runs_stored_block_and_binds_result():
@@ -71,7 +71,7 @@ def test_bare_invocation_parses_as_aidecideinvoke_node():
     assert inv.name == 'resolve_noun', inv.name
     # the declaration form is unaffected
     decl_src = ('ai.decide narrator returns text\n    goal "g"\n    weigh a\n'
-                '    not confident\n        give back 200 ""\nai.decide: done\n')
+                '    not confident\n        give back [200] ""\nai.decide: done\n')
     decl = transform(_P.parse(decl_src), decl_src).statements[0]
     assert isinstance(decl, AiDecideBlock), f"got {type(decl).__name__}"
 

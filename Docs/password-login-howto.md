@@ -62,14 +62,14 @@ listen for
         retrieve.one member from db.members
             match email to request.email
             on.failure
-                give back 401 "invalid credentials"
+                give back [401] "invalid credentials"
         retrieve.one: done
         check request.password against member.hashed_password
             on.success
                 grant role member.role
-                give back 200 "ok"
+                give back [200] "ok"
             on.failure
-                give back 401 "invalid credentials"
+                give back [401] "invalid credentials"
     new: done
 listen: done
 ```

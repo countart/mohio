@@ -102,7 +102,7 @@ journey App
 
     listen for
         new sh.Signup at /signup
-            give back 201 "created"
+            give back [201] "created"
         new: done
     listen: done
 journey: done

@@ -52,7 +52,7 @@ def fails(src):
 
 
 # ── 1. served re-hold returns a clean 500, does not crash ─────────────────────────────
-H = 'shape Visit\n    method POST\nshape: done\n'
+H = 'shape Visit\n    note as text\nshape: done\n'
 BODY = ('listen for\n    new sh.Visit\n        hold once = "a"\n        give back once\n    new: done\nlisten: done\n')
 t = transform(P.parse(H + BODY), H + BODY)
 sessions = _InMemorySessionStore()

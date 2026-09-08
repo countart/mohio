@@ -65,17 +65,17 @@ check("same-currency sum keeps formatting",
 
 # ── dec.N.pad display ─────────────────────────────────────────────────────────────────
 check("dec.2.pad renders 10 -> 10.00 (interp)",
-      run('x as dec.2.pad\nx 10\ngive back 200 "{{x}}"') == "10.00")
+      run('x as dec.2.pad\nx 10\ngive back [200] "{{x}}"') == "10.00")
 check("dec.2.pad renders in concat",
       run('x as dec.2.pad\nx 3.5\ngive back 200 ("" & x)') == "3.50")
-check("dec.3.pad renders 1.5 -> 1.500", run('x as dec.3.pad\nx 1.5\ngive back 200 "{{x}}"') == "1.500")
+check("dec.3.pad renders 1.5 -> 1.500", run('x as dec.3.pad\nx 1.5\ngive back [200] "{{x}}"') == "1.500")
 check("dec.2.pad truncates then pads (5.999 -> 5.99)",
-      run('x as dec.2.pad\nx 5.999\ngive back 200 "{{x}}"') == "5.99")
+      run('x as dec.2.pad\nx 5.999\ngive back [200] "{{x}}"') == "5.99")
 check("dec.2.pad value stays numeric for math",
       run('x as dec.2.pad\nx 10\ngive back 200 (x + 1)') == 11.0)
 check("dec.2.pad in a shape field renders padded",
       run('shape A\n  q as dec.2.pad\nshape: done\ncreate a as sh.A\n  q 7\ncreate: done\n'
-          'give back 200 "{{a.q}}"') == "7.00")
+          'give back [200] "{{a.q}}"') == "7.00")
 
 print(f"\nRESULTS: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

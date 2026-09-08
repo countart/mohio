@@ -73,7 +73,7 @@ check("`lock x` keeps the current value", run('x 5\nlock x\ngive back 200 x') ==
 check("`lock x = 5` (declare-and-lock) still works",
       fails('lock x = 5\nx 10\ngive back 200 x'))
 check("`lock x` on a missing variable fails loud (no silent no-op)",
-      fails('lock nope\ngive back 200 "x"'))
+      fails('lock nope\ngive back [200] "x"'))
 check("a variable locked in place refuses the state operators too",
       fails('x 5\nlock x\nreplace x with 9\ngive back 200 x'))
 

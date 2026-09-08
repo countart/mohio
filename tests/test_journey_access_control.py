@@ -1,8 +1,8 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
 # Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
 """
-test_journey_access_control.py -- private:/public:/flow:/serves: journey-level access
-control (2026-08-06).
+test_journey_access_control.py -- authorize:/public:/private:/flow:/serves: journey-level
+access control (2026-08-06, retargeted 2026-08-27 for the locked page-classification model).
 
 History: all four were the same disease. public:/private:/flow: parsed into an identical,
 indistinguishable generic `path_list`-shaped JourneyMeta (the leading keyword is a bare
@@ -15,21 +15,25 @@ path in every journey was silently open regardless of what was declared. Confirm
 HTTP reproduction (tenant_isolation_probe.py, this session): a `serves: multiple tenants`
 journey let tenant B read tenant A's data verbatim over a plain, unauthenticated GET.
 
-Fixed:
+Fixed 2026-08-06:
   - Grammar: each of the five journey_body alternatives now has its own -> alias
     (journey_public/journey_private/journey_flow/journey_serves_single/journey_serves_multiple)
     so the transformer can tell them apart.
-  - private:/public: are now genuinely enforced in _exec_JourneyDecl, reusing require role's
-    exact server-verified-session mechanism (ctx.has_any_roles()/roles_verified()) and 403
-    shape. Matching is segment-boundary prefix (private: /admin also covers /admin/users);
-    public: is an explicit override for a path that would otherwise fall under a private:
-    entry.
-  - flow: and serves: multiple tenants cannot be genuinely built yet (flow's intended runtime
-    behavior has no documented source of truth anywhere in this repo; serves: needs a
-    request-scoped tenant-identity primitive that does not exist in the language). Converted
-    from silent no-op to fail-loud (501, "not yet ..."), matching the house pattern already
-    used by rate limit / miopdf / miotest -- see CLAUDE-CODE-BACKLOG.md. serves: single tenant
-    is unaffected (nothing to isolate, safe as a no-op).
+  - private:/public: were made genuinely enforced in _exec_JourneyDecl, reusing require role's
+    exact server-verified-session mechanism and 403 shape.
+  - flow: and serves: multiple tenants cannot be genuinely built yet. Converted from silent
+    no-op to fail-loud (501, "not yet ..."), matching the house pattern already used by rate
+    limit / miopdf / miotest -- see CLAUDE-CODE-BACKLOG.md. serves: single tenant is unaffected.
+
+REDEFINED 2026-08-27 (T1-PAGE-CLASSIFICATION-MODEL, locked 2026-08-15, wired this date):
+  - The 403-gate mechanism this suite originally attached to `private:` now belongs to
+    `authorize:` instead -- the locked model's `private:` means served-but-unlisted, NOT
+    auth-gated. GROUP A below was retargeted from `private:` to `authorize:` fixtures so it
+    keeps testing the real mechanism (require role's server-verified-session check) under
+    its now-correct keyword. GROUP A2 is new: it proves `private:` genuinely has no gate.
+  - hidden:/authorize: gained real enforcement this date; hidden:/the `_`-prefix-implies-
+    hidden rule/the full four-state + underscore matrix are covered by the dedicated
+    test_page_classification_enforcement.py, not duplicated here.
 
 Real HTTP throughout (Starlette TestClient), matching test_golden_journey_page.py's harness.
 Run: `python tests/test_journey_access_control.py`.
@@ -70,45 +74,11 @@ def make_client(source):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# GROUP A -- private:/public: real enforcement
+# GROUP A -- authorize:/public: real enforcement (the mechanism this suite originally
+# tested against private: before the 2026-08-27 redefinition moved the auth-gate to
+# authorize:; the fixture is unchanged except the keyword).
 # ══════════════════════════════════════════════════════════════════════
-_ACCESS = """\
-journey AccessApp
-    private: /admin
-    public: /admin/public-notice
-
-    shape Login
-        who as text
-    shape: done
-
-    page Home at /home
-        render
-            <p>[HOME]</p>
-        render: done
-    page: done
-    page Admin at /admin
-        render
-            <p>[ADMIN]</p>
-        render: done
-    page: done
-    page AdminUsers at /admin/users
-        render
-            <p>[ADMIN_USERS]</p>
-        render: done
-    page: done
-    page AdminNotice at /admin/public-notice
-        render
-            <p>[NOTICE]</p>
-        render: done
-    page: done
-    listen for
-        new sh.Login at /login
-            grant role "staff"
-            give back 200 "[LOGGED_IN]"
-        new: done
-    listen: done
-journey: done
-"""
+_ACCESS = 'shape Q\n    q as text\nshape: done\njourney AccessApp\n    authorize: /admin\n    public: /admin/public-notice\n\n    shape Login\n        who as text\n    shape: done\n\n    listen for\n        request for sh.Q at /home\n                render\n                    <p>[HOME]</p>\n                render: done\n        request: done\n    listen: done\n    listen for\n        request for sh.Q at /admin\n                render\n                    <p>[ADMIN]</p>\n                render: done\n        request: done\n    listen: done\n    listen for\n        request for sh.Q at /admin/users\n                render\n                    <p>[ADMIN_USERS]</p>\n                render: done\n        request: done\n    listen: done\n    listen for\n        request for sh.Q at /admin/public-notice\n                render\n                    <p>[NOTICE]</p>\n                render: done\n        request: done\n    listen: done\n    listen for\n        new sh.Login at /login\n            grant role "staff"\n            give back [200] "[LOGGED_IN]"\n        new: done\n    listen: done\njourney: done\n'
 
 c = make_client(_ACCESS)
 
@@ -117,17 +87,17 @@ check("unlisted path (/home) stays default-open, no auth needed",
       r.status_code == 200 and "[HOME]" in r.text, f"status={r.status_code} body={r.text[:150]}")
 
 r = c.get("/admin")
-check("private: /admin genuinely REFUSES an unauthenticated request (403)",
+check("authorize: /admin genuinely REFUSES an unauthenticated request (403)",
       r.status_code == 403, f"status={r.status_code} body={r.text[:150]}")
 check("the refused request does NOT leak the protected page content",
       "[ADMIN]" not in r.text, r.text[:150])
 
 r = c.get("/admin/users")
-check("private: /admin covers a deeper path (/admin/users) via segment-boundary prefix -> 403",
+check("authorize: /admin covers a deeper path (/admin/users) via segment-boundary prefix -> 403",
       r.status_code == 403, f"status={r.status_code} body={r.text[:150]}")
 
 r = c.get("/admin/public-notice")
-check("public: /admin/public-notice OVERRIDES the private: /admin prefix -> stays open (200)",
+check("public: /admin/public-notice OVERRIDES the authorize: /admin prefix -> stays open (200)",
       r.status_code == 200 and "[NOTICE]" in r.text, f"status={r.status_code} body={r.text[:150]}")
 
 r_login = c.post("/login", json={"who": "bo", "_shape": "Login"})
@@ -136,7 +106,7 @@ check("login (grant role) -> 200, session cookie set",
       f"status={r_login.status_code} cookies={dict(c.cookies)}")
 
 r = c.get("/admin")
-check("after login (any server-verified role), private: /admin -> 200",
+check("after login (any server-verified role), authorize: /admin -> 200",
       r.status_code == 200 and "[ADMIN]" in r.text, f"status={r.status_code} body={r.text[:150]}")
 
 r = c.get("/admin/users")
@@ -144,7 +114,7 @@ check("after login, the covered subpath /admin/users -> 200 too",
       r.status_code == 200 and "[ADMIN_USERS]" in r.text, f"status={r.status_code} body={r.text[:150]}")
 
 
-# T1-AUDIT-COVERAGE-GAPS Part B (2026-08-17): a private: denial is a security-relevant event,
+# T1-AUDIT-COVERAGE-GAPS Part B (2026-08-17): an authorize: denial is a security-relevant event,
 # only grants were being audited before -- verify the denial itself writes to
 # security_audit_log. Fresh interp+client (not make_client, which doesn't expose interp) so
 # the log is empty beforehand and the denial is unambiguous.
@@ -153,9 +123,9 @@ _interp_audit = MohioInterpreter(ai=MockAI())
 _c_audit = TestClient(create_app(MohioServer(_prog_audit, _interp_audit)), raise_server_exceptions=False)
 r = _c_audit.get("/admin")
 _log = _interp_audit._audit_logs.get('security_audit_log', [])
-check("private: /admin denial writes a security_audit_log entry",
+check("authorize: /admin denial writes a security_audit_log entry",
       r.status_code == 403 and any(
-          e.get('event') == 'access_denied' and e.get('reason') == 'private_path_unauthenticated'
+          e.get('event') == 'access_denied' and e.get('reason') == 'authorize_path_unauthenticated'
           for e in _log), _log)
 check("the denial entry names the denied path",
       any(e.get('path') == '/admin' for e in _log), _log)
@@ -177,23 +147,28 @@ try:
     _c_spy.get("/admin")
 finally:
     MohioInterpreter._audit_event = _orig_audit_event
-check("the private: denial audit goes through _audit_event (not a bypass)",
-      ('security_audit_log', 'access_denied', 'private_path_unauthenticated') in _calls, _calls)
+check("the authorize: denial audit goes through _audit_event (not a bypass)",
+      ('security_audit_log', 'access_denied', 'authorize_path_unauthenticated') in _calls, _calls)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# GROUP A2 -- private: redefinition (2026-08-27): served, genuinely NO gate. The 403-block
+# this suite used to assert for private: is now authorize:'s job (Group A above); this proves
+# the redefinition the other direction -- an unauthenticated request to a private: path is
+# NOT refused.
+# ══════════════════════════════════════════════════════════════════════
+_PRIVATE_REDEF = 'shape Q\n    q as text\nshape: done\njourney PrivateRedef\n    private: /docs\n    listen for\n        request for sh.Q at /docs\n                render\n                    <p>[DOCS]</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n'
+
+c5 = make_client(_PRIVATE_REDEF)
+r = c5.get("/docs")
+check("private: /docs is served with NO auth gate (200, not 403) -- the locked redefinition",
+      r.status_code == 200 and "[DOCS]" in r.text, f"status={r.status_code} body={r.text[:150]}")
 
 
 # ══════════════════════════════════════════════════════════════════════
 # GROUP B -- flow: converted from silent no-op to fail-loud (501)
 # ══════════════════════════════════════════════════════════════════════
-_FLOW = """\
-journey FlowApp
-    flow: /wizard
-    page Wizard at /wizard
-        render
-            <p>[WIZARD]</p>
-        render: done
-    page: done
-journey: done
-"""
+_FLOW = 'shape Q\n    q as text\nshape: done\njourney FlowApp\n    flow: /wizard\n    listen for\n        request for sh.Q at /wizard\n                render\n                    <p>[WIZARD]</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n'
 
 c2 = make_client(_FLOW)
 r = c2.get("/wizard")
@@ -222,10 +197,10 @@ journey MultiTenantApp
         content as text required
     shape: done
     shape NoteRequest
-        method POST
+        note as text
     shape: done
     shape ListRequest
-        method GET
+        note as text
     shape: done
 
     listen for
@@ -233,7 +208,7 @@ journey MultiTenantApp
             save to db.notes
                 content request.content
             save: done
-            give back 201 "saved"
+            give back [201] "saved"
         new: done
         request for sh.ListRequest at /notes
             retrieve.all notes from db.notes
@@ -266,16 +241,7 @@ check("the closure is a real fail-loud (500), not an accidental different kind o
 # GROUP D -- serves: single tenant remains a genuine no-op (nothing to isolate,
 # must NOT fail loud -- regression guard against over-firing the new check).
 # ══════════════════════════════════════════════════════════════════════
-_SINGLE = """\
-journey SingleApp
-    serves: single tenant
-    page Home at /home
-        render
-            <p>[OK]</p>
-        render: done
-    page: done
-journey: done
-"""
+_SINGLE = 'shape Q\n    q as text\nshape: done\njourney SingleApp\n    serves: single tenant\n    listen for\n        request for sh.Q at /home\n                render\n                    <p>[OK]</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n'
 
 c4 = make_client(_SINGLE)
 r = c4.get("/home")
@@ -285,47 +251,19 @@ check("serves: single tenant is unaffected -- still serves normally (200), no fa
 
 # ══════════════════════════════════════════════════════════════════════
 # GROUP E -- pathless request (no `_path` on the request at all, e.g. `mio run
-# --request-file` with no `_path` key) against a journey declaring private:.
+# --request-file` with no `_path` key) against a journey declaring authorize:.
 # _serve_pages's single-page fallback would otherwise serve whatever one page exists with
-# no path to check against private:/public:, bypassing the check above entirely. Deny by
-# default when the journey declares ANY private: entry and no verified role is present.
+# no path to check against hidden:/authorize:, bypassing the check above entirely. Deny by
+# default when the journey declares ANY authorize: entry and no verified role is present.
 # Driven through run_with_session directly (not the HTTP TestClient) because real HTTP
 # always sets `_path` from the URL -- the only way to construct a genuinely pathless
 # request is the same stateless/session entry point `mio run --request-file` itself uses.
 # ══════════════════════════════════════════════════════════════════════
 from mohio_interpreter import MohioInterpreter, _InMemorySessionStore
 
-_PRIVATE_SINGLE = """\
-journey PrivateSingle
-    private: /admin
+_AUTHORIZE_SINGLE = 'shape Q\n    q as text\nshape: done\njourney AuthorizeSingle\n    authorize: /admin\n\n    shape Login\n        who as text\n    shape: done\n\n    listen for\n        request for sh.Q at /admin\n                render\n                    <p>[SECRET_ADMIN]</p>\n                render: done\n        request: done\n    listen: done\n    listen for\n        new sh.Login at /login\n            grant role "staff"\n            give back [200] "[LOGGED_IN]"\n        new: done\n    listen: done\njourney: done\n'
 
-    shape Login
-        who as text
-    shape: done
-
-    page Admin at /admin
-        render
-            <p>[SECRET_ADMIN]</p>
-        render: done
-    page: done
-    listen for
-        new sh.Login at /login
-            grant role "staff"
-            give back 200 "[LOGGED_IN]"
-        new: done
-    listen: done
-journey: done
-"""
-
-_NO_PRIVATE_SINGLE = """\
-journey NoPrivateSingle
-    page Home at /home
-        render
-            <p>[HOME_NO_PRIVATE]</p>
-        render: done
-    page: done
-journey: done
-"""
+_NO_AUTHORIZE_SINGLE = 'shape Q\n    q as text\nshape: done\njourney NoAuthorizeSingle\n    listen for\n        request for sh.Q at /home\n                render\n                    <p>[HOME_NO_AUTHORIZE]</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n'
 
 def _pathless(source, requests):
     """Run each request through run_with_session, following the session cookie across
@@ -348,47 +286,47 @@ def _pathless(source, requests):
             session_id = new_sid
     return results
 
-# (a) _path absent + private: declared + no role -> denied
-r_a = _pathless(_PRIVATE_SINGLE, [{"_method": "GET"}])[0]
-check("(a) pathless request, private: declared, no role -> denied (403)",
+# (a) _path absent + authorize: declared + no role -> denied
+r_a = _pathless(_AUTHORIZE_SINGLE, [{"_method": "GET"}])[0]
+check("(a) pathless request, authorize: declared, no role -> denied (403)",
       r_a.get('status') == 403, str(r_a))
-check("(a) the denial names the real reason (no path + journey declares private:)",
+check("(a) the denial names the real reason (no path + journey declares authorize:)",
       'no path' in str(r_a.get('body', '')).lower()
-      and 'private' in str(r_a.get('body', '')).lower(), str(r_a))
+      and 'authorize' in str(r_a.get('body', '')).lower(), str(r_a))
 check("(a) the denial does NOT leak the protected page content",
       '[SECRET_ADMIN]' not in str(r_a.get('body', '')), str(r_a))
 
-# (b) _path absent + private: declared + verified role -> allowed
-r_login, r_b = _pathless(_PRIVATE_SINGLE, [
+# (b) _path absent + authorize: declared + verified role -> allowed
+r_login, r_b = _pathless(_AUTHORIZE_SINGLE, [
     {"_method": "POST", "_path": "/login", "_shape": "Login", "who": "bo"},
     {"_method": "GET"},
 ])
 check("(b) setup: login established a server-verified role",
       r_login.get('status') == 200 and '[LOGGED_IN]' in str(r_login.get('body', '')),
       str(r_login))
-check("(b) pathless request, private: declared, verified role -> allowed (not 403)",
+check("(b) pathless request, authorize: declared, verified role -> allowed (not 403)",
       r_b.get('status') != 403, str(r_b))
 check("(b) the single page is actually served, not silently swallowed",
       '[SECRET_ADMIN]' in str(r_b.get('body', '')), str(r_b))
 
-# (c) _path absent + NO private: declared -> allowed, unchanged behavior
-r_c = _pathless(_NO_PRIVATE_SINGLE, [{"_method": "GET"}])[0]
-check("(c) pathless request, journey has NO private: entries -> unaffected (200)",
-      r_c.get('status') == 200 and '[HOME_NO_PRIVATE]' in str(r_c.get('body', '')),
+# (c) _path absent + NO authorize: declared -> allowed, unchanged behavior
+r_c = _pathless(_NO_AUTHORIZE_SINGLE, [{"_method": "GET"}])[0]
+check("(c) pathless request, journey has NO authorize: entries -> unaffected (200)",
+      r_c.get('status') == 200 and '[HOME_NO_AUTHORIZE]' in str(r_c.get('body', '')),
       str(r_c))
 
 # T1-AUDIT-COVERAGE-GAPS Part B: the pathless deny-by-default denial (case (a) above) is the
 # same security-relevant event as the path-known case -- verify it audits too, same as (a)'s
 # 403 assertion but inspecting the interpreter directly (not through _pathless, which discards
 # its interpreter per call).
-_prog_pathless = transform(_P.parse(_PRIVATE_SINGLE), _PRIVATE_SINGLE)
+_prog_pathless = transform(_P.parse(_AUTHORIZE_SINGLE), _AUTHORIZE_SINGLE)
 _interp_pathless = MohioInterpreter()
 _r_pathless = _interp_pathless.run_with_session(
     _prog_pathless, {"_method": "GET"}, "e2e-pathless-audit", _InMemorySessionStore())
 _log = _interp_pathless._audit_logs.get('security_audit_log', [])
-check("pathless private: denial writes a security_audit_log entry",
+check("pathless authorize: denial writes a security_audit_log entry",
       _r_pathless.get('status') == 403 and any(
-          e.get('event') == 'access_denied' and e.get('reason') == 'private_path_unauthenticated'
+          e.get('event') == 'access_denied' and e.get('reason') == 'authorize_path_unauthenticated'
           and e.get('path') is None
           for e in _log), _log)
 

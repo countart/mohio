@@ -81,7 +81,7 @@ listen for
         retrieve member from db.members
             match id to request.member_id
             on.failure
-                give back 404 "Member not found"
+                give back [404] "Member not found"
         retrieve: done
 
         // Find their 10 most recent activity items.

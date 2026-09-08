@@ -112,25 +112,25 @@ def _tryblock(src):
 
 def test_modifiers_parse():
     print("\n=== modifiers parse, convert units, order-independent ===")
-    t = _tryblock('try up to 3 times within 5 seconds\n    give back 200 "ok"\ntry: done\n')
+    t = _tryblock('try up to 3 times within 5 seconds\n    give back [200] "ok"\ntry: done\n')
     check("retry=3", t.retry_times == 3)
     check("per=5s", t.per_timeout == 5.0)
-    t = _tryblock('try within 5 seconds up to 3 times\n    give back 200 "ok"\ntry: done\n')
+    t = _tryblock('try within 5 seconds up to 3 times\n    give back [200] "ok"\ntry: done\n')
     check("order-independent: retry=3", t.retry_times == 3)
     check("order-independent: per=5s", t.per_timeout == 5.0)
-    t = _tryblock('try within 2 hours total\n    give back 200 "ok"\ntry: done\n')
+    t = _tryblock('try within 2 hours total\n    give back [200] "ok"\ntry: done\n')
     check("total=7200s (hours converted)", t.total_timeout == 7200.0)
-    t = _tryblock('try waiting 1 minute between\n    give back 200 "ok"\ntry: done\n')
+    t = _tryblock('try waiting 1 minute between\n    give back [200] "ok"\ntry: done\n')
     check("backoff=60s (minute converted)", t.backoff == 60.0)
 
 
 def test_bare_try_and_always_forms_parse():
     print("\n=== bare try / try+always / try+on.failure+on.success+always all parse ===")
     for label, src in [
-        ("bare try", 'try\n    give back 200 "ok"\ntry: done\n'),
-        ("try+always", 'try\n    give back 200 "ok"\nalways\n    miolog.info "x"\ntry: done\n'),
+        ("bare try", 'try\n    give back [200] "ok"\ntry: done\n'),
+        ("try+always", 'try\n    give back [200] "ok"\nalways\n    miolog.info "x"\ntry: done\n'),
         ("try+on.failure+on.success+always",
-         'try\n    give back 200 "ok"\non.failure\n    give back 500 "e"\n'
+         'try\n    give back [200] "ok"\non.failure\n    give back [500] "e"\n'
          'on.success\n    miolog.info "ok"\nalways\n    miolog.info "done"\ntry: done\n'),
     ]:
         try:

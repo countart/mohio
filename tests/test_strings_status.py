@@ -50,7 +50,7 @@ def value_of(stmts, var='result'):
     return v.to_python() if isinstance(v, MohioValue) else v
 
 def status_of(give_back_src):
-    src = f'listen for GET "/x"\n    {give_back_src}\nlisten: done'
+    src = f'listen for\n    {give_back_src}\nlisten: done'
     prog = transform(P.parse(src + '\n'), src)
     def walk(n):
         yield n
@@ -93,11 +93,11 @@ check("marker on single-line string is harmless",
 # because that would reject working code (e.g. the live Zork marble scene).
 print("\n=== naked multi-line parses fine (no false regression) ===")
 check("naked multi-line in give back parses",
-      parses_ok(f'listen for GET "/x"\n    give back 200 "L1{NL}L2"\nlisten: done'), True)
+      parses_ok(f'listen for\n    give back [200] "L1{NL}L2"\nlisten: done'), True)
 check("naked multi-line assignment parses",
       parses_ok(f'note "first{NL}second"'), True)
 check("marked multi-line also parses",
-      parses_ok(f'listen for GET "/x"\n    give back as.paragraph "L1{NL}L2"\nlisten: done'), True)
+      parses_ok(f'listen for\n    give back as.paragraph "L1{NL}L2"\nlisten: done'), True)
 
 # ── 3. \\n escape renders a real newline ─────────────────────────────────
 print("\n=== \\n escape ===")
@@ -113,7 +113,7 @@ check("created -> 201",       status_of('give back created member'), 201)
 check("unauthorized -> 401",  status_of('give back unauthorized "log in"'), 401)
 check("missing -> 404",       status_of('give back missing "gone"'), 404)
 check("error -> 500",         status_of('give back error "oops"'), 500)
-check("numbers still work",   status_of('give back 202 "review"'), 202)
+check("numbers still work",   status_of('give back [202] "review"'), 202)
 check("no status -> None (runtime defaults 200)", status_of('give back "x"'), None)
 
 # ── 5. round-trip: real newline survives give back ───────────────────────

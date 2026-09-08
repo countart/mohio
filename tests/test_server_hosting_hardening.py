@@ -46,8 +46,8 @@ def check(label, cond, detail=""):
 
 # ── build a realistic tenant directory ────────────────────────────────────────────────
 tenant = tempfile.mkdtemp(prefix="tenant_")
-APP = ('shape H\n    method GET\nshape: done\n'
-       'listen for\n    request for sh.H at /hi\n        give back 200 "tenant"\n'
+APP = ('shape H\n    note as text\nshape: done\n'
+       'listen for\n    request for sh.H at /hi\n        give back [200] "tenant"\n'
        '    request: done\nlisten: done\n')
 open(os.path.join(tenant, 'app.mho'), 'w', encoding='utf-8').write(APP)
 open(os.path.join(tenant, 'style.css'), 'w', encoding='utf-8').write('body{color:red}')

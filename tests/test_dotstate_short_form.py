@@ -50,9 +50,9 @@ def short(flag, v):
 create: done
 check obj
     when obj.{flag}
-        give back 200 "fired"
+        give back [200] "fired"
     otherwise
-        give back 200 "fell_through"
+        give back [200] "fell_through"
 check: done
 ''')
 
@@ -72,9 +72,9 @@ def verbose(v):
 create: done
 check obj
     when obj.verified is true
-        give back 200 "fired"
+        give back [200] "fired"
     otherwise
-        give back 200 "fell_through"
+        give back [200] "fell_through"
 check: done
 ''')
 
@@ -89,9 +89,9 @@ def eq_case(status_value, when_value):
 create: done
 check order.status
     when "{when_value}"
-        give back 200 "matched"
+        give back [200] "matched"
     otherwise
-        give back 200 "no_match"
+        give back [200] "no_match"
 check: done
 ''')
 

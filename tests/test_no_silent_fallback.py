@@ -78,7 +78,7 @@ check("a misspelled backend refuses instead of becoming sqlite", ok, False)
 check("the refusal names the typo", "postgress" in detail, True)
 
 # ---------------------------------------------------------------- static files
-PAGE = 'page at /\n    show "home"\npage: done\n'
+PAGE = 'show "home"\n'
 
 def serve_and_get(paths):
     """Serve a directory and GET each path. Returns {path: status}."""

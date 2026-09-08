@@ -108,8 +108,8 @@ for svc in ('miocache.set "k" to "v"',
 check("invented inline `x foo otherwise bar` is LOUD",
       'hold a "x"\nb a otherwise "fallback"\nshow b\n', 1)
 check("spec: otherwise INLINE in a check block",
-      'hold s 85\ncheck s\n    when s is more than 70\n        give back 200 "pass"\n'
-      '    otherwise give back 200 "fail"\ncheck: done\n', 0)
+      'hold s 85\ncheck s\n    when s is more than 70\n        give back [200] "pass"\n'
+      '    otherwise give back [200] "fail"\ncheck: done\n', 0)
 check("spec: otherwise MULTI-LINE in a check block",
       'hold s 85\ncheck s\n    when s is more than 70\n        show "pass"\n'
       '    otherwise\n        show "fail"\ncheck: done\n', 0)

@@ -165,8 +165,8 @@ The honest pattern is to check `ok` and branch:
 ```mohio
 Stripe.charge with payment as receipt
 check receipt.ok
-    when true   give back 201 "Order confirmed"
-    otherwise   give back 502 "Payment failed"
+    when true   give back [201] "Order confirmed"
+    otherwise   give back [502] "Payment failed"
 check: done
 ```
 
@@ -236,8 +236,8 @@ hold payment = "tok_visa"
 
 Stripe.charge with payment as receipt
 check receipt.ok
-    when true   give back 201 "Order confirmed"
-    otherwise   give back 502 "Payment failed"
+    when true   give back [201] "Order confirmed"
+    otherwise   give back [502] "Payment failed"
 check: done
 ```
 

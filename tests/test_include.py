@@ -114,8 +114,8 @@ _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 # not a declaration at all -- it used to parse only because any `word.word` counted
 # as a statement, and that same permissiveness was eating `give back` values.
 src = ('ai.decide narrator returns text\n    weigh\n        command\n'
-       '    not confident\n        give back 200 "A"\n'
-       '    on.failure\n        give back 200 "B"\nai.decide: done\n')
+       '    not confident\n        give back [200] "A"\n'
+       '    on.failure\n        give back [200] "B"\nai.decide: done\n')
 try:
     _P.parse(src)
     check("grammar: not confident + on.failure coexist", True)

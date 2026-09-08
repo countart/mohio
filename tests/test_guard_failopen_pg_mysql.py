@@ -32,8 +32,27 @@ def check(label, cond, detail=""):
 
 
 class FakeCursor:
-    def __init__(self, exc): self._exc = exc
-    def execute(self, *a, **k): raise self._exc
+    """Raises on the real query, but ANSWERS schema introspection.
+
+    Field validation moved above the runtimes on 2026-09-01 (the backend-neutral safety
+    floor), so every query method now reads the table's columns BEFORE building its SQL. A
+    fake that raises on every execute -- including that read -- means validation fails first
+    and this file never reaches the driver-error path it exists to test. Serving the
+    introspection keeps the test aimed at what it is actually about: a driver error must not
+    be swallowed.
+    """
+    def __init__(self, exc):
+        self._exc = exc
+        self._rows = None
+    def execute(self, sql='', *a, **k):
+        if 'information_schema' in str(sql):
+            self._rows = [('id',), ('z',)]
+            return
+        raise self._exc
+    def fetchall(self):
+        return self._rows or []
+    def fetchone(self):
+        return (self._rows or [None])[0]
     def close(self): pass
 
 class FakeConn:

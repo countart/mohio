@@ -50,11 +50,11 @@ SRC = (
     # 2026-08-04: mio_session is runtime-owned now -- the server emits it
     # automatically on every session-bearing response, no miocookie.set needed
     # (and it would fail loud if attempted; the reservation is tested elsewhere).
-    '        give back 200 "logged in"\n'
+    '        give back [200] "logged in"\n'
     '    new: done\n'
     '    new sh.Secret\n'
     '        require role "admin"\n'
-    '        give back 200 "SECRET OK"\n'
+    '        give back [200] "SECRET OK"\n'
     '    new: done\n'
     'listen: done\n'
 )
@@ -123,21 +123,21 @@ def run_stateless(src):
 
 DYN = ('shape Cmd\n    action as text\nshape: done\n'
        'listen for\n    new sh.Cmd\n        hold r "editor"\n        grant role r\n'
-       '        require role "editor"\n        give back 200 "DYN OK"\n    new: done\nlisten: done\n')
+       '        require role "editor"\n        give back [200] "DYN OK"\n    new: done\nlisten: done\n')
 r = run_stateless(DYN)
 check("grant role from a runtime variable -> require role passes (200)",
       r.get('status') == 200 and 'DYN OK' in str(r.get('body', '')), str(r))
 
 LST = ('shape Cmd\n    action as text\nshape: done\n'
        'listen for\n    new sh.Cmd\n        roles as list "a", "admin", "c"\n        grant role roles\n'
-       '        require role "admin"\n        give back 200 "LIST OK"\n    new: done\nlisten: done\n')
+       '        require role "admin"\n        give back [200] "LIST OK"\n    new: done\nlisten: done\n')
 r = run_stateless(LST)
 check("grant role from a list grants each member (require admin passes)",
       r.get('status') == 200 and 'LIST OK' in str(r.get('body', '')), str(r))
 
 EMPTY = ('shape Cmd\n    action as text\nshape: done\n'
          'listen for\n    new sh.Cmd\n        hold r ""\n        grant role r\n'
-         '        give back 200 "should not reach"\n    new: done\nlisten: done\n')
+         '        give back [200] "should not reach"\n    new: done\nlisten: done\n')
 r = run_stateless(EMPTY)
 check("grant role of an empty value fails loud (403), does not silently grant nothing",
       r.get('status') == 403 and 'empty' in str(r.get('body', '')).lower()
@@ -146,7 +146,7 @@ check("grant role of an empty value fails loud (403), does not silently grant no
 # ── 6. grant role REPLACES, does not accumulate: a second grant reflects current state ──────
 REPLACE = ('shape Cmd\n    action as text\nshape: done\n'
            'listen for\n    new sh.Cmd\n        grant role "admin"\n        grant role "viewer"\n'
-           '        require role "admin"\n        give back 200 "still admin"\n    new: done\nlisten: done\n')
+           '        require role "admin"\n        give back [200] "still admin"\n    new: done\nlisten: done\n')
 r = run_stateless(REPLACE)
 check("second grant REPLACES the first (grant viewer after admin -> require admin is 403)",
       r.get('status') == 403 and 'still admin' not in str(r.get('body', '')), str(r))

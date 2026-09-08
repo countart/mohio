@@ -51,7 +51,7 @@ SRC = (
     '            domain "example.com"\n'
     '            path "/app"\n'
     '        miocookie.set: done\n'
-    '        give back 200 "ok"\n'
+    '        give back [200] "ok"\n'
     '    new: done\nlisten: done\n'
 )
 

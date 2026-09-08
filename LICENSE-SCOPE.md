@@ -1,7 +1,7 @@
 # LICENSE-SCOPE.md
 
-Release: 4.9.0
-Source-control tag: v4.9.0
+Release: 5.0.0
+Source-control tag: v5.0.0
 First public distribution date: 2026-08-22
 License: Business Source License 1.1
 Change Date: 2030-08-22 (four years from first public distribution)
@@ -25,6 +25,24 @@ Only files listed in this section are part of the Mohio Public Core Licensed Wor
 - `mohio_schema.py`
 - `mohio_reachability.py`
 - `mohio_version.py`
+- `mohio_framework.py`: the `framework:` declaration registry and resolution point (T1-FRAMEWORK-FOUNDATION). Scaffolds an app's target structure, orthogonal to `sector:`, which enforces rules.
+- `mohio_classification.py`: the qualified-identity classification resolver. One place that answers what a field is classified as, replacing five separate bare-field-name sets with a single resolver that DC-01/DC-02/DC-10/DC-11 depend on.
+- `mohio_decisions.py`: the deliberate-decision registry. Records why a behaviour that looks like a defect is not one, in a form a verification pass can read, so a settled decision is not re-filed as a bug.
+
+### Datasource / metasource (mechanism)
+- `mohio_metasource.py`: the metasource contract, a normalized index of what a data source contains.
+- `mohio_metasource_postgres.py`: the Postgres/Supabase source adapter.
+- `mohio_metasource_mongo.py`: the MongoDB source adapter.
+- `mohio_metasource_mysql.py`: the MySQL/MariaDB source adapter.
+- `mohio_metasource_sqlite.py`: the SQLite source adapter.
+- `mohio_metasource_shared.py`: the shared-artifact coordination policy (one metasource description, many instances, coordinated regeneration).
+- `mohio_metasource_store.py`: the portable object-store client (S3-compatible) and singleton lock the shared artifact is coordinated through.
+
+Rationale: consistent with the open-core loader-is-public pattern above, these seven files are the
+generic, engine-agnostic MECHANISM (adapters against a schema any Postgres/Mongo/MySQL/SQLite
+already has, and a portable object-store client that runs against any S3-compatible endpoint, not
+a vendor-specific one). None of them is a managed or hosted service; a licensee runs them against
+their own database and their own bucket.
 
 ### Runtime and interpreter
 - `mohio_interpreter.py`
@@ -163,6 +181,16 @@ Only the following may be redistributed in object-code form as Runtime Component
 - `mio_utils.py`
 - `mohio_audit_grades.py`
 - `mohio_ai.py`
+- `mohio_framework.py`
+- `mohio_classification.py`
+- `mohio_decisions.py`
+- `mohio_metasource.py`
+- `mohio_metasource_postgres.py`
+- `mohio_metasource_mongo.py`
+- `mohio_metasource_mysql.py`
+- `mohio_metasource_sqlite.py`
+- `mohio_metasource_shared.py`
+- `mohio_metasource_store.py`
 
 Not redistributable as Runtime Components: `mio.py` (CLI), `mohio_fmt.py`, `mohio_test_grammar.py`, `tests/`, `tools/`, `mohio-vscode/`, docs, examples. These are development tooling, editor tooling, or non-runtime materials.
 
@@ -211,6 +239,9 @@ The following are not included unless expressly listed above:
 - `DC-11` — **PII purpose limitation.** Purpose limitation is enforced on personal data.
 - `DC-12` — **filter integrity.** An unrecognized query filter fails loud and never matches all rows.
 - `DC-13` — **data-change auditing.** Every data-change verb writes its audit and fails loud if the audit write fails.
+- `DC-14`: **value-bound classification.** A classified value keeps its protection through a copy, masking follows the value on every display/egress path, and a copied `[phi]`/`[pci]`/`[pii]` value is sealed at the write, not only in the column that declares it.
+- `DC-15`: **prevention-audit.** A control that refuses or reverses an action leaves an auditable trace, not only the controls that permit one. Covers purpose-limitation refusal, saga compensation, and a `cm.purge` refusal under a `cm.lock` legal hold.
+- `DC-16`: **upload protection.** An uploaded file classified `[phi]`/`[pci]` is encrypted at rest, retrieval is gated by the same server-verified access control as any other handler, and every store/read/delete/move/copy is audited with whether the content was protected.
 
 ### Normative Control Tests for this release
 
@@ -229,6 +260,9 @@ The following are not included unless expressly listed above:
 | DC-11 | `tests/test_pii_purpose.py` |
 | DC-12 | `tests/test_filter_failloud.py` |
 | DC-13 | `tests/test_modify_audit.py`, `tests/test_audit_preseal_gate.py` |
+| DC-14 | `tests/test_battery_value_bound_classification.py`, `tests/test_battery_value_bound_write.py`, `tests/test_battery_marker_keyed_decryption.py` |
+| DC-15 | `tests/test_battery_prevention_audited.py`, `tests/test_battery_refusal_leaves_a_trace.py` |
+| DC-16 | `tests/test_battery_file_protection_audit.py`, `tests/test_battery_authorized_upload_retrieval.py`, `tests/test_battery_cloud_upload_zone.py` |
 
 Additional supporting suites, not designated normative: `tests/test_audit_locks.py`, `tests/test_audit_sink_grading.py`, `tests/test_audit_table_contract.py`, `tests/test_audit_table_schema.py`, `tests/test_audit_chain_postgres.py`, `tests/test_not_found.py`, `tests/test_dead_store_warning.py`.
 
@@ -238,7 +272,16 @@ DC-02 (encryption at rest) conformance requires the `cryptography` package insta
 
 DC-05's normative test (`test_audit_anchor_verify.py`) has a known Windows-specific teardown artifact (an open SQLite handle blocks `os.remove()` on Windows, `WinError 32`) that does not affect its pass/fail signal. Verified by reading the control flow: every cleanup call runs strictly after that section's assertions are already tallied, and the exit code reads only the assertion tally. The artifact is cosmetic to teardown, not to the verdict.
 
-Both controls remain normative as designated.
+DC-16's normative test `test_battery_cloud_upload_zone.py` includes a real bucket round trip that
+runs only when `MOHIO_STORE_ENDPOINT`, `MOHIO_STORE_BUCKET`, `MOHIO_STORE_REGION`,
+`AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` are set, and says so loudly rather than passing
+silently when they are absent. The control's dispatch, configuration precedence, and every
+non-network assertion (23 of them) run and pass without those credentials; the live bucket write
+is the one part of this release's testing that was not independently exercised without a
+configured store present. Confirmed live this pass: 43/43, 25/25, and 23/23 across the three DC-16
+batteries, with the cloud round trip reporting NOT RUN rather than a false pass.
+
+All controls remain normative as designated.
 
 ---
 

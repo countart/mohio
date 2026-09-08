@@ -61,7 +61,15 @@ def run_real(src):
 
 SEED = ('connect db as sqlite from env.DATABASE_URL\n'
         'mioconnect Svc\n    address "https://api.example.com"\n')
-OP = '    operation ping\n        path "/ping"\n    operation: done\nmioconnect: done\n'
+# HANDLERS MOVED AFTER THE OPERATION, 2026-09-03. `mioconnect` now takes its handlers from the
+# shared `result_handlers` rule, which places them structurally LAST -- the same position every
+# other verb block already requires (save, retrieve and find all close with on.failure). Writing
+# them BEFORE the operation block, as this file did, was the only place in the language where
+# that was possible. The BEHAVIOUR tested here is unchanged; only the ordering moved, and the
+# corpus was measured before the change with ZERO new failures.
+OP_BODY = '    operation ping\n        path "/ping"\n    operation: done\n'
+CLOSER = 'mioconnect: done\n'
+OP = OP_BODY + CLOSER
 
 
 # ── genuine connectivity failure, no on.failure declared -> fails loud (was silently ok=False)
@@ -77,7 +85,7 @@ check("the failure never reaches past the call (unreachable show never ran)",
 with unittest.mock.patch('urllib.request.urlopen',
                           side_effect=OSError("Name or service not known")):
     it2, r2 = run_real(
-        SEED + '    on.failure\n        show "caught"\n' + OP +
+        SEED + OP_BODY + '    on.failure\n        show "caught"\n' + CLOSER +
         'Svc.ping as result\nshow "after"\n')
 check("genuine connectivity failure with on.failure declared -> caught",
       it2.shown == ["caught", "after"], it2.shown)
@@ -95,8 +103,9 @@ def _flaky(req, **kwargs):
 
 with unittest.mock.patch('urllib.request.urlopen', side_effect=_flaky):
     it3, r3 = run_real(
-        SEED + '    retry 3 times\n    on.success\n        show "connector succeeded"\n' + OP +
-        'Svc.ping as result\nshow ("status=" & result.status)\n')
+        SEED + '    retry 3 times\n' + OP_BODY
+        + '    on.success\n        show "connector succeeded"\n' + CLOSER
+        + 'Svc.ping as result\nshow ("status=" & result.status)\n')
 check(f"retry 3 times recovers from 2 failures ({_calls[0]} real attempts made)",
       _calls[0] == 3, _calls[0])
 check("on.success fires once the retried call succeeds",
@@ -110,9 +119,10 @@ def _http_422(req, **kwargs):
 
 with unittest.mock.patch('urllib.request.urlopen', side_effect=_http_422):
     it4, r4 = run_real(
-        SEED + '    retry 5 times\n    on.success\n        show "op completed"\n'
-        '    on.failure\n        show "should NOT fire for a 422"\n' + OP +
-        'Svc.ping as result\nshow ("status=" & result.status)\n')
+        SEED + '    retry 5 times\n' + OP_BODY
+        + '    on.success\n        show "op completed"\n'
+        + '    on.failure\n        show "should NOT fire for a 422"\n' + CLOSER
+        + 'Svc.ping as result\nshow ("status=" & result.status)\n')
 check("a real HTTP 422 stays a checkable result (unchanged, locked by test_mioconnect_patterns.py)",
       it4.shown == ["op completed", "status=422"], it4.shown)
 

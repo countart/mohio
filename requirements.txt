@@ -72,3 +72,17 @@ pymongo>=4.0.0             # MongoDB
 # ── Development ──────────────────────────────────────────────
 # colorama>=0.4.6          # Windows color support (optional)
 python-multipart>=0.0.9
+
+# ── Test suite (contributors, not runtime) ───────────────────
+# Not a runtime dependency of `mio` -- imported directly by 6 test files
+# (grep confirms: test_directory_mode.py and others) for fixtures/assertions,
+# even though the suite itself runs through tools/run_tests.py, not `pytest`
+# (see TESTING.md, "Why not pytest"). Needed to run the suite at all; without
+# it those 6 files fail at import before any real test runs.
+pytest>=8.0.0
+
+# In-memory MongoDB double for test_mongo_backend.py. Optional: that file
+# already skips cleanly without it (see TESTING.md). Listed here so a
+# contributor who wants that coverage gets it from the one install command
+# instead of discovering the gap from a skip message.
+mongomock>=4.0.0

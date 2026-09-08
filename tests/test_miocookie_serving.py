@@ -39,10 +39,10 @@ def serve(src, method, path, **kw):
     return r.status_code, dict(r.cookies), set_cookie
 
 # ── `request for sh.X at "/path"` route -- the path that used to silently drop the cookie ──
-REQ = ('shape Q\n    method GET\nshape: done\n'
+REQ = ('shape Q\n    note as text\nshape: done\n'
        'listen for\n    request for sh.Q at /setc\n'
        '        miocookie.set "sid" to "abc123"\n'
-       '        give back 200 "ok"\n'
+       '        give back [200] "ok"\n'
        '    request: done\nlisten: done\n')
 st, cookies, sc = serve(REQ, 'get', '/setc')
 check("request-for route: 200 OK", st == 200, str(st))
@@ -55,7 +55,7 @@ check("request-for route: cookie carries the secure defaults (HttpOnly)",
 NEW = ('shape Cmd\n    command as text\nshape: done\n'
        'listen for\n    new sh.Cmd\n'
        '        miocookie.set "sid" to "abc123"\n'
-       '        give back 200 "ok"\n'
+       '        give back [200] "ok"\n'
        '    new: done\nlisten: done\n')
 st, cookies, sc = serve(NEW, 'post', '/', json={'command': 'x'})
 check("new sh.X route: 200 OK", st == 200, str(st))

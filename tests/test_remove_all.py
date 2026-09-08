@@ -47,7 +47,7 @@ _SEED = ('save to db.items\n    name "a"\nsave: done\n'
 
 def run(handler_body):
     prog = ("connect db as sqlite from env.DATABASE_URL\n"
-            "shape S\n    method POST\nshape: done\n"
+            "shape S\n    note as text\nshape: done\n"
             "listen for\n    new sh.S at /x\n"
             + "\n".join("        " + l for l in handler_body.splitlines())
             + "\n    new: done\nlisten: done\n")
@@ -95,7 +95,7 @@ def test_closer_forms():
     print("\n=== closer rule: verb / verb.modifier / bare done all close; cross-verb fails ===")
     def parses(action):
         prog = ("connect db as sqlite from env.DATABASE_URL\n"
-                "shape S\n    method POST\nshape: done\n"
+                "shape S\n    note as text\nshape: done\n"
                 "listen for\n    new sh.S at /x\n"
                 + "\n".join("        " + l for l in (action + "give back r").splitlines())
                 + "\n    new: done\nlisten: done\n")

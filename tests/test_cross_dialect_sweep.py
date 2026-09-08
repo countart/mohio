@@ -5,7 +5,21 @@ mocked -- Postgres via a locally reachable instance). Diffs the `show` output be
 A divergence here means the SAME Mohio source produces different observable behavior depending
 on which database backend is connected -- a portability bug users would hit silently.
 
-DRAFT / investigative script for the overnight run. Not part of the regression gate.
+DRAFT / investigative script for the overnight run. Not part of the regression gate, and
+EXCLUDED from the suite run in CLAUDE.md alongside test_retired_and_stubs.py (2026-08-24).
+
+WHY IT IS EXCLUDED rather than skip-guarded: it DEADLOCKS when Postgres IS reachable, so the
+usual MOHIO_TEST_PG_URL skip convention its siblings use would not help. When the Postgres
+leg fails mid-run the connection is left in an open transaction still holding a lock on
+`sweep_items`; cleanup_postgres() then opens a second connection and blocks forever on
+`DROP TABLE IF EXISTS sweep_items`, waiting for a lock the first connection never releases.
+`connect_timeout=3` bounds the CONNECT, not the statement, so nothing ever times out.
+Observed live 2026-08-24: 20+ minutes with no output, stack pinned at cleanup_postgres.
+Fixing it properly means rolling back / closing the failed leg before cleanup and giving the
+DROP a statement_timeout -- worth doing when this script is next picked up.
+
+It also currently REPORTS a real Postgres-path failure, unrelated to the deadlock:
+"set_session cannot be used inside a transaction" (backlog: T1-PG-AUTOCOMMIT-IN-TRANSACTION).
 Run: `python tests/test_cross_dialect_sweep.py`.
 """
 import os, sys

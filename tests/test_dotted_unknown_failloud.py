@@ -108,29 +108,43 @@ check("random.hex (bare) fails loud",
       exc is not None and 'random.hex needs its required clause' in str(exc), exc)
 
 
-print("\n=== known-empty legitimately stays None ===")
+print("\n=== known-empty legitimately stays empty ===")
+
+# SUPERSEDED 2026-08-23 -> 2026-08-24 (T1-EMPTY-DISPLAY-NONE). The four cases below asserted the
+# rendered form of an empty value as the literal string 'None' -- i.e. they locked Python's `None`
+# leaking into user-visible output, which is exactly what T1-EMPTY-DISPLAY-NONE deliberately
+# closed: `_display_value` now renders an empty value as Mohio's empty form. `show` appends
+# `_display_value(val)`, not `val` (mohio_interpreter.py:12544-12545), so these assertions were
+# reading the DISPLAY channel while testing a VALUE-path guarantee.
+#
+# What these cases actually exist to guard is UNCHANGED and still fully asserted: the read does
+# NOT fail loud (`exc is None`) and execution CONTINUES past it ('reached end'). Both were
+# verified live to still hold at the moment of this edit -- every one returned
+# `(None, ['', 'reached end'])`, so only the empty value's spelling moved. Re-pointed at the new
+# spelling rather than weakened: `exc is None` and the continuation marker are both kept.
 
 result, exc, it = run_src('x as map\nshow x\n')
-check("x as map (declared, unpopulated) stays None, no error",
-      exc is None and [str(s) for s in it.shown] == ['None'], (exc, it.shown))
+check("x as map (declared, unpopulated) stays empty, no error",
+      exc is None and [str(s) for s in it.shown] == [''], (exc, it.shown))
 
 result, exc, it = run_src('obj as map\nshow obj.zzz\nshow "reached end"\n')
-check("obj.zzz on an unpopulated map (no schema to check) stays None, no error",
-      exc is None and [str(s) for s in it.shown] == ['None', 'reached end'], (exc, it.shown))
+check("obj.zzz on an unpopulated map (no schema to check) stays empty, no error",
+      exc is None and [str(s) for s in it.shown] == ['', 'reached end'], (exc, it.shown))
 
 result, exc, it = run_src(
     SEED + 'retrieve p from db.people\n    match name to "Nobody"\nretrieve: done\n'
     'show p.name\nshow "reached end"\n')
-check("retrieve that finds nothing, then a dotted read on the unbound name, stays None "
-      "(the documented FORK-5 pattern -- the single most load-bearing regression guard here)",
-      exc is None and [str(s) for s in it.shown] == ['None', 'reached end'], (exc, it.shown))
+check("retrieve that finds nothing, then a dotted read on the unbound name, stays empty "
+      "(the documented FORK-5 pattern -- the single most load-bearing regression guard here: "
+      "it must NOT raise, and execution must continue)",
+      exc is None and [str(s) for s in it.shown] == ['', 'reached end'], (exc, it.shown))
 
 _, exc, it = run_src(
     SEED.replace('age 34', 'age 34\n    nickname none') +
     'retrieve p from db.people\n    match name to "Aria"\nretrieve: done\n'
     'show p.nickname\nshow "reached end"\n')
-check("a KNOWN field holding a genuine NULL (present key, None value) stays None, no error",
-      exc is None and [str(s) for s in it.shown] == ['None', 'reached end'], (exc, it.shown))
+check("a KNOWN field holding a genuine NULL (present key, None value) stays empty, no error",
+      exc is None and [str(s) for s in it.shown] == ['', 'reached end'], (exc, it.shown))
 
 _, exc, it = run_src('n random.uuid\nshow "not a length/between form, unaffected"\n')
 check("random.uuid (no required clause) is completely unaffected by the random.X fix",

@@ -77,13 +77,13 @@ check("registered provider: round-trips to plaintext with the provider's key",
 
 # 3. A provider that returns None must FAIL LOUD, same as no env key.
 MohioInterpreter.register_key_provider(lambda: None)
-txt = str(_val(run(SHAPE + DB + SAVE + 'give back 200 "done"\n')))
+txt = str(_val(run(SHAPE + DB + SAVE + 'give back [200] "done"\n')))
 check("provider returning None still fails loud (guarantee preserved)",
       'key_missing' in txt or 'encryption' in txt, f"got {txt!r}")
 
 # 4. A provider returning a wrong-size key is refused, not silently used.
 MohioInterpreter.register_key_provider(lambda: b'too-short')
-txt = str(_val(run(SHAPE + DB + SAVE + 'give back 200 "done"\n')))
+txt = str(_val(run(SHAPE + DB + SAVE + 'give back [200] "done"\n')))
 check("provider returning a non-32-byte key is refused",
       'bad_key' in txt or '32' in txt or 'encryption' in txt, f"got {txt!r}")
 

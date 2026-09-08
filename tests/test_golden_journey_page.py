@@ -103,20 +103,7 @@ def _make_client(source: str, seed: dict | None = None) -> TestClient:
 # Two pages at /home and /about. /missing → 404. Trailing slash tolerated.
 # ══════════════════════════════════════════════════════════════════════════════
 
-_MULTI_PAGE = """\
-journey RatesApp
-    page Home at /home
-        render
-            <p>[HOME]</p>
-        render: done
-    page: done
-    page About at /about
-        render
-            <p>[ABOUT]</p>
-        render: done
-    page: done
-journey: done
-"""
+_MULTI_PAGE = 'shape Q\n    q as text\nshape: done\njourney RatesApp\n    listen for\n        request for sh.Q at /home\n                render\n                    <p>[HOME]</p>\n                render: done\n        request: done\n    listen: done\n    listen for\n        request for sh.Q at /about\n                render\n                    <p>[ABOUT]</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n'
 
 
 class TestMultiPageGET:
@@ -159,16 +146,7 @@ class TestMultiPageGET:
 # Page renders a hold value inherited from the journey.
 # ══════════════════════════════════════════════════════════════════════════════
 
-_SCOPE_INHERIT = """\
-journey App
-    hold greeting = "WELCOME"
-    page Home at /home
-        render
-            <p>[{{ greeting }}]</p>
-        render: done
-    page: done
-journey: done
-"""
+_SCOPE_INHERIT = 'shape Q\n    q as text\nshape: done\njourney App\n    hold greeting = "WELCOME"\n    listen for\n        request for sh.Q at /home\n                render\n                    <p>[{{ greeting }}]</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n'
 
 
 class TestScopeInheritance:
@@ -189,20 +167,7 @@ class TestScopeInheritance:
 # continue-on-404 across sibling listeners.
 # ══════════════════════════════════════════════════════════════════════════════
 
-_MIXED = """\
-journey App
-    page Home at /home
-        render
-            <p>[HOME]</p>
-        render: done
-    page: done
-    listen for
-        new sh.Signup at /signup
-            give back created "[SIGNED_UP]"
-        new: done
-    listen: done
-journey: done
-"""
+_MIXED = 'shape Q\n    q as text\nshape: done\njourney App\n    listen for\n        request for sh.Q at /home\n                render\n                    <p>[HOME]</p>\n                render: done\n        request: done\n    listen: done\n    listen for\n        new sh.Signup at /signup\n            give back created "[SIGNED_UP]"\n        new: done\n    listen: done\njourney: done\n'
 
 
 class TestMixedJourneyListener:
@@ -259,15 +224,7 @@ class TestStaticPrecedence:
             static_file.write_text("<h1>STATIC FILE</h1>", encoding="utf-8")
 
             # Page at /home.html would normally render [PAGE]
-            source = """\
-journey App
-    page Home at /home.html
-        render
-            <p>[PAGE]</p>
-        render: done
-    page: done
-journey: done
-"""
+            source = 'shape Q\n    q as text\nshape: done\njourney App\n    listen for\n        request for sh.Q at /home.html\n                render\n                    <p>[PAGE]</p>\n                render: done\n        request: done\n    listen: done\njourney: done\n'
             # Static roots now come from _static_roots(), whose highest-precedence
             # source is the MOHIO_STATIC_DIR env var (the old module-level _STATIC_DIRS
             # list was removed in the static-serving refactor). Point it at our temp dir.
@@ -341,20 +298,7 @@ class TestRESTVerbs:
 # catch-all /{path:path}. A journey with pages must not shadow them.
 # ══════════════════════════════════════════════════════════════════════════════
 
-_ZORK_COEXIST = """\
-journey App
-    page Dashboard at /dashboard
-        render
-            <p>[DASHBOARD]</p>
-        render: done
-    page: done
-    listen for
-        new sh.Command at /game
-            give back ok "[GAME_RESPONSE]"
-        new: done
-    listen: done
-journey: done
-"""
+_ZORK_COEXIST = 'shape Q\n    q as text\nshape: done\njourney App\n    listen for\n        request for sh.Q at /dashboard\n                render\n                    <p>[DASHBOARD]</p>\n                render: done\n        request: done\n    listen: done\n    listen for\n        new sh.Command at /game\n            give back ok "[GAME_RESPONSE]"\n        new: done\n    listen: done\njourney: done\n'
 
 
 class TestZorkSafety:
@@ -443,18 +387,7 @@ class TestZorkSafety:
 # Top-level bare pages (no journey wrapper) route the same way.
 # ══════════════════════════════════════════════════════════════════════════════
 
-_BARE_PAGES = """\
-page Home at /home
-    render
-        <p>[BARE_HOME]</p>
-    render: done
-page: done
-page About at /about
-    render
-        <p>[BARE_ABOUT]</p>
-    render: done
-page: done
-"""
+_BARE_PAGES = 'shape Q\n    q as text\nshape: done\nlisten for\n    request for sh.Q at /home\n        render\n            <p>[BARE_HOME]</p>\n        render: done\n    request: done\nlisten: done\nlisten for\n    request for sh.Q at /about\n        render\n            <p>[BARE_ABOUT]</p>\n        render: done\n    request: done\nlisten: done\n'
 
 
 class TestImplicitDefaultJourney:

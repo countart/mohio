@@ -64,7 +64,7 @@ def test_on_failure_fallback_runs():
         'ai.create summary from report\n'
         '    tone "brief"\n'
         '    on.failure\n'
-        '        give back 503 "AI unavailable"\n'
+        '        give back [503] "AI unavailable"\n'
         'ai.create: done\n'
         'give back 200 summary\n', ai)
     assert res.get("status") == 503, res                  # fallback fired on failure

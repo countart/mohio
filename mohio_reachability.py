@@ -86,6 +86,18 @@ def _is_unconditional_return(node):
             and getattr(node, "qualifier", None) is None)
 
 
+# A routed unit is ASSEMBLED, not executed in sequence, so a hard return earlier in the
+# same list does not make it dead: the router reaches it directly when a request arrives.
+# This became reachable-in-practice when `page` was removed -- a convention home page is a
+# top-level `give back`, and the section routes that follow it serve normally (verified by
+# real HTTP against a file with both). Warning on them would flag correct code as dead.
+_ROUTED_UNITS = ('ListenBlock', 'JourneyDecl')
+
+
+def _is_routed_unit(node):
+    return type(node).__name__ in _ROUTED_UNITS
+
+
 def scan_unreachable(program):
     """
     Walk the AST and return a list[CompileWarning] for statements that sit after
@@ -99,7 +111,9 @@ def scan_unreachable(program):
         for i in range(len(seq) - 1):
             stmt = seq[i]
             if _is_unconditional_return(stmt):
-                dead = seq[i + 1]
+                dead = next((s for s in seq[i + 1:] if not _is_routed_unit(s)), None)
+                if dead is None:
+                    break
                 verb = "give back" if isinstance(stmt, GiveBackStmt) else "halt"
                 ret_line = getattr(stmt, "line", 0)
                 dead_line = getattr(dead, "line", 0) or ret_line
@@ -344,11 +358,26 @@ _KNOWN_TYPES = {
     'datetime', 'date', 'time', 'uuid', 'email', 'url', 'json', 'list', 'map',
     'any', 'void', 'base64', 'image', 'audio', 'video', 'pdf', 'file',
     'usd', 'cad', 'eur', 'gbp',          # currency types (each formats + rounds; built on dec.2)
+    # `as table` (Phase 2, recovered shape model). `as` describes what a thing IS, and that
+    # covers "this is a table" exactly as it covers "this is text" -- it was never only a
+    # naming word. A table is a NATURE here, not a scalar type: it opens a field scope rather
+    # than describing a value.
+    'table',
+    # PHASE 3. `number` is a NATURE, not a precision. `47` and `4.567` are both just number,
+    # and a shape says what a thing IS, never how many places it prints to. Refinement is a
+    # reformatting operation at the POINT OF USE -- `(total as.dec.2)` -- which already works
+    # and already reuses the name rather than creating a second one.
+    #
+    # UN-RETIRED, deliberately and on a ruling. `number` used to fail loud pointing at
+    # `int`/`dec`, which reads as a correction and is really a category error: it answered
+    # "what nature is this" with "choose a storage precision". `int` and `dec` stay valid --
+    # they are natures too, the corpus is full of them, and removing them would not be additive.
+    'number',
 }
 # Retired: say so by name instead of a generic "unknown type".
 _RETIRED_TYPES = {
-    'number': 'int (or integer) for whole numbers, dec (or decimal) for fractions',
-    'num':    'int (or integer) for whole numbers, dec (or decimal) for fractions',
+    'num':    'number (a nature -- 47 and 4.567 are both number), or int / dec if you '
+              'genuinely mean whole-only or fractional',
 }
 
 
@@ -406,6 +435,104 @@ def scan_unknown_types(program):
 # exist should be refused at CHECK, with the line -- not left to blow up at runtime. This
 # also catches the confusing case where a stray `name as other` line parses as a connector
 # call (mioconnect's `Connector.op with payload as result` shape) and only failed when run.
+
+def scan_agent_tool_grants(program):
+    """An `ai.agent` tools grant must name a connector, and an operation, that exists.
+
+    THE GRANT LIST IS THE SECURITY BOUNDARY. It is the whole statement of what an autonomous
+    agent is allowed to reach, so a grant list that accepts names nobody declared is not a grant
+    list, it is a list. `tools / Nope.refund / tools: done` used to pass `mio check` with no
+    errors at all.
+
+    The refusal already existed, at agent SETUP, inside `_agent_tool_schemas`. That is the right
+    place to keep it and it stays there: it is the last line before a tool is handed to a model,
+    and a runtime that trusts a check is a runtime that can be reached another way. What was
+    missing is that the same mistake was invisible until the code ran, which for an agent means
+    until whatever schedule or request first wakes it.
+
+    The two are the same rule read at two times, deliberately: this one so a typo is a compile
+    error, that one so it is never merely a compile error.
+
+    SCOPED TO THE BLOCK FORM, which is the form that carries a real grant. `tools <name>` written
+    inline on one line lands in the body as an unwired tree and is already reported by the
+    not-built scan, so validating it here would produce a second, more confusing message about a
+    construct that does not run at all yet.
+    """
+    errors = []
+    stmts = getattr(program, 'statements', None) or []
+    connectors = {}
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'MioconnectDecl':
+            name = str(getattr(node, 'name', '') or '')
+            if name:
+                connectors[name] = [str(getattr(op, 'name', '') or '')
+                                    for op in (getattr(node, 'operations', None) or [])]
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'AiAgentBlock':
+            agent = str(getattr(node, 'name', '') or '')
+            line = getattr(node, 'line', 0) or 0
+            # Named rather than written as `join(...) or "(none)"`: an empty join is an
+            # empty STRING, and the reader of the message needs to be told that the
+            # program declares no connectors at all, which is different from a list that
+            # happened to render blank.
+            known = ", ".join(sorted(connectors)) if connectors else "(none declared)"
+            for grant in (getattr(node, 'tools', None) or []):
+                grant = str(grant)
+                # An `mioai.` grant is a built-in, not a connector operation, and the runtime
+                # skips it for the same reason.
+                if grant.startswith('mioai.'):
+                    continue
+                conn_name = grant.split('.', 1)[0] if '.' in grant else grant
+                if conn_name not in connectors:
+                    errors.append(CompileError(
+                        f"ai.agent `{agent}` grants the tool `{grant}`, and no connector named "
+                        f"`{conn_name}` is declared. Declared connectors: {known}.",
+                        line=line,
+                        hint=(f"Declare it with `mioconnect {conn_name} ... mioconnect: done` "
+                              f"before granting it, or correct the name. A grant list is what "
+                              f"the agent is allowed to reach, so a name in it that reaches "
+                              f"nothing is either a typo or a permission nobody wrote.")))
+                    continue
+                if '.' in grant:
+                    op_name = grant.split('.', 1)[1]
+                    if op_name not in connectors[conn_name]:
+                        _ops = connectors[conn_name]
+                        ops = ", ".join(_ops) if _ops else "(none)"
+                        errors.append(CompileError(
+                            f"ai.agent `{agent}` grants `{grant}`, and connector `{conn_name}` "
+                            f"has no operation `{op_name}`. Its operations: {ops}.",
+                            line=line,
+                            hint=(f"Name one of that connector's operations, or grant the "
+                                  f"connector bare (`{conn_name}`) to allow all of them.")))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for s in stmts:
+        collect(s)
+    for s in stmts:
+        walk(s)
+    return errors
+
 
 def scan_undeclared_connectors(program):
     """Every `Connector.op ...` call must name a declared `mioconnect`."""
@@ -1013,7 +1140,10 @@ def scan_upload_accept_groups(program):
         if not is_dataclass(node):
             return
         if isinstance(node, ShapeDecl):
-            for fld in (getattr(node, 'fields', None) or []):
+            # EVERY field, loose or table-owned -- an upload field declared under a
+            # `<name> as table` scope is still an upload field. See ShapeDecl.every_field.
+            for fld in (node.every_field() if hasattr(node, 'every_field')
+                        else (getattr(node, 'fields', None) or [])):
                 if (getattr(fld, 'type_name', None) or '') not in upload_types:
                     continue
                 for m in (getattr(fld, 'modifiers', None) or []):
@@ -1229,11 +1359,726 @@ def scan_mixed_connector_chain(program):
     return errors
 
 
+
+def scan_query_connection_name(program):
+    """A query against a connection named anything but the default is refused HERE, not at
+    runtime with a message that used to be false.
+
+    Every query call site resolves the hardcoded default `'db'`, so
+    `connect primary as sqlite ...` opened a real connection and `find a in primary.orders`
+    answered "needs a database connection, but none is open" -- while one was. The runtime
+    message is correct now, but this is statically visible: the connect name and the query
+    source are both in the source text, so the standing rule puts the refusal at check time,
+    where a developer decides whether to deploy.
+
+    Only fires when the name IS a declared connection. An unknown prefix is somebody else's
+    error (an undeclared connector, a shape ref, a held list) and is not claimed here.
+    """
+    errors = []
+    declared = {}
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ConnectDecl':
+            n = str(getattr(node, 'name', '') or '')
+            if n:
+                declared[n] = node
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        src = getattr(node, 'source', None)
+        parts = getattr(src, 'parts', None)
+        if parts and len(parts) >= 2:
+            head = str(parts[0])
+            if head in declared and head != 'db':
+                errors.append(CompileError(
+                    f"This queries `{head}.{parts[1]}`, but the query layer does not resolve "
+                    f"a connection name other than the default yet. `{head}` IS declared and "
+                    f"really does open a connection -- so this would fail when it ran, not "
+                    f"here. Today, name the connection you query `db` "
+                    f"(`connect db as ...`) and refer to it as `db.{parts[1]}`. Naming "
+                    f"connections is a real declared form that is not wired through the "
+                    f"query layer yet; this is not a rule that connections must be called "
+                    f"`db`.",
+                    line=getattr(node, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in (getattr(program, 'statements', None) or []):
+        collect(st)
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return errors
+
+
+
+def scan_connection_access_mode(program):
+    """`readonly` refuses writes, `writeonly` refuses reads -- at COMPILE time.
+
+    DESIGNED AND LOCKED 2026-06-08 as compile-time enforcement, and never wired: the grammar
+    parsed `conn_access` and `ConnectDecl` had no field to put it in, so every access mode ever
+    written was discarded at the transformer. Measured 2026-09-02: a `save` to a `readonly`
+    connection wrote the row, printed nothing, and `mio check` reported no errors. A declared
+    constraint that enforces nothing is the decorative-constraint class, and on a connection it
+    is the kind a reviewer would reasonably take for a real guarantee.
+
+    Enforced statically, which is where the design put it and where it is reachable today with
+    a single connection: the mode and the verb are both visible in the source.
+    """
+    errors = []
+    WRITE_VERBS = {
+        'SaveBlock': 'save', 'SaveAllBlock': 'save all', 'UpdateBlock': 'update',
+        'RemoveBlock': 'remove', 'RemoveAllBlock': 'remove all',
+        'SaveOrUpdateBlock': 'save or update',
+    }
+    READ_VERBS = {
+        'FindBlock': 'find', 'RetrieveBlock': 'retrieve', 'GrabBlock': 'grab',
+        'PullBlock': 'pull', 'GetBlock': 'get',
+    }
+    modes = {}
+    all_conns = []
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ConnectDecl':
+            nm = str(getattr(node, 'name', '') or '')
+            all_conns.append(nm)
+            acc = str(getattr(node, 'access', '') or '').lower()
+            if acc in ('readonly', 'writeonly'):
+                modes[nm] = acc
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        kind = type(node).__name__
+        verb = WRITE_VERBS.get(kind) or READ_VERBS.get(kind)
+        if verb:
+            # A read names its source as `db.table` (parts), but a WRITE's target is a DbRef
+            # that carries only the table -- the connection prefix is dropped in the AST,
+            # because every call site resolves the single default connection anyway (the same
+            # unfinished wiring E1 reports). So an unqualified verb belongs to the one declared
+            # connection whenever there is exactly one, which is the case this is reachable in
+            # today and the case the design was written for.
+            src = getattr(node, 'source', None) or getattr(node, 'target', None)
+            parts = getattr(src, 'parts', None) or []
+            conn = str(parts[0]) if parts else ""
+            if not conn and len(set(all_conns)) == 1:
+                conn = all_conns[0]
+            mode = modes.get(conn)
+            if mode == 'readonly' and kind in WRITE_VERBS:
+                errors.append(CompileError(
+                    f"`{verb}` writes to `{conn}`, which is declared `readonly`. A readonly "
+                    f"connection refuses save, update, upsert and remove -- that is what the "
+                    f"word is for. Either drop `readonly` from the connect line, or do this "
+                    f"write against a connection that allows it.",
+                    line=getattr(node, 'line', 0) or 0))
+            elif mode == 'writeonly' and kind in READ_VERBS:
+                errors.append(CompileError(
+                    f"`{verb}` reads from `{conn}`, which is declared `writeonly`. A writeonly "
+                    f"connection refuses find, retrieve, grab, pull and get. Either drop "
+                    f"`writeonly` from the connect line, or read from a connection that "
+                    f"allows it.",
+                    line=getattr(node, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in (getattr(program, 'statements', None) or []):
+        collect(st)
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return errors
+
+
+
+def scan_multi_database_reference(program):
+    """`db.<database>.<table>` is not resolved yet, and it must say so HERE, not at runtime.
+
+    MEASURED 2026-09-03. The DB_REF terminal already accepts arbitrary dotted depth
+    (a dotted terminal with no depth limit), so `db.sales.people` PARSES today, `mio check` reports
+    NO ERRORS, and the program then dies at runtime with:
+
+        db_error: no such table: sales
+
+    The developer never wrote a table called `sales`. They wrote a database and a table, the
+    compiler kept the string, something downstream split it, and the error named a thing that
+    does not appear in their source. A confidently wrong message is worse than a blunt one,
+    and `mio check` saying nothing at all is what lets it reach runtime.
+
+    Multiple databases on one connection is a REAL part of the recovered design -- the registry
+    is already by name (`set_connection(name, c)`, `get_connection(name='db')`) and the MVP
+    flattened it to the hardcoded default. This refusal is the honest placeholder until the
+    declaration form is ruled: it does not invent a form, it stops the compiler from pretending
+    the reference means something it does not.
+
+    ZERO corpus files use a three-segment reference (measured before landing), so nothing that
+    works today stops working -- `db.<table>` is untouched and is the compatibility subset.
+    """
+    errors = []
+
+    def walk(node, pos='top'):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c, pos)
+            return
+        if not is_dataclass(node):
+            return
+        # TWO NODE SHAPES, and finding that out is the reason this is verified through the
+        # real CLI rather than a direct transform() call. Building the program in-process gave
+        # a `DbRef(table='warehouse.orders')`; the actual `mio run` / `mio check` path gives a
+        # `DottedName(parts=['db','warehouse','orders'])` for the SAME source line. A scanner
+        # written against the in-process shape alone runs, sees nothing, and reports clean --
+        # which is what it did until this was probed on the real path.
+        _kind = type(node).__name__
+        _multi = None
+        if _kind == 'DbRef':
+            tbl = str(getattr(node, 'table', '') or '')
+            if '.' in tbl and '*' not in tbl:
+                _multi = tbl
+        elif _kind == 'DottedName':
+            _parts = [str(x) for x in (getattr(node, 'parts', None) or [])]
+            if len(_parts) >= 3 and _parts[0] == 'db' and '*' not in _parts:
+                # PHASE 2 ITEM 2 RECONCILIATION. This scanner refused EVERY `db.a.b`, and the
+                # ruled design assigns that exact shape to the canonical field reference:
+                # `db.<table>.<field>` is how table content is reached, and the multi-database
+                # form is `db.<dbname>.<table>.<field>` -- one segment DEEPER. So for a while
+                # the one canonical spelling was the only one refused, while bare `Name.field`
+                # and `table.field` both checked clean. Depth and POSITION separate them, and
+                # both were established by running each verb rather than reasoned about:
+                #   * `source` / `target` name a TABLE (find/retrieve/grab/pull/update/remove/
+                #     save/save.all -- every one measured 2026-09-04). Three segments there is
+                #     still database-plus-table and still unresolved, so it still refuses here.
+                #   * anywhere else is a REFERENCE. Three segments there is `db.table.field`,
+                #     which is canonical and belongs to scan_reference_rule, not to this one.
+                #     Four or more is the multi-database form and is still unresolved.
+                if pos in ('source', 'target') or len(_parts) >= 4:
+                    _multi = '.'.join(_parts[1:])
+        if _multi:
+                tbl = _multi
+                head = tbl.split('.', 1)[0]
+                # THE ADVICE IS THE LAST SEGMENT, not everything after the first. It used to be
+                # `rest`, which is right at three segments and WRONG at four or more: for
+                # `db.sales.public.customers` it said "use `db.public.customers`", and that is
+                # refused by this very scanner with the identical message. A refusal whose
+                # suggested fix reproduces the refusal sends the reader in a circle, which is
+                # worse than a refusal with no advice at all, because they trust it once first.
+                table_only = tbl.rsplit('.', 1)[-1]
+                errors.append(CompileError(
+                    f"`db.{tbl}` names a database and a table, and the query layer does not "
+                    f"resolve a database name yet -- it resolves the single default "
+                    f"connection. Left alone this reaches the database as a table called "
+                    f"`{head}`, which is not something you wrote, and the error you would get "
+                    f"says `no such table: {head}`. Use `db.{table_only}` against the "
+                    f"connection you declared. Naming several databases on one connection is a "
+                    f"real declared part of the design that is not wired through the query "
+                    f"layer yet; this is not a rule that there can only ever be one.",
+                    line=getattr(node, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None), f.name)
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return errors
+
+
+def _declared_shape_tables(program, duplicates=None):
+    """Every table a shape declares, and the fields that belong to it. {table: (shape, [field])}
+
+    Built from the ShapeTable hierarchy Phase 2 item 1 put in the AST, which is the only place
+    that keeps `db.users.email` and `db.orders.email` apart.
+
+    `duplicates`, when a list is passed in, collects every SECOND declaration of a table name
+    rather than letting it merge into the first. Merging is what this did in its first version,
+    and it is the collision bug wearing a different coat: two shapes declaring `users` would have
+    quietly pooled their fields, so `db.users.email` resolved against a table neither shape
+    actually described. scan_table_name_collision is the caller that passes the list.
+    """
+    out = {}
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ShapeDecl':
+            owner = str(getattr(node, 'name', '') or '')
+            for tname, tbl in (getattr(node, 'tables', None) or {}).items():
+                tname = str(tname)
+                flds = [str(getattr(f, 'name', '')) for f in (getattr(tbl, 'fields', None) or [])]
+                if tname in out:
+                    if duplicates is not None:
+                        duplicates.append((tname, out[tname][0], owner,
+                                           getattr(tbl, 'line', 0) or 0))
+                    continue
+                out[tname] = (owner, flds)
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    collect(program)
+    return out
+
+
+def scan_listener_with_no_handler(program):
+    """A `listen for` whose body holds no handler at all mounts NOTHING, silently. Item 7.
+
+    THE ENUMERATION, every arrangement run through `mio check` AND a real HTTP request:
+
+        handler directly inside the container              MOUNTS      (the control)
+        bare `give back`, no handler                       404, clean
+        empty body                                         404, clean
+        a `task` block only                                404, clean
+        an `ai.decide` block plus a `give back`             404, clean
+        handler wrapped in `check` / `try` / `repeat`       PARSE ERROR -- not a member
+
+    That last row is the useful negative: `new sh.P at /x` inside a `try` does not parse at all
+    ("No terminal matches '/'"), so a wrapped handler already fails loud and is not part of this
+    class. The class is one rule, not four bugs: `_exec_ListenBlock` filters its candidates to
+    NewBlock and RequestInboundBlock, and the grammar's `listener_body` also accepts `statement`
+    -- which is every statement in the language. So a listener whose body is only statements has
+    nothing to dispatch and answers nothing.
+
+    SCOPED so a webhook listener is untouched. `connection_block`, `change_block` and
+    `from_connector_block` (`from Stripe / when payment.succeeded`) are legitimate listener
+    bodies that are not HTTP route handlers, so a listener holding one of those is left alone.
+    Only a body that is ORDINARY STATEMENTS ALONE is refused.
+
+    Zero .mho files in the tree contain a handler-less `listen for` (measured before landing).
+    """
+    HANDLERS = ('NewBlock', 'RequestInboundBlock')
+    # Listener bodies that are legitimately NOT http route handlers. A `listen for` wrapping
+    # MioScript client listeners is the plainest case: `listen for / listen for change on #inp`
+    # compiles to BROWSER code and never mounts a server route, by design -- refusing it broke
+    # three assertions in test_mioscript_unknown_value_failloud, which is what caught it.
+    OTHER_LISTENERS = ('ConnectionBlock', 'ChangeBlock', 'FromConnectorBlock',
+                       'ClientListener', 'ClientListenChange', 'ListenBlock')
+    errors = []
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ListenBlock':
+            _ls = getattr(node, 'listeners', None) or []
+            kinds = [type(l).__name__ for l in _ls]
+            # An untransformed Lark `Tree` in the listener list is a body this scanner cannot
+            # classify -- `from Stripe / when payment.succeeded` arrives that way. Silence is
+            # the only safe answer there: the gate's own `listen_from_connector` case is a
+            # legitimate webhook listener with no HTTP handler in it, and refusing it would be
+            # a false refusal on a working form.
+            _unknown = any(not is_dataclass(l) for l in _ls)
+            if not _unknown and not any(k in HANDLERS for k in kinds)                     and not any(k in OTHER_LISTENERS for k in kinds):
+                what = ("is empty" if not kinds
+                        else "holds only " + ", ".join(sorted(set(kinds))))
+                errors.append(CompileError(
+                    f"This `listen for` block {what}, so it registers no route and answers "
+                    f"nothing -- a request to any path in it comes back with no route matching. "
+                    f"`listen for` groups HANDLERS: put the work inside "
+                    f"`new sh.<Shape> at /your/path` for a write or "
+                    f"`request for sh.<Shape> at /your/path` for a read, and the path goes on "
+                    f"the handler, unquoted.",
+                    line=getattr(node, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return errors
+
+
+def scan_ai_decide_declared_but_never_invoked(program):
+    """A declared `ai.decide` name that is READ but never INVOKED. Item 6, and it is a
+    diagnostic gap rather than the binding bug it was reported as.
+
+    MEASURED before building. The invoke form binds correctly:
+
+        ai.decide risk returns boolean ... ai.decide: done
+        ai.decide risk          <- the invocation
+        show risk               -> True
+
+    The DECLARATION deliberately does not run. That is the ruled
+    T1-EVAL-AI-DECIDE-DECLARE-VS-INVOKE behaviour: Zork declares a block once at module scope
+    with template vars that only exist later inside the handler that re-invokes it, so running
+    the body at declaration time interpolated those to None and, on a live provider, spent a
+    real paid AI call before the genuine invocation overwrote the result.
+
+    So the name is unbound for a reason. What was missing is anyone SAYING so: declare, then
+    read the name with no invocation between, and `mio check` reports clean and the program dies
+    at runtime with `unknown variable 'risk'` -- a message about a variable, for a mistake about
+    a block that was never run. The developer's actual error is one line from the declaration
+    and nothing pointed at it.
+
+    NARROW ON PURPOSE. It fires only when there is NO invocation of that name ANYWHERE in the
+    program. Declaring at the top and invoking deep inside a handler is the documented pattern
+    and must stay silent, so "invoked somewhere" is the whole test -- not "invoked before this
+    line", which would refuse the pattern the split exists to support.
+    """
+    declared, invoked, read = {}, set(), {}
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        kind = type(node).__name__
+        if kind == 'AiDecideBlock':
+            nm = str(getattr(node, 'name', '') or '')
+            if nm:
+                declared[nm] = node
+        elif kind == 'AiDecideInvoke':
+            nm = str(getattr(node, 'name', '') or '')
+            if nm:
+                invoked.add(nm)
+        elif kind == 'DottedName':
+            parts = [str(x) for x in (getattr(node, 'parts', None) or [])]
+            if parts:
+                read.setdefault(parts[0], node)
+        elif kind == 'VarRef':
+            nm = str(getattr(node, 'name', '') or '')
+            if nm:
+                read.setdefault(nm, node)
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+
+    errors = []
+    for nm, decl in declared.items():
+        if nm in invoked or nm not in read:
+            continue
+        errors.append(CompileError(
+            f"`{nm}` is read, but the `ai.decide {nm}` block that declares it is never run. "
+            f"Declaring an ai.decide block DEFINES it; it does not decide anything until it is "
+            f"invoked. Add `ai.decide {nm}` where the decision should happen, then read `{nm}` "
+            f"after it. Left as written this checks clean and then fails at run time saying "
+            f"`{nm}` is an unknown variable, which describes the wrong problem.",
+            line=getattr(read[nm], 'line', 0) or getattr(decl, 'line', 0) or 0))
+    return errors
+
+
+def scan_table_name_collision(program):
+    """One table name, one owner. Two shapes declaring `users` refuse LOUDLY.
+
+    PHASE 2 ITEM 4 of the recovered shape model. A table name is the whole address of a field:
+    `db.users.email` says which table by name and nothing else. So if two shapes both declare
+    `users`, that reference has two possible meanings and nothing in the source says which one
+    wins. Every available outcome is bad -- last-wins silently discards a described table,
+    first-wins silently discards the other, and merging (which the first version of the table
+    collector actually did) invents a table neither shape describes and resolves references
+    against it. There is no correct silent behaviour available, which is what makes this a
+    refusal rather than a warning.
+
+    WHERE A TABLE NAME CAN BE INTRODUCED, enumerated before wiring this rather than after, the
+    same way the where-clause allowlist had to be:
+
+      1. `<name> as table` inside a shape. The only declaration form that EXISTS today.
+      2. Twice inside ONE shape -- already refused in the transformer (_split_shape_tables),
+         where both names are in hand at construction time. Covered, and not re-checked here.
+      3. Across two shapes in one program (including a shape pulled in by an include or a
+         journey, because Layer 3 runs on the ASSEMBLED program). That is this scanner.
+      4. A CONNECTION naming tables. NOT REACHABLE: `connect` accepts one name, one driver and
+         one source, with no list and no `as table` binding anywhere in the grammar, so there
+         is no slot a table name could be introduced from. The multi-database declaration form
+         is a live fork awaiting a ruling, and the cross-connection half of this rule is not
+         buildable ahead of it. Named here so the gap is a stated boundary rather than a silent
+         one -- this scanner covers shapes, and only shapes.
+    """
+    dupes = []
+    _declared_shape_tables(program, duplicates=dupes)
+    errors = []
+    for tname, first_owner, second_owner, line in dupes:
+        a = f"`{first_owner}`" if first_owner else "an earlier shape"
+        b = f"`{second_owner}`" if second_owner else "a later shape"
+        errors.append(CompileError(
+            f"Two shapes declare the table `{tname}`: {a} and {b}. A table name is the whole "
+            f"address of a field -- `db.{tname}.<field>` names the table and nothing else -- so "
+            f"two owners leave that reference with two meanings and no way to choose. Give one "
+            f"of them a different table name, or describe `{tname}` in a single shape.",
+            line=line))
+    return errors
+
+
+def _declared_shape_names(program):
+    names = set()
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ShapeDecl':
+            n = str(getattr(node, 'name', '') or '')
+            if n:
+                names.add(n)
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    collect(program)
+    return names
+
+
+def scan_reference_rule(program):
+    """The PREFIX declares the kind, always. A bare `Name.field` does not say what it is reading.
+
+    PHASE 2 ITEM 2 of the recovered shape model, and it is a rule about READABILITY before it is
+    a rule about resolution: `db.users.email` says on its face that this is data, in a table, and
+    which field. `users.email` says none of that, and the reader has to go find a declaration
+    somewhere else in the file to learn whether `users` is a table, a shape, or a variable
+    somebody happened to name `users`.
+
+    MEASURED BEFORE BUILDING, 2026-09-04, and the state was exactly backwards -- the one
+    canonical spelling was the only one refused:
+
+        db.users.email       REFUSED (by the multi-database scanner, wrongly)
+        sh.Person.email      checked clean
+        Person.email         checked clean, then died at runtime: "variable 'Person' is not declared"
+        users.email          checked clean, then died at runtime: "variable 'users' is not declared"
+
+    The two bare forms are not silent -- they fail loud at runtime -- but they fail with a
+    message that describes a variable nobody wrote, at run time rather than at check time, when
+    the whole mistake is visible in the source text. That is the standing rule's case for moving
+    a refusal to check time.
+
+    WHAT IT REFUSES, deliberately narrow:
+      * `db.<table>.<field>` where a shape declares `<table>` but not `<field>` -- and the
+        message names the fields that table really has.
+      * `db.<table>.<field>` where NO shape declares `<table>` at all.
+      * a bare `<Head>.<field>` whose head is a declared SHAPE name or a declared TABLE name.
+
+    WHAT IT LEAVES ALONE, which is the part that stops it becoming a false-refusal machine:
+      * anything whose head is a BOUND VARIABLE. `retrieve customer from db.customers` binds
+        `customer`, and `customer.email` is the ordinary, correct way to read that row. The
+        variable always wins over the declaration -- it is a real value, and a shape name that
+        is also a variable name is the author's business, not this scanner's.
+      * `db.<table>` (two segments), `db.*`, `sh.<Name>`, and every reference whose head is not
+        a declaration this program makes. An unknown prefix belongs to somebody else's error.
+
+    ZERO corpus files across all 123 .mho contain a bare `<shape-or-table>.<field>` reference
+    (measured over-inclusively before landing, so that number is an upper bound), which is why
+    this can refuse rather than warn.
+    """
+    errors = []
+    tables = _declared_shape_tables(program)
+    shapes = _declared_shape_names(program)
+    if not tables and not shapes:
+        return errors
+
+    # A name that is BOUND to a value is a variable, and a variable wins. Collected first and
+    # from the whole program, because a refusal that fires on a legitimate `customer.email` is
+    # the same false statement pointing the other way, and harder to catch: it looks like care.
+    bound = set()
+
+    def collect_bound(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect_bound(c)
+            return
+        if not is_dataclass(node):
+            return
+        kind = type(node).__name__
+        if kind != 'ShapeDecl':
+            for attr in ('name', 'as_name', 'alias', 'var', 'result_name'):
+                v = getattr(node, attr, None)
+                if isinstance(v, str) and v:
+                    bound.add(v)
+        for f in fields(node):
+            collect_bound(getattr(node, f.name, None))
+
+    collect_bound(program)
+
+    def walk(node, pos='top'):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c, pos)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'DottedName':
+            parts = [str(x) for x in (getattr(node, 'parts', None) or [])]
+            ln = getattr(node, 'line', 0) or 0
+            if '*' not in parts and pos not in ('source', 'target'):
+                if len(parts) == 3 and parts[0] == 'db':
+                    tbl, fld = parts[1], parts[2]
+                    if tbl not in tables:
+                        errors.append(CompileError(
+                            f"`db.{tbl}.{fld}` reads the field `{fld}` from a table `{tbl}`, "
+                            f"and no shape declares a table called `{tbl}`. Declare it with "
+                            f"`{tbl} as table` inside a shape and put `{fld}` under it. If "
+                            f"`{tbl}` was meant as a DATABASE name, that form is "
+                            f"`db.{tbl}.<table>.<field>` and it is not wired through the query "
+                            f"layer yet.",
+                            line=ln))
+                    elif fld not in tables[tbl][1]:
+                        # An empty scope is a REAL, legal state (`users as table` with nothing
+                        # under it yet), not a lookup that failed, so the two cases are branched
+                        # rather than collapsed into an `or` default. The silent-shape ratchet
+                        # caught the `or` version of this line on its first run and it was right
+                        # to: a reader cannot tell a rendered empty list from a fallback that
+                        # fired because something upstream returned nothing.
+                        cols = tables[tbl][1]
+                        real = ", ".join(cols) if cols else "no fields yet"
+                        owner = tables[tbl][0]
+                        where = f"`{owner}`" if owner else "an unnamed shape"
+                        errors.append(CompileError(
+                            f"`db.{tbl}.{fld}` reads a field `{fld}` that the table `{tbl}` "
+                            f"does not declare. {where} declares `{tbl}` with: {real}.",
+                            line=ln))
+                elif len(parts) >= 2 and parts[0] not in ('db', 'sh') and parts[0] not in bound:
+                    head = parts[0]
+                    if head in tables:
+                        errors.append(CompileError(
+                            f"`{head}.{parts[1]}` does not say what it is reading. `{head}` is "
+                            f"a table a shape declares, and table content is always reached "
+                            f"through `db.` -- write `db.{head}.{parts[1]}`. The prefix is what "
+                            f"tells a reader this is data.",
+                            line=ln))
+                    elif head in shapes:
+                        errors.append(CompileError(
+                            f"`{head}.{parts[1]}` does not say what it is reading. `{head}` is "
+                            f"a shape, and a shape is reached through `sh.` -- write "
+                            f"`sh.{head}`. If `{parts[1]}` is data in a table, reach it through "
+                            f"`db.<table>.{parts[1]}` instead: data is always reached through "
+                            f"`db.`, even when a shape governs it.",
+                            line=ln))
+        for f in fields(node):
+            walk(getattr(node, f.name, None), f.name)
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return errors
+
+
+def scan_task_param_undeclared_shape(program):
+    """A task parameter typed as a shape that does not exist is refused, like the listener path.
+
+    THE SILENT FAILURE. `take request as sh.NoSuchShape` reported no errors, RAN, and gave back
+    an empty value. The contract the developer declared was simply absent, and nothing said so
+    anywhere. Found while measuring what migrating a shape into a table scope would cost, since
+    that migration renames the shape and every reference to it then names nothing.
+
+    IT WAS A WARNING FIRST, and the record of why is worth keeping. Making it a refusal broke
+    three things on the first attempt: two grammar-gate fixtures that declared a task taking
+    `sh.Transaction` with no shape, because they were testing the grammar of a parameter and
+    nothing else, and `tests/invoice_saga.mho:84`, which took `sh.Customer` with no
+    `shape Customer` declared anywhere. Additive-first says a change that cannot be made
+    additively stops as a fork rather than breaking the corpus, so it stopped and the finding
+    was reported.
+
+    All three are now FIXED rather than exempted. invoice_saga really did need that shape: it
+    reads `customer.email` to send the order confirmation, so the parameter was carrying no
+    contract at all. The two fixtures declare the shape their parameter names, which leaves them
+    testing exactly the grammar they were written for. Nothing is special-cased, and the rule
+    reads the same on every path a shape can be referenced from.
+    """
+    declared = set()
+    refs = []
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        cls = type(node).__name__
+        if cls == 'ShapeDecl':
+            nm = str(getattr(node, 'name', '') or '')
+            if nm:
+                declared.add(nm)
+        if cls == 'TaskParam':
+            # `type_name` also holds ordinary types (`text`, `int`), so only the `sh.` form is
+            # a shape reference.
+            tn = str(getattr(node, 'type_name', '') or '')
+            if tn.startswith('sh.'):
+                refs.append((tn.split('.')[-1], getattr(node, 'line', 0)))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    walk(program)
+    errors = []
+    for name, line in refs:
+        if name and name not in declared:
+            known = ", ".join(sorted(declared)[:6]) if declared else "(none declared)"
+            errors.append(CompileError(
+                f"`sh.{name}` is used as a task parameter type but no shape named `{name}` is "
+                f"declared, so this parameter would carry NO contract: none of the fields, "
+                f"types or validation a shape gives it would be applied. "
+                f"Declared shapes: {known}.",
+                line=line,
+                hint=(f"Declare it with `shape {name} ... shape: done`, or name a shape that "
+                      f"exists. This is the rule the request path already enforces: a reference "
+                      f"to a shape that is not there is a contract that is not there.")))
+    return errors
+
+
 ERROR_SCANS = (
+    scan_reference_rule,
+    scan_table_name_collision,
+    scan_listener_with_no_handler,
+    scan_multi_database_reference,
+    scan_query_connection_name,
+    scan_connection_access_mode,
     scan_give_destination,
     scan_orphan_it,
     scan_unknown_types,
     scan_undeclared_connectors,
+    scan_agent_tool_grants,
+    scan_task_param_undeclared_shape,
     scan_undeclared_tasks,
     scan_not_built_services,
     scan_otherwise_placement,
@@ -1493,7 +2338,8 @@ def scan_sector_route_unauthenticated(program):
         # analysis for PageDecl/NewBlock either (pure type-match anywhere in the tree, no
         # check that a listener is inside a reachable `listen for`), so RequestInboundBlock is
         # covered the same way, not a bespoke stricter rule.
-        if type(node).__name__ in ('PageDecl', 'NewBlock', 'RequestInboundBlock'):
+        # `PageDecl` dropped 2026-08-25 -- the page block is removed, so no tree can hold one.
+        if type(node).__name__ in ('NewBlock', 'RequestInboundBlock'):
             if reads_data(node) and not contains(node, RequireRoleDecl):
                 where = getattr(node, 'path', None) or getattr(node, 'name', '') or 'a route'
                 warnings.append(CompileError(
@@ -1666,7 +2512,328 @@ def scan_transaction_onfailure_futile(program):
     return warnings
 
 
+
+def scan_decorative_shape_modifiers(program):
+    """A shape field modifier that enforces NOTHING must say so, not look like a guarantee.
+
+    Q42. Measured 2026-09-03 by running a violating payload through the form boundary, which is
+    the one path where a shape is actually bound to data:
+
+        ENFORCED      required, allowed, min, max, range, pattern, matches, format
+        ENFORCED ELSEWHERE (correctly, at another layer)
+                      never store (write guard), never log, purpose (use-time scope)
+        NOT CONSTRAINTS (rendering or messaging, nothing to enforce)
+                      optional, multiline, multiple, label, error
+        DECORATIVE    default, unique, threshold  <- zero consumers anywhere
+
+    `modifier_type == 'default' | 'unique' | 'threshold'` returns ZERO matches across the whole
+    interpreter. They parse, they check clean, and they do nothing at all. In a language whose
+    claim is that the compiler enforces what you declare, a constraint that enforces nothing is
+    worse than an absent one: a reviewer reads `unique` and believes it.
+
+    WARNING, NOT REFUSAL, and the reason is measured rather than preferred: all three are
+    already used in the corpus (`default` in 6 files, `unique` and `threshold` in 1 each). A
+    hard refusal would break working files for a property that was never delivered, which is
+    punishing the author for the compiler's gap. The warning removes the DECEPTION, which is the
+    harm; delivering the enforcement is the separate build each backlog entry names.
+    """
+    warnings = []
+    DECORATIVE = {
+        'default':   'nothing reads it -- a missing field is not populated on any path',
+        'unique':    'no uniqueness check runs, on the form boundary or at write',
+        'threshold': 'nothing reads it',
+    }
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ShapeDecl':
+            # EVERY field, loose or table-owned. A decorative modifier is just as decorative
+            # inside a table scope, and staying silent there would be the exact dishonesty
+            # this scanner exists to prevent. See ShapeDecl.every_field.
+            for fld in (node.every_field() if hasattr(node, 'every_field')
+                        else (getattr(node, 'fields', None) or [])):
+                for m in (getattr(fld, 'modifiers', None) or []):
+                    mt = str(getattr(m, 'modifier_type', '') or '')
+                    if mt in DECORATIVE:
+                        warnings.append(CompileWarning(
+                            f"`{mt}` on field `{getattr(fld, 'name', '?')}` is declared but NOT "
+                            f"ENFORCED in this build: {DECORATIVE[mt]}. It reads like a "
+                            f"guarantee and is not one. Nothing about this program is refused "
+                            f"for it -- this says so out loud rather than letting the "
+                            f"declaration look like protection it does not provide.",
+                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return warnings
+
+
+def scan_unrecognized_field_classifier(program):
+    """A bracketed label on a shape field that is not a recognized classifier says so.
+
+    THE LEAK, measured through `mio run` against a real SQLite file and read back raw:
+
+        secret as text [pii]            enc:v1:3Z19rtY1OBB...   encrypted at rest
+        secret as text [ssn]            123-45-6789             PLAINTEXT ON DISK
+
+    A social security number tagged `[ssn]` is stored in the clear, `mio check` reports no
+    errors, and the developer who wrote the most obviously careful thing on the line gets
+    nothing for it.
+
+    A WARNING, NOT A REFUSAL, and that is the design rather than caution. OPEN LABELS ARE
+    DESIGNED BEHAVIOUR: an unreserved `[label]` is a searchable label that does nothing yet,
+    and closing the set was considered and rejected on 2026-09-06. So the harm to remove is not
+    that `[ssn]` is allowed, it is that `[ssn]` LOOKS like protection. The warning removes the
+    deception and leaves the label.
+
+    THE RESERVED SET WAS CONFIRMED AGAINST THE SECTOR PROFILES rather than assumed, and the
+    confirmation changed it. `mohio_data/sectors/sector-demo-regulated.sector` classifies a
+    field `region is [public]`, which was not in the proposed set, so warning on it would have
+    fired on a classifier a shipped profile already uses. That profile is also the clearest
+    statement of the principle this warning teaches: it writes `ssn is [phi, pii]`, naming the
+    FIELD ssn and CLASSIFYING it as phi and pii. A classifier names a regulated class; it does
+    not name the kind of value.
+
+    SCOPED TO SHAPE FIELDS, deliberately and narrowly. Brackets do other jobs elsewhere -- a
+    give-back status `[404]`, and labels reserved for later scaffolding -- and none of those
+    are touched, because in those positions a bracket is not claiming protection.
+    """
+    # THE ONE LIST, imported rather than repeated. The check-time warning and the runtime
+    # resolver have to agree about what a classifier is, and two copies of a set are two
+    # answers waiting to diverge. `identifier` is gone from it: nothing anywhere reads it, so
+    # leaving it recognized made it look like one of the real ones.
+    from mohio_classification import RECOGNIZED_CLASSIFIERS as RECOGNIZED
+    from mohio_classification import SEC_CLASSIFY_LEVEL_WORDS as LEVEL_WORDS
+    # What a developer most plausibly meant, for the ones worth naming outright. Anything not
+    # listed still warns; this only sharpens the suggestion where the intent is unmistakable.
+    MEANT = {
+        'ssn': 'pii', 'social_security': 'pii', 'email': 'pii', 'phone': 'pii',
+        'address': 'pii', 'dob': 'pii', 'birthdate': 'pii', 'name': 'pii',
+        'payment_card': 'pci', 'card': 'pci', 'card_number': 'pci', 'credit_card': 'pci',
+        'cvv': 'pci', 'pan': 'pci',
+        'medical': 'phi', 'health': 'phi', 'diagnosis': 'phi', 'patient': 'phi',
+        'secret': 'confidential', 'private': 'confidential',
+    }
+    warnings = []
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ShapeDecl':
+            for fld in (node.every_field() if hasattr(node, 'every_field')
+                        else (getattr(node, 'fields', None) or [])):
+                for m in (getattr(fld, 'modifiers', None) or []):
+                    if str(getattr(m, 'modifier_type', '') or '') != 'tag':
+                        continue
+                    # Split on comma even though a FIELD tag cannot carry one: TAG_REF is
+                    # `"[" NAME "]"`, and `[phi, pii]` on a field does not parse (measured).
+                    # The comma form is real in sector profiles and on the shape-level zone
+                    # tag, which the interpreter does split, so the split stays rather than
+                    # this being the one reader that would mis-handle a list if it arrives.
+                    raw = str(getattr(m, 'value', '') or '')
+                    for part in [p.strip().lower() for p in raw.split(',') if p.strip()]:
+                        # THE LEVEL WORDS GET THEIR OWN MESSAGE, and they keep their place in
+                        # the recognized set. `confidential` and `classified` are `sec.classify`
+                        # LEVEL names (`sec_classify_body: NAME sec_classify_rule+`, where the
+                        # rules are encrypt.both / strip.on.output / log.access). A shape field
+                        # tag never invokes sec.classify, so writing one in brackets on a field
+                        # produced no warning AND no protection: the same looks-like-protection
+                        # shape this scanner exists to close, one layer down. Saying "not a
+                        # recognized classifier" would be wrong, because the word is real; what
+                        # is wrong is the position. So it is pointed at the construct that does
+                        # what it was reaching for, the way [ssn] is pointed at [pii].
+                        if part in LEVEL_WORDS:
+                            warnings.append(CompileWarning(
+                                f"[{part}] on field `{getattr(fld, 'name', '?')}` names a "
+                                f"`sec.classify` LEVEL, not a field tag, so nothing here reads "
+                                f"it and the field gets no protection from it. To classify this "
+                                f"field at that level, declare it in a `sec.classify` block "
+                                f"(`sec.classify` / `{part} strip.on.output` / `sec.classify: "
+                                f"done`). To protect the field itself, use a classifier that "
+                                f"carries enforcement: [pii], [phi] or [pci].",
+                                line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+                            continue
+                        if part in RECOGNIZED:
+                            continue
+                        suggestion = MEANT.get(part)
+                        did_you_mean = (f" Did you mean [{suggestion}]?" if suggestion else "")
+                        warnings.append(CompileWarning(
+                            f"[{part}] on field `{getattr(fld, 'name', '?')}` is not a "
+                            f"recognized classifier and does nothing.{did_you_mean} It is kept "
+                            f"as a searchable label, so nothing is refused, but it applies no "
+                            f"protection: a field tagged only this way is stored in the clear. "
+                            f"The classifiers that carry protection are: "
+                            f"{', '.join('[' + c + ']' for c in sorted(RECOGNIZED))}.",
+                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return warnings
+
+
+def scan_ai_decide_never_invoked(program):
+    """A declared `ai.decide` that nothing ever invokes will not run, and says so.
+
+    ai.decide REGISTERS AND WAITS. Declaring one produces no gate, no weigh, no fallback, no
+    audit entry and no diagnostic until its name appears on a line to invoke it, and `mio check`
+    passed either way. So a program could carry a governed-looking decision in its source,
+    answer 201 APPROVED, and leave an empty audit behind, with nothing anywhere saying the
+    decision never ran.
+
+    NARROW ON PURPOSE, AND THE SCOPE WAS MEASURED RATHER THAN ASSUMED. The obvious generalisation
+    is "warn on anything declared and never used", and a sweep of the class found that shape does
+    NOT extend past ai.decide: an unused task, view, shape, miovalidate or pattern is ordinary
+    dead code. Warning on those is noise, and noise is how a warning gets switched off. What
+    makes ai.decide different is that it LOOKS like it is doing the work by being declared: the
+    confidence floor, the weighed inputs and the audit destination are all written down, and none
+    of them happens.
+
+    A WARNING, NOT A REFUSAL. A block declared ahead of the code that will invoke it is a
+    legitimate thing to write, so this must not refuse. What it must not do is stay silent.
+    """
+    declared = {}      # name -> line
+    invoked = set()
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        cls = type(node).__name__
+        name = str(getattr(node, 'name', '') or '')
+        if cls == 'AiDecideBlock' and name:
+            declared.setdefault(name, getattr(node, 'line', 0) or 0)
+        elif cls == 'AiDecideInvoke' and name:
+            invoked.add(name)
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    def collect_refs(node, out):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect_refs(c, out)
+            return
+        if not is_dataclass(node):
+            return
+        cls = type(node).__name__
+        if cls != 'AiDecideBlock':
+            nm = getattr(node, 'name', None)
+            if isinstance(nm, str) and nm:
+                out.add(nm)
+            for attr in ('live_name', 'chain_name', 'decision', 'decision_name'):
+                v = getattr(node, attr, None)
+                if isinstance(v, str) and v:
+                    out.add(v)
+            parts = getattr(node, 'parts', None)
+            if parts:
+                out.add(str(parts[0]))
+        for f in fields(node):
+            collect_refs(getattr(node, f.name, None), out)
+
+    stmts = getattr(program, 'statements', None) or []
+    walk(stmts)
+    referenced = set()
+    collect_refs(stmts, referenced)
+
+    warnings = []
+    for name, line in sorted(declared.items()):
+        if name in invoked or name in referenced:
+            continue
+        warnings.append(CompileWarning(
+            f"`ai.decide {name}` is declared but never invoked, so it will not run: no "
+            f"confidence gate, no weighed inputs, no fallback and NO AUDIT ENTRY. The decision "
+            f"reads as governed in the source and does nothing at runtime.",
+            line=line,
+            hint=(f"Invoke it where the decision belongs by putting its name on a line "
+                  f"(`ai.decide {name}`), or remove the block if it is not needed yet.")))
+    return warnings
+
+
+def scan_upload_storage_durability(program):
+    """A shape that accepts an upload says where those files actually go.
+
+    Uploads are written to local disk (`MOHIO_UPLOAD_DIR`, default `./uploads`) and the database
+    stores a PATH into that directory. The row survives a restart; the file does not, unless the
+    directory is durable AND outside the tree a deploy replaces. The default is relative to the
+    working directory, so on most hosts it sits exactly inside that tree.
+
+    The project already warns like this about the things that do not survive a restart: an
+    in-memory SQLite connection says "everything written is lost when the app stops", and a
+    SQLite file says "on a host that resets its disk, it does not survive". Uploads had no such
+    line, so the one kind of data that leaves a working row pointing at a missing file was the
+    one kind nobody was told about.
+
+    A WARNING, and only a warning. Where uploads should be stored for production is a design
+    question with its own document; this is the sentence that stops the silence in the meantime.
+    """
+    UPLOAD_TYPES = ('file', 'image', 'audio', 'video', 'pdf')
+    warnings = []
+    seen = set()
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ShapeDecl':
+            for fld in (node.every_field() if hasattr(node, 'every_field')
+                        else (getattr(node, 'fields', None) or [])):
+                tn = str(getattr(fld, 'type_name', '') or '').lower()
+                # Named rather than written as `... or '?'`: a field with no name is not a
+                # field, and the placeholder is only so the message has something to print if
+                # one ever arrives that way.
+                _raw_name = getattr(fld, 'name', None)
+                nm = str(_raw_name) if _raw_name else '(unnamed field)'
+                if tn in UPLOAD_TYPES and nm not in seen:
+                    seen.add(nm)
+                    warnings.append(CompileWarning(
+                        f"`{nm}` accepts an upload, and uploaded files are written to local "
+                        f"disk (MOHIO_UPLOAD_DIR, default ./uploads) while the database stores "
+                        f"only the path. The row survives a restart and the FILE does not, "
+                        f"unless that directory is durable and outside the tree a deploy "
+                        f"replaces. The default is relative to the working directory, which on "
+                        f"most hosts is inside it.",
+                        line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return warnings
+
+
 WARNING_SCANS = (
+    scan_upload_storage_durability,
+    scan_ai_decide_never_invoked,
+    scan_unrecognized_field_classifier,
+    scan_decorative_shape_modifiers,
     scan_sector_route_unauthenticated,
     scan_unreachable,
     scan_unwired,

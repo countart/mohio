@@ -88,7 +88,7 @@ listen for
             when "login"
                 grant role "admin"
                 hold visitor_name = "Jordan Rivera"
-                give back 200 "logged in"
+                give back [200] "logged in"
             otherwise
                 require role "admin"
                 give back 200 ("name=" & visitor_name)

@@ -95,12 +95,12 @@ class _DictConn:
     def commit(self): pass
     def rollback(self): pass
 
-def _ensure_table(existing_cols, want_cols):
+def _ensure_table(existing_cols, want_cols, allow_new_columns=False):
     sink = []
     rt = object.__new__(MySQLRuntime)          # bypass __init__ (it would open a real socket)
     rt.conn = _DictConn(sink, existing_cols)
     rt._in_transaction = False
-    rt.ensure_table('players', want_cols)
+    rt.ensure_table('players', want_cols, allow_new_columns=allow_new_columns)
     return sink
 
 # THE regression: before the fix this raised KeyError: 0 on the dict row.
@@ -118,10 +118,23 @@ check("ensure_table reads the introspection column by ALIAS (deterministic acros
 check("a column that ALREADY exists is not re-added (the introspection result is really used)",
       'ADD COLUMN' not in joined.upper(), joined)
 
-# The widening branch: a genuinely NEW column must still be added. If the fix had silently
-# produced an empty `existing` set, the case above would ALSO emit ADD COLUMN and look fine --
-# this pair is what distinguishes "read the rows correctly" from "read nothing at all".
-stmts2 = _ensure_table(['id', 'handle'], ['id', 'handle', 'score'])
+# MIGRATION-REFUSAL (2026-08-30) changed the DEFAULT here: a user write naming a column the
+# table does not have is now refused rather than silently ALTER-ed in, because that silent add
+# is what forked data on a rename. Widening is still reachable, but only for INTERNAL callers
+# that opt in, so this branch now passes allow_new_columns=True.
+try:
+    _ensure_table(['id', 'handle'], ['id', 'handle', 'score'])
+    _refused = False
+except Exception:
+    _refused = True
+check("a user write naming an unknown column is REFUSED, not silently added", _refused,
+      "the silent ALTER TABLE ADD COLUMN is back -- a rename would fork the data again")
+
+# The widening branch: a genuinely NEW column must still be added FOR AN INTERNAL CALLER. If
+# the fix had silently produced an empty `existing` set, the case above would ALSO emit ADD
+# COLUMN and look fine -- this pair is what distinguishes "read the rows correctly" from "read
+# nothing at all".
+stmts2 = _ensure_table(['id', 'handle'], ['id', 'handle', 'score'], allow_new_columns=True)
 j2 = ' | '.join(stmts2)
 check("a genuinely NEW column IS added (widening still works)",
       'ADD COLUMN' in j2.upper() and 'score' in j2, j2)

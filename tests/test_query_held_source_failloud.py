@@ -124,8 +124,13 @@ check("retrieve: a field-named match against a scalar list still fails loud, wit
       ok and "holds plain values, not records" in detail, detail)
 
 res, it = run_src(HELD + 'grab item from colors\ngrab: done\nshow item\n')
-check("grab: no match clause at all binds None, same rule as the db path (unrelated to T1-QUERY-HELD)",
-      it.shown == [None], it.shown)
+# SUPERSEDED 2026-08-23 -> 2026-08-24 (T1-EMPTY-DISPLAY-NONE): `show` appends
+# `_display_value(val)`, not `val`, so `it.shown` is the DISPLAY channel -- an empty value now
+# renders as Mohio's empty form instead of leaking Python's `None` into user output. The binding
+# itself is unchanged (still null; locked directly in tests/test_get.py's labelled unit case).
+check("grab: no match clause at all binds an empty result, same rule as the db path "
+      "(unrelated to T1-QUERY-HELD)",
+      it.shown == [''], it.shown)
 
 
 print("\n=== find / retrieve / grab over a held LIST: WITH a db connected -- same new behavior ===")
@@ -142,8 +147,8 @@ check("retrieve: same new fail-loud message with a db connected",
       ok and "holds plain values, not records" in detail, detail)
 
 res, it = run_src(CONNECT + HELD + 'grab item from colors\ngrab: done\nshow item\n')
-check("grab: same None-with-no-match result with a db connected",
-      it.shown == [None], it.shown)
+check("grab: same empty-with-no-match result with a db connected",
+      it.shown == [''], it.shown)
 
 
 print("\n=== find / retrieve / grab over a held SCALAR (non-list): T0-6's refusal STILL applies ===")
