@@ -1,7 +1,7 @@
 # LICENSE-SCOPE.md
 
-Release: 5.0.0
-Source-control tag: v5.0.0
+Release: 5.0.1
+Source-control tag: v5.0.1
 First public distribution date: 2026-08-22
 License: Business Source License 1.1
 Change Date: 2030-08-22 (four years from first public distribution)

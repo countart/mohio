@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mohio"
-version = "5.0.0"
+version = "5.0.1"
 readme = "README.md"
 description = "Mohio, an AI-native language where AI reasoning and compliance are compiler-enforced primitives."
 # The floor is what the suite is ACTUALLY exercised on, and that is 3.12: the development
@@ -18,7 +18,7 @@ description = "Mohio, an AI-native language where AI reasoning and compliance ar
 # codebase need 3.12+. A 3.12 floor still admits every 3.13 image above it.
 # Re-ruled 2026-09-02 (an earlier pass had applied 3.13 before this was checked).
 requires-python = ">=3.12"
-dependencies = ["lark>=1.1.0", "anthropic>=0.96.0", "cryptography>=49.0.0", "tiktoken>=0.13.0", "bcrypt>=4.0", "nh3>=0.2.0"]
+dependencies = ["lark>=1.1.0", "anthropic>=0.96.0", "cryptography>=49.0.0", "tiktoken>=0.13.0", "bcrypt>=4.0", "nh3>=0.2.0", "fastapi>=0.110.0", "uvicorn>=0.30.0", "starlette>=0.37.0", "python-multipart>=0.0.9"]
 
 [project.optional-dependencies]
 # RH-2: bcrypt and nh3 moved to base dependencies above -- a bare `pip install mohio` needs both
@@ -36,7 +36,7 @@ auth = []
 mio = "mio:main"
 
 [tool.setuptools]
-py-modules = ["mio", "mio_utils", "mohio_ai", "mohio_ast", "mohio_audit_grades", "mohio_enforce", "mohio_fmt", "mohio_html_sanitize", "mohio_interpreter", "mohio_langmap", "mohio_layer3", "mohio_mioscript", "mohio_pretokenizer", "mohio_reachability", "mohio_schema", "mohio_sector_loader", "mohio_server", "mohio_services", "mohio_symbol_table", "mohio_test_grammar", "mohio_transformer", "mohio_transformer_ast", "mohio_version"]
+py-modules = ["mio", "mio_utils", "mohio_ai", "mohio_ast", "mohio_audit_grades", "mohio_classification", "mohio_decisions", "mohio_enforce", "mohio_fmt", "mohio_framework", "mohio_html_sanitize", "mohio_interpreter", "mohio_langmap", "mohio_layer3", "mohio_metasource", "mohio_metasource_mongo", "mohio_metasource_mysql", "mohio_metasource_postgres", "mohio_metasource_shared", "mohio_metasource_sqlite", "mohio_metasource_store", "mohio_mioscript", "mohio_pretokenizer", "mohio_reachability", "mohio_schema", "mohio_sector_loader", "mohio_server", "mohio_services", "mohio_symbol_table", "mohio_test_grammar", "mohio_transformer", "mohio_transformer_ast", "mohio_version"]
 packages = ["mohio_data"]
 include-package-data = true
 
