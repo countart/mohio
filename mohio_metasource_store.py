@@ -245,6 +245,70 @@ class S3ObjectStore(ObjectStore):
         except urllib.error.URLError as e:
             raise StoreError(f"{method} {url} could not reach the store: {e.reason}") from e
 
+    def presign(self, method: str, key: str, expires_seconds: int = 900) -> str:
+        """A URL that carries its own authority, for a browser to use directly.
+
+        THE POINT IS THAT THE BYTES NEVER TOUCH THE APPLICATION. A file posted through the app
+        is read into the app's memory, held for the length of the upload, and written out
+        again, which makes every large upload the application's problem: its memory, its
+        request timeout, its bandwidth. A signed URL moves the transfer to the store and
+        leaves the application holding only the decision about who may do it.
+
+        THE SIGNATURE IS THE ENFORCEMENT, and it is the same signature this class already
+        computes for its own requests. The difference is only where it is carried: `_request`
+        puts it in an Authorization HEADER, and a browser handed a bare URL has no way to set
+        one, so SigV4's query-string form puts the credential scope, the timestamp, the
+        lifetime and the signature into the URL itself. Nothing new is trusted and no new
+        secret leaves this process: the key never appears in the URL, only a signature
+        computed from it, and `X-Amz-Expires` is inside the signed material, so moving the
+        deadline invalidates the signature rather than extending it.
+
+        UNSIGNED-PAYLOAD is required rather than convenient. A presigned PUT is signed before
+        the file exists, so its content hash cannot be known at signing time; AWS defines this
+        exact literal for that case. It means the signature authorises WHO may write WHERE and
+        UNTIL WHEN, and does not pin WHAT -- which is why the key is part of the signature and
+        why a caller must not sign a key it would not accept any bytes at.
+        """
+        if expires_seconds < 1 or expires_seconds > 604800:
+            # AWS's own ceiling for SigV4 query signing is seven days. A caller asking for more
+            # is asking for something the signature cannot express, and a URL that quietly
+            # expired earlier than requested is worse than a refusal.
+            raise StoreError(
+                "a signed URL must last between 1 second and 7 days; %d seconds was asked for"
+                % expires_seconds)
+        host = urllib.parse.urlsplit(self.endpoint).netloc
+        path = "/" + self.bucket + ("/" + key if key else "")
+        canonical_uri = urllib.parse.quote(path, safe="/~")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        amzdate = now.strftime("%Y%m%dT%H%M%SZ")
+        datestamp = now.strftime("%Y%m%d")
+        scope = f"{datestamp}/{self.region}/s3/aws4_request"
+
+        # Signed headers are host alone: it is the only header a browser is guaranteed to send
+        # unchanged, and anything else in here would make the URL fail in a real client.
+        signed_headers = "host"
+        params = {
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": f"{self.access_key}/{scope}",
+            "X-Amz-Date": amzdate,
+            "X-Amz-Expires": str(int(expires_seconds)),
+            "X-Amz-SignedHeaders": signed_headers,
+        }
+        # Sorted, and quoted with nothing left safe: the canonical query string is part of what
+        # is signed, so a different ordering or a different escaping is a different signature.
+        canonical_query = "&".join(
+            "%s=%s" % (urllib.parse.quote(k, safe="-_.~"),
+                       urllib.parse.quote(params[k], safe="-_.~"))
+            for k in sorted(params))
+        canonical = (f"{method}\n{canonical_uri}\n{canonical_query}\n"
+                     f"host:{host}\n\n{signed_headers}\nUNSIGNED-PAYLOAD")
+        to_sign = (f"AWS4-HMAC-SHA256\n{amzdate}\n{scope}\n"
+                   f"{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}")
+        signature = hmac.new(self._signing_key(datestamp), to_sign.encode("utf-8"),
+                             hashlib.sha256).hexdigest()
+        return (self.endpoint + canonical_uri + "?" + canonical_query
+                + "&X-Amz-Signature=" + signature)
+
     # ── the verbs ────────────────────────────────────────────────────────────────────────────
     def get(self, key: str) -> Tuple[Optional[bytes], Optional[str]]:
         status, body, headers = self._request("GET", key)

@@ -492,7 +492,7 @@ def load_sector_profile(
         return None
     
     try:
-        text = open(path, encoding='utf-8').read()
+        text = open(path, encoding='utf-8-sig').read()
         profile = _parse_sector_profile_text(text, path)
         return profile
     except Exception as e:

@@ -2,7 +2,7 @@
 <!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Language Reference
 
-*Generated from the grammar on 2026-09-04. Do not edit by hand -- edit `tools/langref/langref_meta.json` and regenerate.*
+*Generated from the grammar on 2026-09-11. Do not edit by hand -- edit `tools/langref/langref_meta.json` and regenerate.*
 
 ## How to use this reference
 
@@ -1633,7 +1633,7 @@ saga checkout
     step: done
 saga: done
 ```
-A multi-step saga with compensation.
+A multi-step saga with developer-defined per-step compensation, rolled back in reverse order, resolving to one of COMMITTED, COMPENSATED or FAILED_COMPENSATION. Saga is WITHIN-PROCESS compensation only: it does not survive a crash, a deploy, or process death, and a saga interrupted mid-flight leaves its completed steps applied and does not resume.
 
 ### ✅ `step`  
 *canonical*
@@ -2181,8 +2181,8 @@ The word list comes from `mio harvest`, the compiler's own sweep of the grammar,
 | unit and currency families | 0 | 0 | 0 | 10 | 10 |
 | string, cast and condition words | 13 | 4 | 0 | 49 | 66 |
 | service calls | 29 | 5 | 43 | 17 | 94 |
-| everything else | 255 | 28 | 0 | 47 | 330 |
-| **all words** | **307** | **38** | **43** | **130** | **518** |
+| everything else | 255 | 28 | 0 | 48 | 331 |
+| **all words** | **307** | **38** | **43** | **131** | **519** |
 
 ### operators and symbols
 
@@ -2216,7 +2216,7 @@ No entry (17): `mioimage.compress`, `mioimage.convert`, `mioimage.crop`, `mioima
 
 Mentioned in a note but with no entry of its own (28): `ai.agent`, `characters`, `context`, `current`, `define`, `display`, `fields`, `flow`, `grant`, `loop`, `on.close`, `parse`, `permanent`, `range`, `release`, `release.now`, `rename`, `render`, `rerun.after`, `rerun.max`, `rerun.until`, `script`, `section`, `style`, `table`, `until`, `via`, `while.active`
 
-No entry (47): `ai.audit`, `ai.compare`, `ai.override`, `ai.resolve`, `ai.respond`, `app config`, `chars`, `check count`, `check exists`, `check unique`, `connect chain`, `do.after`, `do.encrypt`, `do.every`, `do.once`, `do.unless`, `false`, `for.purpose`, `html`, `layout`, `nav to`, `nav.back`, `nav.forward`, `nav.root`, `navigate to`, `navigate.back`, `navigate.root`, `now()`, `on chain`, `on.change`, `on.complete`, `on.error`, `on.pause`, `percentage`, `purpose`, `redirect`, `release.lock`, `require biometric`, `require camera`, `require location`, `require push`, `run mioschedule`, `sign via`, `stage`, `trusted`, `uuid()`, `walk`
+No entry (48): `ai.audit`, `ai.compare`, `ai.override`, `ai.resolve`, `ai.respond`, `app config`, `chars`, `check count`, `check exists`, `check unique`, `connect chain`, `do.after`, `do.encrypt`, `do.every`, `do.once`, `do.unless`, `false`, `for.purpose`, `html`, `layout`, `nav to`, `nav.back`, `nav.forward`, `nav.root`, `navigate to`, `navigate.back`, `navigate.root`, `now()`, `on chain`, `on.change`, `on.complete`, `on.error`, `on.idle`, `on.pause`, `percentage`, `purpose`, `redirect`, `release.lock`, `require biometric`, `require camera`, `require location`, `require push`, `run mioschedule`, `sign via`, `stage`, `trusted`, `uuid()`, `walk`
 
 
 ## Status disagreements (harvest vs this catalog)

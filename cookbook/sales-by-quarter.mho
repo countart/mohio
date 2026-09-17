@@ -1,0 +1,41 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Filter records to a named date window with `timespan`.
+// A declared timespan defines a [start, end) range; referencing it in a find keeps
+// only the rows whose `created_at` falls inside it.
+// Run it:  mio run cookbook/sales-by-quarter.mho
+
+connect db as sqlite from env.DATABASE_URL
+
+// Q1 2026: January through March (the end date is exclusive).
+timespan first_quarter
+    start 2026-01-01
+    end 2026-04-01
+timespan: done
+
+save to db.sales
+    product "notebook"
+    amount 12
+    created_at "2026-02-14"
+save: done
+
+save to db.sales
+    product "desk lamp"
+    amount 40
+    created_at "2026-03-30"
+save: done
+
+save to db.sales
+    product "monitor arm"
+    amount 85
+    created_at "2026-05-02"
+save: done
+
+// Only the rows inside the Q1 window come back (the May sale is excluded).
+find q1 in db.sales
+    timespan first_quarter
+find: done
+
+show "Q1 2026 sales ({{ q1.count }}):"
+repeat each sale in q1
+    show "  {{ sale.product }}: {{ sale.amount }}"
+repeat: done

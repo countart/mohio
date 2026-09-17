@@ -1,0 +1,78 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Session timeout -- lock the page when nobody is there, and let the person back
+// in with a link sent to their email. The browser half and the server half of the
+// same story, and both halves are Mohio.
+// Run it:  mio serve cookbook/session-timeout.mho   (uses SQLite in memory)
+//
+// No email account is needed to try it. With no provider configured miomail does
+// not send anything and nothing leaves the machine, so the flow runs end to end
+// on your laptop. To send real email set SENDGRID_API_KEY, BREVO_API_KEY, or
+// SMTP_HOST. Note that a handler's own `show` is not echoed by mio serve. To watch a
+// step print while you are learning it, drive ONE request from the command line:
+//   mio run cookbook/session-timeout.mho --request '{"_path":"/","_method":"GET"}'
+// A bare `mio run` prints nothing here and that is correct: this file is listeners only,
+// so with no request to answer there is nothing for it to do.
+
+connect db as sqlite from env.DATABASE_URL
+
+shape Relogin
+    email as text required format "email"
+shape: done
+
+shape Back
+    token as text required
+shape: done
+
+// The browser half. Nobody has moved, typed, scrolled, clicked or touched
+// anywhere on this page for 25 minutes, so cover it and ask.
+on.idle 25 minutes
+    show #relogin
+on.idle: done
+
+listen for
+    request for sh.Relogin at /
+        render
+            <h1>The ledger</h1>
+            <p>Your work is here.</p>
+            <div id="relogin" hidden>
+              <h2>Still there?</h2>
+              <p>For your security this page locked itself. Send yourself a link to carry on.</p>
+              {{ form sh.Relogin }}
+            </div>
+        render: done
+    request: done
+
+    // Ask for a link. The token is what proves it was really them, so it is
+    // generated here and never chosen by the person asking.
+    new sh.Relogin at /relogin
+        link_token random.token length 32
+        save to db.relogin_links
+            email relogin.email
+            token link_token
+        save: done
+        miomail.send
+            to relogin.email
+            subject "Your link back to the ledger"
+            body ("Open this to carry on: /back with the token " & link_token)
+        give back [200] "Check your email for the link back."
+    new: done
+
+    // Come back. An unknown token is refused rather than ignored, so a guessed
+    // one fails loudly instead of quietly doing nothing.
+    new sh.Back at /back
+        retrieve.one link from db.relogin_links
+            match token to back.token
+        retrieve.one: done
+        // A token nobody was sent finds NOTHING, and finding nothing is a normal
+        // empty result, not an error. So the test is `is empty`, not `on.failure`:
+        // on.failure means the database itself went wrong, and it would never fire
+        // for a wrong token, which would let one straight through.
+        check link
+            when link is empty
+                give back [401] "That link is not one we sent."
+            otherwise
+                grant role "member"
+                give back [200] "Welcome back."
+        check: done
+    new: done
+listen: done

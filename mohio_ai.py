@@ -121,6 +121,77 @@ class CompletionResult:
     # Empty when the provider reported none; the caller marks that case rather than passing the
     # requested alias off as a resolved one.
     resolved_model: str = ""
+    # WHICH SAMPLING CONTROL ACTUALLY APPLIED (2026-09-13). anthropic 1.0 removed `temperature`
+    # from messages.create, so on that SDK a decision runs under the provider's default sampling
+    # rather than the value the program asked for. That is a real difference between two
+    # decisions and the trail is the only place it can be seen, so it is recorded rather than
+    # inferred -- the same reason `resolved_model` exists beside the requested one.
+    sampling: str = ""
+
+
+def _sampling_of(completion):
+    """What the completion says governed its sampling, or a named admission that it said nothing.
+
+    NEVER the dataclass default. That default means "no provider call was made", and a completion
+    object exists precisely because one was -- so falling back to it here would write a sentence
+    into the audit column that is false about the decision it describes. A provider path that
+    reports nothing is a gap in this file, and the record says that instead, naming the provider
+    so the gap can be found and closed rather than read as a property of the decision.
+    """
+    mode = getattr(completion, 'sampling', None) if completion is not None else None
+    if mode:
+        return mode
+    named = getattr(completion, 'resolved_model', None) if completion is not None else None
+    if named:
+        return ("sampling not reported by the provider path that answered as %s -- the call "
+                "was made, what governed its sampling was not recorded" % named)
+    return ("sampling not reported, and the provider path did not name itself either -- the "
+            "call was made, what governed its sampling was not recorded")
+
+
+def anthropic_sampling(temperature):
+    """What to send for sampling, and what to record about it.
+
+    Returns (kwargs, mode). `kwargs` goes straight into messages.create; `mode` is the sentence
+    the audit records.
+
+    ASKED OF THE SIGNATURE, not of the version number. A future SDK that restores the parameter,
+    or a fork that never dropped it, is handled without anybody maintaining a table of versions.
+    """
+    value = temperature if temperature is not None else 1.0
+    if _anthropic_takes_temperature():
+        return {"temperature": value}, "temperature applied: %s" % value
+    # OMITTED, AND SAID SO. The decision runs under whatever the provider does by default, which
+    # is NOT what the program asked for, and an auditor reading this a year later cannot tell
+    # from anything else in the record.
+    return {}, ("provider default sampling: the installed anthropic SDK does not accept "
+                "temperature, so the requested %s was not applied" % value)
+
+
+_ANTHROPIC_TEMPERATURE_SUPPORT = None
+
+
+def _anthropic_takes_temperature():
+    """Does the installed SDK's messages.create accept `temperature`? Asked once, cached."""
+    global _ANTHROPIC_TEMPERATURE_SUPPORT
+    if _ANTHROPIC_TEMPERATURE_SUPPORT is not None:
+        return _ANTHROPIC_TEMPERATURE_SUPPORT
+    supported = True
+    try:
+        import inspect
+        import anthropic as _a
+        _sig = inspect.signature(_a.resources.messages.Messages.create)
+        supported = ("temperature" in _sig.parameters
+                     or any(p.kind == inspect.Parameter.VAR_KEYWORD
+                            for p in _sig.parameters.values()))
+    except Exception:                                   # noqa: BLE001
+        # THE DETECTION FAILING IS NOT AN ANSWER OF NO. Sending the parameter to an SDK that
+        # takes it is correct; the case that breaks is omitting it when it was wanted. So an
+        # unanswerable question keeps the behaviour the program asked for, and the call itself
+        # reports loudly if that turns out to be wrong.
+        supported = True
+    _ANTHROPIC_TEMPERATURE_SUPPORT = supported
+    return supported
 
 
 class AiProviderError(RuntimeError):
@@ -570,11 +641,28 @@ class AnthropicAiRuntime:
         mt = max_tokens or MAX_TOKENS
         m = (model or "").lower()
         if m.startswith("claude") or "sonnet" in m or "haiku" in m or "opus" in m:
-            msg = self._anthropic_client().messages.create(
-                model=model, max_tokens=mt, system=system,
-                temperature=temperature if temperature is not None else 1.0,
-                messages=[{"role": "user", "content": user}],
-            )
+            _sampling_kwargs, _sampling_mode = anthropic_sampling(temperature)
+            try:
+                msg = self._anthropic_client().messages.create(
+                    model=model, max_tokens=mt, system=system,
+                    messages=[{"role": "user", "content": user}],
+                    **_sampling_kwargs
+                )
+            except TypeError as _sdk_err:
+                # THE INSTALLED SDK DOES NOT TAKE THIS CALL, and the raw error names somebody
+                # else's keyword argument and nothing about Mohio. Measured: anthropic 1.0.0
+                # removed `temperature` from messages.create -- not renamed, not moved, gone --
+                # and requirements ask for `>=0.96.0`, which 1.0.0 satisfies. So a fresh install
+                # gets an SDK this code cannot call, and the first real AI call a pioneer makes
+                # dies with `Messages.create() got an unexpected keyword argument 'temperature'`.
+                #
+                # NOT SILENTLY DROPPED AND RETRIED. Temperature is the model's sampling knob, set
+                # per decision, and a decision that quietly runs at a different temperature than
+                # the program asked for is not the same decision -- which matters most in exactly
+                # the audited case this language is for. The refusal says what to do instead.
+                if 'temperature' not in str(_sdk_err):
+                    raise
+                self._raise_temperature_refusal(_sdk_err)
             if not msg.content:
                 raise ValueError("Anthropic returned empty content")
             usage = getattr(msg, 'usage', None)
@@ -583,6 +671,7 @@ class AnthropicAiRuntime:
                 input_tokens=(getattr(usage, 'input_tokens', 0) or 0) if usage else 0,
                 output_tokens=(getattr(usage, 'output_tokens', 0) or 0) if usage else 0,
                 resolved_model=str(getattr(msg, 'model', '') or ''),
+                sampling=_sampling_mode,
             )
         if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3") or m.startswith("openai"):
             return self._complete_openai(model, system, user, temperature, mt)
@@ -591,6 +680,28 @@ class AnthropicAiRuntime:
         raise RuntimeError(
             f"ai.connect: unknown provider/model '{model}'. "
             f"Supported prefixes: claude*, gpt*/o1*/o3*, gemini*.")
+
+    def _raise_temperature_refusal(self, sdk_err):
+        """The SDK took the call and refused the parameter anyway. Say so in Mohio's own words.
+
+        WHY THIS SURVIVES THE FEATURE CHECK. Detection asks the signature, and a signature can be
+        wrong about the call: a wrapper, a proxy client, a **kwargs that forwards to something
+        stricter. When that happens the raw error names somebody else's keyword argument and
+        nothing about Mohio, which is the failure a pioneer actually hit on a fresh install.
+        """
+        try:
+            import anthropic as _a
+            _ver = getattr(_a, '__version__', 'unknown')
+        except Exception:                               # noqa: BLE001
+            _ver = 'unknown'
+        raise AiProviderError(
+            "the installed anthropic SDK (%s) accepted this call but refused `temperature`. "
+            "Version 1.0 removed it from messages.create.\n"
+            "    Install an SDK that still takes it:  pip install \"anthropic<1.0.0\"\n"
+            "    Temperature is not dropped automatically on purpose: it is the model's "
+            "sampling knob, and an audited decision that quietly ran at a different "
+            "temperature than the program asked for is a different decision."
+            % _ver) from sdk_err
 
     def _complete_openai(self, model, system, user, temperature, max_tokens):
         import os, json as _json, urllib.request
@@ -618,6 +729,13 @@ class AnthropicAiRuntime:
             input_tokens=usage.get("prompt_tokens", 0) or 0,
             output_tokens=usage.get("completion_tokens", 0) or 0,
             resolved_model=str(data.get("model", "") or ""),
+            # THIS PROVIDER TAKES THE PARAMETER, and the value sent is the one recorded. The
+            # Anthropic path has to feature-detect because its SDK dropped the argument; this
+            # one is a plain HTTP field, so there is nothing to detect and nothing conditional
+            # about it. The record still has to say so: an auditor comparing two decisions
+            # cannot be left to infer the sampling state from which provider answered.
+            sampling="temperature applied: %s" % (
+                temperature if temperature is not None else 1.0),
         )
 
     def _complete_gemini(self, model, system, user, temperature, max_tokens):
@@ -652,6 +770,10 @@ class AnthropicAiRuntime:
             # `modelVersion` per Gemini's documented response shape. Carries the same
             # not-live-verified caveat as the token counts directly above.
             resolved_model=str(data.get("modelVersion", "") or ""),
+            # Sent inside generationConfig rather than at the top level, but sent, and by the
+            # same reasoning as the OpenAI sibling above.
+            sampling="temperature applied: %s" % (
+                temperature if temperature is not None else 1.0),
         )
 
     # ── Pre-call token estimation (C, 2026-08-06 -- the cost-cap fix's second slice) ──
@@ -1011,8 +1133,11 @@ class AnthropicAiRuntime:
             return AgentTurn(kind='text', text=_res.text or "Done.", tokens=_tokens, cost=_cost)
         # Claude: the full tool-capable path.
         self._tick()
-        kwargs = dict(model=m, max_tokens=mt, messages=messages,
-                      temperature=temperature if temperature is not None else 1.0)
+        # THE SECOND PLACE THE PARAMETER IS SENT. Found by sweeping for the first one: the
+        # agent's tool-capable path builds its own kwargs, so fixing the completion path alone
+        # would have left every agent turn raising on the same SDK.
+        _agent_sampling, _ = anthropic_sampling(temperature)
+        kwargs = dict(model=m, max_tokens=mt, messages=messages, **_agent_sampling)
         # The agent's GOAL travels in the system role, separate from the context/tool-result
         # data in the user turns (Q99 Fix C). Passing it as another user message would put the
         # instruction on the same footing as the data it is supposed to govern.
@@ -1207,6 +1332,11 @@ class AnthropicAiRuntime:
                         return AiDecision(
                             result=result,
                             confidence=confidence,
+                            # THE SAMPLING SIBLING, for the same reason the model one below it
+                            # exists: a chain fallback is exactly when what actually governed the
+                            # call matters most, because the decision did not run where the
+                            # program said it would.
+                            sampling=_sampling_of(retry_res),
                             # Q97, the chain-retry sibling: this recorded the alias the retry
                             # ASKED for. A chain fallback is exactly when the recorded model
                             # matters most -- the decision did not run where the program said
@@ -1242,6 +1372,10 @@ class AnthropicAiRuntime:
         return AiDecision(
             result=result,
             confidence=confidence,
+            # WHAT GOVERNED THE SAMPLING on the call that produced this. Carried from the
+            # completion rather than recomputed, so the record describes the call that actually
+            # happened rather than what the same call would do if made again now.
+            sampling=_sampling_of(res),
             # Q97 (2026-09-01): the model the PROVIDER says it ran, not the alias that was
             # ASKED for. `claude-sonnet-5` is a moving alias the provider controls, so two
             # decisions a year apart recorded identically while possibly running on different

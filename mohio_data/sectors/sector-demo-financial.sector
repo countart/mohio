@@ -1,0 +1,96 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
+//
+// Mohio Sector Profile -- Demo Financial  (SAMPLE / non-certified, public)
+// sector: demo_financial
+//
+// PURPOSE: exercise sector-tightens-a-compliance-profile layering end to end, using SOC 2 as the
+// floor. Named `demo_financial` rather than the bare `financial` name deliberately -- `financial`
+// is a reserved, paid-tier sector name (`mohio_sector_loader.PAID_SECTORS`) whose real profile is
+// commercial and never ships in the open build; this is a public test fixture, not a real
+// financial-sector artifact, and it does not claim to be one.
+//
+// THIS IS NOT A COMPLIANCE CONTROL. Not legally reviewed, no certified standing. The framework
+// names below activate the grade mapping in `mohio_audit_grades.py`; they are not a ruling on
+// what SOX/SOC 2 actually require of any real organization.
+//
+// THE LAYERING THIS FILE DEMONSTRATES (composition mechanism, verified live 2026-09-04):
+// Mohio has no "sector includes another profile file" primitive -- there is no import/reference
+// syntax that pulls in `sector-demo-soc2.sector` by name. Composition today is DECLARATIVE and
+// ADDITIVE: a sector's own `compliance:` lines are just more framework names appended to the same
+// list a program's own `compliance:` declarations feed (see `mohio_interpreter._exec_ComplianceDecl`,
+// P0-2 2026-09-02 fix). `required_grade()` then takes the HIGHEST grade across the whole list.
+// So this file "calls and tightens" the SOC 2 floor the only way the mechanism supports today:
+// by declaring `soc2` (the floor) AND `sox` (a stricter framework, mapped to `worm`) side by
+// side. The composed result is `worm`, never lower than either framework alone would require --
+// which matches the RULED model's "a sector never lowers a protection, it only adds" even though
+// there is no dedicated "call another profile" primitive to enforce that structurally. That gap
+// -- no file-level composition/inheritance between profiles -- is a real, named finding of this
+// probe, not fixed here.
+//
+// VERIFIED RESULT: a program under `sector: demo_financial`, writing to a real (file-backed,
+// `durable`-grade) SQLite sink, is NOT sufficient -- `durable` does not satisfy the `worm` floor
+// this file raises the requirement to, so the write is durably recorded but flagged as a
+// DEGRADED audit incident pending reconciliation to grade, exactly the outcome the ladder in
+// `mohio_audit_grades.py` describes. The SAME sink, under `sector: demo_soc2` alone (floor
+// `durable`), satisfies the requirement cleanly with no incident. This is the live evidence that
+// the sector's addition of `sox` genuinely raised the floor beyond what SOC 2 alone required --
+// see the probe report for the exact commands and output.
+
+sector: demo_financial
+    meta
+        version "0.1"
+        maintainer "Mohio community sample"
+        tier "community"
+        note "Demo profile: SOC 2 floor tightened to WORM. Not legally reviewed. No certified compliance."
+    meta: done
+
+    // The floor this sector builds on.
+    compliance: soc2
+    // The tightening: sox maps to "worm" in FRAMEWORK_AUDIT_GRADE, raising the composed
+    // requirement above soc2's own "durable" floor. Never removes soc2's requirement, only adds
+    // a stricter one on top -- composition is additive, per `required_grade()`'s max-across-list
+    // rule.
+    compliance: sox
+
+    // A retention rule, layered the same additive way: financial recordkeeping regimes (SOX,
+    // SEC 17a-4) require years-long retention of records touching payment/financial data, well
+    // beyond anything SOC 2 itself mandates.
+    retain all [pci] for 7 years
+
+    // ── WHAT THE ENFORCEMENT MECHANISM NEEDS SOMETHING TO FIRE ON (added 2026-09-14) ──
+    //
+    // Until now this profile declared frameworks and a retention rule and nothing else, which
+    // exercised the audit-grade ladder and left three of the flagship controls with nothing to
+    // act on: no field carried a classification, no field was refused at compile time, and no
+    // decision had a floor to clear. So `sector: demo_financial` demonstrated part of the
+    // mechanism and reported the rest as inactive, which reads as the controls not existing.
+    //
+    // STILL NOT A COMPLIANCE CONTROL. These are the smallest rules that make each control
+    // OBSERVABLE, chosen to look like a financial program rather than to be a ruling on what
+    // any regime requires of anybody.
+
+    field types
+        // REFUSED AT COMPILE TIME, which is the strongest of these: a shape declaring one of
+        // these fields produces no build at all, so the violation never reaches a running
+        // system and there is nothing to clean up afterwards.
+        card_number is [pci]
+            never store
+            label "Payment card number"
+        account_number is [pci, pii]
+            never store
+            label "Bank account number"
+        // CLASSIFIED BUT STORABLE, which is the other half. A field can be governed without
+        // being forbidden, and a profile that only ever refuses cannot show the difference.
+        member_id is [pii]
+            label "Member identifier"
+        amount is [financial]
+            label "Transaction amount"
+    field: done
+
+    // THE FLOOR AN AI DECISION MUST CLEAR. Without one declared, a decision under this sector
+    // had nothing to be measured against and the governance check had nothing to report.
+    ai.decide rules for sector "demo_financial"
+        minimum confidence 0.85 for transaction_decision
+        minimum confidence 0.95 for account_closure
+    ai.decide: done

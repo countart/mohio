@@ -1,0 +1,92 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
+//
+// Mohio Compliance Profile -- SOC 2  (SAMPLE / non-certified, public)
+// sector: demo_soc2
+//
+// WHAT THIS PROFILE IS FOR: this profile produces the EVIDENCE a SOC 2 audit requires. It does
+// NOT and CANNOT certify SOC 2 compliance. SOC 2 is trust-service criteria audited against an
+// organization's controls and evidence, not against code behavior -- there is no SOC 2 rule that
+// says "log disclosure events" the way HIPAA section 164.312(b) does. A compiler can produce the
+// artifacts an auditor asks to see; it cannot certify the organization around those artifacts.
+// Never describe a program using this profile as "SOC 2 compliant." The correct phrasing is
+// "produces the evidence a SOC 2 audit requires."
+//
+// SCOPE, HONESTLY STATED: this is a SAMPLE demonstrating the compliance-profile mechanism, named
+// `demo_soc2` rather than a bare `soc2`, consistent with the project's other public samples
+// (demo_low, demo_high, demo_regulated). It is not legally reviewed and carries no certified
+// standing. `mohio_audit_grades.FRAMEWORK_AUDIT_GRADE` already maps "soc2" to the "durable" audit
+// grade (Trust Services Criteria CC7.2, system monitoring) -- this file activates that mapping
+// through the sector/compliance-declaration mechanism and documents what is and is not delivered.
+//
+// WHAT THIS PROFILE DELIVERS TODAY (verified against the interpreter, not asserted from memory):
+//   - Activate it with `sector: demo_soc2` (not a bare `compliance: soc2` line -- see the gap
+//     below, this distinction is load-bearing). Once active, it requires a `durable` audit sink
+//     (survives restart, not bare `:memory:`). If no sink of at least that grade is connected,
+//     the run refuses with `audit.no_durable_store` rather than silently logging nowhere. Maps to
+//     CC7.2 (monitoring activities). Verified live 2026-09-04: `sector: demo_soc2` + a write +
+//     `:memory:` -> refused with `audit.no_durable_store`; the same write against a real,
+//     file-backed SQLite sink -> succeeds cleanly, no incident.
+//   - Change logging (`DATA_CHANGE`) fires on every write verb that passes `fields=` to the audit
+//     call (save / update / save-or-update / save.all) once `sector: demo_soc2` (or any sector)
+//     is active, OR unconditionally for a write that touches a field tagged `[phi]`/`[pci]`/
+//     `[pii]`, sector or no sector. Maps to CC8.1 (change management).
+//   - Access logging (`DATA_ACCESS`) fires for reads of any field tagged `[phi]`, `[pci]`, or
+//     `[pii]` -- driven by the TAG alone, sector or no sector (see the gap below: a sector never
+//     turns this on for untagged reads). Maps to CC6.1 (logical access controls: who read what).
+//   - `require role` / `grant role` -- server-verified session-bound role checks, fail closed on
+//     an unauthenticated or forged request. Maps to CC6.1/CC6.6 (logical access controls).
+//   - The audit trail itself is hash-chained (tamper-evident) end to end, and anchorable
+//     externally (`mio audit verify-anchors`) so the evidence resists post-hoc alteration.
+//
+// WHAT THIS PROFILE DOES NOT DELIVER, NAMED RATHER THAN HIDDEN:
+//   - A bare `compliance: soc2` line in a PROGRAM, with NO `sector:` declared and no tagged
+//     field touched by the write, enforces NOTHING -- no audit fires at all, and the durable-sink
+//     requirement is never even checked. Verified live 2026-09-04: `compliance: soc2` (no
+//     sector) + an untagged `save` + a `:memory:` sink ran to completion with no error and no
+//     audit record, on the identical write that a `sector: demo_soc2`-activated program refuses.
+//     Root cause: the write-audit gate (`_audit_data_change`) checks whether `ctx._sector_profile`
+//     is set (true only after a `sector:` declaration loads a profile), not whether
+//     `ctx._sector_compliance` is non-empty (true after either a `sector:` OR a bare
+//     `compliance:` line). A bare `compliance:` declaration sets the latter, not the former, so
+//     it silently misses this gate. The floor computation this profile documents above (grade,
+//     `audit.no_durable_store`) is real and correct once reached -- but for an ordinary untagged
+//     write with no active sector, it is never reached. Use `sector: demo_soc2`, not a bare
+//     `compliance: soc2` line, to get enforcement on untagged writes. (A bare `compliance: soc2`
+//     line DOES still enforce the floor for a write that touches an already-tagged field, since
+//     that path bypasses the `_sector_profile` check on a different branch -- verified live the
+//     same session.) This is a genuine compiler gap, not a documentation nuance; it is reported
+//     here rather than hidden because the profile is worthless if its floor silently doesn't
+//     apply to the ordinary case.
+//   - Reads of UNTAGGED fields under this sector are NOT logged, sector active or not. Access
+//     logging today is a TAG trigger only, confirmed still true in the current interpreter's own
+//     docstring for `_audit_data_access` ("The tag carries this on its own, sector or not... it
+//     is not what turns the access log on"), and consistent with the earlier interview-battery
+//     finding G8 in `Docs/capability-compliance-matrix-2026-08-26.md`. A program that wants CC6.1
+//     read evidence on a field must tag it `[phi]`/`[pci]`/`[pii]`, or this profile cannot
+//     produce that evidence for it -- said here rather than implied.
+//   - Vendor/sub-processor management, personnel screening, change-approval workflow, incident
+//     response process, physical security, and every other organizational SOC 2 control: OUT OF
+//     SCOPE for the profile. These are organizational controls, not compiler-enforceable. A
+//     compiler cannot audit whether a human approved a change ticket.
+//   - This profile does not declare field types or a `never store` list: SOC 2 has no universal
+//     per-field prohibition the way PCI-DSS does for CVV. Tag the organization's own sensitive
+//     fields (`[phi]`/`[pci]`/`[pii]`) to get field-level protection; that is orthogonal to, and
+//     composes with, this profile.
+//
+// COMPOSITION: this profile is meant to be the FLOOR a stricter, industry-specific profile can
+// build on -- see `sector-demo-financial.sector`, which activates this floor and RAISES it
+// (never lowers it) to `worm` for financial recordkeeping. See that file's header for the
+// verified layering result.
+
+sector: demo_soc2
+    meta
+        version "0.1"
+        maintainer "Mohio community sample"
+        tier "community"
+        note "SOC 2 evidence profile. Not legally reviewed. Produces audit evidence; does not certify compliance."
+    meta: done
+
+    // Activates the framework -> audit-grade mapping. soc2 maps to "durable" in
+    // mohio_audit_grades.FRAMEWORK_AUDIT_GRADE (CC7.2: system monitoring / audit-logging control).
+    compliance: soc2

@@ -347,6 +347,21 @@ class ClientListener(Node):
     body:        list = field(default_factory=list)   # list of client statements
     debounce_ms: int  = 0          # on.pause <duration> — 0 means fire immediately
 
+
+@dataclass
+class ClientIdle(Node):
+    """MioScript: on.idle <duration> ... on.idle: done.
+
+    Whole-page inactivity, which is a different question from ClientListener's on.pause.
+    on.pause waits for ONE selector's ONE event to stop arriving. This waits for the person
+    to stop being there at all, so it watches the document for every sign of a person and
+    keeps ONE timer between them: any of them restarts it. That is what makes it session
+    timeout rather than a debounce.
+    """
+    ms:   int  = 0                 # the quiet period before the body runs
+    body: list = field(default_factory=list)   # list of client statements
+
+
 @dataclass
 class ClientPut(Node):
     """put <the value | "literal"> into "<selector>" """
@@ -1450,6 +1465,20 @@ class TransactionBlock(Node):
 # ==============================================================
 
 @dataclass
+class MioScheduleClause(Node):
+    """One body line of a schedule, with the word that said what it is.
+
+    `every 5 minutes`, `in 5 minutes` and `for 5 minutes` are a cadence, a delay and a
+    self-terminating burst, and all three arrived as an indistinguishable DurationExpr
+    because their keywords are filtered out of the parse tree. The kind is carried here so
+    they stop being the same thing.
+    """
+    kind:   str = ""
+    value:  Any = None
+    extras: list = field(default_factory=list)
+
+
+@dataclass
 class SignBlock(Node):              # NEW v3.8
     """sign url for cloud_storage / expires in 30 minutes / named download_url"""
     sign_type:  str  = "url"        # "url" | "upload url"
@@ -2154,6 +2183,22 @@ class MiotestDecl(Node):
     """miotest suite_name / it blocks / miotest: done"""
     name: str  = ""
     body: list = field(default_factory=list)
+
+@dataclass
+class ExpectStmt(Node):
+    """expect total is 5 / expect fallback was used / ...
+
+    `kind` names the comparison the source actually wrote, which the grammar aliases make
+    knowable (the underscore terminals that distinguish them are filtered out of the children).
+    A form this build does not evaluate arrives as kind "unsupported" carrying its source text,
+    so the runner can REFUSE it rather than counting it as a pass. An assertion nobody
+    implemented must never look like an assertion that held.
+    """
+    kind:   str = ""          # is / is_not / above / below / contains /
+                              # fallback_used / human_review / unsupported
+    target: Any = None        # the dotted name under test, where the form has one
+    value:  Any = None        # the expected value, where the form has one
+    source: str = ""          # the written form, for the unsupported refusal
 
 @dataclass
 class ItBlock(Node):

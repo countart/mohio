@@ -1,0 +1,59 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// walk -- stop at every stage of a map and look at what is there.
+// Run it:  mio run cookbook/walk-inspect-a-map.mho   (no database, no setup)
+//
+// `flow` runs a map and says nothing. `walk` is the opposite number: it stops at
+// EVERY stage, binds what is sitting there, and runs whatever the body says.
+//
+//   walk <map>[.<chain>]
+//       at each stage: report      emit the stage
+//       at each stage: log         record it
+//       at each stage: <statement> run it, with `stage` bound
+//   walk: done
+//
+// At each stage the body can read:
+//   name / qualifier / path   where this stage is
+//   kind                      `place` or `transform`
+//   position                  where it came in the order, counting from 1
+//   arrives / departs         the hop direction into and out of this stage
+//   value                     what is actually sitting there, in transit
+//
+// A TRANSFORM STAGE SHOWS AN EMPTY VALUE, and that is not a fault. A transform is a
+// step, not a place: nothing rests there. The value it produced shows up at the next
+// place along, which is exactly what the report below shows.
+//
+// `walk` INSPECTS; it does not drive. Walking a chain nothing has flowed through
+// shows the stages with nothing in them, which is a perfectly good question to ask.
+
+shape tidy
+    value as text pad.left to 6 with "0"
+shape: done
+
+map Paydata
+    data
+        order.total -> tidy -> ledger.amount
+map: done
+
+create order
+    total "42"
+create: done
+
+create ledger
+    amount ""
+create: done
+
+flow Paydata.order
+
+// Every stage, in order, with what is sitting at each.
+walk Paydata.order
+    at each stage: report
+walk: done
+
+// The two SEMANTIC ends, found by the arrows rather than by counting. `first` is
+// where data enters, `last` is where it comes to rest -- the pair to compare when
+// asking whether a value survived the trip.
+grab first stage from Paydata.order as entry
+grab last stage from Paydata.order as exit
+show ("entered at: " & entry.name)
+show ("came to rest at: " & exit.name)
+show ("carrying: " & exit.value)

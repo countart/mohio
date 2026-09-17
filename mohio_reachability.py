@@ -72,9 +72,11 @@ because a noisy check erodes trust faster than a missed one.
 #       test drives it through enforce(). A rule only one layer knows about is a rule that drifts.
 # ================================================================================
 
+import re
+
 from dataclasses import fields, is_dataclass
 
-from mohio_ast import GiveBackStmt, HaltStmt
+from mohio_ast import GiveBackStmt, HaltStmt, CheckBlock
 from mohio_transformer import CompileWarning, CompileError
 
 _HARD_RETURN = (GiveBackStmt, HaltStmt)
@@ -357,7 +359,10 @@ _KNOWN_TYPES = {
     'text', 'decimal', 'dec', 'integer', 'int', 'boolean', 'bool',
     'datetime', 'date', 'time', 'uuid', 'email', 'url', 'json', 'list', 'map',
     'any', 'void', 'base64', 'image', 'audio', 'video', 'pdf', 'file',
-    'usd', 'cad', 'eur', 'gbp',          # currency types (each formats + rounds; built on dec.2)
+    # CURRENCY TYPES. Each formats and rounds to its own places, and most are built on dec.2 --
+    # but not all: `jpy` and `krw` have no minor unit and round to whole units, which is why
+    # this is a list of currencies rather than an alias for one decimal shape.
+    'usd', 'eur', 'gbp', 'jpy', 'chf', 'cad', 'aud', 'cny', 'hkd', 'sgd', 'inr', 'nzd', 'sek', 'nok', 'mxn', 'brl', 'zar', 'krw',
     # `as table` (Phase 2, recovered shape model). `as` describes what a thing IS, and that
     # covers "this is a table" exactly as it covers "this is text" -- it was never only a
     # naming word. A table is a NATURE here, not a scalar type: it opens a field scope rather
@@ -596,6 +601,194 @@ def scan_undeclared_connectors(program):
 _NOT_WIRED_SERVICES = {'mioai', 'miofile', 'miohttp', 'mioimage', 'miomail', 'miopdf', 'miosms'}
 
 
+# ── RECORDED AND ANNOUNCED ARE DIFFERENT PROPERTIES ────────────────────────────────────────
+#
+# `test_unbuilt_failloud_backlog.py` enforces that every deferral is RECORDED in the backlog. It
+# never asked whether any of them is VISIBLE at CHECK TIME, and they were not: `rate limit 5 per
+# second` checked clean, with `--security` clean and `--json` reporting zero errors, and then
+# refused at RUN. `rate limit` is a SECURITY control, and `--json` is the documented machine
+# surface for CI, so a pipeline could certify a program that will not start.
+#
+# WHAT THIS IS, PRECISELY. A construct whose executor is NOTHING BUT a deferral raise cannot do
+# anything at run except refuse. Whether it will refuse is therefore a WHOLLY STATIC fact: the
+# node is in the tree, so the answer is known before the program runs. Announcing it at check is
+# not a prediction, it is reading what is already there.
+#
+# DERIVED, NOT INVENTED. Every kind below was read out of `mohio_interpreter.py` by parsing it:
+# an `_exec_<Kind>` whose entire body is one `raise` carrying a not-built sentence. The gate in
+# `tests/test_unbuilt_failloud_backlog.py` re-derives that set on every run and fails if it does
+# not match this dict exactly, so a deferral added later cannot be silent at check -- and one
+# that gets BUILT cannot be left announced as unbuilt either.
+#
+# THE LIST LIVES HERE RATHER THAN IN THE INTERPRETER because `mio check` does not import the
+# interpreter and should not start: it is 22,000 lines, and paying that on every check to read
+# sixteen names is the wrong trade. The gate is what keeps the two honest, which is the same
+# arrangement every other baseline in this repo uses.
+#
+# THE WORD, NOT THE WHOLE SENTENCE. Copying each runtime message here would be two copies of the
+# same text drifting apart. The check message says which construct and which KIND of unavailable
+# it is; the run message keeps its own fuller explanation of what would have gone wrong.
+DEFERRED_CONSTRUCTS = {
+    'AiOverrideStmt':     ('ai.override',      'unbuilt'),
+    'BroadcastStmt':      ('broadcast',        'unbuilt'),
+    'ChangeBlock':        ('change to sh.X',   'unbuilt'),
+    'CmNotifyStmt':       ('cm.notify',        'commercial'),
+    'CmReportStmt':       ('cm.report',        'commercial'),
+    'EnterpriseBlock':    ('enterprise',       'unbuilt'),
+    'FromConnectorBlock': ('from <connector>', 'unbuilt'),
+    'MiomapDecl':         ('miomap',           'unbuilt'),
+    'MiopdfDecl':         ('miopdf',           'unbuilt'),
+    'MiotestDecl':        ('miotest',          'unbuilt'),
+    'NotifyStmt':         ('notify',           'unbuilt'),
+    'PatternDecl':        ('pattern',          'unbuilt'),
+    'RateLimitDecl':      ('rate limit',       'unbuilt'),
+    'SendStmt':           ('send',             'unbuilt'),
+    'StreamStmt':         ('stream',           'unbuilt'),
+    'VerifyTokenStmt':    ('verify token',     'unbuilt'),
+}
+
+# THE CLAUSE DEFERRALS, which are a different shape and needed naming separately. `find` and
+# `retrieve` each declare what their executor CONSUMES, and refuse anything else rather than
+# return rows that look like they honoured a clause they dropped. So `cache for 5 minutes` on a
+# find is a deferral too, and it was silent at check for the same reason the node-level ones
+# were.
+#
+# MIRRORED EXACTLY, AND THE EXCLUSIONS MATTER MORE THAN THE LIST. Paginate, Skip, Cursor and Sql
+# are handled further down the interpreter's own method, so they are NOT dropped clauses; a check
+# that flagged them would turn four working forms into false refusals, which is this project's
+# recorded way of getting a consumed-list wrong (an earlier allowlist missed three clauses and
+# disabled calculate, summarize and return). The gate compares both lists against the
+# interpreter's own literals for exactly this reason.
+# A CONSTRUCT WITH NO EXECUTOR AT ALL, which is a different shape from the sixteen above and
+# was invisible to the rule that finds them. Those are executors whose whole body is a deferral
+# raise; these have no `_exec_` method in the interpreter, so there is nothing to read a sentence
+# out of. They reach the runtime's generic no-executor fallback instead, which says "this
+# construct is not executable in this build" and names the AST class rather than anything the
+# developer wrote.
+#
+# `MapDecl` COVERS TWO OF MAP'S THREE FORMS, measured 2026-09-15: the value-to-value entry form
+# (`map Names / "a" -> "b" / map: done`) and the action form (`map raw through Names as tidy`).
+# Both parse, both check clean, and both stop at run. The third form, the one with `route` and
+# `data` sections, is a different node and works on every engine.
+#
+# THE GATE CHECKS THE OTHER DIRECTION HERE. For the deferral registry it re-derives the set from
+# the interpreter and demands an exact match; for this one it asserts that each kind named really
+# has no `_exec_` method, so an entry cannot outlive the construct being built.
+NO_EXECUTOR_CONSTRUCTS = {
+    'MapDecl': (
+        "a `map` written as value-to-value entries, and `map <value> through <name> as <alias>`",
+        "Use the section form, which is built and runs on every engine:\n"
+        "        map Paydata\n"
+        "            data\n"
+        "                order.total -> db.ledger.amount\n"
+        "        map: done",
+    ),
+}
+
+_FIND_CONSUMED = (
+    'WhereClause', 'AndClause', 'TimespanRef', 'MatchClause', 'MatchBlock',
+    'MatchAnyBlock', 'NoMatchBlock', 'LimitClause', 'OrderClause', 'ExportClause',
+    'CalculateBlock', 'SummarizeBlock', 'ReturnClause',
+)
+_RETRIEVE_CONSUMED = ('MatchClause', 'MatchBlock', 'MatchAnyBlock', 'NoMatchBlock')
+_QUERY_LATER = ('Paginate', 'Skip', 'Cursor', 'Sql')
+
+# The spoken word for a clause, so check names `cache` where the developer wrote `cache for`,
+# rather than `CacheClause`. Same table the interpreter's own refusal reads from.
+_CLAUSE_WORDS = {
+    'WhereClause': 'where', 'AndClause': 'and', 'OrClause': 'or',
+    'LimitClause': 'up to', 'OrderClause': 'order', 'SkipClause': 'skip',
+    'PaginateClause': 'paginate by', 'CacheClause': 'cache', 'ExportClause': 'export',
+    'ReturnClause': 'return', 'JoinBlock': 'join', 'SummarizeBlock': 'summarize',
+    'CalculateBlock': 'calculate', 'InjectClause': 'inject', 'SinceClause': 'since',
+    'TimespanRef': 'timespan',
+}
+
+
+def _deferred_construct_error(kind, line):
+    """The check-time sentence for a construct whose executor can only refuse.
+
+    THREE KINDS OF UNAVAILABLE, kept apart because they are different situations for the person
+    reading them: a thing that is not built yet is something to wait for, a commercial capability
+    is something to buy, and a mistake is something to fix. Collapsing them into one message is
+    how a licensed product reads as a missing feature.
+    """
+    # THE NO-EXECUTOR CASE GETS ITS OWN SENTENCE, because the useful thing to say about it is
+    # not the same. A deferral has nothing to offer instead; here one FORM of the construct is
+    # missing while another does the job, so the message names the form that works rather than
+    # telling someone to go and find one.
+    if kind in NO_EXECUTOR_CONSTRUCTS:
+        what, instead = NO_EXECUTOR_CONSTRUCTS[kind]
+        return CompileError(
+            "%s is declared in the grammar but is not built in this release: nothing runs it, so "
+            "it stops at the first line that reaches it." % what,
+            line=line, hint=instead)
+    word, tier = DEFERRED_CONSTRUCTS[kind]
+    if tier == 'commercial':
+        return CompileError(
+            "%s is a planned commercial capability and does not run on the open compiler. "
+            "It refuses at run rather than appear to work, so this names it now. To proceed: "
+            "remove %s, or run it under a Mohio commercial license." % (word, word), line=line)
+    return CompileError(
+        "%s is declared in the grammar but not built in this release. It refuses at run rather "
+        "than silently do nothing, so this names it before you deploy. To proceed: remove %s "
+        "for now, or use a built alternative." % (word, word), line=line)
+
+
+def scan_deferred_constructs(program):
+    """Everything the runtime can only refuse, said at check time instead of at run.
+
+    THE PROMISE THIS COMPLETES. The compiler already REFUSES programs that are WRONG -- an
+    ungated AI decision, an unhashed password, a never-store violation -- and it does that at
+    check, before anything deploys. What it did not do was warn about programs that are INERT:
+    ones that parse, check clean, and then refuse the moment they run. Both halves belong to
+    "check catches it before you deploy", and only the first half was there.
+    """
+    errors = []
+    seen = set()
+
+    def flag(kind, line):
+        if (kind, line) in seen:
+            return
+        seen.add((kind, line))
+        errors.append(_deferred_construct_error(kind, line))
+
+    def query_clauses(node, kind):
+        consumed = _FIND_CONSUMED if kind == 'FindBlock' else _RETRIEVE_CONSUMED
+        for b in (getattr(node, 'body', None) or []):
+            bk = type(b).__name__
+            if bk in consumed or any(k in bk for k in _QUERY_LATER):
+                continue
+            word = _CLAUSE_WORDS.get(bk, bk)
+            verb = 'find' if kind == 'FindBlock' else 'retrieve'
+            line = getattr(b, 'line', 0) or getattr(node, 'line', 0) or 0
+            errors.append(CompileError(
+                "%s: `%s` is declared but not yet built on `%s` -- the runtime would "
+                "return rows without applying it, so it refuses instead. To proceed: "
+                "remove the clause, or use a form that applies it."
+                % (verb, word, verb), line=line))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        kind = type(node).__name__
+        if kind in DEFERRED_CONSTRUCTS or kind in NO_EXECUTOR_CONSTRUCTS:
+            flag(kind, getattr(node, 'line', 0) or 0)
+        elif kind in ('FindBlock', 'RetrieveBlock'):
+            query_clauses(node, kind)
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    walk(program)
+    return errors
+
+
 def scan_not_built_services(program):
     """A service that will blow up at RUN must blow up at CHECK.
 
@@ -786,6 +979,21 @@ BLOCK_OPENERS = {
     'new', 'shape', 'saga', 'listen', 'save', 'remove', 'get', 'pull',
     'make', 'change', 'create', 'try', 'loop', 'repeat', 'each', 'while', 'sql',
     'render', 'sector', 'request', 'step', 'transaction',
+    # THE MAP-DRIVING FAMILY, added 2026-09-15 after a sweep for the same shape. `walk 5` and
+    # `flow 5` silently declared a variable and printed it, while `save 5` had always been
+    # refused: same class, three words short. It matters more for these two than for most,
+    # because the thing a reader is most likely to write next to them is a map name, and a
+    # construct word that quietly becomes a variable takes the statement with it.
+    #
+    # `walk m.stage` itself was never the problem in this tree -- WALK is a priority terminal, so
+    # the construct wins wherever a map path follows it. What was absorbable is the bare word in
+    # an assignment position, which is the half a lexer priority cannot decide.
+    'flow', 'walk', 'journey',
+    # `page` IS RETIRED, and this is the only place that can say so safely. A line scan
+    # cannot tell `page 5` from a save block's `page "bump"` field, and refusing the
+    # second would break a real program over a normal column name. This scan works on
+    # the tree, where an assignment and a field are different things.
+    'page',
     # NOT `check`. `check confidence above 0.85` is RETIRED syntax inside ai.decide, and
     # the compiler already warns about it BY NAME. Flagging it here would escalate that
     # warning to an error and say the wrong thing. A word can open a block in one place
@@ -801,6 +1009,10 @@ _OPENER_HINT = {
     'check':  'check <name> in db.<table> ... check: done',
     'try':    'try ... try: done',
     'sql':    'sql ... sql: done',
+    'flow':   'flow <map>[.<chain>]           (drives a declared map)',
+    'walk':   'walk <map>[.<chain>] ... walk: done',
+    'journey':'journey <Name> ... journey: done',
+    'page':   'the page block is retired -- a file serves itself, and several addresses are named with `listen for ... request for sh.X at /path`',
     'make':   'create <Name> ... create: done   (make is retired -- use create)',
 }
 
@@ -830,7 +1042,24 @@ def scan_block_opener_as_variable(program):
 
         if type(node).__name__ in ('Assignment', 'HoldDecl', 'LockDecl'):
             name = str(getattr(node, 'name', '') or '')
-            if name in BLOCK_OPENERS:
+            # `expect` IS ONLY A WORD INSIDE A TEST CASE. The grammar reaches `expect_stmt`
+            # from `it_body` and nowhere else, so one indent short of a case the line resolves
+            # into assignments instead: `expect total is 5` becomes a variable `expect` holding
+            # `total`, plus a variable `is` holding 5, with no error. The assertion is gone and
+            # nothing said so. Separate message from the block openers below, because the fix is
+            # not "write the block form", it is "put this in a case".
+            if name == 'expect':
+                errors.append(CompileError(
+                    "`expect` only means something inside a test case, and this line is not in "
+                    "one.\n"
+                    "    Written here it declares a VARIABLE called `expect`, so the assertion "
+                    "you wrote is not in the program at all and nothing would have checked it.\n"
+                    "    The form is:  it \"what this proves\"\n"
+                    "                      expect <name> is <value>\n"
+                    "                  it: done\n"
+                    "    Run the cases with:  mio test <file>",
+                    line=getattr(node, 'line', 0) or 0))
+            elif name in BLOCK_OPENERS:
                 line = getattr(node, 'line', 0) or 0
                 hint = _OPENER_HINT.get(name)
                 msg = (f"`{name}` opens a block. It is not a variable name.\n"
@@ -2066,7 +2295,458 @@ def scan_task_param_undeclared_shape(program):
     return errors
 
 
+# ── a table where a value belongs ─────────────────────────────────────────
+# `x db.members` used to run and die with `variable 'db' is not declared`, which was false: db
+# was declared one line above, as a CONNECTION. The resolver looked in the variable scope, did
+# not find it there, and reported its own search rather than the question asked. Both halves of
+# the real mistake are visible at check time, so it is refused here.
+
+# The positions where a VALUE is unambiguously being read. Short on purpose: see the module
+# note above on why this is a deny-list and not an allow-list of table targets.
+_TABLE_VALUE_SLOTS = {'Assignment': 'value', 'ShowStmt': 'value'}
+
+
+def scan_table_as_value(program):
+    """A table reference in a value position is a category error, not a missing variable."""
+    errors = []
+    stmts = getattr(program, 'statements', None) or []
+    connections = set()
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ConnectDecl':
+            n = getattr(node, 'name', '')
+            if n:
+                connections.add(str(n))
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        slot = _TABLE_VALUE_SLOTS.get(type(node).__name__)
+        if slot is not None:
+            val = getattr(node, slot, None)
+            parts = [str(p) for p in (getattr(val, 'parts', None) or [])]
+            # EXACTLY TWO. `db.members` is a table; `db.users.email` is a FIELD and a
+            # perfectly good value, and refusing it on depth alone is the bug
+            # test_battery_reference_rule was written to stop. Deeper forms are left to the
+            # scanners that already own them.
+            if (len(parts) == 2 and parts[0] in connections
+                    and type(val).__name__ in ('DottedName', 'DbRef')):
+                ref = '.'.join(parts)
+                errors.append(CompileError(
+                    f"`{ref}` is a table, not a value -- `{parts[0]}` is a connection, so "
+                    f"there is no value of `{ref}` to read here.",
+                    line=getattr(val, 'line', 0) or getattr(node, 'line', 0) or 0,
+                    hint=(f"A table is a place you read from or write to. Read rows with "
+                          f"`find rows in {ref}` or `retrieve one from {ref}`; write with "
+                          f"`save to {ref}`. A table cannot be assigned or shown directly.")))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for s in stmts:
+        collect(s)
+    for s in stmts:
+        walk(s)
+    return errors
+
+
+def scan_undeclared_maps(program):
+    """A `flow`, `walk`, `check flow` or `grab stage` must name a map that is declared.
+
+    WHOLLY STATIC, WHICH IS WHY IT BELONGS HERE. A map is declared in the same file that drives
+    it -- `map paydata ... map: done` -- so whether the name exists is knowable before anything
+    runs. It was not being asked: `flow m.stage` checked clean and then refused at run, on a
+    program with no database in it, which is the same check-says-nothing-run-refuses split this
+    pass exists to close.
+
+    ALL FOUR CONSUMERS, not the two that were reported. `flow` and `walk` share MAP_STAGE_PATH in
+    the grammar and were the two named, but `check flow` and `grab stage` take a map name by the
+    same route and had the same silence. A fix applied to the two that were noticed would have
+    left the family half-done, which is how this class regrows one member at a time.
+    """
+    MAP_USERS = {'FlowStmt': 'flow', 'WalkStmt': 'walk',
+                 'CheckFlowStmt': 'check flow', 'GrabStageStmt': 'grab stage'}
+    errors = []
+    declared = set()
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        # BOTH DECLARATION FORMS, and finding that out cost a false refusal in testing. `map
+        # paydata / data / ... / map: done` is a MapSectionsDecl, not a MapDecl, so a scan that
+        # knew only the second told a program with its map declared six lines above that no such
+        # map existed. A `MapDecl` in its ACTION form (`map source through name`) carries no
+        # `name` and correctly declares nothing.
+        if type(node).__name__ in ('MapDecl', 'MapSectionsDecl'):
+            n = str(getattr(node, 'name', '') or '')
+            if n:
+                declared.add(n)
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        kind = type(node).__name__
+        if kind in MAP_USERS:
+            name = str(getattr(node, 'map_name', '') or '')
+            # A NAME THE TRANSFORMER COULD NOT READ is not a missing map. Reporting an empty name
+            # as undeclared would turn a parse-shape problem into a confident wrong diagnosis.
+            if name and name not in declared:
+                verb = MAP_USERS[kind]
+                errors.append(CompileError(
+                    "%s: no map named `%s` is declared." % (verb, name),
+                    line=getattr(node, 'line', 0) or 0,
+                    hint="Declare it first: `map %s ... map: done`. This is a declaration "
+                         "problem, not a database one -- %s reads a map, not a table."
+                         % (name, verb)))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    stmts = getattr(program, 'statements', None) or []
+    for s in stmts:
+        collect(s)
+    for s in stmts:
+        walk(s)
+    return errors
+
+
+def scan_regulated_field_needs_type(program):
+    """Regulated data says its own type. Nothing guesses it.
+
+    THE RULING, and the reason the two halves differ. An UNREGULATED field with no declared type
+    is inferred from what is written: quotes make text, a bare number makes a number, a bare name
+    reads a variable. That is safe because a wrong inference does not stay quiet -- it fails at the
+    point of USE, loudly, with the cast named:
+
+        a "5" / (a + 1)   ->  Cannot do math on text (+) ... cast it first: `5` as.number
+        n "x" into `n as int`  ->  shape_violation: n: N must be a number
+
+    So the coder learns at the line that is wrong and adds the type. Infer, then fail loud at use.
+
+    REGULATED DATA GETS NONE OF THAT, because the cost of being wrong is not a stack trace. A
+    guessed type on a classified field decides how the value is stored, compared, masked and
+    erased, and a wrong guess there is a compliance fault that looks like nothing until somebody
+    audits it. There is no fail-loud-at-use to fall back on, because the harm has already been
+    done by the time anyone reads the column. So a regulated field with no type is REFUSED before
+    the program is built: fail closed, not inferred.
+
+    WHAT MAKES A FIELD REGULATED, both routes, because a rule that knew only one would leave the
+    other silently inferring:
+      * it carries a descriptor of its own -- `ssn [phi]`, `card [phi, pci]`
+      * the DECLARED SECTOR names it -- a profile saying `member_id is [pii]` regulates every
+        `member_id` in the program, which is the whole point of a sector being a baseline.
+    """
+    errors = []
+
+    # The sector's own field names, when a sector is declared. Loaded once: a program declares a
+    # sector at most a handful of times, and a profile read per field would be the same file
+    # opened once per line.
+    sector_fields = {}
+
+    def collect_sector(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect_sector(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'SectorDecl':
+            name = str(getattr(node, 'name', '') or getattr(node, 'sector', '') or '')
+            if name:
+                # NOT WRAPPED IN A TRY. A profile that simply does not exist returns None on
+                # its own, so the only thing an except here could catch is a real failure to
+                # read one -- and answering that with "no profile, carry on" would silently
+                # switch this rule off for the program it was most needed on. Letting it
+                # propagate reaches the Layer 3 guard, which already says out loud that the
+                # whole-program scanners did not finish and that enforcement is incomplete.
+                from mohio_sector_loader import load_sector_profile
+                prof = load_sector_profile(name)
+                for fname, ft in ((prof.field_types if prof else None) or {}).items():
+                    tags = [t for t in (getattr(ft, 'classifications', None) or [])]
+                    if tags:
+                        sector_fields[str(fname).lower()] = (name, tags)
+        for f in fields(node):
+            collect_sector(getattr(node, f.name, None))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ShapeDecl':
+            decl = (node.every_field() if hasattr(node, 'every_field')
+                    else (getattr(node, 'fields', None) or []))
+            for fld in decl:
+                if getattr(fld, 'type_name', None):
+                    continue
+                fname = str(getattr(fld, 'name', '') or '')
+                own = [str(getattr(m, 'value', '') or '')
+                       for m in (getattr(fld, 'modifiers', None) or [])
+                       if str(getattr(m, 'modifier_type', '') or '') == 'tag'
+                       and getattr(m, 'value', None)]
+                line = getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0
+                if own:
+                    errors.append(CompileError(
+                        "`%s` is classified %s and has no declared type. Regulated data is never "
+                        "inferred." % (fname, ", ".join("[%s]" % t for t in own)),
+                        line=line,
+                        hint=("Say what it is, for example `%s as text %s`. An unclassified field "
+                              "may be left to inference, because a wrong guess there fails loud "
+                              "the first time the value is used. A classified one has no such "
+                              "second chance: the type decides how it is stored, matched and "
+                              "erased." % (fname, "[%s]" % ", ".join(own)))))
+                elif fname.lower() in sector_fields:
+                    sec, tags = sector_fields[fname.lower()]
+                    errors.append(CompileError(
+                        "`%s` is classified %s by the `%s` sector and has no declared type. "
+                        "Regulated data is never inferred."
+                        % (fname, ", ".join("[%s]" % t for t in tags), sec),
+                        line=line,
+                        hint=("Say what it is, for example `%s as text`. The sector regulates this "
+                              "field name wherever it appears, so the shape has to state the type "
+                              "even though the classification came from the profile." % fname)))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    stmts = getattr(program, 'statements', None) or []
+    for st in stmts:
+        collect_sector(st)
+    for st in stmts:
+        walk(st)
+    return errors
+
+
+
+def scan_shape_may_not_loosen_sector(program):
+    """A sector is the floor. A shape may raise it and may not lower it.
+
+    THE RULING. The sector provides the BASELINE. A shape may change it only by TIGHTENING, or
+    where the sector allows the change. Tightening is free; loosening is refused. So the floor can
+    be raised and never lowered.
+
+    TIGHTEN AND LOOSEN ARE SET CONTAINMENT HERE, and that is deliberate rather than convenient.
+    The three enforced classifiers are not a ladder: all three encrypt at rest, `pci` additionally
+    masks to the last four on output, `phi` carries audit-on-access. They are different
+    protections, not degrees of one, so there is no ordering to rank them by and inventing one
+    would be a design decision dressed as an implementation detail. What can be said without
+    inventing anything is whether the shape keeps everything the sector asked for:
+
+        sector [pii]   shape [pii, phi]   ADDS a protection        tighter   allowed
+        sector [pii]   shape [pii]        says the same thing      equal     allowed
+        sector [phi, pci] shape [pci]     DROPS a protection       looser    REFUSED
+
+    A SHAPE THAT SAYS NOTHING IS NOT LOOSENING. Leaving the tags off entirely keeps the sector's
+    classification, which applies to the field name wherever it appears, so nothing is claimed and
+    nothing is refused. This fires only when a shape writes its own tags on a field the sector
+    already governs, because that is the case where the source states a protection set and would
+    otherwise be stating a smaller one than the program actually enforces.
+
+    WHICH IS THE REAL DAMAGE, and worth naming because the runtime is already safe here. The
+    sector's tags register regardless, so a narrowed shape does not actually strip protection at
+    runtime. What it does is make the SOURCE lie: the field reads as `[pci]` while `[phi]` is also
+    being enforced, and a reader auditing the shape draws a conclusion the program does not
+    support. Readable code is auditable code, so a shape that misdescribes its own protection is
+    refused rather than quietly corrected.
+
+    THE PER-FIELD PERMISSION MARKER, by which a sector could declare a field loosenable, belongs
+    to the control vocabulary that is still to be designed. Until it exists the default is the
+    safe one: not overridable, floor enforced.
+    """
+    errors = []
+    sector_fields = {}
+
+    def collect_sector(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect_sector(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'SectorDecl':
+            name = str(getattr(node, 'name', '') or getattr(node, 'sector', '') or '')
+            if name:
+                # NOT WRAPPED IN A TRY. A profile that simply does not exist returns None on
+                # its own, so the only thing an except here could catch is a real failure to
+                # read one -- and answering that with "no profile, carry on" would silently
+                # switch this rule off for the program it was most needed on. Letting it
+                # propagate reaches the Layer 3 guard, which already says out loud that the
+                # whole-program scanners did not finish and that enforcement is incomplete.
+                from mohio_sector_loader import load_sector_profile
+                prof = load_sector_profile(name)
+                for fname, ft in ((prof.field_types if prof else None) or {}).items():
+                    tags = {str(t).strip().lower()
+                            for t in (getattr(ft, 'classifications', None) or []) if str(t).strip()}
+                    if tags:
+                        sector_fields[str(fname).lower()] = (name, tags)
+        for f in fields(node):
+            collect_sector(getattr(node, f.name, None))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'ShapeDecl':
+            decl = (node.every_field() if hasattr(node, 'every_field')
+                    else (getattr(node, 'fields', None) or []))
+            for fld in decl:
+                fname = str(getattr(fld, 'name', '') or '')
+                if fname.lower() not in sector_fields:
+                    continue
+                own = {str(getattr(m, 'value', '') or '').strip().lower()
+                       for m in (getattr(fld, 'modifiers', None) or [])
+                       if str(getattr(m, 'modifier_type', '') or '') == 'tag'
+                       and getattr(m, 'value', None)}
+                if not own:
+                    continue          # says nothing, so claims nothing: the floor simply holds
+                sec, need = sector_fields[fname.lower()]
+                missing = sorted(need - own)
+                if missing:
+                    errors.append(CompileError(
+                        "`%s` drops %s, which the `%s` sector requires. A shape may raise the "
+                        "sector's baseline and may not lower it."
+                        % (fname, ", ".join("[%s]" % t for t in missing), sec),
+                        line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0,
+                        hint=("Write every classification the sector gives this field, and add "
+                              "any further one you want: `%s ... [%s]`. Leaving the tags off "
+                              "entirely is also fine and keeps the sector's own set. The narrowed "
+                              "list is refused because the program would still enforce %s while "
+                              "the shape read as though it did not."
+                              % (fname, ", ".join(sorted(own | need)),
+                                 ", ".join("[%s]" % t for t in missing)))))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    stmts = getattr(program, 'statements', None) or []
+    for st in stmts:
+        collect_sector(st)
+    for st in stmts:
+        walk(st)
+    return errors
+
+
+
+_CANONICAL_PATH_PARAM = re.compile(r'^\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}$')
+
+
+def scan_route_path_param_form(program):
+    """A route parameter is `{{name}}`, and anything else shaped like one is refused here.
+
+    WHY THIS IS AN ERROR AND NOT A STYLE NOTE. A route path is matched segment by segment, so a
+    segment the matcher does not recognize as a parameter is treated as literal text. `at
+    /users/:id` then answers only a request that literally spells `:id`, which no client sends, so
+    every real request 404s and nothing anywhere says the route was never going to work. That is
+    the silent class, reached by writing a spelling borrowed from another framework.
+
+    `{{name}}` IS NOT A NEW INVENTION FOR PATHS. Doubled braces are how Mohio says the value of a
+    variable everywhere else, so a route parameter is the same idea in the same spelling, and the
+    spacing inside is stripped in a path exactly as it is in a string.
+
+    WHAT GETS REFUSED, and each is refused for its own reason rather than as a list:
+      * `:id`    another framework's spelling, not Mohio
+      * `{id}`   single braces, which this language does not use anywhere
+      * `*`      a wildcard, which is not built and would silently match nothing
+      * `{{a.b}}` doubled braces around something that is not a plain name, which the matcher
+                  cannot bind and would leave as literal text
+    """
+    errors = []
+
+    def flag(path, seg, line, what, fix):
+        errors.append(CompileError(
+            "`%s` in the route `%s` is not a Mohio route parameter. %s" % (seg, path, what),
+            line=line,
+            hint=("Write it as `{{%s}}`. A route parameter uses the same doubled braces as any "
+                  "other value in Mohio, and the spacing inside does not matter. Without the "
+                  "canonical form the segment is matched as literal text, so the route answers "
+                  "nothing and every request to it returns 404." % fix)))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ in ('NewBlock', 'RequestInboundBlock'):
+            path = getattr(node, 'path', None)
+            if path:
+                line = getattr(node, 'line', 0) or 0
+                for seg in str(path).split('/'):
+                    seg = seg.strip()
+                    if not seg or _CANONICAL_PATH_PARAM.match(seg):
+                        continue
+                    if seg.startswith(':'):
+                        # The name to suggest is whatever followed the colon. A bare `:` has
+                        # nothing to carry over, so the suggestion says `name` -- written out
+                        # rather than as a fallback, because a reader of this line should not
+                        # have to work out which of two things the message will say.
+                        _suggest = seg[1:]
+                        if not _suggest:
+                            _suggest = "name"
+                        flag(path, seg, line,
+                             "A leading colon is another framework's spelling.", _suggest)
+                    elif seg == '*':
+                        flag(path, seg, line,
+                             "A `wildcard` segment is not built and would match nothing.", "name")
+                    elif '{' in seg or '}' in seg:
+                        inner = seg.strip('{}').strip()
+                        nice = inner if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', inner) else "name"
+                        flag(path, seg, line,
+                             "Only the doubled-brace form around a plain name is a parameter.",
+                             nice)
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st)
+    return errors
+
+
+
 ERROR_SCANS = (
+    scan_table_as_value,
     scan_reference_rule,
     scan_table_name_collision,
     scan_listener_with_no_handler,
@@ -2081,6 +2761,11 @@ ERROR_SCANS = (
     scan_task_param_undeclared_shape,
     scan_undeclared_tasks,
     scan_not_built_services,
+    scan_deferred_constructs,
+    scan_undeclared_maps,
+    scan_regulated_field_needs_type,
+    scan_shape_may_not_loosen_sector,
+    scan_route_path_param_form,
     scan_otherwise_placement,
     scan_block_opener_as_variable,
     scan_give_back_no_value,
@@ -2137,9 +2822,11 @@ def scan_audit_grade_requirement(program):
             # active, and those are what carry an audit grade -- so resolve the profile first
             # rather than looking up the sector name in the framework table and reporting every
             # sector as "unknown".
-            frameworks, profile_found = [], False
+            frameworks, profile_found, _paid = [], False, False
             try:
-                from mohio_sector_loader import find_sector_profile, load_sector_profile
+                from mohio_sector_loader import (find_sector_profile, load_sector_profile,
+                                                 sector_requires_license)
+                _paid = sector_requires_license(name)
                 path = find_sector_profile(name)
                 if path:
                     profile_found = True
@@ -2154,13 +2841,37 @@ def scan_audit_grade_requirement(program):
             except Exception:
                 profile_found = False
             if not profile_found:
-                warnings.append(CompileWarning(
-                    f"sector `{name}` is declared but no profile for it was found, so no "
-                    f"compliance framework is active and no audit grade is required.",
-                    line=getattr(node, 'line', 0),
-                    hint=("A sector with no profile enforces nothing. Add the profile, or drop "
-                          "the declaration so the program does not read as governed when it is "
-                          "not.")))
+                # A LICENSED PRODUCT AND A MISSING FILE ARE NOT THE SAME SITUATION, and check
+                # said the same sentence for both. `mio run` already distinguishes them: for a
+                # paid sector it says the profile is licensed and not bundled with the open
+                # compiler. Check said "no profile for it was found ... a sector with no profile
+                # enforces nothing", which reads as something unbuilt.
+                #
+                # WHY THAT SPECIFIC WORDING COST SOMETHING. Check is what a prospect runs first
+                # and what CI runs every time. So somebody evaluating the fraud demo ran
+                # `mio check --security`, read that no profile was found, and could reasonably
+                # conclude financial-sector support does not exist -- at the exact moment they
+                # were deciding whether to keep looking. It is a product they could buy, and the
+                # boundary was invisible in the one place it most needed to be visible.
+                if _paid:
+                    warnings.append(CompileWarning(
+                        f"sector `{name}` is a licensed sector profile and is not bundled with "
+                        f"the open compiler, so nothing is enforced here.",
+                        line=getattr(node, 'line', 0),
+                        hint=("This is a commercial boundary, not a missing feature. Provide the "
+                              "profile on the search path (~/.mohio/sectors) or run the licensed "
+                              "runtime. To exercise the enforcement mechanism without a licensed "
+                              "profile, declare a demo sector: `demo_financial` or "
+                              "`demo_regulated` carry field classifications, never-store fields "
+                              "and confidence floors.")))
+                else:
+                    warnings.append(CompileWarning(
+                        f"sector `{name}` is declared but no profile for it was found, so no "
+                        f"compliance framework is active and no audit grade is required.",
+                        line=getattr(node, 'line', 0),
+                        hint=("A sector with no profile enforces nothing. Add the profile, or "
+                              "drop the declaration so the program does not read as governed "
+                              "when it is not.")))
             elif frameworks:
                 grade, unknown = required_grade(frameworks)
                 if grade in ('append_only', 'worm'):
@@ -2538,10 +3249,22 @@ def scan_decorative_shape_modifiers(program):
     harm; delivering the enforcement is the separate build each backlog entry names.
     """
     warnings = []
+    # `default` LEFT THIS SET on 2026-09-14: it now fills a missing field at the boundary
+    # that accepts a request into `new sh.X`, which is the one path where a shape is bound to
+    # data. Calling it unenforced would be this scanner's own dishonesty pointed the other way.
     DECORATIVE = {
-        'default':   'nothing reads it -- a missing field is not populated on any path',
         'unique':    'no uniqueness check runs, on the form boundary or at write',
         'threshold': 'nothing reads it',
+    }
+
+    # NOT DECORATIVE, BUT NARROWER THAN IT LOOKS. `default` is applied where a request is bound
+    # to a shape and NOT on a direct write, because a write's target is a table name with no
+    # shape attached to it. That binding is a language decision rather than a missing function,
+    # so the scope is stated rather than quietly assumed either way.
+    PARTIAL = {
+        'default': ('applied when a request is bound to this shape, where a missing field is '
+                    'filled in. It is NOT applied on a direct `save`/`update`, because a write '
+                    'names a table and a table carries no shape'),
     }
 
     def walk(node):
@@ -2568,6 +3291,11 @@ def scan_decorative_shape_modifiers(program):
                             f"guarantee and is not one. Nothing about this program is refused "
                             f"for it -- this says so out loud rather than letting the "
                             f"declaration look like protection it does not provide.",
+                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+                    elif mt in PARTIAL:
+                        warnings.append(CompileWarning(
+                            f"`{mt}` on field `{getattr(fld, 'name', '?')}` is "
+                            f"{PARTIAL[mt]}.",
                             line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
         for f in fields(node):
             walk(getattr(node, f.name, None))
@@ -2829,7 +3557,108 @@ def scan_upload_storage_durability(program):
     return warnings
 
 
+def scan_check_with_no_branches(program):
+    """A `check` that has neither a `when` nor an `otherwise` does nothing at all.
+
+    WARNS, DELIBERATELY, RATHER THAN REFUSING. It is hard to construct a reason to write one,
+    but not impossible, and the neighbouring ruling went the other way for a reason worth
+    keeping straight: an empty `listen for` is REFUSED because it is the construct that mounts
+    routes, so an empty one is a server answering nothing and there is no version of that which
+    is on purpose. A `check` with no branches only evaluates a subject and stops, which is
+    pointless rather than broken, so it is named and allowed through. An empty `journey` is left
+    entirely alone: one per folder, not required, and empty is a legitimate state for it.
+
+    Silence was the one option not on the table. The subject still gets evaluated, so the block
+    looks like it is doing something, and a `when` deleted by accident leaves exactly this shape.
+    """
+    warnings = []
+    seen = set()
+
+    def visit(node):
+        if node is None or not is_dataclass(node) or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, CheckBlock) and not node.when_clauses and node.otherwise is None:
+            warnings.append(CompileWarning(
+                "this `check` has no `when` and no `otherwise`, so it does nothing.",
+                getattr(node, "line", 0),
+                "Add a branch (`when <value>` / `otherwise`), or remove the block. The subject "
+                "is still read, so the block looks active while having no effect.",
+            ))
+        for f in fields(node):
+            val = getattr(node, f.name, None)
+            for item in (val if isinstance(val, list) else [val]):
+                if is_dataclass(item):
+                    visit(item)
+
+    for st in (getattr(program, 'statements', None) or []):
+        visit(st)
+    return warnings
+
+
+def scan_returning_call_without_capture(program):
+    """A call to a task that declares a return type, with nothing capturing the result.
+
+    The compiler already refuses the opposite mistake -- asking a task for a value it does not
+    produce -- so this is the missing half of a pair rather than a new idea.
+    """
+    warnings = []
+    stmts = getattr(program, 'statements', None) or []
+    returns = {}
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'TaskDecl':
+            nm = str(getattr(node, 'name', '') or '')
+            rt = getattr(node, 'return_type', None)
+            if nm and rt:
+                returns[nm] = str(rt)
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ in ('RunBlock', 'CallBlock'):
+            name = str(getattr(node, 'task_name', '') or '')
+            alias = str(getattr(node, 'alias', '') or '')
+            if name in returns and not alias:
+                warnings.append(CompileWarning(
+                    f"`{name}` returns {returns[name]}, and this call does not keep the "
+                    f"answer.\n"
+                    f"    The task runs and its result is dropped, so anything after this line "
+                    f"decides on its own rather than on what `{name}` worked out.\n"
+                    f"    Did you mean:  call {name} as result   -- then read `result`?\n"
+                    f"    (A `give back` inside a task sets the task's return value; it does "
+                    f"not answer for the handler around it, so an uncaptured answer is simply "
+                    f"gone.)",
+                    line=getattr(node, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    for st in stmts:
+        collect(st)
+    for st in stmts:
+        walk(st)
+    return warnings
+
+
 WARNING_SCANS = (
+    scan_returning_call_without_capture,
+    scan_check_with_no_branches,
     scan_upload_storage_durability,
     scan_ai_decide_never_invoked,
     scan_unrecognized_field_classifier,

@@ -94,6 +94,13 @@ STATIC_AUDIT_TABLES = frozenset({
     # grade. Both were previously invisible to is_audit_table, which meant a platform deriving
     # append-only grants from this predicate would not have covered them.
     'compliance_audit', 'audit_incident_log',
+    # THE TRANSACTIONAL ENVELOPE AND ITS ACKNOWLEDGEMENTS. Neither is the trail, and
+    # neither is hash-chained: the envelope holds the evidence that a record is owed,
+    # committed in the same transaction as the data it is owed about. They are named
+    # here because everything that follows from this predicate applies to them --
+    # a program cannot write to them, and a platform deriving append-only grants must
+    # cover them, since evidence a tenant can edit is not evidence.
+    'mohio_audit_envelope', 'mohio_audit_envelope_ack',
 })
 
 

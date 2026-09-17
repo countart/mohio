@@ -354,6 +354,49 @@ def _convention_body(server, url_path):
                     headers=CORS_HEADERS)
 
 
+# ── how much the server says ──────────────────────────────────────────────────────────
+# The old choice was silence or every statement of every request, which under load means one
+# usable setting, and it was silence. These are read once per call from the environment so a
+# deployment can change them without a restart hook, and named rather than numbered at the edge.
+LEVEL_QUIET = 0
+LEVEL_NORMAL = 1          # one line per request -- the default
+LEVEL_DEBUG = 2           # request lines plus what a program says with miolog
+LEVEL_VERBOSE = 3         # every statement, which is what --verbose always did
+
+_LEVEL_NAMES = {
+    "quiet": LEVEL_QUIET, "silent": LEVEL_QUIET, "off": LEVEL_QUIET, "none": LEVEL_QUIET,
+    "normal": LEVEL_NORMAL, "request": LEVEL_NORMAL, "requests": LEVEL_NORMAL,
+    "info": LEVEL_NORMAL,
+    "debug": LEVEL_DEBUG,
+    "verbose": LEVEL_VERBOSE, "trace": LEVEL_VERBOSE, "all": LEVEL_VERBOSE,
+}
+
+
+def log_level():
+    """How much to say, from MOHIO_LOG. Defaults to one line per request.
+
+    AN UNREADABLE VALUE IS NOT SILENCE. A typo in this variable used to be the kind of thing that
+    turns logging off without saying so, which is the failure this whole change exists to remove,
+    so an unknown name keeps the default and says on stderr that it did.
+    """
+    import os
+    raw = (os.environ.get("MOHIO_LOG") or "").strip().lower()
+    if not raw:
+        return LEVEL_NORMAL
+    if raw in _LEVEL_NAMES:
+        return _LEVEL_NAMES[raw]
+    import sys as _sys
+    print("  [mohio] MOHIO_LOG=%r is not a level I know (quiet / normal / debug / verbose). "
+          "Using normal." % raw, file=_sys.stderr)
+    return LEVEL_NORMAL
+
+
+def _log_line(text):
+    """One line, to stderr, unbuffered enough to survive a crash right after it."""
+    import sys as _sys
+    print("  " + text, file=_sys.stderr, flush=True)
+
+
 class MohioServer:
     def __init__(self, program, interp, verbose=False, app_dir=None, route_path=None):
         self.program       = program
@@ -405,6 +448,19 @@ class MohioServer:
                     "Sessions cannot be made durable without a database to store them in."
                 )
             return _PostgresSessionStore(database_url)
+        if backend != "memory":
+            # ASKING FOR A STORE THAT DOES NOT EXIST USED TO GET THE IN-MEMORY ONE, IN SILENCE.
+            # Anything unrecognised fell through to the default, so MOHIO_SESSION_STORE=mysql,
+            # or redis, or a typo, started a server whose sessions are lost on restart and are
+            # not shared between workers, and said nothing about it. Somebody setting this
+            # variable at all is asking for durable sessions; handing them the opposite without
+            # a word is the silent-default failure this project refuses everywhere else.
+            raise RuntimeError(
+                f"MOHIO_SESSION_STORE={backend} is not a session store Mohio has. "
+                f"The choices are: postgres (durable, reuses DATABASE_URL) and memory "
+                f"(the default, lost when the process stops and not shared between workers). "
+                f"Refusing rather than starting with memory sessions you did not ask for."
+            )
         return _InMemorySessionStore()
 
     def stats(self):
@@ -881,6 +937,59 @@ def _etag_for(path):
         return f'W/"{st.st_size:x}-{int(st.st_mtime):x}"'
     except Exception:
         return None
+
+
+class _RequestLineMiddleware:
+    """One line per served request: method, path, status, and the request id.
+
+    ON BY DEFAULT, because the alternative was nothing. A served route -- including a 422 that
+    turned a customer away -- left no trace at all unless the whole server was run in verbose
+    mode, which prints every statement of every request and is unreadable under load.
+
+    THE ID IS THE POINT. It is the same value the audit row and any error carry for this request,
+    so the three can be tied together. A line with an id of its own would correlate with nothing.
+
+    Cheap on purpose: one formatted string, written to stderr, no handler chain and no buffering,
+    so leaving it on costs a served request almost nothing.
+    """
+
+    def __init__(self, app, interp=None):
+        self.app = app
+        self.interp = interp
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or log_level() < LEVEL_NORMAL:
+            await self.app(scope, receive, send)
+            return
+        import time as _t
+        started = _t.monotonic()
+        status_seen = {"code": 0}
+
+        async def _send(message):
+            if message.get("type") == "http.response.start":
+                status_seen["code"] = message.get("status", 0)
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            ms = (_t.monotonic() - started) * 1000.0
+            # A REQUEST WITH NO ID AND A RESPONSE WITH NO STATUS ARE REAL STATES, not missing
+            # values to paper over. A request turned away before it reached the interpreter
+            # never got an id, and a connection dropped before the response started never got a
+            # status. Each says which it is, so a line with nothing in that column is not read
+            # as a value that failed to print.
+            _rid = getattr(self.interp, "_request_id", None)
+            rid = _rid if _rid else "(no id: never reached the program)"
+            path = scope.get("path", "?")
+            if scope.get("query_string"):
+                # The path only. A query string can carry an identifier or a token, and a log
+                # line is exactly the wrong place for either.
+                path += "?..."
+            _code = status_seen["code"]
+            _shown = _code if _code else "(no response sent)"
+            _log_line("%-6s %-28s %s  %6.1fms  %s"
+                      % (scope.get("method", "?"), path[:28], _shown, ms, rid))
 
 
 def create_app(server: MohioServer):
@@ -1516,8 +1625,11 @@ def create_app(server: MohioServer):
         "1", "true", "yes")
 
     middleware = [
-        # First in the list, so it runs OUTERMOST: an address over its ceiling is turned away
-        # before CORS, routing, body parsing or any program code.
+        # OUTERMOST, so the line is written whatever happens inside -- including a request the
+        # rate limiter turns away, which is exactly the kind a developer is trying to account for.
+        Middleware(_RequestLineMiddleware, interp=getattr(server, "interp", None)),
+        # An address over its ceiling is turned away before CORS, routing, body parsing or any
+        # program code.
         Middleware(_RateLimitMiddleware, limiter=_limiter, trusted_proxy=_trusted_proxy),
         Middleware(CORSMiddleware,
                    allow_origins=_cors_origins(),

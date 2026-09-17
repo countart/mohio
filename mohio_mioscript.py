@@ -14,7 +14,8 @@ Event data is read implicitly: the element being listened to is the subject, so
 import json
 from mohio_ast import (ClientListener, ClientPut, ClientToggle, ClientCheck,
                        ClientDomOp, ClientRequest, ClientSend, ClientAfter, ClientNav,
-                       ClientAppend, ClientState, ClientValidate, ClientNotify, ClientHold)
+                       ClientAppend, ClientState, ClientValidate, ClientNotify, ClientHold,
+                       ClientIdle)
 
 # Implicit event-data reads. The listened element is the subject (event.target).
 _DATUM = {
@@ -277,7 +278,16 @@ def _emit_stmt(s):
             return "window.history.back();"
         if s.op == 'reload':
             return "window.location.reload();"
-    return ""
+    # NOT AN EMPTY STRING. Every branch above returns JavaScript, and the fallthrough
+    # returned "" -- so a MioScript statement this emitter does not know about compiled to
+    # NOTHING and the page shipped without it. That is the silent-no-op shape this project
+    # treats as its worst: the check passes, the page loads, the button does not work, and
+    # there is no message anywhere saying which line was dropped. A statement the grammar
+    # accepts and the emitter cannot write is a gap in the emitter, and it says so.
+    raise ValueError(
+        "unknown MioScript statement %r -- the browser side has no way to write this, so "
+        "the page would load with the statement silently missing. This is a gap in the "
+        "MioScript emitter, not a mistake in the program." % (getattr(s, 'op', s),))
 
 
 def _emit_listener(listener):
@@ -298,16 +308,51 @@ def _emit_listener(listener):
             f"function(event){{\n      {body}\n  }});")
 
 
+# What counts as a person still being there. A pointer moving, a key pressed, the page
+# scrolled, something clicked, a finger on a touch screen. The set is fixed rather than
+# configurable because "is anyone there" is one question, and a coder who had to list the
+# events would be back to writing the boilerplate this construct exists to remove.
+_IDLE_EVENTS = ('mousemove', 'keydown', 'scroll', 'click', 'touchstart')
+
+
+def _emit_idle(idle):
+    """on.idle: one timer, every activity event, the whole document.
+
+    ONE timer shared across all of the events is the whole point. A timer per event would
+    fire the body as soon as any SINGLE kind of activity stopped, so a person reading
+    without touching the mouse would be logged out mid-sentence. The timer is reset by any
+    of them, so the body runs only when all of them have been quiet together.
+
+    Bound to `document` rather than to a selector so it sees activity anywhere on the page,
+    and captured (`true`) so it still sees events that a handler further in stops from
+    bubbling. `passive` promises nothing here calls preventDefault, which lets the browser
+    keep scrolling smoothly while it watches.
+    """
+    body = "\n        ".join(js for js in (_emit_stmt(s) for s in idle.body) if js)
+    events = ", ".join(json.dumps(e) for e in _IDLE_EVENTS)
+    return ("  (function(){\n"
+            "    var _t;\n"
+            "    function _reset(){ clearTimeout(_t); _t = setTimeout(function(){\n"
+            f"        {body}\n"
+            f"    }}, {int(idle.ms)}); }}\n"
+            f"    [{events}].forEach(function(e){{\n"
+            "      document.addEventListener(e, _reset, {passive: true, capture: true});\n"
+            "    });\n"
+            "    _reset();\n"
+            "  })();")
+
+
 def compile_listeners(listeners):
-    """Compile a list of ClientListener nodes into a single JS bundle string.
+    """Compile a list of ClientListener and ClientIdle nodes into a single JS bundle string.
     Returns '' when there are no client listeners (nothing to inject)."""
-    listeners = [L for L in (listeners or []) if isinstance(L, ClientListener)]
+    listeners = [L for L in (listeners or []) if isinstance(L, (ClientListener, ClientIdle))]
     if not listeners:
         return ""
     _DECLARED_VARS.clear()
     for L in listeners:
         _collect_vars(L.body)
-    parts = [_PRELUDE] + [_emit_listener(L) for L in listeners]
+    parts = [_PRELUDE] + [_emit_idle(L) if isinstance(L, ClientIdle) else _emit_listener(L)
+                          for L in listeners]
     state = "  var _moState = {};\n" if _DECLARED_VARS else ""
     return "(function(){\n" + state + "\n".join(parts) + "\n})();"
 

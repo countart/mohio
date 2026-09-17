@@ -178,7 +178,7 @@ def _shape_to_table(shape_name):
 def write_schema(schema, output_path):
     """Write schema manifest to .mhoschema file."""
     path = Path(output_path)
-    path.write_text(json.dumps(schema, indent=2))
+    path.write_text(json.dumps(schema, indent=2), encoding="utf-8")
     return path
 
 
@@ -187,7 +187,7 @@ def read_schema(schema_path):
     path = Path(schema_path)
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def find_schema_file(source_file):
@@ -315,7 +315,7 @@ def generate_schema(source, source_file=""):
     from mohio_transformer_ast import transform as ast_transform
     import mohio_data
 
-    grammar = mohio_data.GRAMMAR_PATH.read_text()
+    grammar = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8-sig")
     grammar_lines = [l for l in grammar.splitlines() if not l.strip().startswith("//")]
     parser = Lark("\n".join(grammar_lines), parser="earley", ambiguity="resolve")
 

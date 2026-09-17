@@ -1,0 +1,59 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// A map -- where values come from, where they go, and what happens on the way.
+// Run it:  mio run cookbook/map-moving-values.mho   (uses SQLite, no setup needed)
+//
+// A map is a DECLARATION. It says nothing about when the moving happens; it only
+// describes the route a value takes. Something else drives it: `flow` runs it,
+// `walk` stops at every step and looks. That split is the whole idea, so a map can
+// be read on its own without knowing when it fires.
+//
+// A map holds one or more CHAINS. A chain is a line of STAGES joined by arrows,
+// read left to right, and it is named by the qualifier of the stage it starts from
+// -- the chain below starting at `order.total` is called `order`.
+//
+// A stage is one of two things:
+//   a PLACE      `order.total`, `db.ledger.amount`   somewhere a value sits
+//   a TRANSFORM  `tidy`                              a shape the value is reformed by
+// A place is written `owner.field`, as deep as it needs to be. `db.` stages are real
+// database columns and are written on every engine, not only SQLite.
+//
+// Each chain here ends in its OWN table. A chain comes to rest in one place, and Mohio
+// will not add a column to an existing table on the fly, so two chains writing two
+// different columns of one table is refused rather than quietly widening the schema.
+
+connect db as sqlite from env.DATABASE_URL
+
+// The shape a value passes THROUGH. It reforms the value and hands it on, which is
+// what makes a shape usable as a stage rather than only as a description.
+shape tidy
+    value as text pad.left to 6 with "0"
+shape: done
+
+map Paydata
+    data
+        order.total -> tidy -> db.ledger.amount
+        refund.total -> db.refunds.amount
+map: done
+
+create order
+    total "42"
+create: done
+
+create refund
+    total "7"
+create: done
+
+// `flow <map>.<chain>` runs ONE chain. The value leaves `order.total`, is reformed
+// by `tidy`, and comes to rest in the database.
+flow Paydata.order
+
+// `flow <map>` with no chain runs EVERY chain in the map.
+flow Paydata
+
+find rows in db.ledger
+find: done
+find refunds in db.refunds
+find: done
+
+show ("padded on the way through: " & rows.first.amount)
+show ("the second chain landed too: " & refunds.first.amount)

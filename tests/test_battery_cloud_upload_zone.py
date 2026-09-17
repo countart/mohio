@@ -44,6 +44,17 @@ from lark import Lark  # noqa: E402
 from mohio_transformer_ast import transform  # noqa: E402
 from mohio_interpreter import MohioInterpreter, Context  # noqa: E402
 
+
+# HOW THIS BATTERY IS PROVEN ABLE TO FAIL. Putting the cloud licence check back must redden
+# it, because the un-gating is what this file now asserts.
+CAN_FAIL = [
+    {
+        'file': 'mohio_interpreter.py',
+        'find': '            if paid and not entitled:',
+        'replace': '            if (paid or z.get("kind") == "cloud") and not entitled:',
+        'note': 'put the cloud storage licence check back',
+    },
+]
 _p = _f = 0
 _failures = []
 
@@ -197,10 +208,27 @@ check("...and reads no other AWS endpoint spelling, so the names are exactly the
 
 
 # ── the refusals ─────────────────────────────────────────────────────────────────────────────
-print("\n== a cloud area is refused in open core, and reached only when licensed ==")
-msg = refusal(CLOUD, {'MOHIO_ENFORCE_LICENSE': '1'})
-check("open core refuses a cloud area", "commercial" in msg.lower(), msg[:160])
-check("...naming what to do instead", "local or temp" in msg.lower(), msg[:200])
+# CONNECT-YOUR-OWN IS NOT A PAID FEATURE (ruled 2026-09-14). `miofile cloud` points at a bucket
+# the deployment supplies: its own endpoint, bucket, region and keys. Mohio provisions nothing
+# and pays for nothing, so this is a language capability in the same sense `mioconnect` is one.
+# Managed storage, where Mohio provisions and carries the bill, is a separate offering and is
+# not built here.
+print("\n== a connect-your-own bucket runs with no licence, and the managed policies do not ==")
+msg = refusal(CLOUD, {'MOHIO_ENFORCE_LICENSE': '1', 'MOHIO_LICENSE': None,
+                      'MOHIO_OWNER': None})
+check("a cloud area is NOT refused as commercial, even under enforcement",
+      "commercial" not in msg.lower(), msg[:220])
+
+# THE HALF THAT KEEPS THIS A LINE RATHER THAN A REMOVAL. `expires` and `clean` describe work
+# done on somebody's behalf over time, which is the managed shape, and their executor genuinely
+# lives outside this tree.
+LIFECYCLE = ('miofile\n    cloud vault\n        bucket "b"\n        expires in 30 days\n'
+             'miofile: done\nshow "x"\n')
+msg = refusal(LIFECYCLE, {'MOHIO_ENFORCE_LICENSE': '1', 'MOHIO_LICENSE': None,
+                          'MOHIO_OWNER': None})
+check("a managed lifecycle policy IS still refused without a licence",
+      "commercial" in msg.lower(), msg[:220])
+check("...naming the policy that caused it", "expires" in msg.lower(), msg[:220])
 
 print("\n-- an unconfigured cloud area fails loud, naming every missing setting --")
 UNSET_STORE = dict(LIC, **{n: None for n in STORE_ENV + CRED_ENV})

@@ -1,0 +1,11 @@
+# What the SOURCE distribution carries. The wheel is built from pyproject's py-modules and
+# package-data and is unaffected by this file; `pip install mohio` uses the wheel.
+#
+# WITHOUT THIS FILE the sdist packed the whole tests/ folder: 418 internal test files out of
+# 481 entries, including fixtures named after this project's own demo. None of it is needed
+# to install or run Mohio, and a source distribution is a public artifact, so shipping the
+# compiler's private test corpus in it was giving away the internals to save nobody anything.
+prune tests
+prune build
+global-exclude *.pyc
+global-exclude __pycache__

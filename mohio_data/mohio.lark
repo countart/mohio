@@ -356,6 +356,7 @@ TITLE.2:      /title(?![A-Za-z0-9_])/
 DESCRIBE.2:   /describe(?![A-Za-z0-9_])/
 SEND.2:       /send(?![A-Za-z0-9_])/
 ON_PAUSE.3:   "on.pause"   // MioScript debounce: fire once after activity stops
+ON_IDLE.3:    "on.idle"    // MioScript: fire once the WHOLE PAGE has been quiet that long
 // Dotted response access inside MioScript send branches: result.message, result.error.
 // Scoped to the dotted form so bare `result` used as a NAME elsewhere is untouched.
 RESULT_REF.6: /result\.[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*/
@@ -450,7 +451,7 @@ THIS.2:        /this(?![A-Za-z0-9_])/
 // ── Type names (beat NAME) ────────────────────────────────────
 // dec.N / decimal.N cap a decimal to N places (truncation); the optional .pad fills to exactly N
 // places for display (10 -> 10.00). Ordered before bare dec/decimal so the longer match wins.
-TYPE_NAME.1: /text(?![A-Za-z0-9_])/ | /decimal\.\d+\.pad(?![A-Za-z0-9_])/ | /dec\.\d+\.pad(?![A-Za-z0-9_])/ | /decimal\.\d+(?![A-Za-z0-9_])/ | /dec\.\d+(?![A-Za-z0-9_])/ | /decimal(?![A-Za-z0-9_])/ | /dec(?![A-Za-z0-9_])/ | /integer(?![A-Za-z0-9_])/ | /int(?![A-Za-z0-9_])/ | /boolean(?![A-Za-z0-9_])/ | /USD(?![A-Za-z0-9_])/ | /CAD(?![A-Za-z0-9_])/ | /EUR(?![A-Za-z0-9_])/ | /GBP(?![A-Za-z0-9_])/
+TYPE_NAME.1: /text(?![A-Za-z0-9_])/ | /decimal\.\d+\.pad(?![A-Za-z0-9_])/ | /dec\.\d+\.pad(?![A-Za-z0-9_])/ | /decimal\.\d+(?![A-Za-z0-9_])/ | /dec\.\d+(?![A-Za-z0-9_])/ | /decimal(?![A-Za-z0-9_])/ | /dec(?![A-Za-z0-9_])/ | /integer(?![A-Za-z0-9_])/ | /int(?![A-Za-z0-9_])/ | /boolean(?![A-Za-z0-9_])/ | /USD(?![A-Za-z0-9_])/ | /EUR(?![A-Za-z0-9_])/ | /GBP(?![A-Za-z0-9_])/ | /JPY(?![A-Za-z0-9_])/ | /CHF(?![A-Za-z0-9_])/ | /CAD(?![A-Za-z0-9_])/ | /AUD(?![A-Za-z0-9_])/ | /CNY(?![A-Za-z0-9_])/ | /HKD(?![A-Za-z0-9_])/ | /SGD(?![A-Za-z0-9_])/ | /INR(?![A-Za-z0-9_])/ | /NZD(?![A-Za-z0-9_])/ | /SEK(?![A-Za-z0-9_])/ | /NOK(?![A-Za-z0-9_])/ | /MXN(?![A-Za-z0-9_])/ | /BRL(?![A-Za-z0-9_])/ | /ZAR(?![A-Za-z0-9_])/ | /KRW(?![A-Za-z0-9_])/
            | _BOOL | _DATETIME | _DATE | _TIME | _UUID | _EMAIL
            | _URL | _JSON | _LIST | _MAP | _ANY | _VOID
            | _BASE64 | _IMAGE | _AUDIO | _VIDEO | _PDF | _FILE
@@ -489,7 +490,7 @@ TYPE_NAME.1: /text(?![A-Za-z0-9_])/ | /decimal\.\d+\.pad(?![A-Za-z0-9_])/ | /dec
 // saying so.
 // NOT the whole `mio` prefix: user names may legitimately start with it (the gate has a
 // langmap pack called `miogscreen`). Only the real service roots are reserved.
-NAME: /(?!__USERVAR__)(?!(?:miotranslate|mioresponse|mioschedule|miosecurity|miovalidate|mioconnect|miopublish|miocookie|miosearch|miostream|miocache|miochain|miograph|mioimage|miolearn|mioprint|miovault|mioauth|miodata|miofile|miohttp|mioknow|miomail|miopush|miotest|mioapp|mioenv|miolog|miomap|miopdf|miosms|miosys|mioai)\b)(?!(?:if|unless|otherwise|when|catch)\b)(?!(?:text|decimal|dec|integer|int|boolean|bool|datetime|uuid|any|void|base64|pdf|map|json|USD|CAD|EUR|GBP)\b)[a-zA-Z_][a-zA-Z0-9_]*/
+NAME: /(?!__USERVAR__)(?!(?:miotranslate|mioresponse|mioschedule|miosecurity|miovalidate|mioconnect|miopublish|miocookie|miosearch|miostream|miocache|miochain|miograph|mioimage|miolearn|mioprint|miovault|mioauth|miodata|miofile|miohttp|mioknow|miomail|miopush|miotest|mioapp|mioenv|miolog|miomap|miopdf|miosms|miosys|mioai)\b)(?!(?:if|unless|otherwise|when|catch)\b)(?!(?:text|decimal|dec|integer|int|boolean|bool|datetime|uuid|any|void|base64|pdf|map|json|USD|EUR|GBP|JPY|CHF|CAD|AUD|CNY|HKD|SGD|INR|NZD|SEK|NOK|MXN|BRL|ZAR|KRW)\b)[a-zA-Z_][a-zA-Z0-9_]*/
 USERVAR_DOTTED.5: /__USERVAR__[a-zA-Z_][a-zA-Z0-9_]*(?:[.](?:[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+))*/
 
 // ── Literals ─────────────────────────────────────────────────
@@ -505,7 +506,17 @@ SELECTOR.5:   /#[a-zA-Z][a-zA-Z0-9_-]*/
 // mio fmt (when built) normalizes all four to as.paragraph. Longest-first.
 PARA_MARK.5: /as\.paragraph\b|as\.para\b|paragraph\b|para\b/
 NUMBER:       /-?\d+(?:\.\d+)?/
-PATH_LIT:     /\/[a-zA-Z0-9_\/:\*\{\}\.\-]*/
+// A ROUTE PATH, with `{{name}}` as a parameter segment. The doubled-brace form is the
+// language's own way of saying the value of a variable, so a route says it the same way
+// everything else does; `:id` is another framework's spelling and is not Mohio.
+// THE ALTERNATION EXISTS FOR THE SPACES. A terminal does not skip whitespace the way a
+// rule does, so `{{ id }}` used to fail to lex while `{{id}}` passed, which made a route
+// the one place in the language where the spacing inside doubled braces mattered.
+// Everywhere else the interpolation strips it, so the two spellings mean the same thing
+// and this makes a path agree with that. Single braces stay in the character class on
+// purpose: `{id}` still lexes so it can be refused at check with a sentence naming the
+// canonical form, rather than dying as an unexplained lexer error.
+PATH_LIT:     /\/(?:\{\{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\}\}|[a-zA-Z0-9_\/:\*\{\}\.\-])*/
 REL_PATH.2:   /[a-zA-Z0-9_][a-zA-Z0-9_\/\.\-]*\/[a-zA-Z0-9_\/\.\-]*/
 DATE_LIT:     /\d{4}-\d{2}-\d{2}/
 TIME_LIT:     /\d{2}:\d{2}(?::\d{2})?/
@@ -1177,7 +1188,23 @@ task_decl: TASK NAME take_stmt* (RETURNS type_name)? body_stmt* closer
 // Explicitly list them so the Earley parser resolves the ambiguity correctly.
 // The block-opener form of these keywords requires an indented block — not 'as type'.
 
-               | _CONNECTION | _REQUEST | _CHANGE
+// THESE THREE WERE NEVER PART OF `task_decl` AND HAD BEEN FOR THE LIFE OF THE BUILD.
+// The comment above describes a `task_param` rule -- which word may name a task's
+// parameter -- and that rule was never written, so its alternatives dangled onto the
+// rule above them. Lark reads a continuation line through comments, so `task_decl`
+// quietly gained three one-word forms.
+//
+// The damage came from the terminals being FILTERED. `_CONNECTION`, `_REQUEST` and
+// `_CHANGE` are dropped before the tree is built, so a line reading `connection`
+// became a TaskDecl with no name, no body and nothing recording which word had been
+// written. It checked clean and warned about nothing: not a variable, so no
+// declared-but-never-read warning, and not a task anybody could call.
+//
+// Removed rather than fixed, because there is nothing here to fix: naming a task
+// parameter works without them (`take request as text` runs, verified), no file in
+// the corpus uses a bare one, and a reserved word on its own line now fails the way
+// every other reserved word does instead of being absorbed.
+//               | _CONNECTION | _REQUEST | _CHANGE
 
 // take: task inputs, declared with `take` (pairs with `give back` for output).
 // `as` is REQUIRED before a type; bare params are untyped. `and` joins type-groups on one line.
@@ -1621,6 +1648,7 @@ purpose_block: PURPOSE STRING body_stmt* closer
 for_purpose: FOR_PURPOSE STRING
 
 block_stmt: listen_block
+          | client_idle_block
           | purpose_block
           // miotest_block / miotest_unit / miotest_ai were defined in this grammar and referenced
           // by NOTHING -- orphan rules. They could never match, so `miotest "suite"` fell through
@@ -1693,6 +1721,11 @@ block_stmt: listen_block
 listen_block: LISTEN FOR (SH_REF (AT (PATH_LIT | STRING))?)? listener_body* closer
             | LISTEN FOR NAME _ON? sel (ON_PAUSE duration_expr)? client_stmt* closer  -> client_listen_block
             | LISTEN FOR sel client_stmt* closer                  -> client_listen_change
+
+// on.idle -- whole-page inactivity. on.pause debounces ONE selector on ONE event; this
+// watches the document for any sign of a person and fires when there has been none for
+// the duration. Session timeout, auto-logout, are-you-still-there.
+client_idle_block: ON_IDLE duration_expr client_stmt* closer
 
 // ── MioScript: Mohio words that run in the browser ────────────
 client_stmt: PUT client_value INTO sel                               -> client_put
@@ -2274,6 +2307,16 @@ prepend_stmt: PREPEND_KW value_expr TO NAME
 append_stmt:  APPEND_KW  value_expr TO NAME
 add_stmt:     _ADD       value_expr TO NAME
 
+// THE ARGUMENTS THE WRONG WAY ROUND. `add colors to "green"` puts the list where the value goes
+// and a string where the list goes. Without these three alternatives it matches no rule at all
+// and falls apart into two junk assignments (add = colors; to = "green"), which CHECKS CLEAN and
+// does nothing -- the same shipped no-op the comment above describes for `add "x" to errors`,
+// arriving from the other direction. Kept here only so the transformer can refuse it by name and
+// point at the right spelling, exactly as make_retired_block does for `make`.
+prepend_reversed: PREPEND_KW value_expr TO STRING
+append_reversed:  APPEND_KW  value_expr TO STRING
+add_reversed:     _ADD       value_expr TO STRING
+
 UPPERCASE_KW.2: /uppercase(?![A-Za-z0-9_])/
 LOWERCASE_KW.2: /lowercase(?![A-Za-z0-9_])/
 string_op_target: dotted_name | NAME
@@ -2578,6 +2621,21 @@ ai_decide_body: CHECK _CONFIDENCE ABOVE value_expr -> confidence_check
 SEC_DOTTED_ANY.4: /sec\.[a-z_]+(?=[ \t]*[\r\n]|$)/
 ai_decide_sec_bare.4: SEC_DOTTED_ANY
 
+// ── INDENTATION IS INSIGNIFICANT, BY DESIGN (decided day 1) ──────────────────────────────
+// Blocks are delimited by KEYWORDS and CLOSERS, never by indentation. That is deliberate and
+// beginner-friendly: a messy coder is never punished for formatting, so indentation is NEVER
+// an error. Indents are for readability only, and `mio fmt` tidies them afterwards. Forgiving
+// input, clean output, never enforced.
+//
+// This is NOT a bug and must NOT be made significant. Doing so would be drift toward the norms
+// of Python and other languages, against Mohio's own design. If a check or a battery flags
+// "indentation carries no meaning" as a problem, the flag is wrong, not the language.
+//
+// Recorded HERE, in the grammar, because the compiler is the source of truth: a settled
+// decision written next to the rules it governs is self-grounding, while one living only in a
+// separate document gets re-discovered and re-raised as a defect. The note below is what that
+// blindness costs where it genuinely bites, and how that case is handled.
+
 // A loose statement inside an ai.* body, at LOW priority. `not confident` has no closer
 // (not_confident_block: NOT CONFIDENT body_stmt*), so nothing in the grammar marks where its
 // body ends -- and the grammar is indentation-BLIND, so the indent the human reads means
@@ -2819,6 +2877,9 @@ action_stmt: give_back_stmt
            | prepend_stmt
            | append_stmt
            | add_stmt
+           | add_reversed
+           | append_reversed
+           | prepend_reversed
            | extract_stmt
            | hash_block
            | check_against_stmt
@@ -3007,7 +3068,7 @@ verify_body: _SCOPE STRING
 
 // ── sign ─────────────────────────────────────────────────────
 
-sign_block: SIGN (_URL | _UPLOAD _URL) FOR value_expr sign_body* closer
+sign_block: SIGN (_URL | UPLOAD _URL) FOR value_expr sign_body* closer
 
 sign_body: _EXPIRES IN duration_expr
          | _NAMED NAME
@@ -3198,12 +3259,20 @@ where_condition: dotted_name IS ABOVE value_expr                     -> wc_above
                | dotted_name IS_NOT EMPTY                             -> wc_not_empty
                | dotted_name IS EMPTY                                 -> wc_is_empty
                | dotted_name IS NOT EMPTY                             -> wc_is_not_empty
-               | dotted_name CONTAINS STRING                          -> wc_contains
-               | dotted_name STARTS STRING                            -> wc_starts
-               | dotted_name STARTS _WITH STRING                     -> wc_starts_with
-               | dotted_name STARTS_WITH STRING                       -> wc_starts_with
-               | dotted_name ENDS_WITH STRING                         -> wc_ends_with
-               | dotted_name _ENDS _WITH STRING                     -> wc_ends_with
+               // A TEXT PREDICATE TAKES A VALUE, NOT ONLY A LITERAL (2026-09-13). These four
+               // took a STRING, so `where name contains q.term` -- searching for a term the
+               // program was handed -- could not be written at all, while searching for a
+               // constant typed into the source could. `dotted_name` is added rather than the
+               // full value_expr on purpose: value_expr reaches arithmetic and comparison, which
+               // collide with the `IS value_expr` catch-all further down under Earley, and the
+               // measured need is a field or a variable. Widening further is a separate change
+               // with a gate run behind it.
+               | dotted_name CONTAINS (STRING | dotted_name)            -> wc_contains
+               | dotted_name STARTS (STRING | dotted_name)              -> wc_starts
+               | dotted_name STARTS _WITH (STRING | dotted_name)     -> wc_starts_with
+               | dotted_name STARTS_WITH (STRING | dotted_name)         -> wc_starts_with
+               | dotted_name ENDS_WITH (STRING | dotted_name)           -> wc_ends_with
+               | dotted_name _ENDS _WITH (STRING | dotted_name)     -> wc_ends_with
                // T1-SPACED-IS-NOT-COMPARISON (2026-08-23). The SPACED `is not above/below` is the
                // canonical word-form inclusive per comparison-vocabulary-canonical-2026-08-07
                // ("Built / locked"), but only the DOTTED `is.not` had a rule, so the spaced form
@@ -3250,8 +3319,8 @@ and_clause: AND dotted_name IS ABOVE value_expr         -> and_above
           | AND dotted_name IS NEWER THAN duration_expr  -> and_newer
           | AND dotted_name IS_EMPTY                     -> and_empty
           | AND dotted_name IS_NOT EMPTY                 -> and_not_empty
-          | AND dotted_name CONTAINS STRING              -> and_contains
-          | AND dotted_name STARTS STRING                -> and_starts
+          | AND dotted_name CONTAINS (STRING | dotted_name) -> and_contains
+          | AND dotted_name STARTS (STRING | dotted_name)   -> and_starts
           | AND dotted_name IS value_expr                -> and_is
           | AND dotted_name IS_NOT value_expr            -> and_is_not
           | AND dotted_name value_list                   -> and_in_list
@@ -3785,28 +3854,32 @@ force_body: _WITH STRING
 
 expect_stmt: EXPECT expect_body
 
-expect_body: dotted_name _IS value_expr
-           | dotted_name _IS _NOT value_expr
-           | dotted_name _ABOVE value_expr
-           | dotted_name _BELOW value_expr
-           | dotted_name _CONTAINS (STRING | name_list)
-           | dotted_name MATCHES (SH_REF | STRING)
-           | _FALLBACK _WAS _USED
-           | _HUMAN_REVIEW _IS _REQUIRED
-           | _EMAIL _SENT _TO STRING email_expect_body*
-           | _NO _EMAIL _SENT
-           | _PAGE (_CONTAINS STRING | _STATUS NUMBER | _REDIRECTS _TO PATH_LIT)
-           | _PAGE MATCHES _SNAPSHOT STRING
-           | _FILE (_EXISTS | _IN) (REL_PATH | PATH_LIT | NAME) file_expect_body*
-           | _NO _FILE _IN (REL_PATH | PATH_LIT)
-           | _LOG _ENTRY _IN NAME log_expect_body*
-           | _NO _LOG _ENTRY _IN NAME log_expect_body*
-           | "db." NAME (_CONTAINS value_expr | db_expect_body*)
-           | _DATABASE (_QUERIED | _NOT _QUERIED)
-           | _CACHE _HIT _FOR STRING
-           | dotted_name _RECEIVED ws_expect_body*
-           | _RESPONSE (MATCHES _SNAPSHOT STRING | _STATUS NUMBER)
-           | expect_body _AND expect_body
+expect_body: dotted_name _IS value_expr                    -> expect_is
+           | dotted_name _IS _NOT value_expr               -> expect_is_not
+           | dotted_name _ABOVE value_expr                 -> expect_above
+           | dotted_name _BELOW value_expr                 -> expect_below
+           | dotted_name _CONTAINS (STRING | name_list)    -> expect_contains
+           | dotted_name MATCHES (SH_REF | STRING)          -> expect_matches
+           | _FALLBACK _WAS _USED                          -> expect_fallback_used
+           | _HUMAN_REVIEW _IS _REQUIRED                   -> expect_human_review
+           | _EMAIL _SENT _TO STRING email_expect_body*    -> expect_email_sent
+           | _NO _EMAIL _SENT                              -> expect_no_email
+           | _PAGE (_CONTAINS STRING | _STATUS NUMBER | _REDIRECTS _TO PATH_LIT) -> expect_page
+           | _PAGE MATCHES _SNAPSHOT STRING                -> expect_page_snapshot
+           | _FILE (_EXISTS | _IN) (REL_PATH | PATH_LIT | NAME) file_expect_body* -> expect_file
+           | _NO _FILE _IN (REL_PATH | PATH_LIT)           -> expect_no_file
+           | _LOG _ENTRY _IN NAME log_expect_body*         -> expect_log_entry
+           | _NO _LOG _ENTRY _IN NAME log_expect_body*     -> expect_no_log_entry
+           | "db." NAME (_CONTAINS value_expr | db_expect_body*) -> expect_db_contains
+           | _DATABASE _QUERIED                           -> expect_database_queried
+           // The negation needs its own name. Both forms shared one alias and both
+           // keywords are filtered, so `queried` and `not queried` reached the
+           // transformer identical and the `not` was lost.
+           | _DATABASE _NOT _QUERIED                      -> expect_database_not_queried
+           | _CACHE _HIT _FOR STRING                       -> expect_cache_hit
+           | dotted_name _RECEIVED ws_expect_body*         -> expect_received
+           | _RESPONSE (MATCHES _SNAPSHOT STRING | _STATUS NUMBER) -> expect_response
+           | expect_body _AND expect_body                  -> expect_and
 
 email_expect_body: _SUBJECT _CONTAINS STRING
                  | _BODY _CONTAINS STRING
@@ -3873,8 +3946,17 @@ sec_validate_stmt: SEC_VALIDATE dotted_name _AGAINST sec_threat_list
 sec_threat_list: NAME ("," NAME)*
 
 // sec.audit required — audit trail gate
-// TAG_REF = compliance tag like [phi] [pci] [pii] [identifier]
-TAG_REF: "[" NAME "]"
+// TAG_REF = compliance tag like [phi] [pci] [pii] [identifier], and [phi, pci] for a field
+// that is genuinely both. THE COMMA FORM IS THE FOUNDING DESIGN and it had been lost here:
+// this terminal took exactly one NAME, so `ssn as text [phi, pci]` did not parse while the
+// chained `[phi][pci]` did, which is the spelling the design does not use. The profile side
+// never lost it -- `class_tag` a few hundred lines up is already `"[" NAME ("," NAME)* "]"`
+// -- and the shape zone tag already splits its value on commas at the interpreter, so both
+// ends were waiting for a terminal that could carry more than one name.
+// WRITTEN AS A REGEX because a terminal does not ignore whitespace the way a rule does, and
+// `[phi, pci]` is how a person writes it. The spacing is absorbed here and the names are
+// split downstream, so `[phi,pci]`, `[phi, pci]` and `[ phi , pci ]` are the same thing.
+TAG_REF: /\[\s*[a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*\s*\]/
 
 sec_audit_stmt: SEC_AUDIT _REQUIRED (_FOR TAG_REF)?
               | SEC_AUDIT _REQUIRED
@@ -4217,19 +4299,19 @@ mioschedule_stmt: MIOSCHEDULE_EVERY duration_expr                    // miosched
                 | MIOSCHEDULE_IN    duration_expr                     // mioschedule.in 30 minutes
                 | MIOSCHEDULE_CANCEL value_expr                       // mioschedule.cancel "name"
 
-mioschedule_body: _EVERY      duration_expr (_BETWEEN TIME_LIT _AND TIME_LIT)?
+mioschedule_body: _EVERY      duration_expr (_BETWEEN TIME_LIT _AND TIME_LIT)? -> sched_every
                 | _EVERY      weekday_expr _AT (AT_TIME | TIME_LIT)  // every monday at 9am
-                | _EVERY      duration_expr
+                | _EVERY      duration_expr                 -> sched_every
                 | _AT         (AT_TIME | TIME_LIT) (STRING)?  // at 9am / at 09:00 "EST"
                 | _ON         weekday_expr (_ONLY)?
                 | _ON         DATE_LIT _AT (AT_TIME | TIME_LIT)
                 | _ON         NAME NUMBER _AT (AT_TIME | TIME_LIT)   // on december 31 at 11:59pm
                 | _ON         _THE NAME NAME _OF _EVERY NAME _AT TIME_LIT
-                | _IN         duration_expr (_FROM dotted_name)?
+                | _IN         duration_expr (_FROM dotted_name)? -> sched_in
                 | _RUN        NAME                         // run single task (call is the verb for task invocation; run_block retired 2026-08-01)
-                | _FOR        duration_expr                // self-terminating burst
-                | _START      value_expr
-                | _END        value_expr
+                | _FOR        duration_expr                 -> sched_for   // self-terminating burst
+                | _START      value_expr                    -> sched_start
+                | _END        value_expr                    -> sched_end
                 | DO_ONCE      _FOR value_expr             // idempotency key
                 | _TIMEOUT    _AFTER duration_expr
                 | _TIMEZONE   STRING
@@ -5011,7 +5093,11 @@ _UNLESS.2: /unless(?![A-Za-z0-9_])/
 _UNLOCK.2: /unlock(?![A-Za-z0-9_])/
 _UNMARK.2: /unmark(?![A-Za-z0-9_])/
 _UP.2: /up(?![A-Za-z0-9_])/
-_UPLOAD.2: /upload(?![A-Za-z0-9_])/
+// KEPT IN THE TREE, not filtered. `sign url for` and `sign upload url for` are two
+// different permissions -- one authorises a read, the other a write -- and an
+// underscore-prefixed terminal is dropped before the transformer sees it, so the two
+// forms arrived indistinguishable and the write form was read as the read form.
+UPLOAD.2: /upload(?![A-Za-z0-9_])/
 _URL.2: /url(?![A-Za-z0-9_])/
 _USE.2: /use(?![A-Za-z0-9_])/
 _USED.2: /used(?![A-Za-z0-9_])/

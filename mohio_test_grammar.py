@@ -199,8 +199,12 @@ if SUITE in ("all", "parse"):
     run("hold_eq",              "hold THRESHOLD = 0.85")
     run("lock_simple",          "lock MAX_RETRIES 3")
     run("include_file",         'include "config/app.mho"')
-    run("load_pack",            "load pack miogscreen")
-    run("load_pack_version",    "load pack miogscreen version 1.2")
+    # RETIRED 2026-09-16. Superseded twice over: a language map is named where it is
+    # used, and a service is called by name, so there is no loading step left to have.
+    run("load_pack",            "load pack miogscreen",
+        expect="error", error_contains="retired")
+    run("load_pack_version",    "load pack miogscreen version 1.2",
+        expect="error", error_contains="retired")
 
     # ── Shapes ────────────────────────────────────────────────
     run("shape_basic", """
@@ -439,7 +443,7 @@ find members in db.members
     where status is active
     cache for 10 minutes
 find: done
-""")
+""", expect="error", error_contains="not yet built on `find`")
     run("find_match_to", """
 find active in db.members
     match status to "active"
@@ -541,11 +545,20 @@ shape S
     email as text [pii] purpose "billing"
 shape: done
 """)
+    # A TYPELESS FIELD IS FINE UNTIL IT IS REGULATED, which is the type-resolution ruling in two
+    # cases. An unregulated field may be left to inference, because a wrong inference fails loud
+    # the first time the value is used. A classified one may not: the type decides how the value
+    # is stored, matched and erased, and there is no second chance at the point of use.
     run("shape_field_no_type_passes", """
+shape S
+    nickname purpose "greeting"
+shape: done
+""")
+    run("shape_field_no_type_refused_when_classified", """
 shape S
     email [pii] purpose "billing"
 shape: done
-""")
+""", expect="error", error_contains="has no declared type")
 
     # ── `as table` (Phase 2, recovered shape model) ────────────
     run("shape_as_table_opens_a_scope", """
@@ -648,7 +661,8 @@ ai.connect: done
     run("ai_audit_stmt",    "ai.audit to fraud_audit_log")
 
     # ── New verbs ─────────────────────────────────────────────
-    run("load_pack",        "load pack miogscreen")
+    run("load_pack",        "load pack miogscreen",
+        expect="error", error_contains="retired")
     run("apply_single", """
 apply miogscreen.remove_background as clean_image
     target_color #00FF00
@@ -784,7 +798,7 @@ verify token from request.header "Authorization"
     scope "read:members"
     on.failure give back [401] "Unauthorized"
 verify: done
-""")
+""", expect="error", error_contains="verify token is declared in the grammar but not built")
 
     # ── miomap — field direction arrows ──────────────────────
     run("miomap_arrow_canonical", """
@@ -797,7 +811,7 @@ miomap ACHToCanonical
         full_name      -> display_name
     fields: done
 miomap: done
-""")
+""", expect="error", error_contains="miomap is declared in the grammar but not built")
     run("miomap_to_alternative", """
 miomap ACHToCanonical
     from sh.ACH
@@ -807,7 +821,7 @@ miomap ACHToCanonical
         routing_number to routing
     fields: done
 miomap: done
-""")
+""", expect="error", error_contains="miomap is declared in the grammar but not built")
     run("miomap_with_transform", """
 miomap ACHToCanonical
     from sh.ACH
@@ -819,7 +833,7 @@ miomap ACHToCanonical
             as.uc
     fields: done
 miomap: done
-""")
+""", expect="error", error_contains="miomap is declared in the grammar but not built")
 
     # ── miomap — rejected forms ───────────────────────────────
     run("left_arrow_rejected",  "name ← source", expect="reject")

@@ -1,0 +1,55 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// flow -- run a map and get out of the way.
+// Run it:  mio run cookbook/flow-run-a-map.mho   (no database, no setup)
+//
+// A map only DESCRIBES where values go. `flow` is what makes it happen.
+//
+//   flow <map>          runs EVERY chain in the map
+//   flow <map>.<chain>  runs ONE chain
+//
+// A chain is named by the qualifier of the stage it starts from, so the chain
+// beginning at `order.total` is called `order`. That is why there is no separate
+// name to invent or remember.
+//
+// `flow` deliberately reports nothing while it runs. A driver that also narrates is
+// a driver you cannot trust to be quick or quiet, so looking is a different verb:
+// see cookbook/walk-inspect-a-map.mho. What flow gives back is the END of the chain,
+// asked for with `check flow`.
+
+shape tidy
+    value as text pad.left to 6 with "0"
+shape: done
+
+map Paydata
+    data
+        order.total -> tidy -> ledger.amount
+        refund.total -> ledger.refunded
+map: done
+
+create order
+    total "42"
+create: done
+
+create refund
+    total "7"
+create: done
+
+// A destination has to exist before something lands in it, the same as any other
+// value in Mohio.
+create ledger
+    amount ""
+    refunded ""
+create: done
+
+// ONE chain.
+flow Paydata.order
+show ("one chain: " & ledger.amount)
+
+// EVERY chain. The first one runs again, harmlessly, and the second one lands too.
+flow Paydata
+show ("every chain: " & ledger.refunded)
+
+// THE END OF THE CHAIN, which is the question `flow` is usually asked. The endpoint
+// is the stage after the last forward hop -- any other position is `grab` or `walk`.
+check flow Paydata.order as landed
+show ("the endpoint: " & landed)

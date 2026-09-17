@@ -559,9 +559,32 @@ class MohioValidator:
         return False
 
     def _scan_source(self):
+        # THE BODY OF A render/show BLOCK IS MARKUP, NOT MOHIO, and the line-level warnings below
+        # do not describe it. The one that actually bit: a `<style>` block is CSS, CSS is written
+        # in single braces, and the retired-curly-brace warning fired on every rule. A served,
+        # styled Mohio app is a first-class thing to build -- it is what a demo shown on a screen
+        # IS -- and the compiler was telling anyone who built one that their stylesheet used
+        # retired syntax.
+        #
+        # THE OPENER AND CLOSER ARE STILL MOHIO. Only the lines BETWEEN them are exempt, which is
+        # why the closer decrements before the checks run and the opener increments after.
+        _raw_depth = 0
         for i, raw in enumerate(self.lines, 1):
+            _st = raw.strip()
+            if _st in ('render: done', 'show: done'):
+                _raw_depth = max(0, _raw_depth - 1)
+            _line_is_markup = _raw_depth > 0
+            if _st == 'render' or _st == 'show' or re.match(r'^(?:render|show)\s+\w+$', _st):
+                _raw_depth += 1
             s = raw.strip()
-            if s.startswith("#"):
+            # A `#` STARTING A LINE OF MARKUP IS CSS, NOT A MISTAKEN COMMENT. `_line_is_markup`
+            # above already carved render/show bodies out of the retired-curly-brace warning for
+            # exactly this reason, and this check was never given the same exemption, so
+            # `#panel { color:#0b3b33; }` in a <style> block was refused while the identical hex
+            # colour mid-line was fine. The difference was only ever whether the `#` happened to
+            # be the first character, which is nothing to do with comments and everything to do
+            # with a CSS id selector being written the way CSS writes one.
+            if s.startswith("#") and not _line_is_markup:
                 self.ctx.error("Mohio comments use '//', not '#' or '##'.", i,
                     hint="Convert this line to a // comment. '#' is reserved and is not a comment marker.")
                 continue
@@ -728,8 +751,10 @@ class MohioValidator:
             # to drop the `check` prefix -- written by a compiler chat off a stale marker,
             # never a design decision. The advice was backwards, and a gate test then
             # asserted the warning was correct, cementing it. Nothing here is retired.
-            # { } outside templates
-            if re.search(r'\{[^{]', s) and not re.search(r'\{\{', s):
+            # { } outside templates, and outside markup. Inside a render/show body the braces
+            # belong to CSS or to the page's own markup, and calling those retired Mohio syntax
+            # is simply wrong.
+            if (not _line_is_markup) and re.search(r'\{[^{]', s) and not re.search(r'\{\{', s):
                 self.ctx.warn("Curly braces '{ }' are retired.", i,
                     hint="Use named fields or 'as list sh.[Shape]' for nested structures.")
             # Phase 3 reserved -- only flag as KEYWORDS, not inside string literals
@@ -747,11 +772,27 @@ class MohioValidator:
             # 'run' for tasks is rejected by the AST transformer (run is async/schedule only).
             # define reserved
             if re.match(r'\s*define\s+\w', raw):
+                # `load pack` came off this list when it was retired below. A refusal that
+                # recommends a retired form sends the reader from one dead end to another,
+                # and this one was doing it in the message a newcomer is most likely to hit.
                 self.ctx.error("'define' is reserved -- not valid in this version.", i,
-                    hint="Use 'shape', 'task', 'miovalidate', or 'load pack'.")
+                    hint="Use 'shape' to describe data, 'task' to do something with it, or "
+                         "'miovalidate' for a rule.")
             # take back reserved
             if re.search(r'\btake\s+back\b', s):
                 self.ctx.error("'take back' is reserved. Use 'give back'.", i)
+            # load pack retired
+            if re.match(r'\s*load\s+pack\b', raw):
+                # RETIRED, and superseded twice over rather than merely unbuilt. A langmap is
+                # loaded where it is used (`EN -> klingon using maps/en-klingon.langmap`), and
+                # a service arrives by being named (`servicename.actionname`), so there is no
+                # remaining job for a separate loading step. It had no executor at all, so a
+                # program using it checked clean and then died with the generic no-executor
+                # message, which says nothing about what to write instead.
+                self.ctx.error("`load pack` is retired.", i,
+                    hint="Nothing needs loading first. A language map is named where it is "
+                         "used (`EN -> fr using maps/en-fr.langmap`), and a service is "
+                         "called by name (`servicename.actionname`).")
             # set retired
             if re.match(r'\s*set\s+\w', raw):
                 # RETIRED, not warned. A warning is silent acceptance with extra steps: the
@@ -858,32 +899,56 @@ class MohioValidator:
             validate_closer(self.ctx, closer, name, line)
         self.ctx.pop_block()
 
+    # WHAT EACH COMPLIANCE ACTION ACTUALLY DOES, checked by running each one and reading the
+    # database back, not by reading the old warning. All five used to share one message saying
+    # every one of them is declared but not executed and will not run, which is false for three
+    # of them in two different directions.
+    #
+    #   cm.retain / cm.expire  RECORD a policy in the compliance trail. The statement runs. What
+    #                          does not happen is the deletion when the period ends.
+    #   cm.lock                RECORDS a legal hold AND ENFORCES it: a later `cm.purge` of that
+    #                          target is refused, loudly, with its own refusal record. Telling a
+    #                          coder this does nothing is the dangerous direction on a legal hold.
+    #   cm.report / cm.notify  STOP the program if reached. They are commercial-runtime
+    #                          capabilities, and a message saying they merely will not run
+    #                          understates it: the program does not continue past them.
+    _CM_ACTION_NOTES = {
+        'CM_RETAIN': ("'cm.retain' records a retention policy in the compliance trail; nothing "
+                      "is kept or removed by it when the period ends.",
+                      "Perform the expiry yourself when the period is up "
+                      "(cm.purge from db.<table> / match ... / reason \"...\")."),
+        'CM_EXPIRE': ("'cm.expire' records an expiry policy in the compliance trail; nothing is "
+                      "deleted by it when the period ends.",
+                      "Perform the deletion yourself when the period is up "
+                      "(cm.purge from db.<table> / match ... / reason \"...\")."),
+        'CM_REPORT': ("'cm.report' is a commercial-runtime capability and will STOP this program "
+                      "if it is reached; no report is filed.",
+                      "Remove it, or file the report through your own path, until you are on "
+                      "the commercial runtime."),
+        'CM_NOTIFY': ("'cm.notify' is a commercial-runtime capability and will STOP this program "
+                      "if it is reached; no notification is sent.",
+                      "Remove it, or send the notification through your own path "
+                      "(miomail.send / miolog.alert), until you are on the commercial runtime."),
+    }
+
     def _v_cm_action_stmt(self, tree):
-        # cm.retain / cm.report / cm.notify are compliance ACTIONS (data
-        # retention, regulatory filing, breach notification). They are declared
-        # but NOT executed in this build. Warn loudly so no one ships a program
-        # that assumes reports are filed or data is retained when nothing runs --
-        # same safety reasoning as `verify token`.
-        head = next((c for c in tree.children if isinstance(c, Token)), None)
-        what = str(head).strip() if head else "cm.*"
-        self.ctx.warn(
-            f"'{what}' is a compliance action (`cm.retain` / `cm.report` / `cm.notify`) "
-            f"that is declared but not yet "
-            f"executed in this build -- retention / reporting / notification "
-            f"will NOT actually run.",
-            get_line(tree),
-            hint="Do not rely on this for compliance yet; perform the action "
-                 "explicitly until cm.* enforcement ships.")
+        head = next((c for c in tree.children if isinstance(c, Token)
+                     and str(c.type).startswith('CM_')), None)
+        note = self._CM_ACTION_NOTES.get(str(head.type) if head is not None else '')
+        # cm.lock is deliberately absent from the table: it works, so it gets no warning.
+        if note:
+            self.ctx.warn(note[0], get_line(tree), hint=note[1])
         for c in tree.children:
             self._walk(c)
 
     def _v_notify_stmt(self, tree):
         self.ctx.warn(
-            "'notify' is declared but not yet executed in this build -- no "
-            "notification is actually sent.",
+            "'notify' is not built yet and will STOP this program if it is reached; no "
+            "notification is sent.",
             get_line(tree),
-            hint="Send notifications explicitly (miomail.send / miolog.alert) "
-                 "until 'notify' is wired.")
+            hint="Send the notification explicitly (miomail.send / miolog.alert) until "
+                 "'notify' is wired. It refuses rather than skipping, so a program that "
+                 "reaches this line does not continue.")
         for c in tree.children:
             self._walk(c)
 
@@ -1570,7 +1635,37 @@ class MohioValidator:
     def _v_from_connector_block(self, tree):
         for c in tree.children:
             self._walk(c)
+    # The rules that actually CATCH. `on.success`, `always`, `when` and `otherwise` all sit in
+    # `result_handlers` beside on.failure and none of them stops an error leaving the block.
+    _CATCHING_RULES = ('on_failure_handler', 'on_failure_spaced', 'on_error_handler',
+                       'retired_catch')
+
     def _v_try_block(self, tree):
+        """A `try` with nothing inside it that catches is a scope, not a guard.
+
+        MEASURED: `try` around a failing retrieve, with no handler anywhere, checks clean and
+        answers 500 -- the error walks straight out. A reader who writes `try` expecting the word
+        itself to protect gets no error, no warning, and a working-looking program that does not
+        protect anything.
+
+        ASKED OF THE WHOLE BLOCK, not of the try alone, and that is what keeps it from firing on
+        correct code: an inner block carrying its own `on.failure` protects exactly as well
+        (measured both ways), so a try wrapped around blocks that each handle themselves is
+        deliberate and says nothing here.
+        """
+        caught = any(str(getattr(sub, 'data', '')) in self._CATCHING_RULES
+                     for sub in tree.iter_subtrees())
+        if not caught:
+            self.ctx.warn(
+                "This `try` has no `on.failure`, so it does not catch anything -- an error "
+                "inside it still leaves the block and stops the program.",
+                get_line(tree),
+                hint="Add the handler inside the try:\n"
+                     "    try\n        save to db.items\n            name \"Bo\"\n"
+                     "        save: done\n        on.failure\n            show \"failed\"\n"
+                     "    try: done\n"
+                     "A block inside the try may carry its own `on.failure` instead, which "
+                     "protects just as well. `try` on its own is a scope, not a guard.")
         for c in tree.children:
             self._walk(c)
 
@@ -1656,15 +1751,30 @@ class MohioValidator:
         if not has_reason:
             self.ctx.error("'cm.purge' requires a 'reason' declaration.", line,
                 hint='Data deletion must include an audit reason.\nAdd: reason "GDPR Article 17"')
-        # Declared but not yet executed -- same safety reasoning as cm.retain /
-        # cm.report / cm.notify, but cm.purge additionally fails loud at runtime
-        # because silently skipping a deletion is worse than silently skipping a log.
-        self.ctx.warn(
-            "'cm.purge' is declared but not yet executed in this build -- NO data "
-            "is actually deleted (it will fail loud at runtime).",
-            line,
-            hint="Do not rely on this for right-to-be-forgotten / erasure yet; "
-                 "perform deletion explicitly until cm.purge enforcement ships.")
+        # A FALSE SAFE ON A DELETION VERB, which is worse than no warning at all. Both forms
+        # used to be told that nothing is deleted and that the block fails loud at runtime.
+        # Measured on a real database: `cm.purge from db.members / match id to "7"` REMOVES
+        # that row and leaves the others, so a coder who believed the warning would have run
+        # an erasure believing it was a no-op. The message is now per form, because the two
+        # forms genuinely do different things.
+        #
+        # The FROM form deletes, so it gets no warning. It is not unguarded: the runtime
+        # refuses a purge with no `match` (a table-wide erasure), and refuses a match on a
+        # field other than the id unless a per-deployment audit salt is set, so the tombstone
+        # can reference the erased row without being reversible. Those refusals are loud and
+        # are the right place for them, at the moment the program actually runs.
+        #
+        # The VALUE form records the request in the compliance trail and deletes nothing,
+        # which is worth saying because the word is the same and the effect is not.
+        has_from = any(isinstance(c, Token) and c.type == 'FROM' for c in tree.children)
+        if not has_from:
+            self.ctx.warn(
+                "this form of 'cm.purge' RECORDS an erasure request in the compliance "
+                "trail; it does not delete anything.",
+                line,
+                hint="To erase rows, name where they live and which ones: "
+                     "cm.purge from db.<table> / match <field> to <value> / reason \"...\". "
+                     "Keep this form when the record of the request is what you want.")
         for c in tree.children:
             self._walk(c)
 
@@ -1742,6 +1852,118 @@ class MohioValidator:
 
 
 
+def _shape_field_bounds(tree):
+    """Every shape -> {field: (min, max)} for the fields that declare one.
+
+    Reads the same `shape_decl` walk `_shape_field_names` does, and takes the bound off the
+    modifier rules the grammar already names: field_min_mod, field_max_mod, field_minmax_mod
+    (mohio.lark:812-814).
+    """
+    out = {}
+    for node in tree.iter_subtrees():
+        if str(getattr(node, 'data', '')) != 'shape_decl':
+            continue
+        sh_tok = first_token(node, 'NAME')
+        if not sh_tok:
+            continue
+
+        def _fields(n):
+            for child in getattr(n, 'children', []):
+                data = str(getattr(child, 'data', ''))
+                if 'shape_field' in data:
+                    yield child
+                elif 'shape_body' in data:
+                    for inner in _fields(child):
+                        yield inner
+
+        bounds = {}
+        for fnode in _fields(node):
+            ftok = first_token(fnode, 'NAME')
+            if not ftok:
+                continue
+            lo = hi = None
+            for sub in fnode.iter_subtrees():
+                kind = str(getattr(sub, 'data', ''))
+                nums = [str(c) for c in getattr(sub, 'children', [])
+                        if isinstance(c, Token) and c.type == 'NUMBER']
+                if kind == 'field_min_mod' and nums:
+                    lo = nums[0]
+                elif kind == 'field_max_mod' and nums:
+                    hi = nums[0]
+                elif kind == 'field_minmax_mod' and len(nums) >= 2:
+                    lo, hi = nums[0], nums[1]
+            if lo is not None or hi is not None:
+                bounds[str(ftok)] = (lo, hi)
+        if bounds:
+            out[str(sh_tok)] = bounds
+    return out
+
+
+def _check_script_bounds(tree, ctx):
+    """A `create ... as sh.X` whose literal value breaks the shape's own min or max.
+
+    STATICALLY DECIDABLE AND NARROW. The block names its shape, the value is a literal in the
+    same tree, and nothing has to be guessed about which shape governs which table -- the
+    question Q42 is blocked on. Only a literal number is compared: anything computed is left
+    alone, because a wrong warning about a value nobody can see at check time is worse than
+    silence.
+    """
+    bounds = _shape_field_bounds(tree)
+    if not bounds:
+        return
+    for node in tree.iter_subtrees():
+        if str(getattr(node, 'data', '')) != 'create_block':
+            continue
+        sh_tok = next((c for c in node.children
+                       if isinstance(c, Token) and c.type == 'SH_REF'), None)
+        if sh_tok is None:
+            continue
+        shape = str(sh_tok).split('.', 1)[-1]
+        declared = bounds.get(shape)
+        if not declared:
+            continue
+        for sub in node.iter_subtrees():
+            if str(getattr(sub, 'data', '')) != 'create_body':
+                continue
+            # THE NAME AND THE VALUE ARE IN DIFFERENT SUBTREES. `create_body` holds the field
+            # name; the number sits in a nested `literal`. Asking one subtree for both found
+            # neither and the scan quietly did nothing.
+            toks = [c for c in getattr(sub, 'children', []) if isinstance(c, Token)]
+            fname = next((str(t) for t in toks if t.type == 'NAME'), None)
+            if fname is None or fname not in declared:
+                continue
+            num = next((c for inner in sub.iter_subtrees()
+                        for c in getattr(inner, 'children', [])
+                        if isinstance(c, Token) and c.type == 'NUMBER'), None)
+            if num is None:
+                continue
+            # NO NET ON THIS CONVERSION, deliberately. The grammar's NUMBER is a number
+            # (mohio.lark), so a failure here does not mean `skip this field`, it means
+            # the token is not what this code believes it is -- and swallowing that would
+            # hide the one thing worth knowing. Nothing reaches this line but a NUMBER.
+            value = float(str(num))
+            lo, hi = declared[fname]
+            broke = None
+            if lo is not None and value < float(lo):
+                broke = "below the declared minimum of %s" % lo
+            elif hi is not None and value > float(hi):
+                broke = "above the declared maximum of %s" % hi
+            if broke:
+                ctx.warn(
+                    f"`{fname}` is {str(num)}, which is {broke} on shape `{shape}` -- and "
+                    f"NOTHING CHECKS IT HERE. A shape's min and max are enforced where a "
+                    f"request is bound to it, which answers 422 with a message. A value "
+                    f"written directly in a script does not go through that, so this runs.",
+                    _line_of(num) or _line_of(sh_tok) or 0,
+                    hint="The declaration is real and is enforced on the request path. This "
+                         "says out loud that the script path is not the enforcing one, rather "
+                         "than letting the line look checked when it is not.")
+
+
+def _line_of(tok):
+    return getattr(tok, 'line', 0)
+
+
 def _shape_field_names(tree):
     """Every shape declared in the program -> the set of field names it declares.
 
@@ -1799,7 +2021,35 @@ def validate(tree, source="", filename="", symbol_table=None):
     if filename and not filename.endswith('.test.mho'):
         _check_ai_test_coverage(tree, ctx, filename)
     _check_dead_stores(tree, ctx, filename)
+    # A SCRIPT WRITE THAT BREAKS A DECLARED BOUND. Enforced on the request path, not on
+    # this one, and the difference was invisible. See _check_script_bounds.
+    _check_script_bounds(tree, ctx)
     return ctx
+
+def _test_file_has_assertions(path):
+    """Does this test file contain a case that actually asserts something?
+
+    STRUCTURAL, NOT A RUN, and deliberately so: `mio check` must never execute the program it is
+    checking, because a test file may write rows or call a provider. Whether the assertions HOLD
+    is `mio test`'s question. Whether any exist is this one.
+
+    Comments and string literals are removed before looking, so neither `// expect` nor
+    `show "it works, expect nothing"` can fake a case.
+    """
+    import re as _re
+    try:
+        with open(path, encoding='utf-8-sig', errors='replace') as fh:
+            src = fh.read()
+    except OSError:
+        # UNREADABLE IS NOT SATISFIED. A control that cannot read its evidence has not been met.
+        return False
+    src = _re.sub(r"/\*.*?\*/", " ", src, flags=_re.S)     # block comments
+    src = _re.sub(r"//[^\n]*", " ", src)                    # line comments
+    src = _re.sub(r'"(?:[^"\\]|\\.)*"', '""', src)          # string literals, emptied
+    has_case = _re.search(r"(?m)^\s*it\s+\"", src) is not None
+    has_expect = _re.search(r"(?m)^\s*expect\s+\S", src) is not None
+    return has_case and has_expect
+
 
 def _check_ai_test_coverage(tree, ctx, filename):
     """Claim 11: Track ai.decide blocks and warn if no .test.mho file covers them."""
@@ -1818,10 +2068,28 @@ def _check_ai_test_coverage(tree, ctx, filename):
     _find_ai_decides(tree)
     if not ai_decides:
         return
-    # Look for a corresponding .test.mho file
+    # Look for a corresponding .test.mho file that actually ASSERTS something.
     test_file = filename.replace('.mho', '.test.mho')
     ai_test_file = os.path.join(os.path.dirname(filename), 'ai.test.mho')
-    has_tests = os.path.exists(test_file) or os.path.exists(ai_test_file)
+    present = [p for p in (test_file, ai_test_file) if os.path.exists(p)]
+    has_tests = any(_test_file_has_assertions(p) for p in present)
+    if present and not has_tests:
+        # THE FILE IS THERE AND ASSERTS NOTHING, which is a different mistake from having no
+        # tests at all and deserves its own sentence. This is the case the old presence check
+        # could not see: `touch ai.test.mho` satisfied a governance control completely.
+        names = ", ".join(f"'{n}'" for n in ai_decides)
+        ctx.warn(
+            f"ai.decide block(s) {names} have a test file that asserts nothing.",
+            0,
+            hint=(f"{os.path.basename(present[0])} exists but contains no `it` case with an "
+                  f"`expect` in it, so nothing about these decisions is actually checked.\n"
+                  f"    Write a case:  it \"an uncertain decision goes to a human\"\n"
+                  f"                       ai.decide <name>\n"
+                  f"                       expect fallback was used\n"
+                  f"                   it: done\n"
+                  f"    Then run them:  mio test {os.path.basename(present[0])}")
+        )
+        return
     if not has_tests:
         names = ", ".join(f"'{n}'" for n in ai_decides)
         ctx.warn(
@@ -1841,6 +2109,152 @@ def _check_ai_test_coverage(tree, ctx, filename):
 # Leading-word that a newcomer reaches for out of another language, appended to the dead-store
 # hint TEXT only. Membership here NEVER decides whether the warning fires -- the general
 # assigned-but-never-read mechanism does that. This is purely "did you mean ...".
+# ── foreign keywords, refused as variable names ────────────────────────────────────────
+#
+# WHY THIS EXISTS AND WHY IT IS THIS LONG. `name value` is Mohio's assignment, and a foreign
+# keyword followed by a value has exactly that shape, so it was taken as one. Measured across
+# 114 keywords a newcomer might lead a line with: 100 became variables with no error at all, 94
+# without even a warning, and 96 produced a program that ran to completion. A person writing
+# `echo "hello"` got a variable called echo, no output, and nothing to tell them why.
+#
+# The unused-variable warning was not a safety net. It fires only when the variable is never
+# read, so the moment the program grows enough to use the name, the last signal disappears.
+#
+# MEMBERSHIP WAS MEASURED, NOT CHOSEN. Every word here was first checked against every .mho in
+# the repository for use as a statement head, because an over-long list refuses working programs,
+# which is the same false statement pointing the other way and harder to catch because it looks
+# like caution. Words that real Mohio does use -- where, require, from, method, include, log,
+# output, display, filter, select, case, default, end -- are deliberately NOT here.
+#
+# Each entry is one line saying what Mohio does instead. Not a lecture: the reader is mid-thought
+# in a language they know, and what they need is the sentence that gets them back to work.
+_FSAY = ("Mohio prints with `show`:  show \"hello\"  -- and inserts a value with double "
+                "braces:  show \"Hi {{ name }}\"")
+_FLOOP = ("Mohio loops with `repeat`:  repeat 3 times ... repeat: done  /  "
+                 "repeat each item in items ... repeat: done")
+_FTASK = ("Mohio puts behaviour in a `task`:\n"
+                 "    task greet\n        take name as text\n        returns text\n        give back (\"Hi \" & name)\n"
+                 "    task: done")
+_FGIVE = "Mohio returns a value with `give back`:  give back (a + b)"
+_FSHAPE = ("MOHIO HAS NO CLASSES. Data goes in a `shape`, behaviour goes in a `task` that "
+                  "takes it:\n"
+                  "    shape Patient\n        name as text required\n    shape: done\n"
+                  "    task greet\n        take patient as sh.Patient\n"
+                  "        returns text\n"
+                  "        give back (\"Hi \" & patient.name)\n    task: done\n"
+                  "A task gives a value back to its caller only when it declares `returns`. Without it, its\n"
+                  "`give back` is the response and the program ends there.\n"
+                  "A shape describes, a task acts. Naming one does not turn it into the other.\n"
+                  "WHERE THE METHODS GO: a task that TAKES a shape and RETURNS one is the method\n"
+                  "equivalent, and it works today:\n"
+                  "    task rename\n        take patient as sh.Patient\n        returns sh.Patient\n"
+                  "        give back patient\n    task: done")
+_FDECL = ("A value needs no type keyword:  count 5  /  name \"Ada\". A type is optional "
+                 "and trails the name:  count as int")
+_FIMPORT = ("Mohio has no import. A service is always available by name (miofile.read, "
+                   "miohttp.get), and a database is reached with `connect db as ...`.")
+_FCHECK = ("Mohio decides with `check` / `when` / `otherwise`, or with `unless`:\n"
+                  "    check score\n        when score is more than 100\n            show \"big\"\n"
+                  "        otherwise\n            show \"small\"\n    check: done")
+_FFAIL = ("Mohio handles failure with `try` and `on.failure`:\n"
+                 "    try\n        save to db.items\n            name \"Bo\"\n        save: done\n"
+                 "        on.failure\n            show \"failed\"\n    try: done")
+_FASYNC = ("Mohio has no async keyword. A statement waits for its own result, and a "
+                  "long-running job is declared with `mioschedule <name> ... mioschedule: done`.")
+# THE FOUR WITH NO MOHIO EQUIVALENT. Reach is declared where it is enforced, never as a
+# keyword in front of a declaration.
+_FMODIFIER = ("Mohio has no access modifiers. Reach is declared where it is enforced: "
+              "`require role \"admin\"` on a request, and `private:` / `public:` on a "
+              "journey path.")
+# PRIVATE AND PUBLIC ARE OURS, and the general message above is half-wrong for them. They
+# declare journey-path visibility (mohio.lark:1297-1298), so somebody who wrote `private`
+# has very nearly written a real Mohio line and must be told which one rather than told
+# the language has no such thing. They stay an ERROR because the bare assignment shape is
+# ambiguous with vocabulary the language owns -- that is the reason, not the absence of a
+# feature.
+_FVISIBILITY = ("`private:` and `public:` declare JOURNEY-PATH VISIBILITY, and they are "
+                "not variable-assignment targets. The colon is what makes them a "
+                "declaration:\n"
+                "    journey App\n        private: /docs\n        public: /notice\n"
+                "        listen for\n            request for sh.Q at /home\n"
+                "                give back [200] \"ok\"\n            request: done\n"
+                "        listen: done\n    journey: done\n"
+                "For who may reach a request, that is `require role \"admin\"`.")
+
+# THE REFUSAL TIER. Not modifiers only any more: `except` joins them because it is a pure
+# foreign habit with no dotted form and no leading use anywhere in the grammar, so the
+# coming two-word split cannot make a bare `except <value>` mean anything. `do` and `for`
+# are deliberately NOT here -- both have dotted forms that a split would spell as two
+# words, and a hard error on an unsettled question becomes a blocker.
+FOREIGN_REFUSED = {}
+FOREIGN_KEYWORDS = {}
+for _w in ("print", "println", "printf", "sprintf", "echo", "puts", "write", "writeln",
+           "console", "alert"):
+    FOREIGN_KEYWORDS[_w] = _FSAY
+# `until` IS OURS: UNTIL, mohio.lark:443, used by `| UNTIL datetime_expr`
+# (mohio.lark:1592). Removed for the same reason `raise` was.
+for _w in ("for", "foreach", "do"):
+    FOREIGN_KEYWORDS[_w] = _FLOOP
+for _w in ("def", "func", "function", "fn", "proc", "sub", "lambda"):
+    FOREIGN_KEYWORDS[_w] = _FTASK
+for _w in ("return", "yield"):
+    FOREIGN_KEYWORDS[_w] = _FGIVE
+for _w in ("class", "struct", "interface", "enum", "trait", "namespace", "extends",
+           "implements", "this", "self", "super"):
+    FOREIGN_KEYWORDS[_w] = _FSHAPE
+for _w in ("var", "let", "const", "float", "double", "long", "short", "byte", "auto"):
+    FOREIGN_KEYWORDS[_w] = _FDECL
+# `import` IS OURS in the reserved sense: IMPORT, mohio.lark:382. The
+# terminal is defined and NO rule references it, so it is reserved and
+# structurally unreachable rather than live -- but it is still our word,
+# not a foreign one, and it comes off for that reason. `using` is ours too
+# (USING, mohio.lark:307, used by using_chain at 2632 and validate_stmt at
+# 1134).
+for _w in ("package",):
+    FOREIGN_KEYWORDS[_w] = _FIMPORT
+for _w in ("elif", "elseif", "switch"):
+    FOREIGN_KEYWORDS[_w] = _FCHECK
+# `raise` IS NOT HERE, and the gap is the point. It is a real Mohio statement
+# (`raise_stmt`, mohio.lark), so it never reaches the assignment seam and denying it
+# would have been a refusal aimed at a word the language already owns. The corpus scan
+# that decided this list did not catch it, because no corpus file happens to write one.
+# Every entry was then run: 70 of 71 fire, and this was the one that did not.
+for _w in ("finally", "throw", "ensure"):
+    FOREIGN_KEYWORDS[_w] = _FFAIL
+# `except` REFUSES rather than warns. It has no dotted form, and every use of it in the
+# grammar is preceded by something -- `mask.all except last 4` (mohio.lark:1062, 3469),
+# `broadcast to room x except y` (3007), `accept all except <list>` (4026) -- so a bare
+# leading `except` is not the two-word spelling of anything and never will be.
+FOREIGN_REFUSED["except"] = _FFAIL
+for _w in ("async", "await", "promise", "defer"):
+    FOREIGN_KEYWORDS[_w] = _FASYNC
+# THE MODIFIERS ARE THE ERROR TIER, in their own table so the severity split is visible
+# here rather than inferred at the call site. Ruled, not measured: these six are
+# reserved-adjacent, and two of them are already Mohio in another spelling -- `private:`
+# and `public:` are journey path declarations (mohio.lark:1297-1298) -- so a bare
+# `private "x"` is ambiguous with vocabulary the language already owns, which is a
+# different risk from a foreign habit and is why this group alone stays an error.
+for _w in ("protected", "static", "final", "abstract"):
+    FOREIGN_REFUSED[_w] = _FMODIFIER
+# NAMED AS A SET so the refusal can lead with a true sentence for these two.
+MOHIO_VISIBILITY = frozenset({"public", "private"})
+for _w in ("public", "private"):
+    FOREIGN_REFUSED[_w] = _FVISIBILITY
+FOREIGN_KEYWORDS["goto"] = ("Mohio has no goto. A named piece of work is a `task`, called with "
+                            "`call <name> ... call: done`.")
+FOREIGN_KEYWORDS["break"] = ("Mohio leaves a loop with `stop`:  loop ... stop ... loop: done")
+FOREIGN_KEYWORDS["continue"] = ("Mohio has no continue. Guard the body instead: "
+                                "`check x / when ... / check: done` inside the loop.")
+# `pass` IS OURS: _PASS, mohio.lark:4871, used by `when all pass`
+# (mohio.lark:3874) and by a secret/env source at 3951.
+for _w in ("exit", "die"):
+    FOREIGN_KEYWORDS[_w] = ("Mohio ends a request with `give back`:  give back [200] \"ok\". "
+                            "There is no statement that stops the whole program.")
+FOREIGN_KEYWORDS["upload"] = (
+    "`upload` is not a verb on its own. It names a SIGNED UPLOAD URL and is written "
+    "`sign upload url for <value> ... sign: done` (recognised, not yet wired). RECEIVING a file "
+    "is not built: an uploaded file cannot be accepted, stored, or read yet.")
+
 _DEAD_STORE_HINTS = {
     'print':   "Did you mean `show`? Mohio displays a value with `show`.",
     'echo':    "Did you mean `show`? Mohio displays a value with `show`.",
@@ -1856,7 +2270,32 @@ _DEAD_STORE_HINTS = {
     'var':     "Declare a value with `name value` -- there is no `var`.",
     'let':     "Declare a value with `name value` -- there is no `let`.",
     'return':  "Return a value from a task with `give back`.",
+    # THE FOUR THAT FELL THROUGH to "Declared but never read", measured 2026-09-15. Each sentence
+    # below names a form that was RUN before it was written here, because a message that teaches
+    # something nobody can type is the same failure it exists to fix.
+    #
+    # THREE OF THE FOUR ARE MOHIO'S OWN WORDS, which is why a foreign-redirect table never had
+    # them: that table was built from other languages' vocabulary. Telling somebody `times` is a
+    # foreign habit would be wrong -- it is the word in `repeat 3 times`.
+    'import':  ("`import` is reserved and nothing reads it. To bring another file in, Mohio uses "
+                "`include`:\n    include \"helpers.mho\""),
+    'select':  ("`select` is SQL's word. Mohio asks a datasource for what it wants:\n"
+                "    find admins in db.members\n        where role is \"admin\"\n    find: done\n"
+                "(Mohio does have a `select`, but only client-side, inside a `validate` block.)"),
+    'times':   ("`times` belongs to a count, not to a name:\n"
+                "    repeat 3 times\n        show \"hi\"\n    repeat: done\n"
+                "To multiply, group the arithmetic: `total (price * quantity)`."),
+    'index':   ("Mohio has no `index`. An item is reached by its POSITION, counting from 1:\n"
+                "    show colors.position.2      // or colors.pos.2\n"
+                "    show colors.first           // and colors.last"),
 }
+
+# THE TWO PATHS SHARE ONE VOCABULARY. `_DEAD_STORE_HINTS` is A4's own table and covers fifteen
+# words; the redirects below it cover sixty. A word must not get a different answer depending on
+# whether the program happened to read it, so the smaller table is filled from the larger one and
+# its own wording wins wherever it already has an entry.
+for _fk, _fh in FOREIGN_KEYWORDS.items():
+    _DEAD_STORE_HINTS.setdefault(_fk, _fh)
 
 # Real Mohio verbs. A lowercase verb never reaches the dead-store check (it parses as a statement,
 # not an assignment); only a WRONG-CASE form (`Show`, `Check`) lands here as a bare assignment. So
@@ -2041,9 +2480,31 @@ def _check_dead_stores(tree, ctx, filename=""):
             ctx.error(f"`{name}` is not a Mohio word. Mohio keywords are lowercase.",
                       line, hint=f"Did you mean `{low}`?")
             continue
-        # tiers 2-4 are the assigned-but-never-read detector. A name that IS read anywhere is a
-        # legitimate variable (tier 4) -- no diagnostic. A foreign keyword (tier 2) or a plausible
-        # unused variable (tier 3) stays a WARNING; never escalate those.
+        # A4 TIER 2 -- A FOREIGN KEYWORD, WARNED WHETHER OR NOT IT IS READ.
+        #
+        # A4 put this inside the assigned-but-never-read detector, which meant the warning
+        # existed only while the program was too small to use the name it had accidentally
+        # created. Measured across 114 keywords a newcomer might lead a line with: 100 became
+        # variables with no error, 94 with not even a warning, and 96 produced a program that
+        # ran. `print "hi"` warned; `print "hi"` followed by `show print` said nothing at all,
+        # and the second one is what a person actually writes.
+        #
+        # THE SEVERITY IS A4'S AND STAYS A4'S. These words CAN be legitimate variable names, so
+        # refusing one breaks a program that was allowed to run and a warning does not. Narrow
+        # beats broad. What moved is only when the warning is allowed to speak.
+        # CONFINED TO THE CASE A4 COULD NOT REACH: the name IS read. When it is never read, the
+        # assigned-but-never-read warning below already fires and already carries a redirect,
+        # and that path is A4's and is left exactly as it was. Adding a second warning for the
+        # same line would be two diagnostics about one mistake.
+        if low in FOREIGN_KEYWORDS and name == low and name in reads:
+            warned.add(name)
+            ctx.warn(f"`{name}` is not a Mohio word. If you meant it as a variable name it will "
+                     f"work, but this line reads as an instruction and is not one.",
+                     line, hint=FOREIGN_KEYWORDS[low])
+            continue
+        # tiers 3-4 are the assigned-but-never-read detector. A name that IS read anywhere is a
+        # legitimate variable (tier 4) -- no diagnostic. A plausible unused variable (tier 3)
+        # stays a WARNING; never escalate those.
         if name in reads:
             continue
         if suppress_warnings:
@@ -2075,6 +2536,7 @@ def _check_dead_stores(tree, ctx, filename=""):
         ctx.warn(f"`{name}` is set but never used.", line, hint=hint)
 
 
+# the script-path bound check runs with the other whole-program scans
 def validate_and_raise(tree, source="", filename=""):
     ctx = validate(tree, source=source, filename=filename)
     for w in ctx.warnings:

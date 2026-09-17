@@ -18,9 +18,8 @@ You write intent. The compiler enforces the rules.
 
 Before you install, make sure you have:
 
-- **Python 3.10 or higher** (3.12 or newer recommended). Check with `python --version` (or `python3 --version` on Mac and Linux). If you don't have it, get it from python.org.
-- **pip**, which comes with Python.
-- **The Mohio pioneer package** (the zip linked below).
+- **Python 3.12 or higher.** Check with `python --version` (or `python3 --version` on Mac and Linux). If you don't have it, get it from python.org.
+- **pip** and **git**, which come with most Python installs; git separately if you don't have it (git-scm.com, or `brew install git` on Mac).
 - **A text editor.** VS Code is a good choice; any editor works.
 
 Optional, only when you want them:
@@ -42,33 +41,36 @@ This guide writes `python`; if that doesn't work, try `python3`.
 
 ## 1 — Installation
 
-**Requirements:** Python 3.12 or higher.
+**Requirements:** Python 3.12 or higher, git.
 
-Download the Mohio pioneer package (a zip):
-
-  https://drive.google.com/file/d/1mZabIOAuRL8wSlRCBIHlkao9fkBz57MZ/view?usp=sharing
-
-Unzip it somewhere you can find it (for example `C:\mohio`). Then, in the unzipped folder, install the dependencies:
+Clone the repository and install it:
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/countart/mohio
+cd mohio
+pip install -e .
 ```
+
+`pip install -e .` installs Mohio's dependencies AND the `mio` command itself, so after this
+`mio` works directly, from any folder, no `python` prefix needed.
 
 Verify it works:
 
 ```bash
-python mio.py version
+mio version
 ```
 
 Warm up the parse cache (faster runs after this):
 
 ```bash
-python mio.py warmup
+mio warmup
 ```
 
-> **How to type commands:** the pioneer package runs with `python mio.py`. This guide writes `mio` for brevity, so wherever you see `mio ...`, type `python mio.py ...` instead. For example, `mio run hello.mho` means `python mio.py run hello.mho`.
-
 *Every Mohio program is a `.mho` file.*
+
+> **Looking for Mohio Home** (the installer/console that puts Mohio on a machine without a
+> clone)? It's a separate, soft-release product, see the root `README.md`. Everything in this
+> guide runs from the clone above, on Mac, Windows, or Linux, with nothing else installed.
 
 ---
 
@@ -135,7 +137,7 @@ listen: done
 Run it:
 
 ```bash
-python mio.py serve server.mho
+mio serve server.mho
 ```
 
 Open `http://localhost:8080` — you'll get:
@@ -178,9 +180,19 @@ This is where Mohio is different from every other language.
 Create `fraud.mho`:
 
 ```mohio
+shape Txn
+    amount as decimal
+    device_id as text
+shape: done
+
+create txn as sh.Txn
+    amount 4200
+    device_id "device-9981"
+create: done
+
 ai.decide isFraudulent returns boolean
     confidence above 0.85
-    weigh transaction.amount, transaction.device_id
+    weigh txn.amount, txn.device_id
     ai.audit to fraud_audit_log
     not confident
         give back [202] "Flagged for manual review"
@@ -201,13 +213,13 @@ check: done
 Run it without a real AI key (mock mode, free and instant):
 
 ```bash
-python mio.py run fraud.mho --verbose
+mio run fraud.mho --verbose
 ```
 
 Run it with real AI (needs a provider key):
 
 ```bash
-python mio.py run fraud.mho --ai --verbose
+mio run fraud.mho --ai --verbose
 ```
 
 `--ai` uses your Anthropic key (`ANTHROPIC_API_KEY`) by default. For OpenAI or Gemini, see "What you need."
@@ -263,7 +275,7 @@ listen: done
 Check it:
 
 ```bash
-python mio.py check payments.mho --security
+mio check payments.mho --security
 ```
 
 **What just happened, and what to expect right now:**
@@ -317,11 +329,11 @@ Mohio never lets you hardcode a connection string (that would bake a credential 
 Windows (PowerShell):
 ```
 $env:DATABASE_URL="pioneer.db"
-python mio.py run notes.mho
+mio run notes.mho
 ```
 Mac or Linux:
 ```
-DATABASE_URL=pioneer.db python mio.py run notes.mho
+DATABASE_URL=pioneer.db mio run notes.mho
 ```
 
 That creates `pioneer.db` and stores your note. For Postgres later, change `sqlite` to `postgres` and point `DATABASE_URL` at your Postgres server; the driver is already installed with the package.

@@ -1,0 +1,27 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Turn a numeric score into a letter grade.
+// Shows a reusable task with typed input, check/when branching, and calling it.
+// Run it:  mio run cookbook/letter-grade.mho
+
+task grade
+    take score as int
+    returns text
+    check score
+        when score is more than 89
+            give back "A"
+        when score is more than 79
+            give back "B"
+        when score is more than 69
+            give back "C"
+        otherwise
+            give back "F"
+    check: done
+task: done
+
+call grade with 92 as top
+call grade with 74 as mid
+call grade with 55 as low
+
+show "92 scores a {{ top }}"
+show "74 scores a {{ mid }}"
+show "55 scores a {{ low }}"

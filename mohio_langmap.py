@@ -127,7 +127,7 @@ class LangmapLoader:
             raise FileNotFoundError(f"Language pack not found: {self.path}")
 
         in_jobs = False
-        for line_num, line in enumerate(self.path.read_text(encoding='utf-8').splitlines(), 1):
+        for line_num, line in enumerate(self.path.read_text(encoding='utf-8-sig').splitlines(), 1):
             line = line.strip()
             if not line or line.startswith('//') or line.startswith('#'):
                 continue
@@ -569,7 +569,7 @@ def translate_file(input_path: Path, output_path: Path,
     Translates a canonical English .mho file to another language.
     Creates a new file — does not modify the original.
     """
-    source = input_path.read_text(encoding='utf-8')
+    source = input_path.read_text(encoding='utf-8-sig')
     maps_dir = maps_dir or input_path.parent / 'maps'
     
     to_lower = to_lang.lower()

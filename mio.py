@@ -6,6 +6,7 @@ mio -- Mohio Language CLI
 Version: see mohio_version.VERSION | Language: v3.8 | August 2026 | Particular LLC
 
 Usage:
+    mio new <name>
     mio run <file.mho> [options]
     mio check <file.mho>
     mio version
@@ -75,7 +76,7 @@ def _load_grammar():
             f"Make sure mohio_data/mohio.lark exists alongside the mohio_data package.",
             exit_code=3,
         )
-    raw = GRAMMAR_FILE.read_text(encoding="utf-8")
+    raw = GRAMMAR_FILE.read_text(encoding="utf-8-sig")
     return "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
 
 
@@ -561,6 +562,413 @@ def _print_parse_error(e, source="", filename=""):
         _langmap_missing_note()
 
 
+def _code_part(raw):
+    """The part of a line the compiler reads: everything before a `//` comment.
+
+    Quote-aware, because a `//` inside a string is text, not a comment, and treating it as one
+    would make `show "http://x"` look like an unterminated string.
+    """
+    out, in_str, i = [], False, 0
+    while i < len(raw):
+        c = raw[i]
+        if c == '\\' and in_str and i + 1 < len(raw):
+            out.append(raw[i:i + 2])
+            i += 2
+            continue
+        if c == '"':
+            in_str = not in_str
+        elif not in_str and c == '/' and raw[i:i + 2] == '//':
+            break
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _find_unterminated_string(source):
+    """Find a line that opens a double quote and never closes it.
+
+    THE MOST COMMON BEGINNER TYPO, and it produced the worst message in the compiler: an
+    unclosed quote swallows the rest of the file, the parser dies at end-of-input, and the
+    report was `Unexpected end-of-input. Expected one of:` with an EMPTY list, no line and no
+    caret. Nothing in it mentioned a quote. Eight different mistakes shared that one message.
+
+    A Mohio string does not span lines, so an odd number of unescaped quotes in the code part
+    of a line is the open one. Returns (line_no, column_of_the_opening_quote).
+
+    Runs only on an already-failing parse, so a heuristic is safe here: the worst case is a
+    hint that does not apply, never a false error on a working file.
+    """
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        code = _code_part(raw)
+        quotes = [n for n, c in enumerate(code)
+                  if c == '"' and (n == 0 or code[n - 1] != '\\')]
+        if len(quotes) % 2 == 1:
+            return (i + 1, quotes[-1] + 1)
+    return (None, None)
+
+
+# Words that used to be Mohio and are not any more. A pioneer meets these by copying an old
+# blog post or an out-of-date answer, and until now they died on a character further down the
+# line ("No terminal matches '/'") that had nothing to do with the retired word they typed.
+# Each entry says WHAT they wrote, and WHAT to write instead, in the same shape as the message
+# `set` already gets.
+_RETIRED_FORMS = (
+    (r'^route\b', 'route',
+     "A web address is declared with `listen for`, and the address rides on the request:\n"
+     "    listen for\n"
+     "        request for sh.Thing at /home\n"
+     "            ...\n"
+     "        request: done\n"
+     "    listen: done"),
+    (r'^make\b', 'make',
+     "Use `create`.  create list colors  ...  create: done"),
+    (r'^consider\b', 'consider',
+     "Use `check`.  check score / when ... / otherwise ... / check: done"),
+    (r'^delete\b', 'delete',
+     "Use `remove`.  remove it  /  remove from db.items ... remove: done"),
+    (r'^catch\b', 'catch',
+     "Use `on.failure` for the failure branch, and `on.success` for the other one."),
+    (r'^(if|else)\b', None,
+     "Mohio decides with `check` / `when` / `otherwise`, or with `unless`:\n"
+     "    check score\n"
+     "        when score is more than 100\n"
+     "            show \"big\"\n"
+     "        otherwise\n"
+     "            show \"small\"\n"
+     "    check: done"),
+    (r'\bas\.string\b', 'as.string',
+     "Use `as.text`. Mohio has one name for a string type and it is `text`."),
+    (r'^request\s+outbound\b', 'request outbound',
+     "Use `miohttp.get` / `miohttp.post` for an outbound call, or `mioconnect` for a "
+     "declared integration."),
+    # `page` IS THE EXACT CASE THIS TABLE WAS BUILT FOR, and it was missing from it. The word is
+    # kept RESERVED so old code gets told what replaced it; instead `page /home` died on
+    # "No terminal matches '/'", which names a slash and explains nothing. Measured 2026-09-15.
+    # The transformer also refuses the word, which catches `page 5` -- but that runs too late for
+    # the routing form, because `page /home` never parses.
+    # ONLY THE ROUTING SHAPE. `page` is also a perfectly ordinary column name -- a save
+    # block writing `page "bump"` is a real program, and matching the bare word would
+    # hand that program a retirement notice about something it never wrote. The retired
+    # form always put a PATH after the word, and that is what is matched.
+    (r'^page\s+/', 'page',
+     "The page block was removed. A file serves itself now -- whatever it renders or gives "
+     "back IS the response, with no routing code:\n"
+     "    // index.mho, served at /\n"
+     "    give back [200] \"<h1>Hello</h1>\"\n"
+     "To serve several addresses from one file, name them:\n"
+     "    listen for\n"
+     "        request for sh.Home at /about\n"
+     "            render\n                <p>About</p>\n"
+     "            render: done\n"
+     "        request: done\n"
+     "    listen: done\n"
+     "Page CLASSIFICATION (`private:` / `hidden:`) is a different thing and is unchanged."),
+)
+
+
+def _find_retired_form(source):
+    """Find a retired keyword at the head of a statement. Returns (word, line_no, guidance)."""
+    import re as _r
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        line = _code_part(raw).strip()
+        if not line:
+            continue
+        for pattern, word, guidance in _RETIRED_FORMS:
+            m = _r.search(pattern, line)
+            if m:
+                return (word or m.group(1), i + 1, guidance)
+    return (None, None, None)
+
+
+# Words the grammar reserves and no rule ever accepts. They are defined as terminals, which is
+# enough to stop them being read as an ordinary name, and nothing consumes them, so writing one
+# is a parse error on some unrelated character further down. `do.once` is NOT here: it is wired,
+# as an idempotency key on a scheduled run.
+_RESERVED_UNBUILT = {
+    'do.every':   "a repeating schedule",
+    'do.after':   "a delayed action",
+    'do.unless':  "a guarded action",
+    'do.encrypt': "an encryption step",
+}
+
+
+# ── case-transform near misses ─────────────────────────────────────────────────────────
+#
+# Mohio's case vocabulary is richer than the one most newcomers arrive with, and that is exactly
+# why they miss it: they type the word their old language used and land on nothing. MEASURED --
+# `as.upper`, `as.lower`, `as.capitalize`, `as.caps`, `as.upcase` and `as.downcase` all dead-end
+# with a bare parse error naming a character.
+#
+# WHICH FORMS THIS OFFERS IS MEASURED, NOT READ OFF THE GRAMMAR. Six are defined; four run.
+# `as.title` and `as.sentence` parse and have no executor, so they are named as accepted-and-not-
+# working rather than offered as answers.
+_CASE_NEAR_MISS = {
+    'as.upper': 'as.uppercase', 'as.upcase': 'as.uppercase', 'as.caps': 'as.uppercase',
+    'as.lower': 'as.lowercase', 'as.downcase': 'as.lowercase',
+    'as.capitalize': 'as.title', 'as.titlecase': 'as.title', 'as.ucfirst': 'as.title',
+    's.upper': 'as.uppercase', 's.lower': 'as.lowercase',
+}
+
+# The two that parse and have no executor. Measured, not read off the grammar.
+_CASE_UNWIRED = frozenset({'as.title', 'as.sentence'})
+
+_CASE_GUIDANCE = (
+    "Mohio changes case with a dotted form, and these four run today:\n"
+    "    show name as.uppercase        // or the short form  as.uc\n"
+    "    show name as.lowercase        // or the short form  as.lc\n"
+    "`as.title` and `as.sentence` are also written down, and they PARSE AND DO NOTHING -- there "
+    "is no executor for them yet, so a program using one checks clean and stops at runtime.")
+
+
+def _find_case_near_miss(source):
+    """A case transform spelled the way another language spells it. Returns (written, meant)."""
+    import re as _re
+    text = _mask_noncode(source)
+    for wrong, right in _CASE_NEAR_MISS.items():
+        if _re.search(r'(?<![A-Za-z0-9_.])%s(?![A-Za-z0-9_])' % _re.escape(wrong), text):
+            return (wrong, right)
+    return (None, None)
+
+
+def _find_unspellable_construct(source):
+    """A construct that IS built, written in a form nothing accepts. Returns (word, line, how).
+
+    THE STANDING PRINCIPLE THIS SERVES: the error is the only teacher. A construct whose error
+    does not teach its spelling is invisible, however completely it is implemented, because the
+    only way to find the working form is to already know it. `mioschedule` was exactly that: a
+    full declaration with timing, timezone, windows and idempotency, reachable only by someone
+    who had read the grammar.
+
+    Detected at SOURCE level for the same reason the retired-word scan is: by the time the
+    parser fails there is no tree to ask, and the failure has already moved to another line.
+    """
+    import re as _r
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        line = _code_part(raw).strip()
+        if not line:
+            continue
+        # `mioschedule` leading a line, not the dotted runtime forms (mioschedule.every / .at /
+        # .in / .cancel), which are a different construct and parse on their own.
+        m = _r.match(r'^mioschedule(?!\s*[.:])(?:\s+([A-Za-z_]\w*))?\s*$', line)
+        if m:
+            named = m.group(1)
+            return ('mioschedule', i + 1,
+                    # EVERY FORM BELOW WAS RUN BEFORE IT WAS WRITTEN HERE. The first draft of
+                    # this message taught `at "02:00"` and that does not parse: a time is
+                    # written bare, not quoted. A refusal that teaches a form nobody can run is
+                    # the same failure it exists to fix, one level up.
+                    "A schedule is a NAMED declaration with a body and its own closer:\n"
+                    "    mioschedule nightly_cleanup\n"
+                    "        at 09:00\n"
+                    "        run cleanup\n"
+                    "    mioschedule: done\n"
+                    "The body says WHEN and `run <task>` says WHAT. These run today:\n"
+                    "    at 09:00   /   every 5 minutes   /   in 30 minutes   /   "
+                    "on december 31 at 11:59pm\n"
+                    "A time is written bare and never quoted: `at 09:00`, not `at \"09:00\"`.\n"
+                    "`timezone \"EST\"` and `timeout after 10 minutes` are also body lines.\n"
+                    "The WEEKDAY forms (`every monday at 9am`, `every day at 09:00`, "
+                    "`on monday`) parse and are\n"
+                    "NOT WIRED YET -- they are accepted and do nothing, so use one of the "
+                    "forms above until they are."
+                    + ("" if named else
+                       "\nA schedule needs a name of its own -- that is how it is run later "
+                       "(`run mioschedule.<name> now`)."))
+    return (None, None, None)
+
+
+def _find_reserved_unbuilt(source):
+    """Find a word the grammar reserves but nothing implements. Returns (word, line, what)."""
+    import re as _r
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        line = _code_part(raw).strip()
+        if not line:
+            continue
+        m = _r.match(r'^([a-z]+\.[a-z_]+)', line)
+        if m and m.group(1) in _RESERVED_UNBUILT:
+            return (m.group(1), i + 1, _RESERVED_UNBUILT[m.group(1)])
+    return (None, None, None)
+
+
+def _find_hash_comment(source):
+    """Find a line commented with `#`, which is not a comment in Mohio.
+
+    It failed as `No terminal matches '#'`, which never once said what a comment looks like.
+    """
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        if raw.strip().startswith("#"):
+            return i + 1
+    return None
+
+
+# Block openers and everyday verbs, for the capitalised-opener check below.
+_LOWERCASE_WORDS = (
+    'check', 'show', 'save', 'find', 'retrieve', 'grab', 'repeat', 'task', 'shape', 'listen',
+    'journey', 'try', 'loop', 'while', 'hold', 'lock', 'call', 'remove', 'create', 'add',
+    'connect', 'render', 'give', 'replace', 'rename', 'forget', 'clear', 'release', 'unless',
+    'when', 'otherwise', 'modify', 'update', 'upsert', 'saga', 'flow',
+)
+
+
+def _find_capitalised_opener(source):
+    """Find a Mohio word written with a capital letter. Returns (word, line_no).
+
+    `Check x` breaks the parse before any validator runs, and the caret lands on a `(` two
+    lines further down, inside a `when` that is perfectly correct. The person is told about a
+    bracket when what they typed wrong was a capital C. `Show` already had a named message for
+    exactly this; the block openers did not.
+    """
+    import re as _r
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        line = _code_part(raw).strip()
+        m = _r.match(r'^([A-Z][a-z.]+)\b', line)
+        if m and m.group(1).lower() in _LOWERCASE_WORDS:
+            return (m.group(1), i + 1)
+    return (None, None)
+
+
+def _echo_line_if_new(source, want_line, already_shown):
+    """Show the offending line, unless the report already showed that exact line.
+
+    The header prints the line the PARSER died on, which is often not the line the mistake is
+    on. When an explanation names a DIFFERENT line, showing it is the whole point; when it
+    names the same one, printing it twice only makes the message look confused.
+    """
+    if want_line and want_line != already_shown:
+        snippet = _source_snippet(source, want_line)
+        if snippet is not None:
+            print(f"\n  {dim(str(want_line) + ' |')} {snippet}")
+
+
+# ── what the parser knew, said in words ─────────────────────────────────────────────────
+#
+# Every form taught below was RUN before it was written here. A message that teaches a form
+# nobody can run is the same failure it exists to fix, one level up, and this lane has already
+# made that mistake twice.
+_FOREIGN_PUNCTUATION = (
+    # (pattern, what the reader wrote, what Mohio does instead)
+    (r'\{\s*$|^\s*\}',
+     "a curly brace opening or closing a block",
+     "Mohio blocks are indentation and a named closer, never braces:\n"
+     "    check score\n        when score is more than 100\n            show \"big\"\n"
+     "    check: done\n"
+     "The only brace form in Mohio is the double brace, which shows a value inside text:\n"
+     "    show \"Hi {{ name }}\""),
+    (r'\$[A-Za-z_]\w*',
+     "a dollar sign in front of a name",
+     "A Mohio value is just its name:  count 5  /  show count\n"
+     "Request data arrives through a shape, never through a global:\n"
+     "    shape Signup\n        name as text required\n    shape: done\n"
+     "then read it as  request.name  inside the listener."),
+    (r';\s*$',
+     "a semicolon ending the line",
+     "Mohio lines end at the end of the line. There is no semicolon."),
+    (r'[A-Za-z_]\w*\s*\[\s*\d+\s*\]',
+     "square brackets to reach an item by number",
+     "Mohio counts from 1 and reaches an item by position:\n"
+     "    show colors.position.2      // or colors.pos.2\n"
+     "    show colors.first           // and colors.last\n"
+     "Square brackets are for field tags, as in  ssn as text [pii]."),
+    (r'[A-Za-z_]\w*\.[A-Za-z_]\w*\s*\(\s*\)',
+     "a method call with parentheses",
+     "Mohio calls a task by name, in a block:\n"
+     "    call greet\n        name \"Ada\"\n    call: done\n"
+     "Parentheses group arithmetic and comparisons, nothing else."),
+    (r'\[[^\]]*\bfor\b[^\]]*\bin\b[^\]]*\]',
+     "a list comprehension",
+     "Mohio builds a list by asking for what it wants:\n"
+     "    find cheap in items\n        where price is below 5\n    find: done\n"
+     "or by walking one:\n"
+     "    repeat each item in items\n        show item.name\n    repeat: done"),
+    (r'^\s*for\b.*\bin\b.*:\s*$',
+     "a for-loop header ending in a colon",
+     "Mohio walks a collection with `repeat each`, and counts with `repeat N times`:\n"
+     "    repeat each item in items\n        show item\n    repeat: done\n"
+     "    repeat 3 times\n        show \"hi\"\n    repeat: done"),
+    (r'^\s*with\b.*\bas\b.*:\s*$',
+     "a with-block opening a file",
+     "Mohio reads a file in one line, and names the result:\n"
+     "    miofile.read \"notes.txt\" as notes\n    show notes"),
+    (r'\bf"',
+     "an f-string",
+     "Mohio puts a value into text with double braces:\n"
+     "    name \"Bo\"\n    show \"Hi {{ name }}\""),
+    (r'=>',
+     "an arrow function",
+     "Mohio names its work:  task double\n        take n as int\n"
+     "        give back (n * 2)\n    task: done"),
+)
+
+
+def _humanise_allowed(allowed):
+    """Turn the parser's terminal set into the few categories a reader can act on.
+
+    NOT a dump. `allowed` holds hundreds of names like MIOHTTP_DELETE and AS_UC, and printing
+    them is the mistake the end-of-input message already refused to make: the compiler's insides
+    handed to somebody who did not write a compiler. What is useful is the SHAPE of what could
+    come next, so the set is asked a few yes/no questions instead of being listed.
+    """
+    if not allowed:
+        return []
+    names = {str(a) for a in allowed}
+    out = []
+    if names & {'STRING', 'NUMBER', 'SIGNED_NUMBER', 'TRUE', 'FALSE'}:
+        out.append("a value, such as a number or a piece of text in double quotes")
+    if names & {'NAME', 'DOTTED_NAME'}:
+        out.append("a name")
+    if names & {'DONE', 'CLOSER'}:
+        out.append("the block's closer, written `<verb>: done`")
+    if names & {'NEWLINE', '_NL'}:
+        out.append("the end of the line")
+    return out
+
+
+def _explain_unexpected(e, source, line, col):
+    """The teacher-less message, given something to teach.
+
+    Returns (what_was_written, guidance) or None. Reads the offending LINE first, because a
+    familiar habit is worth naming directly, and falls back to what the parser would have
+    accepted there.
+    """
+    import re as _re
+    # THE REPORTED LINE FIRST, THEN ITS NEIGHBOURS -- AND NOTHING FURTHER. A statement does not
+    # end at the line break, so looking only where the error points finds nothing when a wrapped
+    # line carries the habit. That is why this looks past the reported line at all.
+    #
+    # IT USED TO LOOK AT EVERY LINE IN THE FILE, and that made it lie. The guidance opens with
+    # "This line uses square brackets", so a `show colors[0]` on line 7 attached that sentence to
+    # a parse error on line 1 that has no bracket in it -- measured, and reproduced twice before
+    # this. For a reader whose only teacher is the error message, a confidently wrong hint is
+    # worse than no hint: it sends them to fix something that is not there while the real mistake
+    # stays on screen.
+    #
+    # A WINDOW, because the justification only ever reached as far as a wrapped statement. Two
+    # lines either side covers that and cannot reach across a file.
+    _NEAR = 2
+    snippet = _source_snippet(source, line) if line else None
+    _masked = _mask_noncode(source).split("\n")
+    if line:
+        _lo = max(0, line - 1 - _NEAR)
+        _near_lines = _masked[_lo:line + _NEAR]
+    else:
+        # No line to anchor to. Naming a habit from an arbitrary line would be the same false
+        # statement, so this falls through to the parser's own account of what it expected.
+        _near_lines = []
+    for candidate in ([snippet] if snippet else []) + _near_lines:
+        if not candidate or not candidate.strip():
+            continue
+        for pattern, wrote, guidance in _FOREIGN_PUNCTUATION:
+            if _re.search(pattern, candidate):
+                return (wrote, guidance)
+    cats = _humanise_allowed(getattr(e, 'allowed', None))
+    if cats:
+        if len(cats) == 1:
+            return (None, "At this point Mohio was expecting " + cats[0] + ".")
+        return (None, "At this point Mohio was expecting one of: "
+                + "; ".join(cats) + ".")
+    return None
+
+
 def _print_parse_error_body(e, source="", filename=""):
     header = bold(red("Syntax error")) + (f"  {dim(filename)}" if filename else "")
     print(f"\n{header}\n")
@@ -589,6 +997,112 @@ def _print_parse_error_body(e, source="", filename=""):
             print(f"    nothing is built behind it yet.")
         print(f"    If you meant a variable, pick a name that is not a service root.\n")
         return
+    # A quote that is never closed swallows the rest of the file and kills the parse at
+    # end-of-input, so it arrives here with no line, no caret, and an empty expected-list.
+    # It is the commonest typo there is, so it is recovered before anything else.
+    q_line, q_col = _find_unterminated_string(source)
+    if q_line:
+        snippet = _source_snippet(source, q_line)
+        print(f"  {red('x')} This text is opened with a quote that is never closed.")
+        if snippet is not None:
+            print(f"\n  {dim(str(q_line) + ' |')} {snippet}")
+            print(f"  {dim('  |')} {' ' * (q_col - 1)}{red('^')}")
+        print(f"\n    The quote marked above opens a piece of text, and nothing closes it, so "
+              f"everything")
+        print(f"    after it is read as part of that text and the file runs out before it ends.")
+        print(f"    Close it on the same line: text in Mohio never runs past the end of its "
+              f"line.\n")
+        return
+
+    # A word that used to be Mohio dies on a character further along the line that had nothing
+    # to do with it. Name the word the person actually typed, and what replaced it.
+    word, w_line, guidance = _find_retired_form(source)
+    if word:
+        print(f"  {red('x')} {bold(word)} is not a Mohio word any more.")
+        _echo_line_if_new(source, w_line, line)
+        print()
+        for g in guidance.splitlines():
+            print(f"    {g}")
+        print()
+        return
+
+    # A case transform spelled the way another language spells it. The vocabulary here is richer
+    # than the one most people arrive with, which is why it gets missed: the word they know is
+    # not the word, and what they got back was a character.
+    _wrong, _meant = _find_case_near_miss(source)
+    if _wrong:
+        print(f"  {red('x')} {bold(_wrong)} is not a Mohio word.")
+        # NEVER ANSWER `did you mean` WITH A FORM THAT DOES NOT RUN. `as.title` is the nearest
+        # spelling to `as.capitalize` and it has no executor, so suggesting it plainly would send
+        # the reader into a runtime error -- and the guidance below already says it does not work,
+        # which would make one message say two opposite things.
+        if _meant in _CASE_UNWIRED:
+            print(f"\n    The nearest Mohio word is {bold(_meant)}, and it is ACCEPTED BUT NOT "
+                  f"WIRED -- it would check clean and stop at runtime.")
+            print(f"    For something that works today, use {bold('as.uppercase')} or "
+                  f"{bold('as.lowercase')}.")
+        else:
+            print(f"\n    Did you mean {bold(_meant)}?")
+        for _g in _CASE_GUIDANCE.splitlines():
+            print(f"    {dim(_g)}")
+        print()
+        return
+
+    # A construct that IS built, written in a form nothing accepts. The error it produced named
+    # a character on a later line and never mentioned the construct, so a working feature was
+    # unreachable to anyone who had not read the grammar.
+    uns, u_line, how = _find_unspellable_construct(source)
+    if uns:
+        print(f"  {red('x')} {bold(uns)} is built, but this is not how it is written.")
+        _echo_line_if_new(source, u_line, line)
+        print()
+        for g in how.splitlines():
+            print(f"    {g}")
+        print()
+        return
+
+    # A word the grammar reserves and nothing implements. It fails on some unrelated character
+    # further down (`do.every` reports "No terminal matches 'd'" against its own closer two
+    # lines later), which reads as a mistake in the program. It is not one: there is no way to
+    # write this today, and saying so is different from saying it is wrong.
+    resv, r_line, what = _find_reserved_unbuilt(source)
+    if resv:
+        # The four words are `do.every`, `do.after`, `do.unless` and `do.encrypt`, each tracked
+        # in the living backlog. Named here in full because the message interpolates
+        # whichever one was written, so the words themselves appear nowhere else in this file.
+        print(f"  {red('x')} {bold(resv)} is declared but not yet built, so nothing can run it.")
+        _echo_line_if_new(source, r_line, line)
+        print(f"\n    The word is reserved in the grammar for {what} and no part of the "
+              f"compiler")
+        print(f"    consumes it yet, so this is not a mistake in your program: there is no "
+              f"spelling")
+        print(f"    of it that works in this build.")
+        print(f"    A repeating job can be DECLARED today with a `mioschedule` block, which "
+              f"registers")
+        print(f"    it for an external driver to run; it does not start a timer by itself.\n")
+        return
+
+    h_line = _find_hash_comment(source)
+    if h_line:
+        snippet = _source_snippet(source, h_line)
+        print(f"  {red('x')} A comment in Mohio starts with {bold('//')}, not with #.")
+        _echo_line_if_new(source, h_line, line)
+        print(f"\n    Write it as:  // {snippet.strip().lstrip('#').strip() if snippet else 'your note'}")
+        print(f"    For several lines at once, wrap them in  /* ... */\n")
+        return
+
+    cap, c_line = _find_capitalised_opener(source)
+    if cap:
+        print(f"  {red('x')} Mohio words are written in lower case, so {bold(cap)} is not read "
+              f"as {bold(cap.lower())}.")
+        _echo_line_if_new(source, c_line, line)
+        print(f"\n    Write {bold(cap.lower())} on line {c_line} and the rest of the block will "
+              f"be understood.")
+        print(f"    The error may have been reported further down: a capitalised word stops the "
+              f"line")
+        print(f"    being recognised, and the first thing that cannot be read comes later.\n")
+        return
+
     # An unclosed block dies at end-of-input with no line and no fix. Recover both.
     if "end-of-input" in msg.lower() or "end of input" in msg.lower():
         kw, kw_line = _find_unclosed_block(source)
@@ -600,11 +1114,56 @@ def _print_parse_error_body(e, source="", filename=""):
             print(f"\n    Every verb block closes with its own closer.")
             print(f"    Add '{kw}: done' at the same indent as the '{kw}' on line {kw_line}.\n")
             return
+
+    # THE EMPTY MESSAGE, AT ITS ROOT. Everything above recovers a SPECIFIC end-of-input cause.
+    # What was left when none of them matched was the worst message the compiler produced:
+    #
+    #     Unexpected end-of-input. Expected one of:
+    #
+    # and nothing after the colon. The parser's own text runs to about fifty lines, with the
+    # word "Expected" on the first and the expected tokens on all the rest, and the line above
+    # keeps only the first. So the list was not missing, it was cut off, and the reader was
+    # shown the promise of an explanation with the explanation removed.
+    #
+    # The list itself is not the fix. It is fifty entries of CONCAT_OP and MASK_ALL, which
+    # names the compiler's insides to somebody who did not write a compiler. What is useful is
+    # the one thing the parser does know: the file ended in the middle of something. So say
+    # that, and point at the last line there was, which is where the reader has to look.
+    if "end-of-input" in msg.lower() or "end of input" in msg.lower():
+        code_lines = [(n, raw) for n, raw in enumerate(_mask_noncode(source).split("\n"), 1)
+                      if raw.strip()]
+        print(f"  {red('x')} The file ended while this was still unfinished.")
+        if code_lines:
+            last_no = code_lines[-1][0]
+            snippet = _source_snippet(source, last_no)
+            if snippet is not None:
+                print(f"\n  {dim(str(last_no) + ' |')} {snippet}")
+            print(f"\n    The compiler read to the end of the file still waiting for the rest "
+                  f"of something.")
+            print(f"    Whatever is unfinished is on or above line {last_no}: a statement that "
+                  f"stops early,")
+            print(f"    a block with no closer, or a piece of text with no closing quote.")
+        print()
+        return
+
     print(f"  {msg}\n")
     hint = _beginner_parse_hint(e, source, line)
     if hint:
         for hint_line in hint.splitlines():
             print(f"    {dim(hint_line)}")
+        print()
+        return
+    # THE MESSAGE THAT TAUGHT NOTHING, GIVEN SOMETHING TO TEACH. `No terminal matches 'X'` was
+    # 73 of 90 ordinary newcomer lines: it names a character and stops. The parser knew the
+    # terminal set at that point the whole time, and the line itself usually shows which habit
+    # the reader brought with them.
+    _explained = _explain_unexpected(e, source, line, col)
+    if _explained:
+        _wrote, _guidance = _explained
+        if _wrote:
+            print(f"    {dim('This line uses ' + _wrote + '.')}")
+        for _g in _guidance.splitlines():
+            print(f"    {dim(_g)}")
         print()
 
 
@@ -661,7 +1220,28 @@ def _print_runtime_error(e, filename="", source="", line=0):
     snippet = _source_snippet(source, line) if (source and line) else None
     if snippet:
         print(f"  {dim(str(line) + ' |')} {snippet}")
-    print(f"  {str(e)}\n")
+    print(f"  {str(e)}")
+    # THE HINT WAS BEING THROWN AWAY HERE. Every runtime refusal carries three things by
+    # design -- the project's own standard a few lines below `_Raise` says so: WHERE it is,
+    # WHAT it is, and HOW to fix it. This printed only the first two. `str(e)` on a `_Raise`
+    # is `error_name: message`, so the HOW never reached the person running the program, and
+    # `format_runtime_error` had been carefully assembling a hint that nothing displayed.
+    #
+    # ONE PLACE, RATHER THAN REWORDING EVERY REFUSAL. The alternative was to fold each
+    # refusal's guidance into its message, which would have fixed the ones anybody thought to
+    # look at and left the rest exactly as they are: the raw-sql refusals were merely where
+    # this was noticed, and the same silence applied to every `_Raise` in the compiler,
+    # including the whole `_RUNTIME_HINT_TABLE` of per-category advice which no CLI user has
+    # ever seen. Printing it here reaches all of them and keeps the structured split intact,
+    # which the HTTP response payload already relies on.
+    hint = getattr(e, 'hint', '') or ''
+    if not hint:
+        from mohio_interpreter import _RUNTIME_HINT_TABLE
+        hint = _RUNTIME_HINT_TABLE.get(getattr(e, 'error_name', None) or '', '')
+    if hint:
+        for hint_line in str(hint).splitlines():
+            print(f"    {dim(hint_line)}")
+    print()
 
 
 def _die(message, exit_code=1):
@@ -681,7 +1261,7 @@ def _read_source(path, exit_code=2):
     if p.is_dir():
         _die(f"Expected a .mho file but that is a directory: {p}", exit_code=exit_code)
     try:
-        return p.read_text(encoding="utf-8")
+        return p.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
         _die(f"Cannot read {p}: it is not valid UTF-8 text (is it a binary file?). "
              f"Mohio source must be UTF-8.", exit_code=exit_code)
@@ -763,11 +1343,27 @@ def _mask_noncode(src):
 # -- Result formatter -----------------------------------------------------------
 
 def _print_result(result, verbose=False):
+    # THE WRAPPER IS NOT THE VALUE. Every runtime value is a MohioValue, and formatting one with
+    # `%s` prints its repr: `print "hi"` reported `Result MohioValue('hi', 'string')`, showing a
+    # pioneer the interpreter's own bookkeeping where their value belonged. Unwrapped here
+    # because this is the display boundary; the double-wrapping that caused the other routes is
+    # fixed at construction, and this is the remaining one where a bare wrapper is handed
+    # straight to a format string.
+    if type(result).__name__ == "MohioValue":
+        try:
+            result = result.to_python()
+        except Exception:                                       # noqa: BLE001
+            result = result.value
     if result is None:
         if verbose:
             print(dim("  (no response -- program completed without give back)"))
         return
-    if isinstance(result, dict):
+    # A RESPONSE ENVELOPE, NOT MERELY A DICT. Unwrapping the value above means a saved ROW
+    # now arrives here as a plain dict too, and printing one through the response branch
+    # showed `Response` with an empty status and an empty body -- a row is not an
+    # envelope. The envelope is the thing that carries a status or a body, so that is what
+    # is tested rather than the container type.
+    if isinstance(result, dict) and ("status" in result or "body" in result):
         status = result.get("status", "")
         body   = result.get("body", "")
         if isinstance(status, int):
@@ -776,6 +1372,12 @@ def _print_result(result, verbose=False):
         else:
             status_str = str(status)
         print(f"\n  {bold('Response')}  {status_str}  {body}")
+        # The HOW, when the envelope carries one. Printed under the response rather than folded
+        # into the body, so the body stays exactly the string several tests assert on.
+        _hint = result.get("hint") or ""
+        if _hint:
+            for _hint_line in str(_hint).splitlines():
+                print(f"    {dim(_hint_line)}")
     else:
         print(f"\n  {bold('Result')}  {result}")
     print()
@@ -784,23 +1386,34 @@ def _print_result(result, verbose=False):
 # -- Shared parse + validate step ----------------------------------------------
 
 def _parse_and_validate(source, filename, verbose=False):
+    """Parse source and run compile-time validation.
+
+    Returns (tree, ctx) or exits on hard failure. ctx.errors is populated if validation
+    fails; ctx.warnings are always printed.
+
+    This text used to sit further down, below the first executable lines, where Python
+    reads it as a statement that evaluates a string and discards it rather than as the
+    function's documentation. It was moved up so `help(_parse_and_validate)` shows it.
+    """
     # Per-file state. The missing-pack hint is set during THIS compile and must not survive it:
     # a stale hint would attach "that pack is NOT INSTALLED" to an unrelated error in a later
     # file, which is a confident wrong answer -- the worst kind of diagnostic.
     globals().pop('_LANGMAP_MISSING_HINT', None)
 
-    # A single leading UTF-8 BOM (U+FEFF) is file metadata, not code. Windows tools add it
-    # by default (PowerShell `Out-File -Encoding utf8`, Notepad, some editors), so a newcomer
-    # would otherwise get a line 1 col 1 non-ASCII error for an invisible character they never
-    # typed. Strip exactly one leading BOM; non-ASCII anywhere else still fails loud below.
-    if source and source[0] == '\ufeff':
-        source = source[1:]
-    """
-    Parse source and run compile-time validation.
-    Returns (tree, ctx) or exits on hard failure.
-    ctx.errors is populated if validation fails.
-    ctx.warnings always printed.
-    """
+    # THE LEADING BOM IS STRIPPED AT THE READ, not here. A single leading U+FEFF is file
+    # metadata, not code: Windows tools add one by default (PowerShell `Out-File -Encoding
+    # utf8`, Notepad, some editors), so a newcomer would otherwise get a line 1 col 1 non-ASCII
+    # error for an invisible character they never typed. Every read of a .mho file opens it as
+    # utf-8-sig, which removes exactly one leading BOM and is plain utf-8 otherwise.
+    #
+    # It used to be stripped HERE, and that was the bug. This function strips its own local
+    # copy, so the caller kept the marked string and handed it to the snippet printer, which
+    # then had to encode a U+FEFF onto a console that has no code for one.
+    #
+    # Stripping in BOTH places would be worse than either: two leading BOMs would both vanish,
+    # when the rule is exactly one. The second is a character the author actually has, and it
+    # still fails loud below, which `tests/test_bom_strip.py` requires and caught when this
+    # briefly stripped twice.
     # -1a. ASCII enforcement -- Mohio source must be ASCII only in executable positions
     # Comments (//) and string literals are excluded -- those are for humans.
     # Non-ASCII in keywords, identifiers, operators: rejected with clear error.
@@ -1212,7 +1825,7 @@ def _resolve_includes(program, including_path, _seen=None, _depth=0, verbose=Fal
             if real in _seen:
                 continue  # already included once (duplicate or cycle) -- skip
             _seen.add(real)
-            sub_src = open(target, encoding='utf-8').read()
+            sub_src = open(target, encoding='utf-8-sig').read()
             # An included file was re-parsed on every boot even when a cache existed
             # for it, because this path never looked. On zork that left ~7s of the
             # warm start still being spent parsing the include, against ~0.4s for the
@@ -1272,7 +1885,7 @@ def _apply_journey(program, file_path, verbose=False):
         return program
     if os.path.realpath(journey_path) == os.path.realpath(os.path.abspath(file_path)):
         return program  # don't apply the journey to itself
-    j_src = open(journey_path, encoding='utf-8').read()
+    j_src = open(journey_path, encoding='utf-8-sig').read()
     j_tree, _j_ctx = _parse_and_validate(j_src, journey_path, verbose)
     j_prog = _t(j_tree, j_src)
     _resolve_includes(j_prog, journey_path, verbose=verbose)  # journey may include too
@@ -1568,9 +2181,18 @@ def _generate_applang_training_data(args):
     output = getattr(args, 'output', None) or 'applang_training_data.jsonl'
     min_hits = getattr(args, 'min_hits', 1)
 
-    # Handle postgres:// style URLs -- use sqlite for now
-    if db_path and db_path.startswith('postgres'):
-        _die("Postgres export not yet supported. Use sqlite DATABASE_URL.")
+    # THE EXPORT READS SQLITE AND ONLY SQLITE, and it has to say so for every other engine
+    # rather than one of them. A postgres url was named and refused; a mysql one fell past this
+    # to the file-exists check below and came back as `database not found at mysql://...`, which
+    # sends somebody looking for a missing file when the real answer is that this command cannot
+    # read their database at all. The learned-language store itself is SQLite-only, which is the
+    # reason underneath both and is tracked separately.
+    if db_path and '://' in db_path and not db_path.startswith('sqlite'):
+        _scheme = db_path.split('://', 1)[0]
+        _die(f"the applang export reads a SQLite database, and this is {_scheme}. "
+             f"Point --db at the SQLite file that holds applang_map. "
+             f"Exporting from {_scheme} is not built: the learned-language store is "
+             f"SQLite-only today.")
 
     if not os.path.exists(db_path) and db_path != ':memory:':
         _die(f"database not found at {db_path}")
@@ -1627,7 +2249,7 @@ def _generate_applang_training_data(args):
 
         # Write metadata
         meta_path = out_path.with_suffix('.meta.json')
-        with open(meta_path, 'w') as f:
+        with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump({
                 "total_entries": count,
                 "max_hit_count": max_hits,
@@ -1833,7 +2455,7 @@ def cmd_warmup(args=None):
 
     for target in serve_targets:
         try:
-            source = _Path(target).read_text(encoding='utf-8')
+            source = _Path(target).read_text(encoding='utf-8-sig')
             cached = _load_ast_cache(target, source)
             if cached and cached[0] is not None:
                 print(f"  [warmup] {target} -- AST cache valid.")
@@ -1971,7 +2593,7 @@ def _cmd_serve_directory(args, directory, verbose=False):
             # Read inside the try so an unreadable page (not UTF-8, vanished, etc.)
             # is reported per-file and skipped like a parse error -- one bad page must
             # not crash the whole directory server with a raw traceback (Unit B).
-            source = Path(filepath).read_text(encoding='utf-8')
+            source = Path(filepath).read_text(encoding='utf-8-sig')
             tree, ctx = _parse_and_validate(
                 source, filepath, verbose=False)
             if ctx.errors:
@@ -2665,7 +3287,7 @@ def cmd_walk(args):
     path = _Path(args.file)
     if not path.exists():
         _die(f"File not found: {args.file}")
-    source = path.read_text(encoding='utf-8')
+    source = path.read_text(encoding='utf-8-sig')
 
     print(f"\n  {bold('mio walk')} {dim(f'v{VERSION}')} -- {bold(str(path))}")
 
@@ -2830,7 +3452,7 @@ def cmd_check(args):
             # that misses them, so anything unexpected is re-raised rather than
             # reported as the file's fault.
             try:
-                _parse_and_validate(Path(f).read_text(encoding="utf-8"), f,
+                _parse_and_validate(Path(f).read_text(encoding="utf-8-sig"), f,
                                     verbose=False)
             except SystemExit as e:
                 if e.code not in (0, None):
@@ -2880,7 +3502,7 @@ def cmd_check(args):
         import json as _json
         config_path = Path(".mioconfig")
         if config_path.exists():
-            cfg = _json.loads(config_path.read_text())
+            cfg = _json.loads(config_path.read_text(encoding="utf-8-sig"))
             if not security_mode:
                 security_mode = cfg.get("check", {}).get("security", False)
     except Exception:
@@ -3221,7 +3843,7 @@ exit 0
 """
 
     pre_push_path = hooks_dir / "pre-push"
-    pre_push_path.write_text(pre_push_content)
+    pre_push_path.write_text(pre_push_content, encoding="utf-8")
     pre_push_path.chmod(pre_push_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     print(f"\n  {green('v')}  Installed: {bold('.git/hooks/pre-push')}")
     print(f"  {dim('Runs mio check on all .mho files before git push')}")
@@ -3266,7 +3888,7 @@ echo ""
 exit 0
 """
         pre_commit_path = hooks_dir / "pre-commit"
-        pre_commit_path.write_text(pre_commit_content)
+        pre_commit_path.write_text(pre_commit_content, encoding="utf-8")
         pre_commit_path.chmod(pre_commit_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
         print(f"  {green('v')}  Installed: {bold('.git/hooks/pre-commit')}")
         print(f"  {dim('Runs mio check on staged .mho files before git commit')}")
@@ -3287,7 +3909,7 @@ exit 0
     }
     config_path = Path(".mioconfig")
     import json as _json
-    config_path.write_text(_json.dumps(mio_config, indent=2))
+    config_path.write_text(_json.dumps(mio_config, indent=2), encoding="utf-8")
     print(f"  {green('v')}  Config written: {bold('.mioconfig')}")
     print(f"  {dim('Edit to customize check behavior')}\n")
 
@@ -3406,7 +4028,7 @@ def cmd_harvest(args):
     keeps the job singular.
     """
     import json, re
-    text  = GRAMMAR_FILE.read_text(encoding="utf-8")
+    text  = GRAMMAR_FILE.read_text(encoding="utf-8-sig")
     lines = text.splitlines()
 
     cat_re  = re.compile(r'^//\s*─+\s*(.+?)\s*─+\s*$')         # // ── Category ──
@@ -3492,8 +4114,81 @@ def cmd_harvest(args):
           f"Editorial fields (alias/map_label/note) left blank for the langmap pass.")
 
 
+def cmd_writes(args):
+    """mio writes FILE.mho -- show what each write in a program MEANS, normalized.
+
+    Phase 1 of the write planner. Eight write node types call the destination `target` on two of
+    them and `source` on four, and insert / update / delete / upsert are normalized nowhere, so a
+    planner would be reading eight divergent shapes. WriteIntent is the first normal form, and
+    this is the command that makes it visible.
+
+    It plans nothing and changes nothing. A write that cannot be faithfully represented is
+    printed as NOT NORMALIZED with the reason, rather than approximated -- an IR that guesses is
+    worse than none, because it reads as knowledge.
+    """
+    filename = args.file
+    if not filename:
+        _die("Which file? Usage: mio writes <file.mho>", exit_code=3)
+    path = Path(filename)
+    if not path.exists():
+        _die(f"File not found: {filename}", exit_code=3)
+    source = _read_source(path)
+
+    tree, ctx = _parse_and_validate(source, filename, False)
+    if ctx.errors:
+        print(f"\n  {bold(red('Build failed'))}  {dim(filename)}\n")
+        for e in ctx.errors:
+            _print_compile_error(e, source, filename)
+        sys.exit(1)
+
+    from mohio_transformer_ast import transform as ast_transform
+    from mohio_write_intent import lower_program, classify_program, program_activates_sector
+    program = ast_transform(tree, source)
+
+    classifier = classify_program(program)
+    intents = lower_program(program, classifier)
+
+    print()
+    if not intents:
+        print(f"  {dim('No writes in ' + str(filename) + '.')}\n")
+        return
+    _tagged = sorted(classifier.fields_with('encrypted'))
+    print(f"  {bold('WriteIntent')}  {dim(str(filename))}   "
+          f"{len(intents)} write(s)")
+    if _tagged:
+        print(f"  {dim('regulated fields declared: ' + ', '.join(_tagged))}")
+    if program_activates_sector(program):
+        print(f"  {dim('a compliance sector is active: every data write is regulated')}")
+    print()
+    for w in intents:
+        head = f"  line {w.line:>4}  {bold(w.verb)}"
+        if not w.normalized:
+            print(f"{head}  {red('NOT NORMALIZED')}")
+            print(f"            {dim(w.not_normalized_reason)}")
+            print()
+            continue
+        print(f"{head}  {w.operation} -> {w.target.datasource}.{w.target.relation}")
+        print(f"            rows {w.row_source}"
+              + (f" (cardinality {w.cardinality})" if w.cardinality is not None else ""))
+        if w.field_names:
+            print(f"            fields {', '.join(w.field_names)}")
+        if w.predicate_fields:
+            print(f"            matched on {', '.join(w.predicate_fields)}")
+        print(f"            result {w.result}"
+              + (f" bound to `{w.result_bound_to}`" if w.result_bound_to else ""))
+        print(f"            ordering {w.ordering}   failure {w.failure}   "
+              f"transaction {w.transaction}")
+        _c = w.compliance
+        _mark = red("REGULATED") if _c.regulated == "yes" else dim("regulated: unknown")
+        print(f"            {_mark}   {dim(_c.why[:78])}")
+        print()
+    print(f"  {dim('Every dependency question reads unknown: no def-use analysis exists yet,')}")
+    print(f"  {dim('and unknown forbids, which is the conservative rule the roadmap specifies.')}")
+    print()
+
+
 def cmd_audit(args):
-    """mio audit verify|head|verify-anchors [db] -- inspect the audit trail's hash chain.
+    """mio audit verify|head|verify-anchors|relay [db] -- inspect and complete the audit trail.
 
     Reads the durable store directly (DATABASE_URL, or a path given as the argument). It does NOT
     run the program: an auditor should be able to check the records without executing the code
@@ -3505,6 +4200,12 @@ def cmd_audit(args):
     is the value an anchoring scheme publishes: a head that no longer matches a previously
     published one is how truncation and genesis-restart become visible, since neither of those
     breaks the chain internally.
+
+    `relay` finishes what a crash interrupted. A regulated write commits its data and a durable
+    envelope describing it in one transaction, and then delivers the record to the trail; a
+    process killed in between leaves the row, the evidence, and no record. This reads the
+    evidence and writes the records, and a record already delivered is recognised and skipped,
+    so running it twice changes nothing the first run did not already do.
     """
     action = getattr(args, "audit_action", "verify") or "verify"
     explicit_file = getattr(args, "file", None)
@@ -3514,18 +4215,42 @@ def cmd_audit(args):
              exit_code=3)
 
     from mohio_interpreter import MohioInterpreter, _make_db_runtime, _sniff_driver
-    # A `--file`/positional argument is always a literal sqlite path (the documented form,
-    # `mio audit verify app.db`) -- only a DATABASE_URL-sourced target needs its scheme
-    # detected, since that is the one case with no explicit driver to read (T0-2: this used
-    # to open every target with a raw sqlite3.connect() regardless of scheme, which is the
+    # A positional argument is USUALLY a literal sqlite path (the documented form,
+    # `mio audit verify app.db`), and it was treated as one unconditionally (T0-2: before that,
+    # every target was opened with a raw sqlite3.connect() regardless of scheme, which is the
     # same "unable to open database file" crash the interpreter's own setup fallback had).
-    driver = 'sqlite' if explicit_file else _sniff_driver(target)
+    #
+    # Treating it unconditionally left the same crash on the most natural thing an auditor
+    # types: `mio audit verify postgresql://...`. That forced the sqlite driver at a Postgres
+    # url and answered `unable to open database file`, which reads as a missing file and is
+    # really a refusal to look at the database that was named. A url carries its own driver, so
+    # it is read either way now, and a plain path still means sqlite exactly as before.
+    driver = _sniff_driver(target) if '://' in str(target) else (
+        'sqlite' if explicit_file else _sniff_driver(target))
     try:
-        sink = _make_db_runtime(driver, target)
+        sink = _make_db_runtime(driver, target,
+                                url=target if '://' in str(target) else None)
     except Exception as e:
         _die(f"Could not open the audit store at {target}: {e}", exit_code=3)
 
     it = MohioInterpreter()
+
+    if action == "relay":
+        # BEFORE THE LOG CHECK, DELIBERATELY. A process killed between committing a regulated
+        # write and delivering its record may have left no audit log at all -- if it was the
+        # first write, the log was never created. Refusing to relay because there is no log is
+        # refusing exactly when the relay is most needed.
+        try:
+            delivered, already = it.audit_relay_drain(sink)
+        except Exception as e:
+            _die(f"Could not deliver the owed audit records: {e}", exit_code=3)
+        if delivered or already:
+            print(f"\n  delivered {delivered} record(s) that were owed; "
+                  f"{already} were already in the trail.\n")
+        else:
+            print(f"\n  {dim('Nothing owed: every regulated write in ' + str(target) + ' has its record.')}\n")
+        return
+
     logs = it.audit_logs(sink)
     if not logs:
         print(f"\n  {dim('No audit logs found in ' + str(target) + '.')}\n")
@@ -3538,7 +4263,7 @@ def cmd_audit(args):
                  "mio audit verify-anchors app.db --anchors anchors.json", exit_code=3)
         import json
         try:
-            with open(anchors_path) as fh:
+            with open(anchors_path, encoding="utf-8-sig") as fh:
                 anchor_map = json.load(fh)
         except Exception as e:
             _die(f"Could not read anchors file {anchors_path}: {e}", exit_code=3)
@@ -3609,12 +4334,228 @@ def cmd_version(args):
 
 # -- mio help -------------------------------------------------------------------
 
+# -- mio new / mio init: the starter project -------------------------------------------
+#
+# THE SAME STARTER MOHIO HOME WRITES. Until now the two ways into Mohio started from
+# different places. The installer scaffolds a clean hello-world. A pioneer who ran
+# `pip install mohio` got a compiler and nothing to point it at, so the natural next move
+# was to clone the project and start from whatever files were lying in it -- which in this
+# repository means a deploy configuration aimed at the Zork demo with a billed AI switch
+# turned on. That is this project's own platform demo, not anybody's starting point.
+#
+# Mirrored from Mohio Home's `_write_standard_scaffold` (read from app/app.py, not
+# remembered): journey.mho and index.mho with the same content, _project.json with the same
+# three fields, and the same .gitignore.
+#
+# ONE DELIBERATE ADDITION, which is why this is not a byte-for-byte copy. The installer
+# writes no deploy files at all, because deploying is the platform's job there: Mohio Home
+# zips the project folder and uploads it, and its own exclusion list deliberately keeps a
+# Dockerfile out of that zip. A pioneer who installed from pip has no platform behind them,
+# so this starter carries its own Procfile and its own README, both pointing at THIS
+# project's index.mho, and neither one mentioning --ai.
+
+_STARTER_JOURNEY = 'lock site_name "{}"\n'
+
+_STARTER_INDEX = (
+    "connect db as sqlite from env.DATABASE_URL\n"
+    "\n"
+    "shape Home\n"
+    "shape: done\n"
+    "\n"
+    "listen for\n"
+    "    request for sh.Home at /\n"
+    "        render\n"
+    "            <h1>{{site_name}}</h1>\n"
+    "            <p>Your new project is running.</p>\n"
+    "        render: done\n"
+    "    request: done\n"
+    "listen: done\n"
+)
+
+# The same file Mohio Home writes beside a project's repository. .mohio/ is Mohio's own
+# local database and run state, not source, and the other two are operating-system clutter.
+_STARTER_GITIGNORE = ".mohio/\n.DS_Store\nThumbs.db\n"
+
+# NO --ai. A real AI decision is a billed call to a provider, so it is something a pioneer
+# turns on deliberately, never something a starter turns on for them. The file says so where
+# somebody editing it will read it, rather than only in a document.
+_STARTER_PROCFILE = (
+    "# How this project starts when a host runs it. It serves THIS project's index.mho.\n"
+    "#\n"
+    "# There is no --ai here on purpose. A real ai.decide call is billed by the provider, so\n"
+    "# it is turned on deliberately: add --ai to the line below, and set ANTHROPIC_API_KEY.\n"
+    "# Without it every ai.decide still runs, against a local stand-in, and costs nothing.\n"
+    "web: mio serve index.mho --port $PORT --host 0.0.0.0\n"
+)
+
+_STARTER_README = """# {display}
+
+A Mohio project. Two files hold it: `journey.mho` names it, and `index.mho` is the page
+served at `/`.
+
+## Run it on this computer
+
+    mio serve index.mho
+
+Then open http://127.0.0.1:8080 in a browser. Change `index.mho`, stop the server with
+Ctrl-C, and start it again to see the change.
+
+To run a program once instead of serving it:
+
+    mio run index.mho
+
+## Check it without running it
+
+    mio check index.mho
+
+This reads the whole program and reports every error and warning it can find, and it runs
+in about a second. It is the fastest way to find out whether something is wrong.
+
+## Deploy it
+
+`Procfile` is the start command a host reads. It already points at this project's
+`index.mho`, on whatever port the host hands it.
+
+Anything that reads a Procfile (Railway, Heroku, Render, Fly) needs no further setup:
+push this folder, and the host installs `mohio` from `requirements.txt` and runs the
+Procfile line. Set `DATABASE_URL` in the host's environment if you want a database that
+survives a restart; without it the project uses a local SQLite file.
+
+**AI decisions are off.** A real `ai.decide` call is billed by the provider. Every
+`ai.decide` in this project still runs without it, against a local stand-in, and costs
+nothing. When you want the real thing, add `--ai` to the Procfile line and set
+`ANTHROPIC_API_KEY` in the host's environment.
+"""
+
+_STARTER_REQUIREMENTS = "mohio>={}\n"
+
+
+def _starter_slug(display_name):
+    """Lowercase, spaces to hyphens, anything else dropped. The same shape Mohio Home's own
+    slugify produces, so a project created either way lands in a folder with the same name.
+
+    RETURNS EMPTY rather than falling back to a name, and that is the one place this
+    deliberately parts company with the installer. Mohio Home can fall back to "project"
+    because the folder name is invisible there: it is derived, never typed, and never
+    something a pioneer has to find again. Here it is a folder somebody is about to `cd`
+    into, and a name made entirely of characters a folder cannot hold is a mistake worth
+    saying out loud rather than answering with a word they did not choose."""
+    lowered = display_name.strip().lower()
+    spaced = re.sub(r"\s+", "-", lowered)
+    stripped = re.sub(r"[^a-z0-9_-]", "", spaced)
+    collapsed = re.sub(r"-{2,}", "-", stripped).strip("-")
+    return collapsed[:40].strip("-")
+
+
+def _starter_folder_for(display_name):
+    """The folder a display name earns, or a refusal naming why it earned none."""
+    slug = _starter_slug(display_name)
+    if not slug:
+        _die(f'There is nothing in "{display_name}" that a folder name can be built from. '
+             f'A folder name keeps letters, digits, hyphens and underscores, and spaces '
+             f'become hyphens. Give the project a name with at least one of those in it, '
+             f'or name the folder yourself with --in.', exit_code=3)
+    return slug
+
+
+def _write_starter(project_dir, display_name, description=""):
+    """Writes the starter into an existing, empty-enough directory. Returns the list of
+    files written, in the order written, so the caller can show the pioneer what it did."""
+    written = []
+
+    def put(name, content):
+        (project_dir / name).write_text(content, encoding="utf-8")
+        written.append(name)
+
+    # A display name with a double quote in it would close the string on the `lock` line and
+    # hand the pioneer a parse error in a file they never typed. Mohio Home settles this the
+    # same way: the quote becomes an apostrophe rather than an escape nobody asked for.
+    put("journey.mho", _STARTER_JOURNEY.format(display_name.replace('"', "'")))
+    put("index.mho", _STARTER_INDEX)
+    put("_project.json", json.dumps(
+        {"display_name": display_name, "description": description, "hidden": False},
+        indent=4) + "\n")
+    put(".gitignore", _STARTER_GITIGNORE)
+    put("Procfile", _STARTER_PROCFILE)
+    put("requirements.txt", _STARTER_REQUIREMENTS.format(VERSION))
+    put("README.md", _STARTER_README.format(display=display_name))
+    return written
+
+
+def _starter_occupied(project_dir):
+    """The names this scaffold would write, that are already there. Never overwrite a
+    pioneer's own file: the whole point of a starter is the first thing in a folder, and a
+    starter that silently replaced an index.mho somebody had been editing would be the worst
+    possible way to learn that."""
+    names = ["journey.mho", "index.mho", "_project.json", ".gitignore", "Procfile",
+             "requirements.txt", "README.md"]
+    return [n for n in names if (project_dir / n).exists()]
+
+
+def _report_starter(project_dir, display_name, written, cd_hint):
+    print()
+    print(f"  {bold(display_name)}  {dim(str(project_dir))}")
+    print()
+    for name in written:
+        print(f"    {name}")
+    print()
+    if cd_hint:
+        print(f"  Next:   cd {cd_hint}")
+        print(f"          mio serve index.mho")
+    else:
+        print(f"  Next:   mio serve index.mho")
+    print(f"  Then open http://127.0.0.1:8080")
+    print()
+    print(dim("  Version history is not set up. `git init` here if you want it."))
+    print()
+
+
+def cmd_new(args):
+    """Create a folder and put the starter in it."""
+    display_name = args.name
+    folder = args.folder if args.folder else _starter_folder_for(display_name)
+    project_dir = Path(folder).resolve()
+
+    if project_dir.exists():
+        occupied = _starter_occupied(project_dir) if project_dir.is_dir() else ["(a file)"]
+        if not project_dir.is_dir():
+            _die(f"{project_dir} is a file, not a folder. Pick another name.", exit_code=3)
+        if occupied:
+            _die(f"{project_dir} already has {', '.join(occupied)} in it. "
+                 f"A starter never overwrites a file that is already there. "
+                 f"Pick another name, or run `mio init` in an empty folder.", exit_code=3)
+    else:
+        try:
+            project_dir.mkdir(parents=True)
+        except OSError as e:
+            _die(f"Could not create {project_dir}: {e}", exit_code=3)
+
+    written = _write_starter(project_dir, display_name, args.description or "")
+    _report_starter(project_dir, display_name, written, folder)
+
+
+def cmd_init(args):
+    """Put the starter in the folder you are standing in."""
+    project_dir = Path.cwd()
+    display_name = args.name or project_dir.name
+    occupied = _starter_occupied(project_dir)
+    if occupied:
+        _die(f"This folder already has {', '.join(occupied)} in it. "
+             f"A starter never overwrites a file that is already there. "
+             f"Run `mio init` in an empty folder, or `mio new <name>` to create one.",
+             exit_code=3)
+    written = _write_starter(project_dir, display_name, args.description or "")
+    _report_starter(project_dir, display_name, written, None)
+
+
 def cmd_help(args):
     print(f"""
   {bold('mio')} -- Mohio Language CLI  {dim(f'v{VERSION}')}
 
   {bold('USAGE')}
 
+    mio new <name>                      Create a new project folder with a starter page
+    mio init                            Put that same starter in the folder you are in
     mio run <file.mho>                  Execute a Mohio program
     mio run <file.mho> --verbose        Execute with trace output
     mio run <file.mho> --ai             Use real Anthropic API for ai.decide
@@ -3623,6 +4564,7 @@ def cmd_help(args):
     mio serve <file.mho> --ai           Serve with real Anthropic API
     mio check <file.mho>                Validate -- all errors and warnings, no run
     mio check --all                     Validate every .mho file in the tree
+    mio fmt <file.mho> [--write]        Normalize toward canonical Mohio
     mio generate <artifact>             Generate artifacts (e.g. training data)
     mio translate <file.mho> --to <lang>  Translate a program's natural-language layer
     mio schema <generate|check|show>    Work with .mhoschema files
@@ -3631,16 +4573,14 @@ def cmd_help(args):
     mio audit verify <db>               Check each audit log's hash chain is intact
     mio audit head <db>                 Print each log's chain head (the value you anchor)
     mio audit verify-anchors <db> --anchors f.json   Check the chain against published anchors
+    mio audit relay <db>                Deliver audit records a crash left owed
+    mio writes <file.mho>               Show what each write means, normalized
     mio warmup                          Pre-warm the parser cache
     mio install-hooks                   Install git pre-commit hooks
     mio version                         Print version information
     mio help                            Print this message
 
-  {bold('COMING SOON')}
-
-    mio fmt <file.mho>                  Auto-format to canonical Mohio
-                                          (e.g. 'verb: done'; strips stray handler closers)
-    {dim('(more tooling commands are on the roadmap)')}
+  {dim('(more tooling commands are on the roadmap)')}
 
   {bold('PASSING A REQUEST')}
 
@@ -3727,6 +4667,15 @@ def build_arg_parser():
     r.add_argument("--api-key", default=None, dest="api_key")
     r.add_argument("--seed", default=None, metavar="seed.json")
 
+    # test
+    ts = sub.add_parser("test", add_help=False)
+    ts.add_argument("file")
+    ts.add_argument("--db", dest="db", default=None)
+    ts.add_argument("--memory", dest="memory", action="store_true")
+    ts.add_argument("--verbose", "-v", action="store_true")
+    ts.add_argument("--ai", action="store_true", default=False)
+    ts.add_argument("--api-key", default=None, dest="api_key")
+
     # check
     c = sub.add_parser("check", add_help=False)
     c.add_argument("--security", action="store_true", help="Run full security compliance report")
@@ -3749,6 +4698,16 @@ def build_arg_parser():
     fp.add_argument("file")
     fp.add_argument("--write", "-w", action="store_true", help="Apply changes in place")
     fp.add_argument("--stdout", action="store_true", help="Print formatted source to stdout")
+
+    # new / init -- the starter project
+    nw = sub.add_parser("new", add_help=False)
+    nw.add_argument("name")
+    nw.add_argument("--in", dest="folder", default=None,
+                    metavar="FOLDER", help="Folder to create (default: the name, lowercased)")
+    nw.add_argument("--description", default=None)
+    ini = sub.add_parser("init", add_help=False)
+    ini.add_argument("name", nargs="?", default=None)
+    ini.add_argument("--description", default=None)
 
     # version / help
     sub.add_parser("version", add_help=False)
@@ -3778,9 +4737,11 @@ def build_arg_parser():
     sc.add_argument("schema_action", nargs="?", default="generate",
                     choices=["generate", "check", "show"])
     sc.add_argument("file", nargs="?", default=None)
+    wr = sub.add_parser("writes", add_help=False)
+    wr.add_argument("file", nargs="?", default=None)
     aud = sub.add_parser("audit", add_help=False)
     aud.add_argument("audit_action", nargs="?", default="verify",
-                     choices=["verify", "head", "verify-anchors"])
+                     choices=["verify", "head", "verify-anchors", "relay"])
     aud.add_argument("file", nargs="?", default=None)
     aud.add_argument("--anchors", default=None,
                      help="Path to a JSON file of published anchors (for verify-anchors)")
@@ -3805,6 +4766,86 @@ def build_arg_parser():
 
 
 # -- Entry point ----------------------------------------------------------------
+
+def cmd_test(args):
+    """Run every `it` case in a file and report. Exits 1 if any case fails.
+
+    WHAT THIS EXISTS TO STOP. `it` blocks parsed and check-passed for an entire build while
+    nothing executed them, so a governance control that requires tests for AI programs was asking
+    for tests the language could not run. The assertions are real now, and so is the exit code.
+    """
+    filename = args.file
+    verbose = getattr(args, "verbose", False)
+    path = Path(filename)
+    source = _read_source(path, exit_code=3)
+
+    tree, ctx = _parse_and_validate(source, filename, verbose)
+    if ctx.errors:
+        for e in ctx.errors:
+            _print_compile_error(e, source, filename)
+        sys.exit(1)
+
+    from mohio_transformer_ast import transform as ast_transform
+    program = ast_transform(tree, source)
+    program = _resolve_includes(program, filename, verbose=verbose)
+    program = _apply_journey(program, filename, verbose=verbose)
+
+    if program is not None:
+        try:
+            from mohio_enforce import enforce_scans as _enforce_scans
+            _enforce_scans(ctx, program)
+        except Exception as _scan_err:
+            print(f"  [enforce] WARNING: a Layer 3 scanner failed "
+                  f"({type(_scan_err).__name__}: {_scan_err}). Enforcement is INCOMPLETE.",
+                  file=sys.stderr)
+        if ctx.errors:
+            for e in ctx.errors:
+                _print_compile_error(e, source, filename)
+            sys.exit(1)
+
+    from mohio_interpreter import MohioInterpreter, MockAiRuntime
+    ai = _construct_ai_runtime(getattr(args, "api_key", None), verbose) \
+        if getattr(args, "ai", False) else MockAiRuntime()
+    interp = MohioInterpreter(ai=ai, verbose=verbose,
+                              db_path=_resolve_sqlite_db_path(filename, args))
+    print(f"\n  mio test  {dim(filename)}\n")
+    try:
+        interp.run(program)
+    except Exception as e:                                  # noqa: BLE001
+        # A program that cannot finish cannot have proven anything, so this is a failure of the
+        # run and is reported as one rather than as "no tests found".
+        print(f"  {red('x')}  the program stopped before its cases finished: {e}\n")
+        sys.exit(1)
+
+    cases = getattr(interp, "_test_results", None) or []
+    if not cases:
+        # NOT A PASS. A file with no cases proves nothing, and calling that green is the exact
+        # hole the `ai.test.mho` control had.
+        print(f"  {yellow('!')}  no test cases in this file -- `it \"what this proves\" ... "
+              f"it: done`\n")
+        sys.exit(1)
+
+    failed = 0
+    for c in cases:
+        # NAMED WHERE IT IS KNOWN. A case is written `it "what this proves"`, so an empty
+        # description means the author left the quotes empty, which is worth saying rather than
+        # papering over with a stand-in that reads like a name the runner chose.
+        desc = c.get("description")
+        label = desc if desc else "a case with no description (it \"\")"
+        if c.get("passed"):
+            print(f"  {green('v')}  {label}")
+        else:
+            failed += 1
+            print(f"  {red('x')}  {label}")
+            for why in c.get("failures") or []:
+                print(f"        {why}")
+    total = len(cases)
+    print()
+    if failed:
+        print(f"  {red(bold(str(failed) + ' of ' + str(total) + ' case(s) failed'))}\n")
+        sys.exit(1)
+    print(f"  {green(bold(str(total) + ' case(s) passed'))}\n")
+
 
 def cmd_schedule(args):
     """`mio schedule run-due <file>` — fire schedules that are due (call this
@@ -3992,7 +5033,49 @@ def cmd_ai_check(args):
     sys.exit(0)
 
 
+def _use_utf8_console():
+    """Make mio's own output survive a console that is not UTF-8.
+
+    Windows hands Python a cp1252 console by default, and mio prints characters cp1252
+    has no code for: the box and arrow characters in its diagnostics, a source snippet
+    from a file with any non-ASCII in it, a BOM that reached a snippet. Printing one of
+    those raised UnicodeEncodeError from inside print(), which surfaced as an internal
+    error and STOPPED the command -- so `mio check --all` died partway and reported no
+    summary at all. That is a Windows newcomer's first command failing on the encoding
+    of the message rather than on anything in their program.
+
+    Done once here, at the entry point, rather than at each print: there are hundreds of
+    print sites and a rule applied per-print is a rule that decays. errors='replace' is
+    the backstop, so a character the console genuinely cannot show degrades to a
+    placeholder instead of ending the run -- a diagnostic with one odd glyph in it is
+    still a diagnostic, and a crash is not.
+
+    Only main() calls this, so importing mio as a library leaves the process's streams
+    alone. A stream that is not a real text file (a test harness swapping in StringIO,
+    a closed stream) has no reconfigure and is left as it is.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # RECORDED IN silent_shape_baseline.txt AS A DELIBERATE ONE. Both exceptions mean
+            # the stream is detached, closed, or refuses reconfiguration -- which is to say the
+            # stream this failure would have to be REPORTED ON is the broken one. There is no
+            # louder option available: raising would stop mio at startup over the encoding of
+            # its output rather than over anything the coder asked for, and printing a warning
+            # needs the stream that just proved unusable. So the streams stay exactly as the
+            # process was given them and mio runs, which is what it did before this function
+            # existed.
+            pass
+
+
 def main():
+    # Before the parser, because argparse prints usage and --help through these streams too.
+    _use_utf8_console()
+
     p    = build_arg_parser()
     args = p.parse_args()
 
@@ -4006,14 +5089,18 @@ def main():
 
     dispatch = {
         "run":     cmd_run,
+        "new":     cmd_new,
+        "init":    cmd_init,
         "serve":   cmd_serve,
         "check":   cmd_check,
+        "test":    cmd_test,
         "warmup":  cmd_warmup,
         "translate": cmd_translate,
         "generate":  cmd_generate,
         "schema":        cmd_schema,
         "schedule":      cmd_schedule,
         "audit":         cmd_audit,
+        "writes":        cmd_writes,
         "install-hooks": cmd_install_hooks,
         "harvest":       cmd_harvest,
         "walk":          cmd_walk,

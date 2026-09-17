@@ -1,0 +1,38 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Nightly schedule -- declare work that runs on its own, without anyone asking.
+// Run it:  mio run cookbook/nightly-schedule.mho   (uses SQLite in memory)
+
+connect db as sqlite from env.DATABASE_URL
+
+save to db.sessions
+    member "ada"
+    last_seen "2026-09-01"
+save: done
+
+// A schedule is a NAMED declaration. The name is how it is run later.
+task expire_old_sessions
+    remove from db.sessions
+        where last_seen is "2026-09-01"
+    remove: done
+    give back "expired"
+task: done
+
+// The body says WHEN. A time is written bare, never quoted: 09:00, not "09:00".
+mioschedule nightly_cleanup
+    at 09:00
+    timezone "EST"
+    run expire_old_sessions
+mioschedule: done
+
+// Other timings that run today, one per schedule:
+//     every 5 minutes
+//     in 30 minutes
+//     on december 31 at 11:59pm
+//     timeout after 10 minutes
+//
+// The WEEKDAY forms parse and are NOT WIRED yet -- accepted, and they do nothing:
+//     every monday at 9am
+//     every day at 09:00
+//     on monday
+
+show "A schedule is declared. Run it on demand with:  run mioschedule.nightly_cleanup now"

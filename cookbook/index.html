@@ -1,0 +1,469 @@
+<!doctype html>
+<!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mohio Cookbook</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1c1b19; --muted: #6b6862; --card: #ffffff;
+    --border: #e7e4dd; --accent: #b4531f; --code-bg: #f4f2ec; --out-bg: #f0f5f0;
+    --out-border: #cfe0cf; --out-fg: #1f3a24;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171614; --fg: #ece9e3; --muted: #9a968d; --card: #201f1c;
+      --border: #34322d; --accent: #e0854f; --code-bg: #14130f; --out-bg: #14201660;
+      --out-border: #2f4a35; --out-fg: #bfe4c6;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171614; --fg: #ece9e3; --muted: #9a968d; --card: #201f1c;
+    --border: #34322d; --accent: #e0854f; --code-bg: #14130f; --out-bg: #14201660;
+    --out-border: #2f4a35; --out-fg: #bfe4c6;
+  }
+  :root[data-theme="light"] {
+    --bg: #fbfaf7; --fg: #1c1b19; --muted: #6b6862; --card: #ffffff;
+    --border: #e7e4dd; --accent: #b4531f; --code-bg: #f4f2ec; --out-bg: #f0f5f0;
+    --out-border: #cfe0cf; --out-fg: #1f3a24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+  header h1 { font-size: 2.1rem; margin: 0 0 .3rem; letter-spacing: -.01em; }
+  header p { color: var(--muted); margin: 0 0 1.75rem; font-size: 1.05rem; }
+  nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 2.5rem; }
+  nav a {
+    text-decoration: none; color: var(--fg); background: var(--card);
+    border: 1px solid var(--border); border-radius: 999px; padding: .35rem .85rem;
+    font-size: .9rem; transition: border-color .15s;
+  }
+  nav a:hover { border-color: var(--accent); color: var(--accent); }
+  .recipe {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 1.5rem 1.5rem 1.75rem; margin-bottom: 1.75rem; scroll-margin-top: 1.5rem;
+  }
+  .recipe h2 { margin: 0 0 .25rem; font-size: 1.35rem; }
+  .recipe .desc { color: var(--muted); margin: 0 0 1.1rem; }
+  .run { color: var(--muted); font-size: .85rem; margin: 0 0 1.1rem; }
+  .run code { background: var(--code-bg); padding: .15rem .4rem; border-radius: 5px; }
+  .label {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 0 0 .4rem; font-weight: 600;
+  }
+  pre {
+    margin: 0 0 1.25rem; padding: 1rem 1.1rem; border-radius: 10px; overflow-x: auto;
+    font: 13.5px/1.55 "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    background: var(--code-bg); border: 1px solid var(--border);
+  }
+  pre.output {
+    margin-bottom: 0; background: var(--out-bg); border: 1px solid var(--out-border);
+    color: var(--out-fg);
+  }
+  code { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .9rem; text-align: center; }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Mohio Cookbook</h1>
+    <p>Small, complete recipes you can read in a minute and run in a second. Each shows real Mohio source and the exact output it produces.</p>
+  </header>
+
+  <nav>
+    <a href="#letter-grade">Letter grade</a>
+    <a href="#reading-list">Reading list</a>
+    <a href="#sales-by-quarter">Sales by quarter</a>
+    <a href="#password-login">Password login</a>
+    <a href="#session-timeout">Session timeout</a>
+    <a href="#nightly-schedule">Nightly schedule</a>
+    <a href="#map-moving-values">Moving values with a map</a>
+    <a href="#flow-run-a-map">Running a map with flow</a>
+    <a href="#walk-inspect-a-map">Inspecting a map with walk</a>
+  </nav>
+
+  <section class="recipe" id="letter-grade">
+    <h2>Letter grade</h2>
+    <p class="desc">Turn a numeric score into a letter grade &mdash; a reusable task with typed input and check/when branching.</p>
+    <p class="run">Run it: <code>mio run cookbook/letter-grade.mho</code></p>
+    <p class="label">Source</p>
+    <pre>task grade
+    take score as int
+    returns text
+    check score
+        when score is more than 89
+            give back "A"
+        when score is more than 79
+            give back "B"
+        when score is more than 69
+            give back "C"
+        otherwise
+            give back "F"
+    check: done
+task: done
+
+call grade with 92 as top
+call grade with 74 as mid
+call grade with 55 as low
+
+show "92 scores a {{ top }}"
+show "74 scores a {{ mid }}"
+show "55 scores a {{ low }}"</pre>
+    <p class="label">Output</p>
+    <pre class="output">92 scores a A
+74 scores a C
+55 scores a F</pre>
+  </section>
+
+  <section class="recipe" id="reading-list">
+    <h2>Reading list</h2>
+    <p class="desc">Connect a database, add books, and query the ones you have not read yet.</p>
+    <p class="run">Run it: <code>mio run cookbook/reading-list.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
+    <p class="label">Source</p>
+    <pre>connect db as sqlite from env.DATABASE_URL
+
+save to db.books
+    title "The Left Hand of Darkness"
+    author "Ursula K. Le Guin"
+    read "true"
+save: done
+
+save to db.books
+    title "A Memory Called Empire"
+    author "Arkady Martine"
+    read "false"
+save: done
+
+save to db.books
+    title "Piranesi"
+    author "Susanna Clarke"
+    read "false"
+save: done
+
+// Find the books you have not read yet.
+find unread in db.books
+    where read is "false"
+find: done
+
+show "Still to read ({{ unread.count }}):"
+repeat each book in unread
+    show "  {{ book.title }} -- {{ book.author }}"
+repeat: done</pre>
+    <p class="label">Output</p>
+    <pre class="output">Still to read (2):
+  A Memory Called Empire -- Arkady Martine
+  Piranesi -- Susanna Clarke</pre>
+  </section>
+
+  <section class="recipe" id="sales-by-quarter">
+    <h2>Sales by quarter</h2>
+    <p class="desc">Filter records to a named date window with <code>timespan</code> &mdash; a declared [start, end) range applied inside a find.</p>
+    <p class="run">Run it: <code>mio run cookbook/sales-by-quarter.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
+    <p class="label">Source</p>
+    <pre>connect db as sqlite from env.DATABASE_URL
+
+// Q1 2026: January through March (the end date is exclusive).
+timespan first_quarter
+    start 2026-01-01
+    end 2026-04-01
+timespan: done
+
+save to db.sales
+    product "notebook"
+    amount 12
+    created_at "2026-02-14"
+save: done
+
+save to db.sales
+    product "desk lamp"
+    amount 40
+    created_at "2026-03-30"
+save: done
+
+save to db.sales
+    product "monitor arm"
+    amount 85
+    created_at "2026-05-02"
+save: done
+
+// Only the rows inside the Q1 window come back (the May sale is excluded).
+find q1 in db.sales
+    timespan first_quarter
+find: done
+
+show "Q1 2026 sales ({{ q1.count }}):"
+repeat each sale in q1
+    show "  {{ sale.product }}: {{ sale.amount }}"
+repeat: done</pre>
+    <p class="label">Output</p>
+    <pre class="output">Q1 2026 sales (2):
+  notebook: 12
+  desk lamp: 40</pre>
+  </section>
+
+  <section class="recipe" id="password-login">
+    <h2>Password login</h2>
+    <p class="desc">Hash a password, check a login attempt against the stored hash, and grant a role on success &mdash; the real, already-built way to log a user in.</p>
+    <p class="run">Run it: <code>mio run cookbook/password-login.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
+    <p class="label">Source</p>
+    <pre>connect db as sqlite from env.DATABASE_URL
+
+hash "correct-horse-battery-staple" as stored_hash using bcrypt
+
+save to db.members
+    email "alice@example.com"
+    hashed_password stored_hash
+    role "member"
+save: done
+
+// The decoy exists only to be verified against when no account is found, so a
+// miss does the same slow work a hit does. Nothing ever logs in with it.
+hash "this-value-is-never-anyone-password" as decoy_hash using bcrypt
+
+retrieve.one member from db.members
+    match email to "alice@example.com"
+retrieve.one: done
+
+// No account with that email finds NOTHING, and finding nothing is a normal empty
+// result, not an error. So the test is `is empty`. `on.failure` means the database
+// itself went wrong, and putting the not-found message there leaves it never printed
+// while the code below reads a member who was never found.
+check member
+    when member is empty
+        // Verified against the decoy purely so this path costs what the other
+        // path costs. The answer is the same either way.
+        check "correct-horse-battery-staple" against decoy_hash
+            on.success
+                show "invalid email or password"
+            on.failure
+                show "invalid email or password"
+    otherwise
+        check "correct-horse-battery-staple" against member.hashed_password
+            on.success
+                grant role member.role
+                show "login ok, role granted: {{ member.role }}"
+            on.failure
+                show "invalid email or password"
+check: done</pre>
+    <p class="label">Output</p>
+    <pre class="output">4 warning(s) -- run mio check for details
+login ok, role granted: member</pre>
+    <p class="desc">The four warnings are correct and expected: this recipe hardcodes a
+    password so it can be run without setting anything up, and <code>mio check</code> says
+    so every time. Real code reads it from <code>env</code>.</p>
+  </section>
+
+  <section class="recipe" id="session-timeout">
+    <h2>Session timeout</h2>
+    <p class="desc">Lock the page when nobody is there, and let the person back in with a link sent to their email &mdash; the browser half and the server half of the same story, both Mohio.</p>
+    <p class="run">Run it: <code>mio serve cookbook/session-timeout.mho</code></p>
+    <p class="label">Source (the client half; the full recipe, server side included, is in the file)</p>
+    <pre>// The browser half. Nobody has moved, typed, scrolled, clicked or touched
+// anywhere on this page for 25 minutes, so cover it and ask.
+on.idle 25 minutes
+    show #relogin
+on.idle: done</pre>
+    <p class="label">Output</p>
+    <pre class="output">After 25 minutes of no activity, #relogin becomes visible.
+The visitor asks for a link, gets one by email, and the token
+in it grants the member role back &mdash; see the full file for
+the request/new/check handlers that do that half.</pre>
+  </section>
+
+  <section class="recipe" id="nightly-schedule">
+    <h2>Nightly schedule</h2>
+    <p class="desc">Declare work that runs on its own, without anyone asking &mdash; a named schedule, a time written bare, and the task it runs.</p>
+    <p class="run">Run it: <code>mio run cookbook/nightly-schedule.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
+    <p class="label">Source</p>
+    <pre>connect db as sqlite from env.DATABASE_URL
+
+save to db.sessions
+    member "ada"
+    last_seen "2026-09-01"
+save: done
+
+// A schedule is a NAMED declaration. The name is how it is run later.
+task expire_old_sessions
+    remove from db.sessions
+        where last_seen is "2026-09-01"
+    remove: done
+    give back "expired"
+task: done
+
+// The body says WHEN. A time is written bare, never quoted: 09:00, not "09:00".
+mioschedule nightly_cleanup
+    at 09:00
+    timezone "EST"
+    run expire_old_sessions
+mioschedule: done
+
+// Other timings that run today, one per schedule:
+//     every 5 minutes
+//     in 30 minutes
+//     on december 31 at 11:59pm
+//     timeout after 10 minutes
+//
+// The WEEKDAY forms parse and are NOT WIRED yet -- accepted, and they do nothing:
+//     every monday at 9am
+//     every day at 09:00
+//     on monday
+
+show "A schedule is declared. Run it on demand with:  run mioschedule.nightly_cleanup now"</pre>
+    <p class="label">Output</p>
+    <pre class="output">[mioschedule] registered 'nightly_cleanup' -> tasks=['expire_old_sessions']
+A schedule is declared. Run it on demand with:  run mioschedule.nightly_cleanup now</pre>
+  </section>
+
+  <section class="recipe" id="map-moving-values">
+    <h2>Moving values with a map</h2>
+    <p class="desc">A <code>map</code> describes where values go and says nothing about when. It holds chains, and a chain is a line of stages: places a value sits, and shapes it is reformed by on the way.</p>
+    <p class="run">Run it: <code>mio run cookbook/map-moving-values.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
+    <p class="label">Source</p>
+    <pre>connect db as sqlite from env.DATABASE_URL
+
+// The shape a value passes THROUGH. It reforms the value and hands it on, which is
+// what makes a shape usable as a stage rather than only as a description.
+shape tidy
+    value as text pad.left to 6 with "0"
+shape: done
+
+map Paydata
+    data
+        order.total -&gt; tidy -&gt; db.ledger.amount
+        refund.total -&gt; db.refunds.amount
+map: done
+
+create order
+    total "42"
+create: done
+
+create refund
+    total "7"
+create: done
+
+// `flow &lt;map&gt;.&lt;chain&gt;` runs ONE chain. The value leaves `order.total`, is reformed
+// by `tidy`, and comes to rest in the database.
+flow Paydata.order
+
+// `flow &lt;map&gt;` with no chain runs EVERY chain in the map.
+flow Paydata
+
+find rows in db.ledger
+find: done
+find refunds in db.refunds
+find: done
+
+show ("padded on the way through: " &amp; rows.first.amount)
+show ("the second chain landed too: " &amp; refunds.first.amount)</pre>
+    <p class="label">Output</p>
+    <pre class="output">padded on the way through: 000042
+the second chain landed too: 7</pre>
+  </section>
+
+  <section class="recipe" id="flow-run-a-map">
+    <h2>Running a map with flow</h2>
+    <p class="desc"><code>flow</code> is the verb that makes a map happen &mdash; one chain, or every chain in it. It reports nothing while it runs, and <code>check flow</code> asks for where the value came to rest.</p>
+    <p class="run">Run it: <code>mio run cookbook/flow-run-a-map.mho</code> (no database, no setup)</p>
+    <p class="label">Source</p>
+    <pre>shape tidy
+    value as text pad.left to 6 with "0"
+shape: done
+
+map Paydata
+    data
+        order.total -&gt; tidy -&gt; ledger.amount
+        refund.total -&gt; ledger.refunded
+map: done
+
+create order
+    total "42"
+create: done
+
+create refund
+    total "7"
+create: done
+
+// A destination has to exist before something lands in it, the same as any other
+// value in Mohio.
+create ledger
+    amount ""
+    refunded ""
+create: done
+
+// ONE chain.
+flow Paydata.order
+show ("one chain: " &amp; ledger.amount)
+
+// EVERY chain. The first one runs again, harmlessly, and the second one lands too.
+flow Paydata
+show ("every chain: " &amp; ledger.refunded)
+
+// THE END OF THE CHAIN, which is the question `flow` is usually asked. The endpoint
+// is the stage after the last forward hop -- any other position is `grab` or `walk`.
+check flow Paydata.order as landed
+show ("the endpoint: " &amp; landed)</pre>
+    <p class="label">Output</p>
+    <pre class="output">one chain: 000042
+every chain: 7
+the endpoint: 000042</pre>
+  </section>
+
+  <section class="recipe" id="walk-inspect-a-map">
+    <h2>Inspecting a map with walk</h2>
+    <p class="desc">Where <code>flow</code> runs a map quietly, <code>walk</code> stops at every stage and looks. A transform stage shows an empty value because nothing rests there; what it produced appears at the next place along.</p>
+    <p class="run">Run it: <code>mio run cookbook/walk-inspect-a-map.mho</code> (no database, no setup)</p>
+    <p class="label">Source</p>
+    <pre>shape tidy
+    value as text pad.left to 6 with "0"
+shape: done
+
+map Paydata
+    data
+        order.total -&gt; tidy -&gt; ledger.amount
+map: done
+
+create order
+    total "42"
+create: done
+
+create ledger
+    amount ""
+create: done
+
+flow Paydata.order
+
+// Every stage, in order, with what is sitting at each.
+walk Paydata.order
+    at each stage: report
+walk: done
+
+// The two SEMANTIC ends, found by the arrows rather than by counting. `first` is
+// where data enters, `last` is where it comes to rest -- the pair to compare when
+// asking whether a value survived the trip.
+grab first stage from Paydata.order as entry
+grab last stage from Paydata.order as exit
+show ("entered at: " &amp; entry.name)
+show ("came to rest at: " &amp; exit.name)
+show ("carrying: " &amp; exit.value)</pre>
+    <p class="label">Output</p>
+    <pre class="output">order [1] order.total (place) = '42'
+order [2] tidy (transform) = ''
+order [3] ledger.amount (place) = '000042'
+entered at: order.total
+came to rest at: ledger.amount
+carrying: 000042</pre>
+  </section>
+
+  <footer>
+    Built with Mohio &mdash; <a href="https://mohio.io">mohio.io</a>
+  </footer>
+</div>
+</body>
+</html>

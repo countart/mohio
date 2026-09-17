@@ -1,0 +1,33 @@
+// Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
+// Reading list -- connect a database, add books, and query them.
+// Run it:  mio run cookbook/reading-list.mho   (uses SQLite in memory)
+
+connect db as sqlite from env.DATABASE_URL
+
+save to db.books
+    title "The Left Hand of Darkness"
+    author "Ursula K. Le Guin"
+    read "true"
+save: done
+
+save to db.books
+    title "A Memory Called Empire"
+    author "Arkady Martine"
+    read "false"
+save: done
+
+save to db.books
+    title "Piranesi"
+    author "Susanna Clarke"
+    read "false"
+save: done
+
+// Find the books you have not read yet.
+find unread in db.books
+    where read is "false"
+find: done
+
+show "Still to read ({{ unread.count }}):"
+repeat each book in unread
+    show "  {{ book.title }} -- {{ book.author }}"
+repeat: done
