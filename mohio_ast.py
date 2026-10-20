@@ -24,6 +24,46 @@ from typing import Any, Optional
 # BASE
 # ==============================================================
 
+class SourceLine(int):
+    """A line number that also knows its FILE. Statements merged in from an included file carry
+    their own file's line numbers (HC-137); as a plain int, a finding on one was printed against the
+    including file's line of the same number. Being an int, it compares, sorts and serializes as
+    the number it is, so every scan passes it on unchanged and the report reads `.file`."""
+
+    def __new__(cls, value, file):
+        obj = super().__new__(cls, value)
+        obj.file = file
+        return obj
+
+    def __reduce__(self):
+        return (SourceLine, (int(self), self.file))
+
+
+def tag_source_file(nodes, path):
+    """Give every node line under `nodes` the file it was written in, unless a deeper include
+    already gave it its own."""
+    from dataclasses import fields, is_dataclass
+    stack, seen = [nodes], set()
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (list, tuple)):
+            stack.extend(n)
+            continue
+        if not is_dataclass(n) or id(n) in seen:
+            continue
+        seen.add(id(n))
+        ln = getattr(n, 'line', None)
+        if isinstance(ln, int) and not isinstance(ln, (bool, SourceLine)) and ln > 0:
+            try:
+                n.line = SourceLine(ln, path)
+            except (AttributeError, TypeError):  # SILENT-OK: a frozen node keeps its plain line
+                pass
+        for f in fields(n):
+            v = getattr(n, f.name, None)
+            if isinstance(v, (list, tuple)) or is_dataclass(v):
+                stack.append(v)
+
+
 @dataclass
 class Node:
     """Base class. All nodes carry line/col for error reporting."""
@@ -202,6 +242,7 @@ class ConnectDecl(Node):
     # access mode ever written was discarded at the transformer: a `save` to a `readonly`
     # connection wrote happily and `mio check` reported no errors (measured 2026-09-02).
     access: str = ""
+    default: Optional[str] = None   # `default "app.db"`: the address when the variable is unset
 
 @dataclass
 class ComplianceDecl(Node):
@@ -231,16 +272,57 @@ class IncludeDecl(Node):
 
 @dataclass
 class RequireRoleDecl(Node):
-    """require role "admin" or "screener" """
+    """require role "admin" or "screener"  |  require person"""
     roles: list = field(default_factory=list)   # list[str]
+    person: bool = False   # `require person`: anyone signed in, no role named
+
+@dataclass
+class VerifySignatureDecl(Node):
+    """verify signature using env.X [header "H"] [within N minutes]
+
+    A webhook handler clause. At request time the interpreter runs it FIRST -- before shape
+    validation and before any body statement -- computing HMAC-SHA256 over the RAW request bytes with
+    the secret from env, comparing it constant-time against the signature header, and failing closed.
+    `secret_env` is the ENV VAR NAME only (e.g. STRIPE_WEBHOOK_SECRET); the secret VALUE is never
+    stored on the node, never logged and never audited. A string-literal secret is refused at
+    transform time (the value must be `env.X`). `header` names a non-default signature header (default
+    X-Signature). `within_seconds`, when set, adds a freshness bound: the signed material becomes
+    `timestamp.rawbody`, the timestamp arrives in a header (default X-Timestamp), and a timestamp too
+    far in the past OR the future is rejected. Freshness narrows the window; replay defence is the
+    recorded identity of every accepted delivery (T1-WEBHOOK-REPLAY-PROTECTION), and the sender's own
+    event id as that identity is T1-WEBHOOK-IDEMPOTENCY."""
+    secret_env: str = ""          # the env var NAME, never the value
+    header: str = None            # signature header name; None -> X-Signature default
+    ts_header: str = None         # timestamp header name; None -> X-Timestamp default
+    within_seconds: object = None # freshness tolerance in seconds; None -> no freshness check
 
 @dataclass
 class GrantRoleDecl(Node):
     """grant role "admin"  /  grant role user.role -- establish a SERVER-verified
     role in the current session. The value_expr resolves at runtime to the role
     name(s); the grant is stored on the session root and marked verified, and is
-    the ONLY source `require role` trusts (client `_roles` is never consulted)."""
-    value: object = None   # value_expr node, resolved at runtime
+    the ONLY source `require role` trusts (client `_roles` is never consulted).
+
+    `person` (T1-DURABLE-PRINCIPAL) is the OPTIONAL `for person <who>` value_expr: the human the
+    application asserts at this auth boundary. Set once per session, read-only thereafter as
+    session.person, survives rotation, stamped automatically on writes and audit records."""
+    value:  object = None   # role value_expr node, resolved at runtime
+    person: object = None   # `for person <who>` value_expr node, or None
+
+@dataclass
+class EndSessionStmt(Node):
+    """end session -- logout. Ends the whole current session: roles dropped, session contents
+    gone, and the session id invalidated via the shared primitive so the old cookie can never be
+    resurrected. The inverse of GrantRoleDecl; carries no value (it ends the current session)."""
+    pass
+
+@dataclass
+class EndPersonSessionsStmt(Node):
+    """end every session for person <who> -- end every session that person holds, in every
+    session store, each ending audited. An administrative act on someone else's sessions, so it is
+    deliberately NOT an EndSessionStmt: the auth-boundary exemption a logout earns does not reach
+    it, and a handler running it needs an authority check like any other."""
+    person: object = None   # the value_expr naming the person
 
 @dataclass
 class RateLimitDecl(Node):
@@ -275,7 +357,7 @@ class LockDecl(Node):
 
 @dataclass
 class ReleaseStmt(Node):
-    """release var | release.now var value | release.lock var value"""
+    """release var | release.now var value (retired) | release.lock var value (retired)"""
     variant: str = ""     # "release" | "release.now" | "release.lock"
     name:    str = ""
     value:   Any = None
@@ -363,11 +445,40 @@ class ClientIdle(Node):
 
 
 @dataclass
+class ClientEvery(Node):
+    """every <duration> as <name> ... every: done — named recurring poll (setInterval).
+    The name is what a later `stop <name>` cancels; two `every` blocks with the same name
+    on one page is a mistake (one would silently replace the other's running timer), so it
+    is refused at compile time rather than left to collide at runtime."""
+    ms:   int  = 0
+    name: str  = ""
+    body: list = field(default_factory=list)
+
+
+@dataclass
+class ClientStopInterval(Node):
+    """stop <name> — cancels the `every <name>` interval it names (clearInterval). A name
+    that was never declared by an `every` block refuses at compile time, the same as any
+    other reference to an undeclared page construct."""
+    name: str = ""
+
+
+@dataclass
 class ClientPut(Node):
     """put <the value | "literal"> into "<selector>" """
     source_kind: str = "literal"   # "literal" or "the"
     source:      str = ""          # the literal text, or the datum name (value/key)
     target:      str = ""          # CSS selector to write into
+
+@dataclass
+class ClientInject(Node):
+    """inject result into "<selector>" -- place a Mohio-rendered FRAGMENT as markup.
+
+    Only `result` (a `send` response) may be injected, and only when it carried the fragment marker
+    the server set on `render fragment`. Anything else -- a value, a field, a browser-built string --
+    is not markup and is refused at transform, never silently escaped. The runtime check of the marker
+    is what makes this safe: data never becomes markup."""
+    target: str = ""               # CSS selector to inject the fragment into
 
 @dataclass
 class ClientToggle(Node):
@@ -420,13 +531,115 @@ class ClientNotify(Node):
     source:      str = ""
 
 @dataclass
+class ClientAlert(Node):
+    """alert "message" — a real, blocking browser alert() dialog. Reuses the server-side
+    `alert` keyword (already a terminal for miolog.alert); this is the client statement form.
+    Unlike notify (a dismissable toast), alert halts the page until the person closes it, so
+    it is for something that must be seen before anything else continues."""
+    source_kind: str = "literal"
+    source:      str = ""
+
+@dataclass
+class ClientCopy(Node):
+    """copy #element or a built value — writes to the OS clipboard via navigator.clipboard.
+    source_kind 'elem' reads the element's displayed value/text first; the other kinds are
+    the same literal/result/the/marked vocabulary every other client value accepts. A denied
+    or unsupported clipboard write alerts rather than failing silently."""
+    source_kind: str = "literal"
+    source:      str = ""
+
+@dataclass
+class ClientShare(Node):
+    """Three forms (ruled by Ron, 2026-10-03), each composing with `on DESTINATION`:
+    `share` with no value shares the CURRENT PAGE (source_kind='page', source unused --
+    _emit_stmt reads window.location.href); `share #element` shares that ELEMENT'S OWN LINK
+    (source_kind='elem', source is the selector -- its own .href, or a link found inside it,
+    or the current page as a last resort); `share VALUE` shares a literal/built value
+    (source_kind 'literal'/'result'/'the', the pre-existing form). Bare opens the device's
+    native share sheet (navigator.share); `on DESTINATION` instead opens that site's own share
+    page (a new tab/window), built from the URL template in
+    mohio_data/share_destinations.json -- destination is "" for the bare-destination form; an
+    unrecognized destination refuses at compile time, the same as an unrecognized client
+    value. A failed or cancelled share sheet does not alert -- declining to share is a normal
+    outcome, not an error to report."""
+    source_kind:  str = "literal"
+    source:       str = ""
+    destination:  str = ""
+
+@dataclass
+class ClientConfirm(Node):
+    """confirm "message" — a yes/no gate. On no (Cancel), the handler stops right there;
+    every statement after it in this listener is skipped. On yes, execution falls through."""
+    source_kind: str = "literal"
+    source:      str = ""
+
+@dataclass
 class ClientHold(Node):
-    """hold <name> = <"literal" | datum | result.field> — store a page-level value.
-    Reading the name anywhere recalls it. Capture/recall only; computation lives
-    in Mohio (server), not in MioScript."""
+    """hold <name> = <"literal" | datum | result.field> — FREEZE a page-level value
+    (Ron ruling, 2026-10-04 -- the client mirror of the server's hold). Reading the name
+    anywhere recalls it; a second `hold` for the same name, or an assignment to it, refuses
+    until `release`. For a value that should keep recapturing (the last keystroke, the last
+    selection), use the bare `ClientAssign` form (`name value`) instead -- that is what `hold`
+    meant before this ruling, and the one it is retired from."""
     name:        str = ""
     source_kind: str = "literal"
     source:      str = ""
+
+@dataclass
+class ClientAssign(Node):
+    """<name> <value> — a FLUID page value, no freeze: plain read/recapture, the client's
+    own mirror of the server's bare `name value`. Always reassignable, unlike ClientHold."""
+    name:        str = ""
+    source_kind: str = "literal"
+    source:      str = ""
+
+@dataclass
+class ClientRelease(Node):
+    """release <name> — unfreezes a client hold, so it can be held (or assigned) again.
+    Refused at compile time if <name> was never held anywhere on the page."""
+    name: str = ""
+
+@dataclass
+class ClientClearVar(Node):
+    """clear <name> — empties a HELD client value in place; it stays held. A different rule
+    from `clear #selector` (ClientDomOp op='clear'), which empties a DOM element and is
+    unaffected by this. Refused at compile time if <name> was never held."""
+    name: str = ""
+
+@dataclass
+class ClientForgetVar(Node):
+    """forget <name> — removes a held client value entirely. Refused at compile time if
+    <name> was never held."""
+    name: str = ""
+
+@dataclass
+class ClientRename(Node):
+    """rename <name> to <target> — renames a held client value. Refused at compile time if
+    <name> was never held."""
+    name:   str = ""
+    target: str = ""
+
+@dataclass
+class ClientReplaceVar(Node):
+    """replace <name> with <value> — whole-value replace of a HELD client value, in place;
+    the client mirror of the server's VarStateStmt op='replace'. Refused at compile time if
+    <name> was never held."""
+    name:        str = ""
+    source_kind: str = "literal"
+    source:      str = ""
+
+@dataclass
+class ClientReplaceIn(Node):
+    """replace "old" with <value> in <target> (as <alias>)? — string substitution, the client
+    mirror of the server's ReplaceBlock. With `as <alias>` it is a pure expression (reads
+    <target>, writes only <alias>, source untouched) and works on ANY client value, held or
+    fluid. Without `as <alias>` it mutates <target> in place, and that form is refused at
+    compile time unless <target> was held -- the same held-only split as the server side."""
+    old:         str = ""
+    source_kind: str = "literal"
+    source:      str = ""
+    target:      str = ""
+    alias:       str = ""
 
 @dataclass
 class ClientPrevent(Node):
@@ -481,6 +694,8 @@ class ShapeField(Node):
     name:       str  = ""
     type_name:  Optional[str] = None
     is_list:    bool = False       # NEW v3.8 -- "as list text"
+    # The ITEM type of a `list X` field (`tags as list int` -> "int"); type_name stays "list".
+    element_type: Optional[str] = None
     dotted:     Optional[str] = None  # NEW v3.8 -- "status.allowed"
     modifiers:  list = field(default_factory=list)   # list[ShapeFieldModifier]
     # DECLARED AS PART OF A COMMA GROUP (`a, b, c as text`). The refuse-two-fields-on-one-line
@@ -567,6 +782,7 @@ class MioconnectOperation(Node):
     sends_shape:  Optional[str] = None
     returns_shape: Optional[str] = None
     method:       str  = "POST"
+    timeout:      Any  = None   # seconds; overrides the connector's own timeout for this operation
 
 @dataclass
 class MioconnectCall(Node):
@@ -853,6 +1069,23 @@ class FromConnectorWhen(Node):      # NEW v3.8
     body:  list = field(default_factory=list)
 
 
+# ── Handler registry (Batch 16) ───────────────────────────────
+# The handler node types that STAND ALONE. Each of these is a complete web handler on its own line:
+# it listens for something (a shape POST, a GET at a path, a websocket connection, a stored-record
+# change, a connector webhook) and registers itself as one independent route. None of them depends on
+# a containing block. A `listen for` wrapper around them is retired -- see the lock comment at
+# mohio.lark's block_stmt rule and _build_route_registry in mohio_interpreter. `top_handlers` is the
+# ONE place that answers "which top-level statements are routes", so the router, the has-routes checks
+# and the framework scanner cannot drift apart on the answer.
+TOP_HANDLER_TYPES = (NewBlock, RequestInboundBlock, ConnectionBlock, ChangeBlock, FromConnectorBlock)
+
+
+def top_handlers(statements):
+    """The standalone handler statements in a statement list, in source order. Used for top-level
+    program routing and for handlers written loose inside a journey body."""
+    return [s for s in (statements or []) if isinstance(s, TOP_HANDLER_TYPES)]
+
+
 # ==============================================================
 # FLOW CONTROL
 # ==============================================================
@@ -1035,6 +1268,7 @@ class UpdateBlock(Node):
     source:  Any  = None
     body:    list = field(default_factory=list)
     handlers: list = field(default_factory=list)
+    alias:   Optional[str] = None                 # update ... as NAME -> bind rows-changed count
 
 @dataclass
 class RemoveBlock(Node):
@@ -1043,6 +1277,7 @@ class RemoveBlock(Node):
     condition: Any  = None
     match:     Any  = None   # MatchClause -- alias for condition
     handlers:  list = field(default_factory=list)
+    alias:     Optional[str] = None   # remove ... as NAME -> bind rows-removed count
 
 @dataclass
 class RemoveAllBlock(Node):         # NEW v3.8
@@ -1107,8 +1342,9 @@ class SkipClause(Node):             # NEW v3.8
 
 @dataclass
 class PaginateClause(Node):         # NEW v3.8
-    """paginate by 25"""
+    """paginate by 25  |  paginate by request.page default 1"""
     count: Any = None
+    default: Any = None   # the value a MISSING page takes (ruled 2026-09-22)
 
 @dataclass
 class CursorClause(Node):           # NEW v3.8
@@ -1229,7 +1465,14 @@ class UsingChain(Node):
 @dataclass
 class WeighClause(Node):
     """weigh transaction.amount, member.history, ..."""
-    inputs: list = field(default_factory=list)   # list[DottedName]
+    inputs: list = field(default_factory=list)   # list[DottedName | WeighLiteral]
+
+@dataclass
+class WeighLiteral(Node):
+    """A literal weighed as context (`weigh message.body, "returns: 30 days"`, RULED 2026-08-30).
+    The model reads `literal`; the decision record keeps only its source line and the
+    classification `literal`, never its text."""
+    literal: Any = None
 
 @dataclass
 class NotConfidentBlock(Node):
@@ -1282,6 +1525,10 @@ class AiConnectBlock(Node):
     names:     list = field(default_factory=list)   # group name(s)
     providers: list = field(default_factory=list)   # [{provider, model}] in fallback order
     handlers:  list = field(default_factory=list)   # on.failure handler(s)
+    # Coder-declared providers carrying their own endpoint + key, overriding a built-in of the same
+    # name. [{name, address, address_type, key, key_type}]; address_type/key_type in
+    # {'string','env','secret'} so the interpreter resolves an env/secret ref at run time.
+    declared:  list = field(default_factory=list)
 
 @dataclass
 class AiConnectProvider(Node):
@@ -1291,7 +1538,7 @@ class AiConnectProvider(Node):
 
 @dataclass
 class AiCreateStmt(Node):
-    """ai.create poster returns image as banner / goal / style / size / ..."""
+    """ai.create image as banner / goal / style / size / ...  (KIND first, NAME last)"""
     create_type: str  = ""   # image | audio | logic | text | data | video
     name:        str  = ""   # asset/decision name
     alias:       str  = ""   # `as NAME` -- variable the result is stored in
@@ -1310,6 +1557,7 @@ class AiCreateStmt(Node):
     source:      str  = ""   # knowledge base ref
     attrs:       dict = field(default_factory=dict)  # `with k v` extras + template
     body:        list = field(default_factory=list)
+    realistic:   Optional[float] = None   # `realistic N`; 0.0 = fully synthetic, from the source's fields only
 
 @dataclass
 class AiOverrideStmt(Node):
@@ -1486,14 +1734,39 @@ class SignBlock(Node):              # NEW v3.8
     expires:    Any  = None
     named:      Optional[str] = None
     handlers:   list = field(default_factory=list)
+    named_word: bool = False        # captured with the retired `named NAME` (refused at check)
 
 @dataclass
 class VerifyTokenStmt(Node):
-    """verify token from request.header "Authorization" """
+    """verify token from request.header "Authorization"  |  verify token from link.token as grant"""
     source:  Any  = None
     header:  Optional[str] = None
     scope:   Optional[str] = None
     handlers: list = field(default_factory=list)
+    as_name: Optional[str] = None
+
+@dataclass
+class TokenCreateBlock(Node):
+    """mioauth.token.create as NAME / for X / scope "..." / expires in N unit / one time"""
+    as_name:  Optional[str] = None
+    subject:  Any  = None
+    scope:    Any  = None
+    expires:  Any  = None
+    one_time: bool = False
+    named:    Optional[str] = None      # the retired `named NAME` capture, refused at check
+    uses:     Optional[int] = None      # `up to N times`; None means one time, the default
+    token:    Any  = None               # not a create clause; kept so check can refuse it
+
+@dataclass
+class TokenRevokeBlock(Node):
+    """mioauth.token.revoke / for X / scope "approve:*" -- every unused matching token"""
+    subject:  Any  = None
+    scope:    Any  = None
+    expires:  Any  = None               # not a revoke clause; kept so check can refuse it
+    one_time: bool = False
+    named:    Optional[str] = None
+    uses:     Optional[int] = None
+    token:    Any  = None               # `token X`: revoke the one presented token
 
 @dataclass
 class ValidateStmt(Node):           # NEW v3.8
@@ -1759,6 +2032,24 @@ class RoundExpr(Node):              # NEW v3.8
     places:    Any = None
 
 @dataclass
+class InTimezoneExpr(Node):
+    """payment.created in.timezone "Asia/Bahrain"  |  payment.created in.timezone customer.zone
+    T1-DB-TYPED-STORAGE (RULED by Ron, 2026-10-05): display conversion, translating a stored
+    (UTC) datetime into another zone for display. `zone` is either a literal zone-name string
+    (zone_literal set, zone_value None) or a value_expr to evaluate at run (zone_value set,
+    zone_literal None) -- e.g. a dotted reference to a `timezone`-typed field."""
+    value:        Any = None
+    zone_literal: Optional[str] = None
+    zone_value:   Any = None
+
+@dataclass
+class StrippedExpr(Node):
+    """`<record> stripped` -- the record without its [phi]/[pci]/[pii] fields (RULED by Ron), the one
+    way to send a record holding protected data to an AI call or an outside call."""
+    operand: Any = None
+
+
+@dataclass
 class StringOpExpr(Node):
     """
     String operation expression -- returns a value.
@@ -1846,17 +2137,6 @@ class ConcatExpr(Node):
     terms: list = field(default_factory=list)
 
 @dataclass
-class DynamicFieldValue(Node):
-    """
-    set field puzzle.flag_set to "true"
-    Dynamic field assignment -- field name comes from a runtime value.
-    Generates a runtime warning in mio check (cannot validate at compile time).
-    The field_name is evaluated at runtime to determine which column to set.
-    """
-    field_name: Any = None   # value_expr -- evaluated to get the column name
-    value:      Any = None   # value_expr -- the value to set
-
-@dataclass
 class MiohttpStmt(Node):
     """
     miohttp.get "https://api.example.com/users"
@@ -1900,6 +2180,7 @@ class MiofileStmt(Node):
     content: Any = None     # value_expr (write)
     dest:    Any = None     # value_expr (move/copy)
     alias:   str = ""       # "as NAME" (read/list)
+    overwrite: bool = False # move/copy `allow overwrite`: replace an existing destination
 
 @dataclass
 class MiofileDecl(Node):
@@ -2165,6 +2446,13 @@ class DescribeDecl(Node):
     text: str = ""
 
 @dataclass
+class ImageDecl(Node):
+    """image "q3-preview.png" -- the social-preview image, declared beside title/describe.
+    The runtime writes title/describe/image into every og:/twitter: social preview tag the
+    render shell emits (_wrap_html_shell), not just <title>/<meta name="description">."""
+    text: str = ""
+
+@dataclass
 class ViewDecl(Node):
     """view header / title as text required / display ... / view: done"""
     name:   str  = ""
@@ -2332,3 +2620,178 @@ class MapDecl:
     source: object = None
     through: str = ""
     alias: str = ""
+
+# WHAT A `mioai.<method>` CALL IS, said by the check and the run refusal alike (RULED by Ron
+# 2026-10-09). "Retired" is kept for the spellings that really were retired (the dotted generative
+# forms, replaced by `ai.create`). `mioai.extract` is a locked design (2026-06-12) that is not built
+# yet, so calling it retired told the reader a design was abandoned. Any other method is not a
+# mioai operation at all.
+MIOAI_RETIRED_METHODS = ('text', 'image', 'audio', 'video', 'data', 'generate')
+MIOAI_DESIGNED_METHODS = {
+    'extract': ("reads a document or image (a PDF, a scan, a photo) into text",
+                "Until it lands, get the text out by other means and give `ai.*` the text: a field "
+                "the person types, or `miofile.read` for a stored plain-text file."),
+}
+
+
+def mioai_refusal(method):
+    """The message for a `mioai.<method>` call that this build cannot run."""
+    if method in MIOAI_DESIGNED_METHODS:
+        what, today = MIOAI_DESIGNED_METHODS[method]
+        return (f"mioai.{method} is designed but not built yet: it {what}, and it arrives with "
+                f"mioai. {today}")
+    if method in MIOAI_RETIRED_METHODS:
+        return (f"mioai.{method} is retired. Use `ai.create` to generate text, data, an image, "
+                f"audio, or video (e.g. `ai.create poster image`), or `ai.decide` for AI reasoning "
+                f"-- both are wired.")
+    return (f"mioai.{method} is not a mioai operation. To generate something use `ai.create` "
+            f"(e.g. `ai.create poster image`); for AI reasoning use `ai.decide`.")
+
+
+# TAGGED DATA ON MONGODB (ruling 2, Ron 2026-10-09): until T1-MONGO-AUDIT-TRAIL is built Mohio keeps
+# no audit trail on MongoDB, so an app holding [phi], [pii] or [pci] data there refuses: at check when
+# the connect line names the engine, and at startup when only the address does. One message for both.
+def mongo_tagged_refusal(fields, line=None):
+    shown = ', '.join(f"`{f}`" for f in sorted(fields)[:6]) + (', ...' if len(fields) > 6 else '')
+    return ((f"Line {line}: " if line else "")
+            + f"this app keeps tagged data ({shown}) on MongoDB, and Mohio does not keep an audit "
+            f"trail on MongoDB yet (T1-MONGO-AUDIT-TRAIL), so every record of who saw or changed "
+            f"that data would be lost.\n"
+            f"    Until it is built, keep this app's data on an engine that keeps the trail: SQLite, "
+            f"Postgres, MySQL or Oracle, for example\n"
+            f"        connect db as postgres from env.DATABASE_URL")
+
+
+def mongo_ai_audit_refusal(logs, line=None):
+    """The same boundary for an `ai.audit to` line: on MongoDB the record it asks for has nowhere to go
+    (measured 2026-10-09: an audited ai.decide answered 200 and wrote nothing), and a governed AI step
+    never completes without its record, so the app would refuse every one of them."""
+    shown = ', '.join(f"`{n}`" for n in sorted(logs)[:6]) + (', ...' if len(logs) > 6 else '')
+    return ((f"Line {line}: " if line else "")
+            + f"this app records AI steps with `ai.audit to` ({shown}) on MongoDB, and Mohio does not "
+            f"keep an audit trail on MongoDB yet (T1-MONGO-AUDIT-TRAIL), so every one of those "
+            f"records would be lost and each governed step would be refused.\n"
+            f"    Until it is built, keep this app's data on an engine that keeps the trail: SQLite, "
+            f"Postgres, MySQL or Oracle, for example\n"
+            f"        connect db as postgres from env.DATABASE_URL")
+
+
+def mongo_sector_audit_refusal(frameworks, grade, line=None, label=None):
+    """The same boundary for a sector or compliance profile that requires an audit grade (RULED by
+    Ron 2026-10-09): every audited action needs the trail MongoDB does not keep yet."""
+    said = label or "this app's sector"
+    return ((f"Line {line}: " if line else "")
+            + f"{said} ({', '.join(frameworks)}) requires {grade}-grade audit storage, and Mohio "
+            f"does not keep an audit trail on MongoDB yet (T1-MONGO-AUDIT-TRAIL), so every audited "
+            f"action (a sign-in, a role check, a governed decision) would be refused.\n"
+            f"    Until it is built, keep this app's data on an engine that keeps the trail: SQLite, "
+            f"Postgres, MySQL or Oracle, for example\n"
+            f"        connect db as postgres from env.DATABASE_URL")
+
+
+# `when actor.is "yes"` (RULED by Ron 2026-10-09, from the Dispatch app's line 747): `is` dotted
+# onto a name reads as a FIELD called is, so the condition is neither a comparison nor a value. With
+# a value after it the parse fails a line later; without one it checks clean and stops at run. Both
+# paths say this, at the condition's own line.
+def when_is_field_message(line, owner, subject=None, value=None):
+    """The refusal for a `when <owner>.is ...` condition. `subject` is the enclosing check's subject
+    when it is known, `value` the value written after `is` when there was one."""
+    subject = subject or f"{owner}.<field>"
+    value = value or '"<value>"'
+    return (f"Line {line}: `when {owner}.is` reads `is` as a field of `{owner}`, but `is` is a "
+            f"comparison word, not a field, so this condition is neither a comparison nor a value.\n"
+            f"    Inside `check {subject}`, compare with the value alone:  when {value}\n"
+            f"    or write the whole comparison:  when {subject} is {value}")
+
+
+def shape_name_start_message(line, name):
+    """The refusal for a shape declared with a name that does not begin with a letter (RULED by Ron
+    2026-10-10). Said by `mio check` for a leading `_` and by the syntax-error explainer for a leading
+    `-`, which never parses, so both read the same."""
+    rest = name.lstrip('_-') or 'Order'  # SILENT-OK: an example name in the message when the declared one has no letters
+    rest = rest[0].upper() + rest[1:]
+    return (f"Line {line}: the shape name `{name}` begins with `{name[0]}`. A shape name begins with "
+            f"a letter, so that `sh.<name>` can always reach it.\n"
+            f"    Rename it, for example:  shape {rest}\n"
+            f"    and refer to it as `sh.{rest}`, reading its data in a handler as `{rest}.<field>`.")
+
+
+# The type words a value can be mistakenly followed by (`code 5 as text`), and the cast that converts
+# to each. `as.integer` and `as.date` do not exist, so a type with no cast gets none offered: the
+# message only ever suggests a form that runs.
+_CAST_FOR_TYPE = {'text': 'as.text', 'text.long': 'as.text', 'int': 'as.int', 'integer': 'as.int',
+                  'dec': 'as.dec', 'decimal': 'as.dec', 'boolean': 'as.boolean', 'bool': 'as.boolean'}
+_TYPE_AFTER_VALUE_WORDS = frozenset(_CAST_FOR_TYPE) | {
+    'date', 'datetime', 'time', 'uuid', 'json', 'string', 'number', 'num',
+    'usd', 'eur', 'gbp', 'jpy', 'chf', 'cad', 'aud', 'cny', 'hkd', 'sgd', 'inr', 'nzd', 'sek', 'nok',
+    'mxn', 'brl', 'zar', 'krw', 'bhd', 'kwd', 'omr', 'jod', 'tnd', 'iqd', 'lyd'}
+
+
+def type_after_value_message(lines, line):
+    """`code 5 as text` (RULED by Ron 2026-10-11): a type written after a value, on source line
+    `line` of `lines`. Returns the teaching message, or None when the line is not that mistake.
+
+    One message for every way the line fails: a reserved type word (`text`, `int`, `json`) stops
+    the parse, and the syntax-error explainer asks here; an unreserved one (`date`, `USD`) parses
+    as a field named `as`, and the save, call and top-level refusals ask here. The type's source
+    depends on where the line sits: a save's column, a call's take line, or the value itself."""
+    import re as _re
+    if not (line and 0 < line <= len(lines)):
+        return None
+    m = _re.match(r'(\s*)([A-Za-z_]\w*)\s+(\S.*?)\s+as\s+([A-Za-z_][\w.]*)\s*(?://.*)?$',
+                  lines[line - 1])
+    if not m:
+        return None
+    indent, name, value, typ = len(m.group(1)), m.group(2), m.group(3), m.group(4)
+    base = 'dec' if _re.fullmatch(r'(?:dec|decimal)\.\d+', typ.lower()) else typ.lower()
+    if base not in _TYPE_AFTER_VALUE_WORDS or name.lower() in ('connect', 'take'):
+        return None
+    opener, opener_words = '', []
+    for prev in reversed(lines[:line - 1]):
+        s = prev.strip()
+        if s and not s.startswith("//") and len(prev) - len(prev.lstrip()) < indent:
+            opener_words = s.split()
+            opener = opener_words[0].lower()
+            break
+    cast = _CAST_FOR_TYPE.get(base)
+    if cast == 'as.dec' and base != typ.lower():
+        cast = 'as.dec.' + typ.split('.', 1)[1]
+    if opener in ('save', 'update', 'upsert', 'save.all'):
+        article = 'an' if opener in ('update', 'upsert') else 'a'
+        where = (f"In {article} {opener}, a field's type comes from its column, or from the value "
+                 f"itself when the column is new, so there is nothing to declare on this line.")
+    elif opener == 'call':
+        # Quote the task's own take line when this file declares it; the type on the mistaken
+        # line is not necessarily the one the task takes.
+        take = None
+        task = opener_words[1] if len(opener_words) > 1 else None
+        in_task = False
+        for src in lines:
+            s = src.strip()
+            if s.split()[:2] == ['task', task]:
+                in_task = True
+            elif in_task and s.startswith('task:'):
+                break
+            elif in_task and s.startswith('take ') and _re.search(r'\b%s\b' % _re.escape(name), s):
+                take = s
+                break
+        where = (f"In a call, a value's type comes from the task's take line"
+                 + (f" ({take})" if take else "") + ", so there is nothing to declare here.")
+    else:
+        where = (f"A value's type comes from the value itself. To declare an empty typed name, "
+                 f"write `{name} as {typ}` on its own line.")
+    msg = (f"`{name} {value} as {typ}` puts a type after the value. {where}\n"
+           f"    Write the value alone:\n        {name} {value}")
+    if cast:
+        msg += f"\n    To convert the value, use the cast:\n        {name} {value} {cast}"
+    return msg
+
+
+# THE ACCEPTED ROUNDING FORMS, said by every refusal of a rounding form that is not one of them
+# (RULED by Ron, 2026-10-06), so no unsupported spelling ends at a generic parse error or a
+# no-handler message.
+ROUNDING_FORMS = (
+    "Rounding is written after the value: `price round.to 2` rounds to two places, ties away "
+    "from zero; `price round.up 2` rounds away from zero and `price round.down 2` toward zero. "
+    "`round.up` and `round.down` with no number round to a whole number. The number of places "
+    "is a whole number, 0 or more.")

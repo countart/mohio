@@ -11,7 +11,7 @@ status on a response. Every example here is verified against the current compile
 
 A normal string is one physical line, in double quotes:
 
-```
+```mohio
 greeting   "Welcome back."
 give back [200] "Saved."
 ```
@@ -21,7 +21,7 @@ give back [200] "Saved."
 For a line break inside an otherwise short string, use the `\n` escape — it
 renders as a real newline in the output:
 
-```
+```mohio
 give back [200] "Line one.\nLine two."
 ```
 
@@ -37,7 +37,7 @@ A string that spans physical lines in the source — a paragraph, a block of
 narrative, an **AI prompt** — must be marked with **`as.paragraph`** so Mohio
 knows the line breaks are intentional:
 
-```
+```mohio
 give back as.paragraph "
     You hold the marble up.
 
@@ -45,7 +45,7 @@ give back as.paragraph "
 "
 ```
 
-```
+```mohio
 ai.decide narrator
     goal as.paragraph "
         Respond as a sardonic narrator.
@@ -79,7 +79,7 @@ has). `as.paragraph` is an **optional authoring-clarity marker** — it signals 
 reader "this is intentionally a multi-paragraph block." It does not change how the
 string is parsed or stored:
 
-```
+```mohio
 give back 200 "Line one.
 Line two."                       // works
 
@@ -97,7 +97,8 @@ they never pass through the parser. Long narrative or prompt text can be stored
 as a field and given back directly:
 
 ```
-find scene in db.scenes where id matches request.scene_id
+find scene in db.scenes
+    where id matches request.scene_id
 find: done
 give back 200 scene.text          // scene.text may contain newlines — fine
 ```
@@ -111,7 +112,7 @@ This is often the cleaner pattern for large blocks of content: logic in the
 
 `give back` takes an optional status before the value. Numbers always work:
 
-```
+```mohio
 give back [200] "Saved."
 give back [404] "Not found."
 give back [202] "Queued for review."
@@ -132,7 +133,7 @@ as-is — it does not convert between them.)
 | `404` | `missing` | the requested thing doesn't exist |
 | `500` | `error` | server-side failure |
 
-```
+```mohio
 give back ok "Your changes are saved."
 give back created member
 give back unauthorized "Please log in."
@@ -149,7 +150,7 @@ Only these five aliases exist for now; everything else uses its number
 When you omit the status entirely, it defaults to **200**. These three are
 identical:
 
-```
+```mohio
 give back "Done."
 give back [200] "Done."
 give back ok "Done."
@@ -175,3 +176,17 @@ A `give back as.paragraph "..."` with no status also defaults to 200.
 
 **Two rules to remember:** a real line break in a source string needs the
 `as.paragraph` marker (or use `\n`), and an omitted status means `200`.
+
+---
+
+## Redirecting after a POST: `jump to`, not `redirect`
+
+To send the browser to another address after a POST, use `jump to`, which performs a 303 redirect:
+
+```mohio
+jump to "/welcome"
+```
+
+`redirect` is declared but NOT built, and it refuses at `mio check` and `mio run` rather than doing
+nothing (it used to parse as a variable named `redirect` and silently no-op). The refusal names the
+fix and points at `jump to` (backlog: `T1-REDIRECT-UNBUILT`). Write `jump to` today.

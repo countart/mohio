@@ -36,7 +36,7 @@ These are hard rules. Breaking them is a compile error, so learn them first:
    ```
 2. **No curly braces `{ }`. Ever.** Mohio uses indentation and words instead.
 3. **Every block ends with a named closer.** When you open a block, you close it with its name:
-   `check: done`, `retrieve: done`, `new: done`, `ai.decide: done`. (`done` by itself works but
+   `check: done`, `retrieve: done`, `listen: done`, `ai.decide: done`. (`done` by itself works but
    always use the named one — it's clearer and safer.)
 4. **Plain text only.** Use straight quotes `"like this"`, not curly ones. Use `->` (a dash and a
    greater-than), never a fancy arrow symbol. Word and some editors "auto-correct" quotes and dashes —
@@ -58,7 +58,7 @@ greeting "Hello"
 `hold` and `lock` are the guarded forms, not the everyday one. `hold` freezes a value
 until you `release` it; `lock` freezes it permanently.
 
-```
+```mohio
 hold rate 0.05        // frozen until released
 lock pi = 3.14159     // frozen for good
 ```
@@ -121,7 +121,7 @@ shout message uppercase
 
 Mohio uses `check / when / otherwise` instead of long if-chains:
 
-```
+```mohio
 check score
     when score is above 100
         show "Amazing!"
@@ -144,7 +144,7 @@ check: done
 
 Repeat a fixed number of times:
 
-```
+```mohio
 repeat 3 times
     show "Knock"
 repeat: done
@@ -152,7 +152,7 @@ repeat: done
 
 Keep going while a condition holds:
 
-```
+```mohio
 attempts 0
 while attempts is less than 3
     show "Trying..."
@@ -167,14 +167,14 @@ while: done
 This is one of Mohio's superpowers: queries that read like English. First, connect once at the top:
 
 ```
-connect db as postgres from env.DATABASE_URL
+connect db from env.DATABASE_URL
 ```
 
 Then refer to tables as `db.players`, `db.puzzles`, and so on.
 
 **Get one row** with `retrieve`:
 
-```
+```mohio
 retrieve player from db.players
     match id to current_user
 retrieve: done
@@ -183,7 +183,7 @@ retrieve: done
 **`match` means "is exactly equal to."** Stack several `match` lines to require *all* of them — that's
 how you do a compound key. You don't need an "and":
 
-```
+```mohio
 retrieve puzzle from db.puzzles
     match room to current_room
     match verb to command_verb
@@ -193,7 +193,7 @@ retrieve: done
 
 **`match any` means OR** — any one of them can match:
 
-```
+```mohio
 retrieve ticket from db.tickets
     match any
         label to "bug"
@@ -205,7 +205,7 @@ retrieve: done
 
 **`no.match` means "none of these"** (NOT). It closes with its own `no.match: done`:
 
-```
+```mohio
 retrieve task from db.tasks
     match owner to current_user
     no.match
@@ -218,12 +218,20 @@ retrieve: done
 
 You can mix all three — they all combine with AND at the top level.
 
-> **Not-found handling — both forms work (verified by running, 2026-08-01).** For a single-row `retrieve`, attach **`on.failure`** to react when the row isn't found (e.g. `on.failure / give back 404 "Not found."`). For a multi-row `find`, the canonical shape distinguishes three outcomes: `find X in db.T / match ... / on.failure (operational failure — a missing table or no DB) / otherwise ( check X / when empty (zero rows) / otherwise (rows present) / check: done ) / find: done`. `when empty` fires on a genuinely empty result, and a missing table routes to `on.failure` (not silently empty-success). (`no.match` above is different — a compound-match filter inside the query, not a result-emptiness handler.)
+> **Not-found handling (verified by running, 2026-09-22).** A read that matches no row is a SUCCESSFUL
+> empty result, not a failure, for both a single-row `retrieve` and a multi-row `find`. `on.failure`
+> means the operation ERRORED (a missing table, no database), and it never fires for a no-match. So
+> test the not-found case with `when <name> is empty`, and keep `on.failure` for a real error:
+> `retrieve member ... / on.failure / give back [503] "store unavailable" / retrieve: done`, then
+> `check member / when member is empty / give back [404] "Not found." / otherwise / ... / check: done`.
+> This reverses the old advice here (which attached `on.failure` to a not-found); Mohio 4.9.0 made a
+> no-match run the ordinary path. (`no.match` above is different, a compound-match filter inside the
+> query, not a result-emptiness handler.)
 
 **`where` is for ranges and comparisons** (not plain equality). Use it mostly with `find`, which gets
 *many* rows:
 
-```
+```mohio
 find members in db.members
     where score is above 100
     and score is below 500
@@ -273,21 +281,19 @@ other, but you don't need that to start.
 
 Use `listen for` to handle web requests, with a `new` endpoint for each address:
 
-```
+```mohio
 shape ScreenCheck
     student_name as text
 shape: done
 
-listen for
-    new sh.ScreenCheck at /checkin
-        require role "staff"
-        student request.student_name
-        save to db.checkins
-            name student
-            at today
-        save: done
-        give back 200 ("Checked in: " & student)
-    new: done
+listen for sh.ScreenCheck at /checkin
+    require role "staff"
+    student ScreenCheck.student_name
+    save to db.checkins
+        name student
+        at today
+    save: done
+    give back 200 ("Checked in: " & student)
 listen: done
 ```
 
@@ -301,7 +307,7 @@ listen: done
 
 Bundle steps you reuse into a `task`, then run it by name with `call`:
 
-```
+```mohio
 task welcome
     show "Welcome to the game!"
     show "Good luck."
@@ -313,7 +319,7 @@ call welcome
 
 Tasks can take inputs and return a value. Declare each input with a `take` line:
 
-```
+```mohio
 task greet
     take name as text
     returns text
@@ -326,7 +332,7 @@ call greet with "Aria"
 
 Pass **several** inputs by name, one per line — the order doesn't matter, and any input with a `default` can be omitted:
 
-```
+```mohio
 task total
     take a, b as int
     returns int
@@ -367,31 +373,30 @@ values are always written in quotes.
 
 ## 14. A complete little program
 
-```
+```mohio
 // guess.mho — a tiny number game
 
-connect db as postgres from env.DATABASE_URL
+connect db from env.DATABASE_URL
 
 shape Guess
     number as int
+    tries as int
 shape: done
 
-listen for
-    new sh.Guess at /guess
-        tries request.tries default "0" as.int
-        answer 7
-        guess request.number as.int
-        total_tries (tries + 1)
+listen for sh.Guess at /guess
+    tries Guess.tries default "0" as.int
+    answer 7
+    guess Guess.number as.int
+    total_tries (tries + 1)
 
-        check guess
-            when guess is answer
-                give back 200 ("You got it in " & total_tries & " tries!")
-            when guess is above answer
-                give back [200] "Too high — try again"
-            otherwise
-                give back [200] "Too low — try again"
-        check: done
-    new: done
+    check guess
+        when guess is answer
+            give back 200 ("You got it in " & total_tries & " tries!")
+        when guess is above answer
+            give back [200] "Too high — try again"
+        otherwise
+            give back [200] "Too low — try again"
+    check: done
 listen: done
 ```
 

@@ -19,8 +19,10 @@ because it decides what strangers can download from your site.
 | `index.mho` | The front page. Served at `/`. |
 | `journey.mho` | The spine. Applied to every page in its folder. Never a page itself. |
 | `_cheats.mho` | Private. Pulled into other files with `include`. Never has a web address. |
-| `_seed.json` | Private. Never handed out, whatever it holds. |
+| `_seed.json` | Private. The authored-data file `mio serve` loads; the leading underscore keeps it off the web. |
+| `_project.json` | Private. The project manifest Mohio Home reads; the leading underscore keeps it unserved. |
 | `.private/` | Private folder. Nothing inside it is ever handed out. |
+| `.git/` | Private. A dot-directory, so none of your repository's git history reaches a visitor. |
 | `_next/` | **Not** private. A folder starting with an underscore is served normally. |
 
 **To hide a folder, start its name with a dot.** To hide a single file, an underscore is
@@ -52,31 +54,97 @@ nothing. That now stops the build and tells you to rename it.
 
 ---
 
+## Protecting a folder by declaration
+
+Privacy has two mechanisms, not one: **by filename** (the underscore and dot above), and
+**by declaration**. A journey classifies a PATH, and that classification governs the static
+files under it, not only the routes. So a whole folder is gated by one line in the spine, and
+you do not rename every asset inside it.
+
+```mohio
+journey App
+    hidden: /secrets
+    authorize: /admin
+    public: /admin/public
+journey: done
+```
+
+The journey already matches by segment prefix, so `authorize: /admin` covers `/admin/panel.css`
+and everything else under `/admin` (but not `/administration`, which is a different segment).
+What each tier does to a static file under its path, verified over real HTTP:
+
+- **`hidden:`** returns `404` to everyone, with or without a session. This is the strongest tier,
+  for secrets and includes: the path does not admit that anything is there.
+- **`authorize:`** returns `403` to an anonymous request and **serves** to a viewer holding a
+  verified role. An authorized viewer loads a gated page's own stylesheet from the same folder
+  with no special handling.
+- **`public:`** on a deeper path **overrides** a broader gate above it: `public: /admin/public`
+  serves anonymously even though `/admin` is gated.
+
+**The whole folder is gated, with no carve-out for a page's own assets.** There is deliberately
+no exception that lets a gated page's stylesheet or image serve to an anonymous visitor, because
+the session cookie rides along with every asset request, so the same viewer who may see the page
+is the one who may load its assets. The gate is the page's protection and the asset's protection
+at once.
+
+This is why the rule is now **private by filename OR by declaration**: a `_secret.json` is private
+wherever it sits, and everything under a `hidden:` or `authorize:` path is private whether or not
+its name says so.
+
+---
+
 ## What is never handed out
 
-Some files are refused no matter where they sit, because handing them over would give
-away the app itself or the data inside it.
+The rule, stated positively so it is the useful part rather than a list of past leaks: a
+served folder hands out GENUINE ASSETS and nothing else. Images, stylesheets, scripts,
+`manifest.json`, markdown, CSV, fonts: the things a browser is meant to fetch. Everything
+below is refused wherever it sits, because handing it over would give away the app itself,
+the data inside it, or the machine it runs on. The categories, and why each is a category:
 
-- **Your source and its build artifacts.** `.mho`, and also `.cache`, `.pkl`,
-  `.pickle`. A parse cache holds every value written in the file, keys included, so it
-  is source in a different shape.
+- **Your source and its build artifacts.** `.mho`, `.py`, `.lark`, and also `.cache`, `.pkl`,
+  `.pickle`. A parse cache holds every value written in the file, keys included, so it is
+  source in a different shape: a build artifact derived from source IS source.
+- **The schema manifest.** `.mhoschema`, a generated file that names every table and field, is
+  denied like other source: it describes the shape of your data to anyone who reads it.
 - **Configuration.** `.env`, `.ini`, `.cfg`, `.conf`, `.toml`, `.yaml`, `.yml`.
-- **Databases, including their side files.** `.db`, `.sqlite`, `.sql`, and the sidecars
-  `.db-wal`, `.db-shm`, `.db-journal`, `.sqlite-journal`. SQLite writes recent changes
-  to those sidecars, so refusing the database and serving its journal would leak the
-  same data by another name.
-- **Keys and certificates.** `.pem`, `.key`, `.crt`, `.p12`, `.pfx`, `.p8`, `.der`,
-  `.jks`, `.ppk`, and files named `id_rsa`, `authorized_keys`, `known_hosts` even
-  though they have no extension at all.
-- **Leftovers.** `.bak`, `.old`, `.tmp`, `.orig`, `.swp`, `.log`, `.dump`, and anything
-  ending in `~`, which is how editors name a backup of the file they are editing.
+- **Databases, including their side files.** `.db`, `.sqlite`, `.sqlite3`, `.sql`, and the
+  sidecars `.db-wal`, `.db-shm`, `.db-journal`, `.sqlite-wal`, `.sqlite-shm`,
+  `.sqlite-journal`. SQLite writes recent changes to those sidecars, so refusing the database
+  and serving its write-ahead log would leak the same data by another name.
+- **Keys and certificates.** `.pem`, `.key`, `.crt`, `.p12`, `.pfx`, `.p7b`, `.p7c`, `.p8`,
+  `.der`, `.jks`, `.keystore`, `.ppk`, `.asc`, `.gpg`, `.kdbx`, and files named `id_rsa`,
+  `authorized_keys`, `known_hosts`, `htpasswd`, `passwd`, `shadow`, `credentials` even though
+  they have no extension at all.
+- **Dotfiles and dot-directories.** Any name whose first character is a dot, and everything
+  inside a folder whose name starts with a dot: `.env`, `.gitignore`, and the whole `.git/`
+  directory. Your repository's history and its ignore rules never reach a visitor.
+- **The project manifest**, `_project.json`, refused by the leading-underscore rule you can
+  use for your own files.
+- **The old authored-data name.** `seed.json` (no underscore) is refused too. The file that
+  seeds an app is `_seed.json`; a leftover `seed.json` seeds nothing, and it is denied so it
+  cannot leak the authority configuration it used to hold. `mio serve` also prints a one-line
+  warning at startup when a `seed.json` sits at the app root, naming the rename to `_seed.json`,
+  so a copied older example does not fail silently.
+- **Leftovers.** `.bak`, `.old`, `.save`, `.tmp`, `.temp`, `.orig`, `.swp`, `.log`, `.dump`,
+  and anything ending in `~`, which is how editors name a backup of the file they are editing.
+
+**These name rules apply at any depth, not just the root.** A `.env`, a `_secret.json` or a
+`seed.json` is refused whether it sits at the top of your app or three folders down. So is a
+genuine asset served at any depth: `assets/style.css` and `images/photo.png` serve exactly as a
+file at the root does. Folder depth never decides this; the name and the declaration do.
 
 **Every part of the name is checked, not just the end.** `backup.sql.gz` is refused
 because of the `.sql` in the middle, so compressing a database dump does not get it
 past. Same for `app.log.1`.
 
-Ordinary things are unaffected: images, stylesheets, scripts, `manifest.json`,
-markdown, CSV.
+**The mechanism you control, for anything of your own.** Give a file a LEADING UNDERSCORE and
+it is private, never served and never routed (`_notes.md`, `_scratch.json`); to hide a whole
+folder, start its name with a dot, or gate it with a `hidden:` / `authorize:` declaration in the
+journey (see above). That is the answer to "where do I put something I do not want served."
+
+A name rule and a declaration are independent: a file denied by name stays denied under a gated
+folder too, so an anonymous request for `/admin/.env` never returns its contents whether or not
+`/admin` is gated.
 
 ---
 
@@ -167,7 +235,7 @@ and tables survive.
 ## Databases: say which one you mean
 
 ```mohio
-connect db as postgres from env.DATABASE_URL
+connect db from env.DATABASE_URL
 ```
 
 If you name a real database and its address is not set, the app **refuses to start**.
@@ -178,7 +246,7 @@ believe their data is saved, and find it gone.
 To use the simple local database, say so:
 
 ```mohio
-connect db as sqlite from env.DATABASE_URL
+connect db from env.DATABASE_URL
 ```
 
 You will get a note reminding you that SQLite in memory keeps nothing after the app
@@ -288,7 +356,7 @@ code at all. It also means two things are worth knowing.
 you found is the ordinary case and it is fine. Changing something is not, and Mohio refuses
 it rather than letting it happen quietly:
 
-```
+```mohio
 save to db.hits
     page "about"
 save: done
@@ -299,14 +367,12 @@ made. So a page that changes state is refused, with the file, the verb and the l
 Move the change into a handler, which is the explicit place for it and runs only for the
 request it declares:
 
-```
-listen for
-    new sh.Click at /about
-        save to db.hits
-            page "about"
-        save: done
-        give back [200] "recorded"
-    new: done
+```mohio
+listen for sh.Click at /about
+    save to db.hits
+        page "about"
+    save: done
+    give back [200] "recorded"
 listen: done
 ```
 

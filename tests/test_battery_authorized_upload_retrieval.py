@@ -56,6 +56,8 @@ from mohio_transformer_ast import transform  # noqa: E402
 from mohio_interpreter import MohioInterpreter, MohioValue, Context  # noqa: E402
 from mohio_server import MohioServer, create_app  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _guard_token import guard_token
 
 _p = _f = 0
 _failures = []
@@ -89,27 +91,40 @@ def app(tag=" [phi]", accept="txt", ftype="file"):
     """One program that stores an upload and reads it back from a role-gated handler."""
     _n[0] += 1
     db = os.path.join(TMP, f"db{_n[0]}.db")
-    src = ('shape Chart\n    scan as ' + ftype + tag + '\n        accept ' + accept + '\n'
-           '        max size 5 mb\n    name as text\nshape: done\n'
-           'shape Login\n    who as text\nshape: done\n'
-           'connect db as sqlite from env.DATABASE_URL\n'
-           'listen for\n'
-           '    new sh.Chart at /c\n'
-           '        save to db.charts\n            scan scan\n            name name\n'
-           '        save: done\n        give back [200] "stored"\n    new: done\n'
-           '    new sh.Login at /login\n        grant role "clinician"\n'
-           '        give back [200] "in"\n    new: done\n'
-           '    new sh.Login at /badlogin\n        grant role "visitor"\n'
-           '        give back [200] "in"\n    new: done\n'
-           '    request for sh.Chart at /read\n'
-           '        require role "clinician"\n'
-           '        retrieve c from db.charts\n            match name to "Ada"\n'
-           '            on.failure\n                give back [404] "none"\n'
-           '        retrieve: done\n'
-           '        miofile.read c.scan as content\n'
-           '        give back [200] content\n'
-           '    request: done\n'
-           'listen: done\n')
+    src = ('shape Chart\n    scan as ' + ftype + tag + '\n        accept ' + accept + ('\n'
+                                                                                       '        max size 5 mb\n'
+                                                                                       '    name as text\n'
+                                                                                       'shape: done\n'
+                                                                                       'shape Login\n'
+                                                                                       '    who as text\n'
+                                                                                       'shape: done\n'
+                                                                                       'connect db as sqlite from env.DATABASE_URL\n'
+                                                                                       'listen for sh.Chart at /c\n'
+                                                                                       '    save to db.charts\n'
+                                                                                       '        scan scan\n'
+                                                                                       '        name name\n'
+                                                                                       '    save: done\n'
+                                                                                       '    give back [200] "stored"\n'
+                                                                                       'listen: done\n'
+                                                                                       'listen for sh.Login at /login\n'
+                                                                                       '    grant role "clinician"\n'
+                                                                                       '    give back [200] "in"\n'
+                                                                                       'listen: done\n'
+                                                                                       'listen for sh.Login at /badlogin\n'
+                                                                                       '    grant role "visitor"\n'
+                                                                                       '    give back [200] "in"\n'
+                                                                                       'listen: done\n'
+                                                                                       'request for sh.Chart at /read\n'
+                                                                                       '    require role "clinician"\n'
+                                                                                       '    retrieve c from db.charts\n'
+                                                                                       '        match name to "Ada"\n'
+                                                                                       '        when c is empty\n'
+                                                                                       '            give back [404] "none"\n'
+                                                                                       '    retrieve: done\n'
+                                                                                       '    miofile.read c.scan as content\n'
+                                                                                       '    give back [200] content\n'
+                                                                                       'request: done\n'
+                                                                                       ''))
     prev = os.environ.get('DATABASE_URL')
     os.environ['DATABASE_URL'] = db
     try:
@@ -124,7 +139,7 @@ def app(tag=" [phi]", accept="txt", ftype="file"):
 
 def store(it, client, blob, filename="chart.txt", ctype="text/plain"):
     before = set(os.listdir(STORE))
-    r = client.post("/c", data={"_csrf": it._issue_csrf(), "name": "Ada"},
+    r = client.post("/c", data={"_csrf": guard_token(client, it, "/c"), "name": "Ada"},
                     files={"scan": (filename, blob, ctype)})
     return r, [n for n in os.listdir(STORE) if n not in before]
 
@@ -145,7 +160,7 @@ check("...as ciphertext on disk", raw.startswith(b"enc:v1:"), raw[:30])
 print("\n-- UNAUTHENTICATED --")
 before = len(denials(it))
 resp = client.get("/read")
-check("refused", resp.status_code == 403, (resp.status_code, resp.text[:120]))
+check("refused", resp.status_code == 401, (resp.status_code, resp.text[:120]))
 check("...and the file content is nowhere in the response",
       SECRET.decode() not in resp.text, resp.text[:120])
 check("...and the refusal is audited", len(denials(it)) == before + 1, denials(it))
@@ -185,7 +200,7 @@ it2, client2 = app(tag="")
 r2, keys2 = store(it2, client2, PLAIN)
 raw2 = open(os.path.join(STORE, keys2[0]), 'rb').read() if keys2 else b""
 check("it is stored in the clear, as it always was", raw2 == PLAIN, raw2[:40])
-check("an unauthenticated read is still refused", client2.get("/read").status_code == 403)
+check("an unauthenticated read is still refused", client2.get("/read").status_code == 401)
 client2.post("/login", json={"who": "x"})
 resp2 = client2.get("/read")
 check("an authorized read returns it", PLAIN.decode() in resp2.text, resp2.text[:120])

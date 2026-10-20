@@ -24,6 +24,8 @@ os.environ.setdefault('DATABASE_URL', ':memory:')
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _aad_assert import bound_reason  # noqa: E402
 
 _raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
@@ -33,8 +35,15 @@ SHAPE = ('shape Person\n    ssn as text [pii] sec.encrypt required\n'
          '    name as text\nshape: done\n')
 DB = 'connect db as sqlite from env.DATABASE_URL\n'
 SAVE = 'save to db.people\n    ssn "123-45-6789"\n    name "Ada"\nsave: done\n'
-AT_REST = ('retrieve raw from db.*\n    sql\n        SELECT ssn FROM people\n'
-           '    sql: done\nretrieve: done\ngive back 200 raw.first.ssn\n')
+AT_REST = ('retrieve raw from db.*\n    sql\n        SELECT ssn, id FROM people\n'
+           '    sql: done\nretrieve: done\ngive back 200 raw.first\n')
+
+
+def sealed_for_row(at, key):
+    """'' when the stored row holds the ssn sealed for that row under `key` (T1-ENCRYPTION-AAD)."""
+    if not isinstance(at, dict):
+        return "no row read back: %r" % (at,)
+    return bound_reason(at.get('ssn'), 'people', 'ssn', at.get('id'), key, '123-45-6789')
 READBACK = ('retrieve p from db.people\n    match name to "Ada"\nretrieve: done\n'
             'give back 200 p.ssn\n')
 
@@ -60,8 +69,8 @@ def check(label, cond, detail=""):
 MohioInterpreter.unregister_key_provider()
 os.environ['MOHIO_ENCRYPTION_KEY'] = 'test-secret-key-123'
 at_rest = _val(run(SHAPE + DB + SAVE + AT_REST))
-check("default provider: ciphertext at rest (unchanged behaviour)",
-      isinstance(at_rest, str) and at_rest.startswith('enc:v1:'), f"got {at_rest!r}")
+check("default provider: ciphertext at rest, sealed for its row under the env key",
+      not sealed_for_row(at_rest, 'test-secret-key-123'), sealed_for_row(at_rest, 'test-secret-key-123'))
 
 # 2. A registered provider takes over. Simulate a KMS returning a fixed 32-byte key,
 #    with the env var deliberately DIFFERENT to prove the provider is what's used.
@@ -70,8 +79,8 @@ MohioInterpreter.register_key_provider(lambda: kms_key)
 os.environ['MOHIO_ENCRYPTION_KEY'] = 'this-should-be-ignored-now'
 at_rest = _val(run(SHAPE + DB + SAVE + AT_REST))
 back = _val(run(SHAPE + DB + SAVE + READBACK))
-check("registered provider: still encrypts at rest", 
-      isinstance(at_rest, str) and at_rest.startswith('enc:v1:'), f"got {at_rest!r}")
+check("registered provider: still encrypts at rest, sealed for its row under the provider's key",
+      not sealed_for_row(at_rest, kms_key), sealed_for_row(at_rest, kms_key))
 check("registered provider: round-trips to plaintext with the provider's key",
       str(back) == '123-45-6789', f"got {back!r}")
 

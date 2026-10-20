@@ -2,7 +2,7 @@
 // Reading list -- connect a database, add books, and query them.
 // Run it:  mio run cookbook/reading-list.mho   (uses SQLite in memory)
 
-connect db as sqlite from env.DATABASE_URL
+connect db as sqlite from env.DATABASE_URL default "app.db"
 
 save to db.books
     title "The Left Hand of Darkness"

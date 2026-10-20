@@ -120,10 +120,46 @@ check score
 check: done
 ```
 
-The full walkthrough this chapter draws from -- numbers, casts, and every comparison word
-(`contains`, `starts.with`, `is empty`, and more) -- lives in
-`Docs/manual/mohio-manual-getting-started.md`, written for someone who has never coded before and
-verified line by line (all 15 samples, `mio check` and `mio run`, output matched).
+The conditions read like English. The ones you will reach for most:
+
+- `is more than 100` / `is less than 10`
+- `is "cash"` (equals) / `is not "closed"`
+- `contains "smith"` / `starts.with "A"` / `is empty`
+
+For a quick one-liner, **`unless`** does something unless a condition is true, the opposite of "if":
+
+```mohio
+door_open true
+show "The door is locked." unless door_open
+```
+
+That shows the message only when `door_open` is false. `unless` takes any condition above.
+
+### Numbers, casts, and booleans
+
+Math works the way you expect (`+ - * /`), wrapped in `( )`:
+
+```mohio
+price 4
+quantity 3
+total (price * quantity)
+show total          // 12
+```
+
+When a value is text you need as a number, or the reverse, convert it with a **dot cast**:
+
+```mohio
+text_number "5"
+real_number (text_number as.int)
+show real_number    // 5, a number you can do math with
+```
+
+Useful casts: `as.int` (whole number), `as.decimal.2` (two places), `as.text`. And a value can be
+true or false, a boolean: `game_over false`, `has_key true`. You will use these to make the
+decisions above.
+
+Going deeper on each: values and output in Chapter 6, text in Chapter 8, decisions in Chapter 11,
+loops in Chapter 12.
 
 ---
 

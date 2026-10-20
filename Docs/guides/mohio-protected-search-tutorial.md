@@ -47,41 +47,40 @@ shape SearchQuery
     term as text required min 2
 shape: done
 
-listen for
-    new sh.Login at /login
-        retrieve.one member from db.members
-            match email to login.email
-        retrieve.one: done
+listen for sh.Login at /login
+    retrieve.one member from db.members
+        match email to Login.email
+    retrieve.one: done
 
-        check member
-            when member is empty
-                give back [401] "Wrong email or password."
-            otherwise
-                check login.password against member.hashed_password
-                    on.success
-                        grant role member.role
-                        give back [200] "Logged in."
-                    on.failure
-                        give back [401] "Wrong email or password."
-        check: done
-    new: done
+    check member
+        when member is empty
+            give back [401] "Wrong email or password."
+        otherwise
+            check Login.password against member.hashed_password
+                on.success
+                    grant role member.role
+                    give back [200] "Logged in."
+                on.failure
+                    give back [401] "Wrong email or password."
+            check: done
+    check: done
+listen: done
 
-    new sh.SearchQuery at /directory/search
-        require role "member"
-        find hits in db.members
-            where email contains searchQuery.term
-        find: done
-        check hits.count
-            when 0
-                give back [200] "No matches."
-            otherwise
-                results ""
-                repeat each hit in hits
-                    results (results & "- " & hit.email & "\n")
-                repeat: done
-                give back [200] results
-        check: done
-    new: done
+listen for sh.SearchQuery at /directory/search
+    require role "member"
+    find hits in db.members
+        where email contains SearchQuery.term
+    find: done
+    check hits.count
+        when 0
+            give back [200] "No matches."
+        otherwise
+            results ""
+            repeat each hit in hits
+                results (results & "- " & hit.email & "\n")
+            repeat: done
+            give back [200] results
+    check: done
 listen: done
 ```
 
@@ -151,27 +150,28 @@ before a single line of the route's own code runs, the same guarantee `Docs/guid
 describes for any shape field.
 
 **The search is a normal `find ... where ... contains ...`,** reading the ALREADY-validated
-`searchQuery.term` -- no separate sanitizing step, because the value reaching this line has
+`SearchQuery.term` -- no separate sanitizing step, because the value reaching this line has
 already passed the shape's own rule.
 
 ---
 
 ## Two things worth knowing before you build this yourself
 
-**A multi-word shape name binds to lower-camelCase, not all-lowercase.** `shape Feedback`
-binds to `feedback` (one word lowercases to itself, easy to miss the actual rule). `shape
-SearchQuery` binds to `searchQuery` -- only the FIRST letter is lowercased, the rest of the
-name is untouched. Verified live: reading `searchquery.term` or `search_query.term` both fail
-with `undeclared_variable`; `searchQuery.term` (matching the shape name with just its first
-letter lowered) is the one that resolves.
+**Read the incoming request by the shape's name, exactly as declared.** `request for
+sh.SearchQuery` is read as `SearchQuery.term` -- the shape name as written, letter for letter,
+not lowercased and not camelCased. Verified live: reading `searchquery.term`, `search_query.term`,
+or `searchQuery.term` all fail, each naming the exact-name fix on the line that got it wrong;
+`SearchQuery.term`, matching the declared shape name exactly, is the one that resolves. `mio fmt
+--write` rewrites a mismatched case for you.
 
-**`check <value> against <value>` does not take its own closer when nested inside another
-`check`'s `otherwise` branch.** Writing `on.success`/`on.failure` under it, then adding a
-`check: done` for it specifically, breaks the OUTER check's own closer matching (verified: it
-produces a "closer mismatch" pointing at the wrong block). The outer `check member / when /
-otherwise / check ... against ... / on.success / on.failure` needs exactly ONE closing
-`check: done`, for the outer block only -- `cookbook/password-login.mho` already gets this
-right; it's easy to get wrong copying the pattern by eye instead of from the file.
+**`check <value> against <value>` takes its own closer, `check: done`, the same as every other
+`check` block.** When it is nested inside another `check`'s `otherwise` branch, it closes
+NORMALLY, with its own `check: done` indented to its own level, BEFORE the outer block's
+`check: done`. So the pattern above closes twice, inner then outer: the inner `check ... against`
+is closed at its indent, and the outer `check member / when / otherwise` is closed at its indent.
+An unclosed `check ... against` now refuses at compile, naming the missing closer, because a
+statement written after it would otherwise disappear into its last `on.success`/`on.failure`
+handler. `cookbook/password-login.mho` shows the two closers in place.
 
 ---
 

@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import json
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 import os
 import re
 from dataclasses import dataclass, field
@@ -84,20 +85,62 @@ _FALLBACK_PRICING_PER_1M = {
     "gemini": (1.25, 5.00),     # 1.5-pro rate -- worst case for an unrecognized gemini model
 }
 
-def _price_for_model(model):
-    """(input_$_per_1M, output_$_per_1M) for a model name. Longest matching prefix wins,
-    so 'claude-opus-4' matches 'claude-opus' rather than a shorter 'claude-' entry."""
+def _price_with_basis(model):
+    """(input_$_per_1M, output_$_per_1M, basis) -- the rate AND a sentence saying how it was derived,
+    so a cost figure never travels without its provenance. The NUMBER is unchanged from the historical
+    _price_for_model; only the basis is added, from the SAME match so the two can never diverge. Shape
+    mirrors _sampling_of: a table hit names the model; a family or worst-case fallback names ITSELF an
+    upper bound, so a cap estimate is never read as a measurement. Longest matching prefix wins."""
     m = (model or "").lower()
     best = None
     for prefix, rate in MODEL_PRICING_PER_1M.items():
         if m.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
             best = (prefix, rate)
     if best:
-        return best[1]
+        return best[1][0], best[1][1], f"priced from the table for {model}"
     for prefix, rate in _FALLBACK_PRICING_PER_1M.items():
         if m.startswith(prefix):
-            return rate
-    return _FALLBACK_PRICING_PER_1M["claude"]  # totally unknown model -- worst case, never free
+            return rate[0], rate[1], (
+                f"priced at the highest listed {prefix} rate because {model} is not individually "
+                f"listed -- an upper bound, not a measurement.")
+    r = _FALLBACK_PRICING_PER_1M["claude"]  # totally unknown model -- worst case, never free
+    return r[0], r[1], (
+        f"priced at the highest listed rate because {model} is not in the pricing table -- an "
+        f"upper bound, not a measurement.")
+
+
+def _price_for_model(model):
+    """(input_$_per_1M, output_$_per_1M) for a model name. Longest matching prefix wins, so
+    'claude-opus-4' matches 'claude-opus'. Delegates to _price_with_basis so the number and its
+    basis are one source of truth; the worst-case fallback is unchanged."""
+    in_rate, out_rate, _ = _price_with_basis(model)
+    return (in_rate, out_rate)
+
+
+def _cost_basis(model):
+    """A short sentence saying how `cost` for this model was priced (table / family / worst-case).
+    Same source as the number itself (_price_with_basis), so they never disagree."""
+    return _price_with_basis(model)[2]
+
+
+def _token_basis(completion):
+    """How the token count on `completion` was obtained, or a named gap -- never a bare number.
+    Mirrors _sampling_of: a completion object means a call happened. Provider-reported when the
+    response carried usage; otherwise the gap is named (with the model that answered, when it named
+    itself) rather than passed off as a measured count."""
+    if completion is None:
+        return "no provider call was made, so there is no token count"
+    reported = ((getattr(completion, 'input_tokens', 0) or 0)
+                + (getattr(completion, 'output_tokens', 0) or 0))
+    if reported > 0:
+        return "reported by the provider"
+    named = getattr(completion, 'resolved_model', None)
+    if named:
+        return (f"the provider path that answered as {named} reported no token usage -- the call "
+                f"was made, the count was not returned")
+    return ("the provider path reported no token usage and did not name itself -- the call was "
+            "made, the count was not returned")
+
 
 def _cost_for_tokens(model, input_tokens, output_tokens):
     """Real USD cost for one call's real token usage, using the pricing table above."""
@@ -127,6 +170,12 @@ class CompletionResult:
     # decisions and the trail is the only place it can be seen, so it is recorded rather than
     # inferred -- the same reason `resolved_model` exists beside the requested one.
     sampling: str = ""
+    # THE PROVIDER STOPPED AT THE TOKEN CAP, not because the answer was done (Batch 31). A completion
+    # cut off at `max_tokens` is an INCOMPLETE answer, and presenting it as a whole one is the worst
+    # outcome a ceiling can produce -- so the provider seam records it and the caller refuses rather
+    # than returning a truncated answer as if it were complete. False when the model stopped on its
+    # own (a real end), True when it hit the ceiling.
+    truncated: bool = False
 
 
 def _sampling_of(completion):
@@ -201,8 +250,67 @@ class AiProviderError(RuntimeError):
     stay distinct from a genuine low-confidence answer, which returns normally with
     fell_back=True instead of raising. Every caller of decide() (ai.decide, ai.agent,
     ai.compare, ai.respond, mio ai-check) catches this and surfaces it loudly --
-    on.failure / not_confident -- rather than letting it look like a real result."""
-    pass
+    on.failure / not_confident -- rather than letting it look like a real result.
+
+    IT SAYS WHERE IT FAILED (RULED by Ron, 2026-10-05). `stage` is `call` (the provider request
+    itself failed), `response validation` (an answer came back that is not a usable decision) or
+    `confidence` (the confidence it carried is not a confidence); `provider` names who was asked;
+    `status` is the provider's HTTP status when there was one. A failure that says only "failed"
+    sends whoever is on call to guess between a bad key, an outage and a malformed answer."""
+
+    def __init__(self, message="", stage=None, provider=None, status=None):
+        super().__init__(message)
+        self.stage = stage
+        self.provider = provider
+        self.status = status
+
+
+def _provider_label(model, route_provider=None):
+    """Who a call went to, from the routed provider or the model name, for a failure's detail."""
+    if route_provider:
+        return str(route_provider)
+    m = str(model or "").lower()
+    if m.startswith("claude") or "sonnet" in m or "haiku" in m or "opus" in m or "fable" in m:
+        return "anthropic"
+    if m.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+        return "openai"
+    if m.startswith("gemini"):
+        return "google"
+    return m or None
+
+
+def _http_status(err):
+    """The provider's HTTP status carried on an exception, when there is one."""
+    for cand in (getattr(err, "status_code", None), getattr(err, "status", None),
+                 getattr(getattr(err, "response", None), "status_code", None),
+                 getattr(err, "code", None)):
+        if isinstance(cand, int) and 100 <= cand <= 599:
+            return cand
+    return None
+
+
+# ── Built-in provider routing table (shipped as data, not hardcoded) ───────────
+# name -> {api_format, base_url, env_key}. Read once from mohio_data/providers.json so the table can
+# be refreshed on a tag without a code change and no model strings live in the compiler. A coder-
+# declared provider (an ai.connect `address`/`key` block) overrides a built-in of the same name.
+# The loader lives in mohio_runtime_vocab so `mio check` can read the table without this module.
+from mohio_runtime_vocab import load_builtin_providers, builtin_provider_names  # noqa: E402,F401
+
+
+# A chain entry carries provider identity: {provider, model}. A bare string is an old-style model id.
+def _entry_provider(entry):
+    return entry.get('provider') if isinstance(entry, dict) else str(entry)
+
+
+def _entry_model(entry):
+    return entry.get('model') if isinstance(entry, dict) else None
+
+
+def _entry_label(entry):
+    """Human label for a chain entry in a log line: `provider (model)`."""
+    p = _entry_provider(entry)
+    m = _entry_model(entry)
+    return f"{p} ({m})" if m else str(p)
 
 
 # ── Chain runtime ─────────────────────────────────────────────────────────────
@@ -259,7 +367,7 @@ class ResolvedChain:
         records 49-100 automatically use the new provider at zero cost.
         No re-resolution. No re-evaluation. The switch persists.
         """
-        previous = self.active_provider
+        previous = _entry_label(self.active_provider)
         next_index = self._active_index + 1
 
         if next_index >= len(self.providers):
@@ -274,10 +382,10 @@ class ResolvedChain:
         self._fallback_count += 1
 
         log_entry = (f"Chain '{self.name}' fallback #{self._fallback_count}: "
-                     f"{previous} → {self.active_provider}. Reason: {reason}")
+                     f"{previous} → {_entry_label(self.active_provider)}. Reason: {reason}")
         self._fallback_log.append(log_entry)
         print(f"  [ai.connect] FALLBACK — {log_entry}")
-        print(f"  [ai.connect] Remaining records will use: {self.active_provider}")
+        print(f"  [ai.connect] Remaining records will use: {_entry_label(self.active_provider)}")
 
         return self.active_provider
 
@@ -391,14 +499,15 @@ def _parse_response(raw: str, return_type: str) -> tuple[Any, float, str]:
     text = re.sub(r'^```(?:json)?\s*', '', text)
     text = re.sub(r'\s*```$', '', text)
 
+    from decimal import Decimal as _Dec
     try:
-        data = json.loads(text)
+        data = json.loads(text, parse_float=_Dec)            # exact numbers (2026-10-05)
     except json.JSONDecodeError:
         # Try extracting the first JSON object from the response
         match = re.search(r'\{[^{}]+\}', text, re.DOTALL)
         if match:
             try:
-                data = json.loads(match.group())
+                data = json.loads(match.group(), parse_float=_Dec)
             except json.JSONDecodeError:
                 raise AiProviderError(f"Model returned unparseable response: {text[:100]}")
         else:
@@ -472,8 +581,9 @@ def _parse_response(raw: str, return_type: str) -> tuple[Any, float, str]:
 
     elif return_type == "number":
         try:
-            result = float(result)
-        except (TypeError, ValueError):
+            result = result if isinstance(result, (int, _Dec)) and not isinstance(result, bool) \
+                else _Dec(str(result))
+        except (TypeError, ValueError, ArithmeticError):
             # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): a malformed/missing "result" used to
             # silently become 0.0 -- indistinguishable from the model genuinely computing
             # zero. A real 0/0.0 result converts via float() without ever reaching this
@@ -488,8 +598,9 @@ def _parse_response(raw: str, return_type: str) -> tuple[Any, float, str]:
         # favour). They were absent here and in the mock, so the CANONICAL forms fell through
         # every branch and returned the model's raw value uncoerced.
         try:
-            result = float(result)
-        except (TypeError, ValueError):
+            result = result if isinstance(result, (int, _Dec)) and not isinstance(result, bool) \
+                else _Dec(str(result))
+        except (TypeError, ValueError, ArithmeticError):
             raise AiProviderError(
                 f"Model returned {result!r}, which cannot be read as a number for "
                 f"`returns {return_type}`.")
@@ -524,7 +635,8 @@ class AnthropicAiRuntime:
     def __init__(self,
                  api_key: Optional[str] = None,
                  model: Optional[str] = None,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 declared_keys=()):
         """
         Args:
             api_key: Anthropic API key (back-compat). Any provider key from the environment
@@ -539,22 +651,39 @@ class AnthropicAiRuntime:
         self._anthropic_key = (api_key or _envval("ANTHROPIC_API_KEY")) or ""
         self._openai_key    = _envval("OPENAI_API_KEY")
         self._gemini_key    = _envval("GEMINI_API_KEY") or _envval("GOOGLE_API_KEY")
-        if not (self._anthropic_key or self._openai_key or self._gemini_key):
+        # THE PROGRAM'S OWN PROVIDER COUNTS (RULED by Ron 2026-10-09). A program whose `ai.connect`
+        # names its own key (`key env.MYKEY`) was refused at startup for lacking one of the three
+        # vendor keys it never uses. With only a declared key there is no default provider, so a
+        # call that names no chain refuses (see _complete) rather than guessing one.
+        _own_key = any(_envval(k) for k in (declared_keys or ()))
+        if not (self._anthropic_key or self._openai_key or self._gemini_key or _own_key):
             raise RuntimeError(
-                "No AI provider key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY "
-                "(or run with MOHIO_AI=mock for the labeled mock provider).")
+                "No AI provider key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY, "
+                "or the key your program's `ai.connect` names (or run with MOHIO_AI=mock for the "
+                "labeled mock provider).")
 
         # Default model: explicit arg > env (MOHIO_AI_MODEL) > the default for the key that IS present.
         self._model = model or (
             DEFAULT_ANTHROPIC_MODEL if self._anthropic_key else
             DEFAULT_OPENAI_MODEL    if self._openai_key else
-            DEFAULT_GEMINI_MODEL)
+            DEFAULT_GEMINI_MODEL    if self._gemini_key else None)
         self._client  = None            # lazy Anthropic client (built on first claude model use)
         self._verbose = verbose
         self._overrides: dict[str, AiDecision] = {}
         self._chains: dict[str, ResolvedChain] = {}
+        # The provider routing table: built-in rows from providers.json, plus any coder-declared
+        # rows merged in (coder wins). Each row is {api_format, base_url, env_key} and may also carry
+        # a resolved `api_key` for a coder-declared provider whose key was a secret ref.
+        self._provider_table = load_builtin_providers()
         self._calls    = 0              # per-session AI call counter (cost-cap hook)
         self._call_cap = CALL_CAP       # 0 = unlimited
+
+    def merge_provider_table(self, rows):
+        """Add/override provider rows (coder-declared providers win over a built-in of the same name).
+        `rows` is {name: {api_format, base_url, env_key?, api_key?}}. Called by the interpreter when an
+        ai.connect block declares a provider with its own address+key."""
+        for name, row in (rows or {}).items():
+            self._provider_table[str(name)] = dict(row)
 
     def _anthropic_client(self):
         """Build the Anthropic client on first claude use. A gpt/gemini-only deployment never
@@ -595,11 +724,33 @@ class AnthropicAiRuntime:
             inputs={},
         )
 
-    def register_chain(self, chain_name: str, providers: list[str]) -> ResolvedChain:
-        """Register an ai.connect declaration. Resolution happens lazily on first use."""
-        chain = ResolvedChain(chain_name, providers)
+    def register_chain(self, chain_name: str, providers: list) -> ResolvedChain:
+        """Register an ai.connect declaration. Each entry carries provider identity ({provider,
+        model}); a bare string is normalized to {provider: <string>, model: None} so an old chain of
+        model-id strings still works. Resolution happens lazily on first use."""
+        entries = [p if isinstance(p, dict) else {'provider': str(p), 'model': None}
+                   for p in (providers or [])]
+        chain = ResolvedChain(chain_name, entries)
         self._chains[chain_name] = chain
         return chain
+
+    def egress_destination(self, chain_name=None, model_override=None):
+        """The address a call with this routing reaches, or None for a provider's own endpoint.
+        Mirrors decide()'s routing exactly: an explicit model goes to its vendor; a resolved
+        `ai.connect` chain goes to its active provider's row. The interpreter asks this so the
+        protected-data rule can tell a local model at a loopback address from a remote one."""
+        if model_override or not chain_name:
+            return None
+        chain = (getattr(self, '_chains', None) or {}).get(chain_name)
+        if chain is None or not getattr(chain, 'resolved', False) or not getattr(chain, 'active_provider', None):
+            return None
+        return self._endpoint_of(_entry_provider(chain.active_provider))
+
+    def _endpoint_of(self, provider):
+        """The base_url a provider's row routes to, for the resolved-provider record (so a grok/groq
+        mix-up is visible as the actual vendor URL rather than silent)."""
+        row = (getattr(self, '_provider_table', None) or {}).get(str(provider))
+        return (row or {}).get('base_url') if row else None
 
     def resolve_chain(self, chain_name: str) -> Optional[str]:
         """
@@ -614,20 +765,26 @@ class AnthropicAiRuntime:
         if chain.resolved:
             return chain.active_provider  # Already resolved — free
 
-        def test_provider(provider: str) -> bool:
-            """Ping a provider with a minimal request to check availability.
-            Works for any vendor via the _complete dispatcher."""
+        def test_provider(entry) -> bool:
+            """Ping a provider with a minimal request to check availability, routed by the provider's
+            row (so a coder-declared or non-OpenAI provider is pinged at its own endpoint)."""
             try:
-                self._complete(provider, "Reply with: ok", "ping",
-                               temperature=0, max_tokens=5)
+                self._complete_provider(_entry_provider(entry), _entry_model(entry),
+                                        "Reply with: ok", "ping", temperature=0, max_tokens=5)
                 return True
             except Exception as e:
-                print(f"  [ai.connect] Provider {provider!r} unavailable: {type(e).__name__}")
+                print(f"  [ai.connect] Provider {_entry_label(entry)!r} unavailable: {type(e).__name__}")
                 return False
 
         resolved = chain.resolve(test_provider)
         if resolved:
-            print(f"  [ai.connect] '{chain_name}' resolved → {chain.active_provider}")
+            _prov = _entry_provider(chain.active_provider)
+            _ep = self._endpoint_of(_prov)
+            # RECORD THE RESOLVED PROVIDER AND ITS ENDPOINT, so a wrong-vendor call (grok vs groq) is
+            # visible as the actual URL rather than silent. Verbose here; the interpreter also carries
+            # it into the audit record.
+            _at = f" at {_ep}" if _ep else ""
+            print(f"  [ai.connect] '{chain_name}' resolved → {_entry_label(chain.active_provider)}{_at}")
         else:
             print(f"  [ai.connect] WARNING: no providers available for '{chain_name}'")
         return chain.active_provider
@@ -637,6 +794,11 @@ class AnthropicAiRuntime:
         Returns a CompletionResult (text + real input/output token counts, 2026-08-06 --
         see CompletionResult's docstring for why). Reads each provider's key from env.
         This is the single seam that makes ai.connect multi-provider work."""
+        if not model:
+            raise AiProviderError(
+                "This run has no default AI provider: its only key is the one an `ai.connect` names, "
+                "so the call has to name that connection. Add `using NAME` to the block, or set "
+                "ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY for a default.", stage="call")
         self._tick()
         mt = max_tokens or MAX_TOKENS
         m = (model or "").lower()
@@ -672,6 +834,7 @@ class AnthropicAiRuntime:
                 output_tokens=(getattr(usage, 'output_tokens', 0) or 0) if usage else 0,
                 resolved_model=str(getattr(msg, 'model', '') or ''),
                 sampling=_sampling_mode,
+                truncated=(getattr(msg, 'stop_reason', None) == 'max_tokens'),
             )
         if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3") or m.startswith("openai"):
             return self._complete_openai(model, system, user, temperature, mt)
@@ -680,6 +843,69 @@ class AnthropicAiRuntime:
         raise RuntimeError(
             f"ai.connect: unknown provider/model '{model}'. "
             f"Supported prefixes: claude*, gpt*/o1*/o3*, gemini*.")
+
+    def _complete_provider(self, provider, model, system, user,
+                           temperature=None, max_tokens=None):
+        """Route a completion by the PROVIDER's row, not by the model-name prefix. This is what lets
+        a coder-declared or non-OpenAI provider work: an openai-format row (openai, groq, kimi, a
+        local llama) goes through the raw-HTTP wire at the row's own base_url with its own key; an
+        anthropic/gemini row keeps the SDK/native client. A provider NOT in the table is treated as a
+        bare model id and prefix-routed through `_complete` (back-compat for a chain of plain model
+        strings)."""
+        # getattr default: a runtime built via __new__ (some tests) has no table -- treat as empty,
+        # so an unregistered provider falls through to prefix routing exactly as before.
+        _table = getattr(self, '_provider_table', None) or {}
+        row = _table.get(str(provider)) if provider else None
+        if row is None:
+            # Not a registered provider name -- treat `provider` as a model id (old chains stored
+            # model strings) and route by prefix.
+            return self._complete(model or provider, system, user, temperature, max_tokens)
+        if not model:
+            raise RuntimeError(
+                f"provider '{provider}' was named with no model; ai.connect needs an explicit model "
+                f"string (Mohio keeps no per-provider default model).")
+        _af = row.get("api_format")
+        fmt = str(_af) if _af else "openai"   # a row always carries api_format; openai is the wire default
+        if fmt == "openai":
+            return self._complete_openai(model, system, user, temperature,
+                                         max_tokens or MAX_TOKENS,
+                                         base_url=row.get("base_url"),
+                                         env_key=row.get("env_key"),
+                                         api_key=row.get("api_key"))
+        if fmt == "anthropic_sdk" and row.get("base_url"):
+            # Honor a coder-declared endpoint for anthropic-wire: the installed SDK accepts base_url
+            # (established 2026-09-30), so route through a client built at that address.
+            import os as _os
+            return self._complete_anthropic_at(
+                model, system, user, temperature, max_tokens or MAX_TOKENS,
+                base_url=row["base_url"],
+                api_key=(row.get("api_key") or _os.environ.get(
+                    row.get("env_key") if row.get("env_key") else "ANTHROPIC_API_KEY", "")))
+        # anthropic_sdk (no custom endpoint) / gemini_native keep their dedicated clients; `_complete`
+        # routes them by the model prefix (claude* -> SDK, gemini* -> native).
+        return self._complete(model, system, user, temperature, max_tokens)
+
+    def _complete_anthropic_at(self, model, system, user, temperature, max_tokens,
+                               base_url, api_key):
+        """An anthropic-wire completion against a coder-declared endpoint (a proxy/gateway). Reuses
+        anthropic_sampling() so the SDK-version temperature handling is identical to the default path;
+        the only difference is the client is built at `base_url` rather than the cached default one."""
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=api_key, base_url=base_url)
+        _sampling_kwargs, _sampling_mode = anthropic_sampling(temperature)
+        msg = client.messages.create(
+            model=model, max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": user}], **_sampling_kwargs)
+        if not msg.content:
+            raise ValueError("Anthropic returned empty content")
+        usage = getattr(msg, "usage", None)
+        return CompletionResult(
+            text=msg.content[0].text,
+            input_tokens=(getattr(usage, "input_tokens", 0) or 0) if usage else 0,
+            output_tokens=(getattr(usage, "output_tokens", 0) or 0) if usage else 0,
+            resolved_model=str(getattr(msg, "model", "") or ""),
+            sampling=_sampling_mode,
+            truncated=(getattr(msg, "stop_reason", None) == "max_tokens"))
 
     def _raise_temperature_refusal(self, sdk_err):
         """The SDK took the call and refused the parameter anyway. Say so in Mohio's own words.
@@ -703,11 +929,19 @@ class AnthropicAiRuntime:
             "temperature than the program asked for is a different decision."
             % _ver) from sdk_err
 
-    def _complete_openai(self, model, system, user, temperature, max_tokens):
+    def _complete_openai(self, model, system, user, temperature, max_tokens,
+                         base_url=None, env_key=None, api_key=None):
+        """The OpenAI chat-completions wire. The endpoint and key default to OpenAI's own, but a
+        provider ROW supplies its own `base_url` and `env_key` (or a resolved `api_key`) so every
+        openai-format provider -- groq, kimi, qwen, a local llama on localhost -- reaches the same
+        code at a different address. `{base_url}/chat/completions` is the request URL."""
         import os, json as _json, urllib.request
-        key = (os.environ.get("OPENAI_API_KEY", "") or "").strip().strip('"').strip("'")
+        _ek = env_key if env_key else "OPENAI_API_KEY"          # the openai default when no row env_key
+        key = (api_key or os.environ.get(_ek, "") or "").strip().strip('"').strip("'")
         if not key:
-            raise RuntimeError("OPENAI_API_KEY not set")
+            _where = ("`%s`" % env_key) if env_key else "OPENAI_API_KEY"
+            raise RuntimeError("%s not set" % _where)
+        _base = (base_url if base_url else "https://api.openai.com/v1").rstrip("/")
         body = _json.dumps({
             "model": model,
             "max_tokens": max_tokens,
@@ -718,9 +952,10 @@ class AnthropicAiRuntime:
             ],
         }).encode()
         req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions", data=body,
+            _base + "/chat/completions", data=body,
             headers={"Authorization": f"Bearer {key}",
                      "Content-Type": "application/json"}, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=60) as r:
             data = _json.loads(r.read().decode())
         usage = data.get("usage") or {}
@@ -729,6 +964,7 @@ class AnthropicAiRuntime:
             input_tokens=usage.get("prompt_tokens", 0) or 0,
             output_tokens=usage.get("completion_tokens", 0) or 0,
             resolved_model=str(data.get("model", "") or ""),
+            truncated=(data["choices"][0].get("finish_reason") == "length"),
             # THIS PROVIDER TAKES THE PARAMETER, and the value sent is the one recorded. The
             # Anthropic path has to feature-detect because its SDK dropped the argument; this
             # one is a plain HTTP field, so there is nothing to detect and nothing conditional
@@ -755,6 +991,7 @@ class AnthropicAiRuntime:
         }).encode()
         req = urllib.request.Request(url, data=body,
             headers={"Content-Type": "application/json"}, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=60) as r:
             data = _json.loads(r.read().decode())
         # Field names per Gemini's documented generateContent response shape
@@ -774,6 +1011,8 @@ class AnthropicAiRuntime:
             # same reasoning as the OpenAI sibling above.
             sampling="temperature applied: %s" % (
                 temperature if temperature is not None else 1.0),
+            truncated=(str((data.get("candidates") or [{}])[0].get("finishReason", "")).upper()
+                       == "MAX_TOKENS"),
         )
 
     # ── Pre-call token estimation (C, 2026-08-06 -- the cost-cap fix's second slice) ──
@@ -852,15 +1091,17 @@ class AnthropicAiRuntime:
             body = {"contents": contents}
         req = urllib.request.Request(url, data=_json.dumps(body).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=30) as r:
             data = _json.loads(r.read().decode())
         return data.get("totalTokens", 0) or 0
 
     # ── ai.create generators: text / image / video (multi-provider) ──────────
-    def generate_text(self, *, goal, persona="", context="", style="",
-                      model=None, temperature=None, max_tokens=None):
-        """Text generation — reuses the multi-provider _complete dispatch
-        (Claude / GPT / Gemini, routed by model name)."""
+    def generate_text_result(self, *, goal, persona="", context="", style="",
+                             model=None, temperature=None, max_tokens=None):
+        """Text generation returning the FULL CompletionResult (text + tokens + `truncated`), so a
+        caller enforcing a token ceiling can tell a completed answer from one cut off at the cap
+        (Batch 31). `generate_text` keeps returning bare text for every existing caller."""
         model = model or self._model
         system = ("You are a generation assistant. Produce only the requested "
                   "content, with no preamble or commentary.")
@@ -871,7 +1112,15 @@ class AnthropicAiRuntime:
         user = goal or ""
         if context:
             user = f"{user}\n\nContext: {context}"
-        return self._complete(model, system, user, temperature, max_tokens).text
+        return self._complete(model, system, user, temperature, max_tokens)
+
+    def generate_text(self, *, goal, persona="", context="", style="",
+                      model=None, temperature=None, max_tokens=None):
+        """Text generation — reuses the multi-provider _complete dispatch
+        (Claude / GPT / Gemini, routed by model name)."""
+        return self.generate_text_result(goal=goal, persona=persona, context=context, style=style,
+                                         model=model, temperature=temperature,
+                                         max_tokens=max_tokens).text
 
     def generate_image(self, *, goal, style="", negative="", size="1024x1024",
                        model=None, n=1):
@@ -904,6 +1153,7 @@ class AnthropicAiRuntime:
             "https://api.openai.com/v1/images/generations", data=body,
             headers={"Authorization": f"Bearer {key}",
                      "Content-Type": "application/json"}, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=120) as r:
             data = _json.loads(r.read().decode())
         item = data["data"][0]
@@ -930,6 +1180,7 @@ class AnthropicAiRuntime:
                             "parameters": {"sampleCount": 1}}).encode()
         req = urllib.request.Request(url, data=body,
             headers={"Content-Type": "application/json"}, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=120) as r:
             data = _json.loads(r.read().decode())
         preds = data.get("predictions", [{}])
@@ -974,6 +1225,7 @@ class AnthropicAiRuntime:
         req = urllib.request.Request("https://api.openai.com/v1/videos",
                                      data=_json.dumps(payload).encode(),
                                      headers=hdr, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=60) as r:
             job = _json.loads(r.read().decode())
         job_id = job.get("id")
@@ -985,6 +1237,7 @@ class AnthropicAiRuntime:
             _t.sleep(5)
             preq = urllib.request.Request(
                 f"https://api.openai.com/v1/videos/{job_id}", headers=hdr)
+            # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
             with urllib.request.urlopen(preq, timeout=30) as r:
                 job = _json.loads(r.read().decode())
         # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): the loop used to fall through with no
@@ -1019,6 +1272,7 @@ class AnthropicAiRuntime:
                             "parameters": params}).encode()
         req = urllib.request.Request(url, data=body,
             headers={"Content-Type": "application/json"}, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=60) as r:
             op = _json.loads(r.read().decode())
         op_name = op.get("name")
@@ -1027,6 +1281,7 @@ class AnthropicAiRuntime:
                 break
             _t.sleep(5)
             preq = urllib.request.Request(f"{base}/{op_name}?key={key}")
+            # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
             with urllib.request.urlopen(preq, timeout=30) as r:
                 op = _json.loads(r.read().decode())
         # T1-SILENT-SWEEP-BATCH6-10 (2026-08-15): sibling of the OpenAI video fix above --
@@ -1076,6 +1331,7 @@ class AnthropicAiRuntime:
         req = urllib.request.Request(
             "https://api.openai.com/v1/audio/speech", data=_json.dumps(payload).encode(),
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=120) as r:
             return r.read()          # audio bytes (mp3)
 
@@ -1090,6 +1346,7 @@ class AnthropicAiRuntime:
                             "model_id": _envval("MOHIO_AI_ELEVENLABS_MODEL", "eleven_multilingual_v2")}).encode()
         req = urllib.request.Request(url, data=body,
             headers={"xi-api-key": key, "Content-Type": "application/json"}, method="POST")
+        # EGRESS-EXEMPT: AI provider transport; the AI boundary is gated in the interpreter (_egress_refuse('ai')) before any provider call
         with urllib.request.urlopen(req, timeout=120) as r:
             return r.read()          # audio bytes (mp3)
 
@@ -1127,9 +1384,14 @@ class AnthropicAiRuntime:
                                       "directly.",
                                       _user, temperature, mt)   # _complete ticks the cap
             except Exception as e:
-                raise AiProviderError(f"ai.agent provider call failed: {type(e).__name__}: {e}")
+                raise AiProviderError(f"ai.agent provider call failed: {type(e).__name__}: {e}",
+                                      stage="call", provider=_provider_label(m),
+                                      status=_http_status(e))
             _tokens = _res.input_tokens + _res.output_tokens
-            _cost = _cost_for_tokens(m, _res.input_tokens, _res.output_tokens)
+            # Price the model that ANSWERED, not the requested alias -- the same rule decide() uses
+            # for its audit cost. The provider-reported id when it gave one, else the requested model.
+            _priced = _res.resolved_model if getattr(_res, 'resolved_model', '') else m
+            _cost = _cost_for_tokens(_priced, _res.input_tokens, _res.output_tokens)
             return AgentTurn(kind='text', text=_res.text or "Done.", tokens=_tokens, cost=_cost)
         # Claude: the full tool-capable path.
         self._tick()
@@ -1148,12 +1410,17 @@ class AnthropicAiRuntime:
         try:
             msg = self._anthropic_client().messages.create(**kwargs)
         except Exception as e:
-            raise AiProviderError(f"ai.agent provider call failed: {type(e).__name__}: {e}")
+            raise AiProviderError(f"ai.agent provider call failed: {type(e).__name__}: {e}",
+                                  stage="call", provider="anthropic", status=_http_status(e))
         usage  = getattr(msg, 'usage', None)
         in_tok  = (getattr(usage, 'input_tokens', 0) or 0) if usage else 0
         out_tok = (getattr(usage, 'output_tokens', 0) or 0) if usage else 0
         tokens = in_tok + out_tok
-        cost = _cost_for_tokens(m, in_tok, out_tok)
+        # Price the model the provider says it ran (msg.model, the resolved id on the Claude SDK
+        # path), not the requested alias -- the same rule decide() uses. Falls back to the requested
+        # model when the response names none.
+        _priced = str(getattr(msg, 'model', '') or '') or m
+        cost = _cost_for_tokens(_priced, in_tok, out_tok)
         if getattr(msg, 'stop_reason', None) == 'tool_use':
             for block in (getattr(msg, 'content', None) or []):
                 if getattr(block, 'type', None) == 'tool_use':
@@ -1243,12 +1510,26 @@ class AnthropicAiRuntime:
         # resolution entirely. This was backwards: a resolved chain used to silently
         # overrule an explicit model_override, the opposite of what a developer
         # naming a specific model for a specific decision would expect.
+        _route_provider = None   # when a chain resolved a provider, route the call by its row
+        if model_override and chain_name:
+            # `using` names the ONLY place this call may go (RULED by Ron 2026-10-09). A model named
+            # beside it used to win outright and route to that model's own vendor, leaving the chain
+            # the program named for a provider it never named.
+            raise AiProviderError(
+                f"'{name}' names both `using {chain_name}` and `model \"{model_override}\"`, so it "
+                f"cannot tell which one decides where the request goes. Name the model inside the "
+                f"chain instead, for example `{chain_name} model \"{model_override}\"` under its "
+                f"`order`, and keep `using {chain_name}` on the block.",
+                stage="call", provider=f"ai.connect chain {chain_name}")
         if model_override:
             model = model_override
         elif chain_name:
             chain = self._chains.get(chain_name)
             if chain is not None and chain.resolved and chain.active_provider:
-                model = chain.active_provider  # any provider (claude/gpt/gemini)
+                _entry = chain.active_provider                 # {provider, model}
+                _route_provider = _entry_provider(_entry)
+                # the model STRING for pricing/record; a back-compat string entry has the id here
+                model = _entry_model(_entry) or _entry_provider(_entry)
             else:
                 # A chain was explicitly named for this decision, but it produced no
                 # usable provider -- never registered, never resolved (every provider
@@ -1260,9 +1541,16 @@ class AnthropicAiRuntime:
                 # the exact same disease as an ai.decide hard failure, just with a
                 # wrong answer instead of no answer. Ruled 2026-08-04: never
                 # indistinguishable from a normal success.
-                if chain is None:
+                if chain is None and chain_name in (getattr(self, '_provider_table', None) or {}):
+                    # A standalone `ai.connect NAME / address / key` defines a PROVIDER, with no
+                    # model and no order, so there is no chain to send this call to.
+                    reason = (f"`{chain_name}` is a provider, not a chain: its `ai.connect` gives an "
+                              f"address and a key but no `order`, so there is no model to call. Give "
+                              f"it one, for example `order` / `{chain_name} model \"<model>\"` / "
+                              f"`order: done` inside the same `ai.connect`.")
+                elif chain is None:
                     reason = (f"ai.connect chain '{chain_name}' is not registered "
-                              f"(no ai.connect block declared it) -- this ai.decide "
+                              f"(no ai.connect block declared it) -- '{name}' "
                               f"named it with 'using {chain_name}' but there is "
                               f"nothing to resolve.")
                 elif not chain.resolved:
@@ -1271,7 +1559,7 @@ class AnthropicAiRuntime:
                 else:
                     reason = (f"ai.connect chain '{chain_name}' is exhausted -- "
                               f"every provider in it has failed.")
-                raise AiProviderError(reason)
+                raise AiProviderError(reason, stage="call", provider=f"ai.connect chain {chain_name}")
         else:
             model = self._model  # app default -- the runtime's own configured model
 
@@ -1301,12 +1589,17 @@ class AnthropicAiRuntime:
         raw = None
         res = None
         try:
-            res = self._complete(model, system, user, temperature,
-                                 max_tokens_override or MAX_TOKENS)
+            if _route_provider:
+                res = self._complete_provider(_route_provider, model, system, user,
+                                              temperature, max_tokens_override or MAX_TOKENS)
+            else:
+                res = self._complete(model, system, user, temperature,
+                                     max_tokens_override or MAX_TOKENS)
             raw = res.text
             print(f"  Raw response: {raw}")  # Always print — critical for debugging
 
         except Exception as e:
+            _call_err = e
             error_msg = f"API call failed: {type(e).__name__}: {e}"
             print(f"  [ai.decide ERROR] {error_msg}")
             if raw is not None:
@@ -1321,14 +1614,23 @@ class AnthropicAiRuntime:
                 chain = self._chains[chain_name]
                 new_provider = chain.fallback(reason=error_msg)
                 if new_provider:
-                    # Retry once with the next provider in the chain (any vendor)
-                    print(f"  [ai.connect] Retrying with {new_provider}...")
+                    # The next entry carries provider identity; route the retry by its row and price
+                    # from its model string.
+                    _rp = _entry_provider(new_provider)
+                    _rm = _entry_model(new_provider) or _entry_provider(new_provider)
+                    print(f"  [ai.connect] Retrying with {_entry_label(new_provider)}...")
                     try:
-                        retry_res = self._complete(new_provider, system, user,
+                        retry_res = self._complete_provider(_rp, _rm, system, user,
                                              temperature, max_tokens_override or MAX_TOKENS)
                         print(f"  Raw response (retry): {retry_res.text}")
                         result, confidence, explanation = _parse_response(retry_res.text, return_type)
                         fell_back = confidence < threshold
+                        # Same rule as the main return: price the model that ANSWERED the retry,
+                        # which is the provider-resolved id when it reported one, else the retry's
+                        # own requested model -- never the first (failed) provider's alias.
+                        _priced_rm = (retry_res.resolved_model
+                                      if getattr(retry_res, 'resolved_model', '')
+                                      else _rm)
                         return AiDecision(
                             result=result,
                             confidence=confidence,
@@ -1343,13 +1645,15 @@ class AnthropicAiRuntime:
                             # it would -- so the resolved id belongs here more than anywhere.
                             model=(retry_res.resolved_model
                                    if getattr(retry_res, 'resolved_model', '')
-                                   else f"requested:{new_provider}"),
-                            requested_model=new_provider,
+                                   else f"requested:{_rm}"),
+                            requested_model=_rm,
                             inputs=inputs,
                             explanation=explanation,
                             fell_back=fell_back,
                             tokens=retry_res.input_tokens + retry_res.output_tokens,
-                            cost=_cost_for_tokens(new_provider, retry_res.input_tokens, retry_res.output_tokens),
+                            cost=_cost_for_tokens(_priced_rm, retry_res.input_tokens, retry_res.output_tokens),
+                            cost_basis=_cost_basis(_priced_rm),
+                            tokens_basis=_token_basis(retry_res),
                         )
                     except Exception as retry_e:
                         print(f"  [ai.connect] Retry also failed: {retry_e}")
@@ -1359,11 +1663,27 @@ class AnthropicAiRuntime:
             # the "dead model / network failure" case, not a low-confidence opinion, so
             # it raises rather than returning a fell_back AiDecision that would be
             # indistinguishable from one (2026-08-04 ruling).
-            raise AiProviderError(error_msg)
+            raise AiProviderError(error_msg, stage="call",
+                                  provider=_provider_label(model, _route_provider),
+                                  status=_http_status(_call_err))
 
-        result, confidence, explanation = _parse_response(raw, return_type)
+        try:
+            result, confidence, explanation = _parse_response(raw, return_type)
+        except AiProviderError as _pe:
+            # The call succeeded and the ANSWER was unusable: say which part of it.
+            _pe.stage = _pe.stage or ("confidence" if "confidence" in str(_pe).lower()
+                                      else "response validation")
+            _pe.provider = _pe.provider or _provider_label(model, _route_provider)
+            raise
 
         fell_back = confidence < threshold
+
+        # PRICE THE MODEL THAT ANSWERED, not the alias that was asked for. The recorded `model`
+        # field below already prefers the provider-resolved id (Q97); the cost has to name the SAME
+        # model, or the audit row prices one model while its model column claims another. When the
+        # provider reported no resolved id, the requested model is what ran, so price that (bare, no
+        # `requested:` display prefix -- the basis names the real model string).
+        _priced = res.resolved_model if getattr(res, 'resolved_model', '') else model
 
         if self._verbose:
             print(f"  Result: {result}  Confidence: {confidence:.2f}  "
@@ -1399,7 +1719,9 @@ class AnthropicAiRuntime:
             explanation=explanation,
             fell_back=fell_back,
             tokens=res.input_tokens + res.output_tokens,
-            cost=_cost_for_tokens(model, res.input_tokens, res.output_tokens),
+            cost=_cost_for_tokens(_priced, res.input_tokens, res.output_tokens),
+            cost_basis=_cost_basis(_priced),
+            tokens_basis=_token_basis(res),
         )
 
     def explain(self, decision: AiDecision,

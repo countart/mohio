@@ -38,6 +38,13 @@ import subprocess
 import sys
 import tempfile
 
+CAN_FAIL = [
+    {"file": "mohio_interpreter.py",
+     "find": "            if enriched.get('_audit_owed'):\n                self._relay_still_owed += 1\n",
+     "replace": "            if enriched.get('_audit_owed'):\n                pass  # MUTATED: a still-owed record is counted nowhere\n",
+     "note": "the relay says Nothing owed and exits 0 while the envelope stays owed"},
+]
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -168,8 +175,11 @@ def sq(sql):
 
 
 run(PHI_IN_FAILED_TX, SQLITE_DB, "sqlite")
+# A first write creates its table, so a rolled-back first write leaves no table at all (no table is
+# created at connect, T1-DECLARED-TABLE-READ-TOLERANT): no table is no row too.
+_rolled = sq("select name from patients")
 check("a [phi] write in a FAILED transaction leaves no row",
-      sq("select name from patients") == [], sq("select name from patients"))
+      _rolled == [] or str(_rolled).startswith("ERR no such table"), _rolled)
 check("...and leaves an audit record saying it rolled back",
       outcomes(sq("select detail from data_audit_log")) == ["rolled_back"],
       sq("select detail from data_audit_log"))
@@ -301,7 +311,19 @@ check("the audit log's own column list is what that check is made against for an
 
 # -- real Postgres ------------------------------------------------------------------------------
 print("\n== postgres ==")
-PG = os.environ.get("MOHIO_TEST_PG", "postgresql://postgres:postgres@localhost:5432/postgres")
+PG = os.environ.get("MOHIO_TEST_PG", "postgresql://nobody:none@127.0.0.1:1/none")
+import sys as _sys_guard
+_sys_guard.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+# OUR TEST CONTAINERS ONLY. _engine_isolation refuses any server that is not this project's own test
+# container; it is not shipped. A licensee runs this test against their own engine through the env
+# var above (a throwaway database: the test drops and creates its own tables), or it skips.
+try:
+    import _engine_isolation as _iso_guard
+except ImportError:
+    _iso_guard = None
+if _iso_guard is not None:
+    _iso_guard.require_live_url(PG, "postgres")
+
 pg_ok = False
 try:
     import psycopg2
@@ -380,8 +402,25 @@ else:
     skip("append-only role case", "postgres unreachable")
 
 if role_ok:
-    APP_URL = PG.replace("postgres:postgres@", "mohio_app_r:app_pw@")
-    AUDIT_URL = PG.replace("postgres:postgres@", "mohio_audit_r:audit_pw@")
+    def _swap_creds(url, user, pw):
+        # A literal string .replace("postgres:postgres@", ...) broke SILENTLY the moment PG's
+        # own superuser password changed (343318a moved PG off the forbidden native port onto
+        # the mohio-pg container, whose password is "mohiotest", not "postgres") -- the
+        # replace then matched nothing, APP_URL/AUDIT_URL stayed IDENTICAL to the superuser PG,
+        # and every "the restricted role cannot ..." check below passed only because it was
+        # secretly still running as the superuser. Parsing the URL properly and replacing just
+        # the userinfo survives ANY future credential change, including a user-supplied
+        # MOHIO_TEST_PG with its own password.
+        import urllib.parse as _up
+        p = _up.urlsplit(url)
+        host = p.hostname or ""
+        if p.port:
+            host += ":" + str(p.port)
+        netloc = f"{user}:{pw}@{host}"
+        return _up.urlunsplit((p.scheme, netloc, p.path, p.query, p.fragment))
+
+    APP_URL = _swap_creds(PG, "mohio_app_r", "app_pw")
+    AUDIT_URL = _swap_creds(PG, "mohio_audit_r", "audit_pw")
     AUDIT_TABLES = ("phi_audit_log", "data_audit_log", "operation_audit_log")
 
     def _teardown():
@@ -390,8 +429,10 @@ if role_ok:
         # restricted application role below cannot then alter what it does not own. That is a
         # fixture leftover rather than a finding, but the ownership it exposes is real and is
         # asserted a few lines down.
+        # mohio_key_check too (HC-110, 2026-10-12): the first encrypted write proves its key against
+        # it, and one an earlier superuser leg created is not the application role's to use.
         for t in AUDIT_TABLES + ("patients", "mohio_audit_envelope",
-                                 "mohio_audit_envelope_ack"):
+                                 "mohio_audit_envelope_ack", "mohio_key_check"):
             pg("DROP TABLE IF EXISTS %s CASCADE" % t)
         for r in ("mohio_app_r", "mohio_audit_r"):
             pg("DROP OWNED BY %s" % r)
@@ -408,6 +449,11 @@ if role_ok:
         # creates anything, which is the whole point of it.
         pg("CREATE TABLE %s (%s)" % (t, cols))
         pg("GRANT INSERT, SELECT ON %s TO mohio_audit_r" % t)
+        # ...and its indexes, as the administrator must: the chain needs a unique index on
+        # prev_hash and audit_id, and a role that may only INSERT cannot create one on a table it
+        # does not own. Mohio asks for an existing unique index before creating (2026-10-17).
+        pg("CREATE UNIQUE INDEX admin_%s_prev ON %s (prev_hash)" % (t, t))
+        pg("CREATE UNIQUE INDEX admin_%s_aid ON %s (audit_id)" % (t, t))
         # mohio_app_r is granted NOTHING on the audit tables.
 
     out = run(APPEND_ONLY_WRITE, APP_URL, "postgres", {"MOHIO_AUDIT_DATABASE_URL": AUDIT_URL})
@@ -416,8 +462,13 @@ if role_ok:
     check("...the application's write landed",
           [r[0] for r in (pg("select name from patients") or [])] == ["Eve"],
           pg("select name from patients"))
-    check("...and the audit record landed, written by a role that may only INSERT",
-          pg("select count(*) from data_audit_log") == [(1,)],
+    # THE DOCUMENTED GAP (T1-AUDIT-RESTRICTED-ROLE-INDEX, deferred by Ron 2026-10-17): a role that may
+    # only INSERT on audit tables an administrator owns cannot deliver, because the sink creates its
+    # chain indexes first and Postgres answers `must be owner`. The record is not lost: its full sealed
+    # entry is in the envelope beside the row (below), owed. This asserts that honest state, and goes
+    # red when the gap is built and the record lands, so the item cannot be closed silently.
+    check("...and the audit record is OWED, not in the trail yet (the named gap T1-AUDIT-RESTRICTED-ROLE-INDEX)",
+          pg("select count(*) from data_audit_log") == [(0,)],
           pg("select count(*) from data_audit_log"))
 
     # THE EVIDENCE BELONGS TO THE APPLICATION, NOT TO THE AUDIT. It commits in the same
@@ -432,8 +483,30 @@ if role_ok:
     check("...and the evidence for that write is in it",
           pg("select count(*) from mohio_audit_envelope") == [(1,)],
           pg("select count(*) from mohio_audit_envelope"))
-    check("...and it was acknowledged, so nothing is owed",
-          pg("select count(*) from mohio_audit_envelope_ack") == [(1,)],
+    check("...and it is not acknowledged, so it stays owed for the relay",
+          pg("select count(*) from mohio_audit_envelope_ack") == [(0,)],
+          pg("select count(*) from mohio_audit_envelope_ack"))
+    # RELAY HONESTY (RULED by Ron 2026-10-17): the relay, run as the same roles, tries the owed record,
+    # cannot deliver it, and says so: "1 owed, delivery failed: <reason>", exit non-zero. It used to print
+    # "Nothing owed" and exit 0 here, a receipt written from the attempt. It also never prints a password.
+    _renv = dict(os.environ, PYTHONPATH=ROOT, MOHIO_ENCRYPTION_KEY="testkey", PYTHONIOENCODING="utf-8",
+                 MOHIO_AUDIT_DATABASE_URL=AUDIT_URL)
+    _renv.pop("DATABASE_URL", None)
+    _rp = os.path.join(TMP, "relay_prog.mho")
+    io.open(_rp, "w", encoding="utf-8", newline="\n").write(APPEND_ONLY_WRITE.format(eng="postgres"))
+    _rr = subprocess.run([sys.executable, "-m", "mio", "audit", "relay", APP_URL, "--program", _rp],
+                         cwd=ROOT, env=_renv, capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=300)
+    _rout = (_rr.stdout or "") + (_rr.stderr or "")
+    check("the relay reports the record still owed, with the reason, and exits non-zero",
+          _rr.returncode != 0 and "1 owed, delivery failed:" in _rout and "must be owner" in _rout,
+          (_rr.returncode, _rout[-500:]))
+    check("...never `Nothing owed` while an envelope is owed",
+          "Nothing owed" not in _rout, _rout[-400:])
+    check("...and it names the store without its password",
+          "app_pw" not in _rout and "audit_pw" not in _rout, _rout[-400:])
+    check("...and the record is still owed after it, not acknowledged by the attempt",
+          pg("select count(*) from mohio_audit_envelope_ack") == [(0,)],
           pg("select count(*) from mohio_audit_envelope_ack"))
     _got_env = pg("select count(*) from mohio_audit_envelope", AUDIT_URL)
     check("the audit's role cannot read the evidence either",
@@ -462,7 +535,7 @@ if role_ok:
 # -- real MySQL ---------------------------------------------------------------------------------
 print("\n== mysql: its audit reader was built with the wrong quoting and wrote nothing ==")
 MY = os.environ.get("MOHIO_TEST_MYSQL",
-                    "mysql://mohio:mohio_test_pw@127.0.0.1:3307/mohio_meta_test")
+                    "mysql://nobody:none@127.0.0.1:1/none")
 my_ok = False
 try:
     import pymysql

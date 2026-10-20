@@ -98,6 +98,25 @@ One case has no second connection: an in-memory SQLite database. A second connec
 would be written where nothing could read it. An in-memory database is already the one MOHIO™
 warns is not for real data.
 
+## Owed records drain on their own
+
+If a record cannot reach the chain at the moment it is made, for instance during a momentary
+audit-store outage, it is held as OWED rather than lost. Owed records drain automatically, with
+nobody running a command (verified by running):
+
+- the next regulated write in the same process delivers what an earlier one left owed, after the
+  drain interval, so the chain and its acknowledgements catch up on their own;
+- a server started over a database an earlier run left owed delivers it on a background interval,
+  with no write at all.
+
+`mio audit relay` stays as a manual tool for draining owed records on demand, but it is no longer
+something an operator has to remember. Setting `MOHIO_AUDIT_RELAY_INTERVAL_SECONDS=0` starts no
+background loop, for a deployment that wants to drive the drain itself.
+
+When run by hand it reports any record it leaves owed with the reason (`N owed, delivery failed: <reason>`)
+and exits 1, so a drain that cannot finish is visible to a script or an operator; a clean drain exits 0.
+Every `mio audit` message shows the database URL with its password masked.
+
 ## Giving the trail its own credential
 
 An audit record is only ever inserted. It is never updated and never deleted. So the audit

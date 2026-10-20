@@ -39,15 +39,13 @@ shape Feedback
     message as text required min 5 max 500
 shape: done
 
-listen for
-    request for sh.Feedback at /
-        render
-            <h1>Feedback</h1>
-            <p>Tell us what you think.</p>
-            {{ form sh.Feedback }}
-        render: done
-    request: done
-listen: done
+request for sh.Feedback at /
+    render
+        <h1>Feedback</h1>
+        <p>Tell us what you think.</p>
+        {{ form sh.Feedback }}
+    render: done
+request: done
 ```
 
 `{{ form sh.Feedback }}` builds a real HTML form FROM the shape -- the fields, the `required`
@@ -58,36 +56,32 @@ it automatically.
 ### Accepting it
 
 ```mohio
-listen for
-    new sh.Feedback
-        save to db.feedback
-            name feedback.name
-            email feedback.email
-            message feedback.message
-        save: done
-        give back [200] "Thanks for the feedback."
-    new: done
+listen for sh.Feedback
+    save to db.feedback
+        name Feedback.name
+        email Feedback.email
+        message Feedback.message
+    save: done
+    give back [200] "Thanks for the feedback."
 listen: done
 ```
 
-`new sh.Feedback` fires on a POST, and binds the now-validated submission to a variable named
-after the shape, lowercased: `feedback`. `save to db.feedback` writes it -- no `create table`
+`listen for sh.Feedback` fires on a POST, and binds the now-validated submission to the shape's name
+exactly as declared: `Feedback`. `save to db.feedback` writes it -- no `create table`
 anywhere; the first `save` makes the table.
 
 ### Reading it back
 
 ```mohio
-listen for
-    request for sh.Feedback at /feedback/list
-        find rows in db.feedback
-        find: done
-        listing ("{{ rows.count }} message(s):")
-        repeat each row in rows
-            listing (listing & "\n- " & row.name & ": " & row.message)
-        repeat: done
-        give back [200] listing
-    request: done
-listen: done
+request for sh.Feedback at /feedback/list
+    find rows in db.feedback
+    find: done
+    listing ("{{ rows.count }} message(s):")
+    repeat each row in rows
+        listing (listing & "\n- " & row.name & ": " & row.message)
+    repeat: done
+    give back [200] listing
+request: done
 ```
 
 `find rows in db.feedback` (no `where`) gets every row; `repeat each row in rows` walks it.

@@ -46,6 +46,7 @@ WHAT.
 from __future__ import annotations
 
 import os
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 import sqlite3
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -67,6 +68,11 @@ class SQLiteAdapter(SourceAdapter):
         if not self.path:
             raise MetasourceError(
                 "SQLiteAdapter needs a file: pass `path=` or set SQLITE_PATH.")
+        from mohio_db_drivers import sqlite_path_from_address
+        try:
+            self.path = sqlite_path_from_address(self.path)   # `sqlite:///app.db` names app.db
+        except RuntimeError as e:
+            raise MetasourceError(str(e))
         if self.path != ":memory:" and not os.path.exists(self.path):
             raise MetasourceError(
                 f"There is no SQLite file at {self.path!r}. An adapter that quietly created one "
@@ -113,8 +119,12 @@ class SQLiteAdapter(SourceAdapter):
                 source=self.source_name(), adapter=self.name,
                 introspected_at=datetime.datetime.utcnow().isoformat() + "Z")
             for (_seq, dbname, _file) in conn.execute("pragma database_list").fetchall():
+                # NAMES FROM THE DATABASE'S OWN CATALOG are quoted with the SQL escape (the quote mark
+                # doubled), never interpolated bare: an attached database or a table may carry any
+                # name the database accepted (the relay-identifier blocker sweep).
+                _qdb = '"' + str(dbname).replace('"', '""') + '"'
                 for name, kind, ddl in conn.execute(
-                        f"select name, type, sql from {dbname}.sqlite_master "
+                        f"select name, type, sql from {_qdb}.sqlite_master "
                         f"where type in ('table','view')").fetchall():
                     if str(name).startswith(INTERNAL_PREFIXES):
                         continue
@@ -123,7 +133,7 @@ class SQLiteAdapter(SourceAdapter):
                     # the DDL text sqlite_master keeps. There is no pragma for it.
                     strict = self._is_strict(ddl)
                     for col in conn.execute(
-                            f"pragma {dbname}.table_info('{name}')").fetchall():
+                            f"pragma {_qdb}.table_info('" + str(name).replace("'", "''") + "')").fetchall():
                         _cid, colname, decltype, notnull, dflt, _pk = col
                         # A SQLITE COLUMN MAY HAVE NO DECLARED TYPE AT ALL. `create table t (x)`
                         # is legal, and `pragma table_info` returns an empty string for it.

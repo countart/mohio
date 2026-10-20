@@ -50,10 +50,9 @@
 //   3. Multi-condition branching -> check / when / otherwise
 //   4. ai.audit BEFORE not confident inside ai.decide
 //   5. not confident is mandatory in ai.decide — compile error without it
-//   6. check confidence above N — the ai.decide gate. CANONICAL, locked Apr 3 (LDD v2.0).
-//      The "RETIRED" marker that used to sit on this line was never a Ronnie decision. A
-//      compiler chat read it, invented `threshold N` to replace it, and shipped that
-//      without asking. Nothing here is retired. Do not retire it again.
+//   6. confidence above N — the ai.decide gate, the only form (RULED by Ron 2026-10-10).
+//      `check confidence above N` and `confidence is above N` refuse with this form; the
+//      history of the reversals is at ai_decide_body. `threshold N` still refuses.
 //   7. match field TO value (not IS)
 //   8. order.up / order.down — not ORDER BY ... ASC/DESC
 //   9. mioagent / invoke / recall / remember — RESERVED Phase 3
@@ -140,6 +139,7 @@ RELEASE_LOCK.3: "release.lock"
 AS_JSON.3:      "as.json"
 AS_CSV.3:       "as.csv"
 AS_PDF.3:       "as.pdf"
+AS_XLSX.3:      "as.xlsx"
 AS_HTML.3:      "as.html"
 AS_INT.3:       "as.int"
 AS_NUMBER.3:    "as.number"
@@ -158,6 +158,7 @@ IN_KG.3:         "in.kg"
 IN_USD.3:        "in.USD"
 IN_EUR.3:        "in.EUR"
 IN_GBP.3:        "in.GBP"
+IN_TIMEZONE.3:   "in.timezone"
 AS_DAYS.3:      "as.days"
 AS_HOURS.3:     "as.hours"
 AS_MINUTES.3:   "as.minutes"
@@ -203,7 +204,11 @@ DO_EVERY.3:     "do.every"
 DO_ENCRYPT.3:   "do.encrypt"
 
 // ── Namespace-scoped refs (regex terminals) ──────────────────
-SH_REF.3:      /sh\.[A-Z][a-zA-Z0-9_]*/
+// A shape is referenced by its name exactly as declared (RULED by Ron 2026-10-10): `shape staff_status`
+// is `sh.staff_status`. This required an uppercase first letter, so a shape declared in lower case
+// could be written and never referenced. A shape name begins with a letter: a leading `_` or `-` is
+// refused at the declaration (scan_shape_name_start), so no reference to one is accepted here.
+SH_REF.3:      /sh\.[A-Za-z][a-zA-Z0-9_]*/
 ENV_REF.3:     /env\.[A-Z_][A-Z0-9_]*/
 SECRET_REF.3:  /secret\.[A-Z_][A-Z0-9_]*/
 DB_REF.3:      /db\.[a-zA-Z_*][a-zA-Z0-9_.]*/ 
@@ -314,6 +319,7 @@ BETWEEN.2:    /between(?![A-Za-z0-9_])/
 QUALITY.2:    /quality(?![A-Za-z0-9_])/
 AUDIENCE.2:   /audience(?![A-Za-z0-9_])/
 FORMAT_KW.2:  /format(?![A-Za-z0-9_])/
+NO_SYMBOL.3:  /no\.symbol(?![A-Za-z0-9_])/
 DECISION.2:   /decision(?![A-Za-z0-9_])/
 SKIP_KW.2:    /skip(?![A-Za-z0-9_])/
 PAGINATE.2:   /paginate(?![A-Za-z0-9_])/
@@ -351,7 +357,17 @@ SHOW.2:       /show(?![A-Za-z0-9_.])/
 PURPOSE.2:    /purpose(?![A-Za-z0-9_])/
 FOR_PURPOSE.3: "for.purpose"
 RENDER.2:     /render(?![A-Za-z0-9_])/
-RENDER_KIND.3: /html(?![A-Za-z0-9_])/ | /scripts(?![A-Za-z0-9_])/
+RENDER_KIND.3: /html(?![A-Za-z0-9_])/ | /scripts(?![A-Za-z0-9_])/ | /code(?![A-Za-z0-9_])/ | /fragment(?![A-Za-z0-9_])/
+// A render block closes on its OWN closer, matched as a single high-priority token so the block's
+// content -- which for `render code` is Mohio SOURCE, full of `task: done`, `check: done` and even
+// `render: done` as displayed text -- can never be mistaken for the closer. raw_show_line (below)
+// excludes exactly `render: done`, so the parser reads every other closer-shaped line as content and
+// ends the block only on its real closer. Without this, `render code` whose body is valid Mohio had a
+// competing parse (render as a NAME assignment, the body as real statements) that won. `show` keeps
+// the generic closer on purpose: giving it a dedicated closer shifted an unrelated ambiguity (a
+// `show <value>` inside a saga step mis-bound the step's `compensate: done`), and show is not the
+// container that displays Mohio source, so it does not need this.
+RENDER_CLOSER.6: /render[ \t]*:[ \t]*done(?![A-Za-z0-9_])/
 TITLE.2:      /title(?![A-Za-z0-9_])/
 DESCRIBE.2:   /describe(?![A-Za-z0-9_])/
 SEND.2:       /send(?![A-Za-z0-9_])/
@@ -367,6 +383,7 @@ STREAM.2:     /stream(?![A-Za-z0-9_])/
 RAISE.2:      /raise(?![A-Za-z0-9_])/
 AGAIN.2:      /again(?![A-Za-z0-9_])/
 NOTIFY.2:     /notify(?![A-Za-z0-9_])/
+SHARE.2:      /share(?![A-Za-z0-9_])/
 VIA.2:        /via(?![A-Za-z0-9_])/
 APPLY.2:      /apply(?![A-Za-z0-9_.])/
 MODIFY.2:     /modify(?![A-Za-z0-9_.])/
@@ -416,6 +433,8 @@ NONE_KW.2:    /none(?![A-Za-z0-9_])/
 VERIFY.2:     /verify(?![A-Za-z0-9_])/
 SIGN.2:       /sign(?![A-Za-z0-9_])/
 TOKEN.2:      /token(?![A-Za-z0-9_])/
+SIGNATURE.2:  /signature(?![A-Za-z0-9_])/
+HEADER.2:     /header(?![A-Za-z0-9_])/
 
 // ── miomap / conflict ─────────────────────────────────────────
 CONFLICT.2:   /conflict(?![A-Za-z0-9_])/
@@ -451,7 +470,11 @@ THIS.2:        /this(?![A-Za-z0-9_])/
 // ── Type names (beat NAME) ────────────────────────────────────
 // dec.N / decimal.N cap a decimal to N places (truncation); the optional .pad fills to exactly N
 // places for display (10 -> 10.00). Ordered before bare dec/decimal so the longer match wins.
-TYPE_NAME.1: /text(?![A-Za-z0-9_])/ | /decimal\.\d+\.pad(?![A-Za-z0-9_])/ | /dec\.\d+\.pad(?![A-Za-z0-9_])/ | /decimal\.\d+(?![A-Za-z0-9_])/ | /dec\.\d+(?![A-Za-z0-9_])/ | /decimal(?![A-Za-z0-9_])/ | /dec(?![A-Za-z0-9_])/ | /integer(?![A-Za-z0-9_])/ | /int(?![A-Za-z0-9_])/ | /boolean(?![A-Za-z0-9_])/ | /USD(?![A-Za-z0-9_])/ | /EUR(?![A-Za-z0-9_])/ | /GBP(?![A-Za-z0-9_])/ | /JPY(?![A-Za-z0-9_])/ | /CHF(?![A-Za-z0-9_])/ | /CAD(?![A-Za-z0-9_])/ | /AUD(?![A-Za-z0-9_])/ | /CNY(?![A-Za-z0-9_])/ | /HKD(?![A-Za-z0-9_])/ | /SGD(?![A-Za-z0-9_])/ | /INR(?![A-Za-z0-9_])/ | /NZD(?![A-Za-z0-9_])/ | /SEK(?![A-Za-z0-9_])/ | /NOK(?![A-Za-z0-9_])/ | /MXN(?![A-Za-z0-9_])/ | /BRL(?![A-Za-z0-9_])/ | /ZAR(?![A-Za-z0-9_])/ | /KRW(?![A-Za-z0-9_])/
+// text.long is unlimited text (CLOB on Oracle, a native unlimited type elsewhere) -- ordered
+// before bare text for the same reason: without it, text's own negative lookahead (the char
+// after "text" just needs to not be [A-Za-z0-9_], and "." is not) matches "text.long" up to the
+// dot and leaves ".long" an unparsed trailer.
+TYPE_NAME.1: /text\.long(?![A-Za-z0-9_])/ | /text(?![A-Za-z0-9_])/ | /decimal\.\d+\.pad(?![A-Za-z0-9_])/ | /dec\.\d+\.pad(?![A-Za-z0-9_])/ | /decimal\.\d+(?![A-Za-z0-9_])/ | /dec\.\d+(?![A-Za-z0-9_])/ | /decimal(?![A-Za-z0-9_])/ | /dec(?![A-Za-z0-9_])/ | /integer(?![A-Za-z0-9_])/ | /int(?![A-Za-z0-9_])/ | /boolean(?![A-Za-z0-9_])/ | /USD(?![A-Za-z0-9_])/ | /EUR(?![A-Za-z0-9_])/ | /GBP(?![A-Za-z0-9_])/ | /JPY(?![A-Za-z0-9_])/ | /CHF(?![A-Za-z0-9_])/ | /CAD(?![A-Za-z0-9_])/ | /AUD(?![A-Za-z0-9_])/ | /CNY(?![A-Za-z0-9_])/ | /HKD(?![A-Za-z0-9_])/ | /SGD(?![A-Za-z0-9_])/ | /INR(?![A-Za-z0-9_])/ | /NZD(?![A-Za-z0-9_])/ | /SEK(?![A-Za-z0-9_])/ | /NOK(?![A-Za-z0-9_])/ | /MXN(?![A-Za-z0-9_])/ | /BRL(?![A-Za-z0-9_])/ | /ZAR(?![A-Za-z0-9_])/ | /KRW(?![A-Za-z0-9_])/ | /BHD(?![A-Za-z0-9_])/ | /KWD(?![A-Za-z0-9_])/ | /OMR(?![A-Za-z0-9_])/ | /JOD(?![A-Za-z0-9_])/ | /TND(?![A-Za-z0-9_])/ | /IQD(?![A-Za-z0-9_])/ | /LYD(?![A-Za-z0-9_])/
            | _BOOL | _DATETIME | _DATE | _TIME | _UUID | _EMAIL
            | _URL | _JSON | _LIST | _MAP | _ANY | _VOID
            | _BASE64 | _IMAGE | _AUDIO | _VIDEO | _PDF | _FILE
@@ -490,8 +513,21 @@ TYPE_NAME.1: /text(?![A-Za-z0-9_])/ | /decimal\.\d+\.pad(?![A-Za-z0-9_])/ | /dec
 // saying so.
 // NOT the whole `mio` prefix: user names may legitimately start with it (the gate has a
 // langmap pack called `miogscreen`). Only the real service roots are reserved.
-NAME: /(?!__USERVAR__)(?!(?:miotranslate|mioresponse|mioschedule|miosecurity|miovalidate|mioconnect|miopublish|miocookie|miosearch|miostream|miocache|miochain|miograph|mioimage|miolearn|mioprint|miovault|mioauth|miodata|miofile|miohttp|mioknow|miomail|miopush|miotest|mioapp|mioenv|miolog|miomap|miopdf|miosms|miosys|mioai)\b)(?!(?:if|unless|otherwise|when|catch)\b)(?!(?:text|decimal|dec|integer|int|boolean|bool|datetime|uuid|any|void|base64|pdf|map|json|USD|EUR|GBP|JPY|CHF|CAD|AUD|CNY|HKD|SGD|INR|NZD|SEK|NOK|MXN|BRL|ZAR|KRW)\b)[a-zA-Z_][a-zA-Z0-9_]*/
+NAME: /(?!__USERVAR__)(?!(?:miotranslate|mioresponse|mioschedule|miosecurity|miovalidate|mioconnect|miopublish|miocookie|miosearch|miostream|miocache|miochain|miograph|mioimage|miolearn|mioprint|miovault|mioauth|miodata|miofile|miohttp|mioknow|miomail|miopush|miotest|mioapp|mioenv|miolog|miomap|miopdf|miosms|miosys|mioai)\b)(?!(?:if|unless|otherwise|when|render)\b)(?!(?:true|false|text|decimal|dec|integer|int|boolean|bool|datetime|uuid|any|void|base64|pdf|map|json|USD|EUR|GBP|JPY|CHF|CAD|AUD|CNY|HKD|SGD|INR|NZD|SEK|NOK|MXN|BRL|ZAR|KRW|BHD|KWD|OMR|JOD|TND|IQD|LYD)\b)[a-zA-Z_][a-zA-Z0-9_]*/
 USERVAR_DOTTED.5: /__USERVAR__[a-zA-Z_][a-zA-Z0-9_]*(?:[.](?:[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+))*/
+
+// STATE_NAME -- a client STATE / CSS-class name, used ONLY after `as` in `mark`, `unmark` and
+// `toggle` (client_mark / client_unmark / client_markstate). It is emitted VERBATIM through
+// classList.add/remove/toggle, so it is a class name, not a variable being bound -- which is why it
+// gets its OWN terminal instead of sharing the result-alias NAME. A state name is written the way a
+// stylesheet author writes a class: `is-active` as well as `is_active` / `isActive`.
+//
+// BOUNDED SO IT CANNOT SWALLOW A MINUS (Ron's residual caution). Each hyphen MUST sit between two
+// word fragments -- `[a-z]+(?:-[a-z0-9_]+)*` -- so there is no leading, trailing or doubled hyphen and
+// NO whitespace inside it. `total - discount` (spaces) can never match it, and the terminal is
+// reachable ONLY at the `as` position of those three rules, where an expression (and therefore minus)
+// is never valid. So a hyphen here is always a name character, never subtraction.
+STATE_NAME: /[a-zA-Z_][a-zA-Z0-9_]*(?:-[a-zA-Z0-9_]+)*/
 
 // ── Literals ─────────────────────────────────────────────────
 STRING:       /\"(?:[^\"\\]|\\.)*\"/
@@ -582,6 +618,7 @@ CASE_YES.2: "case.yes"
          | respond_as_stmt
          | title_decl
          | describe_decl
+         | image_decl
          | view_call_stmt
 
 // ── trailing guards ──────────────────────────────────────────
@@ -624,6 +661,10 @@ respond_as_stmt: _RESPOND _AS STRING    // respond as "text/html"
 // page head metadata for the render view shell
 title_decl: TITLE STRING                // title "Rates"
 describe_decl: DESCRIBE STRING           // describe "Cabin rates for the season"
+// image "q3-preview.png" -- the social-preview image, declared beside title/describe. The
+// runtime writes it (and title/describe) into every og:/twitter: tag the render shell emits;
+// see _wrap_html_shell in mohio_interpreter.py.
+image_decl: _IMAGE STRING
 
 // view call with variables -- standalone statement
 // view "template" key1 val1 key2 val2 ...
@@ -669,7 +710,9 @@ declaration: sector_decl
            | security_decl
            | include_decl
            | require_role_decl
+           | verify_signature_decl
            | grant_role_decl
+           | end_session_stmt
            | rate_limit_decl
            | timespan_decl
            | load_pack_decl
@@ -736,8 +779,15 @@ conn_access: CONN_READONLY | CONN_WRITEONLY | CONN_READWRITE
 // `connect X as Y from Z` keeps parsing exactly as before. Rides the SAME shared result_handlers
 // mechanism every verb block uses, not a parallel one -- see result_handlers's own transformer
 // (mohio_transformer_ast.py) for the shared choke point.
-connect_decl: CONNECT NAME AS conn_access? NAME FROM (ENV_REF | SECRET_REF) (result_handlers closer)?
-            | CONNECT NAME AS conn_access NAME NAME FROM (ENV_REF | SECRET_REF) (result_handlers closer)?
+// `default "app.db"` (RULED by Ron, 2026-10-06): the address to use when the variable is not set,
+// written by the program, never assumed. Used with a loud warning naming it; refused on a
+// temporary disk and under a sector. Without it, `default` on this line was read as a separate
+// statement, an assignment to a variable named `default`, and nothing fell back to it.
+connect_decl: CONNECT NAME AS conn_access? NAME FROM (ENV_REF | SECRET_REF) (_DEFAULT STRING)? (result_handlers closer)?
+            | CONNECT NAME AS conn_access NAME NAME FROM (ENV_REF | SECRET_REF) (_DEFAULT STRING)? (result_handlers closer)?
+            // No `as`: the engine is read from the resolved address (postgres://, mysql://,
+            // oracle://, mongodb://, or a file path -> sqlite). `connect db from env.DATABASE_URL`.
+            | CONNECT NAME FROM (ENV_REF | SECRET_REF) (_DEFAULT STRING)? (result_handlers closer)?
 
 // ── shape ────────────────────────────────────────────────────
 
@@ -817,6 +867,7 @@ shape_field_mod: PAD_LEFT  _TO NUMBER _WITH (NUMBER | STRING)  -> field_pad_left
                | UNIQUE
                | MULTILINE
                | MULTIPLE
+               | NO_SYMBOL                   -> field_no_symbol
                | DEFAULT value_expr
                | PURPOSE STRING              -> field_purpose_mod
                | _MIN NUMBER                -> field_min_mod
@@ -829,6 +880,7 @@ shape_field_mod: PAD_LEFT  _TO NUMBER _WITH (NUMBER | STRING)  -> field_pad_left
                | _RETAIN FOR duration_expr
                | ALLOWED allowed_list
                | _STATUS "." ALLOWED allowed_list
+               | TIMEZONE STRING -> field_timezone_mod
 
 // TYPE_NAME is accepted alongside NAME for the same reason `ext_list` takes it (see that rule):
 // this list holds file extensions (`f as file accept images, pdf, csv`) and allowed VALUES, and
@@ -1141,9 +1193,15 @@ miovalidate_mod: _LENGTH NUMBER _TO NUMBER
 
 // validate — apply rules to data
 
-validate_stmt: _VALIDATE (_USING | _CONNECT) NAME validate_handler* closer?
-             | _VALIDATE NAME _AGAINST value_expr validate_handler* closer?
-             | _VALIDATE NAME (_USING | _CONNECT) NAME validate_handler* closer?
+// A validate with a handler needs its closer, the same rule as verify token: an optional closer
+// let a `show` inside the handler take it, and every statement after the block ran only on
+// failure (measured 2026-10-06). One with no handler keeps the closer optional.
+validate_stmt.5: _VALIDATE (_USING | _CONNECT) NAME validate_handler+ closer
+             | _VALIDATE (_USING | _CONNECT) NAME closer?
+             | _VALIDATE NAME _AGAINST value_expr validate_handler+ closer
+             | _VALIDATE NAME _AGAINST value_expr closer?
+             | _VALIDATE NAME (_USING | _CONNECT) NAME validate_handler+ closer
+             | _VALIDATE NAME (_USING | _CONNECT) NAME closer?
 
 validate_handler: on_failure_handler
                 | on_success_handler
@@ -1325,6 +1383,7 @@ journey_body: _SERVES ":" "single tenant"    -> journey_serves_single
             | _HIDDEN    ":" path_list -> journey_hidden
             | _AUTHORIZE ":" path_list -> journey_authorize
             | _FLOW      ":" path_list -> journey_flow
+            | TIMEZONE STRING -> journey_timezone
             | languages_block
             | enterprise_block
             | limits_block
@@ -1403,7 +1462,12 @@ saga_body: step_block
 
 step_block: STEP NAME body_stmt* step_handler* closer
 
-step_handler: COMPENSATE body_stmt*           // canonical compensation keyword
+// `compensate: done` is the compensation block's OWN closer, one token, so it can never be read as
+// the step's. It had none: programs wrote `compensate: done` and it parsed only because a raw `show`
+// inside the body took it as its closer, the misparse fixed 2026-10-06; with that gone the closer
+// fell to the step and failed as a mismatch. Optional, as before, for a body that writes none.
+COMPENSATE_CLOSER.6: /compensate[ \t]*:[ \t]*done(?![A-Za-z0-9_])/
+step_handler: COMPENSATE body_stmt* COMPENSATE_CLOSER?   // canonical compensation keyword
             | UNDO body_stmt*                  // RETIRED alias for compensate (warns)
             | BEST_EFFORT
             | on_failure_handler
@@ -1413,7 +1477,7 @@ step_handler: COMPENSATE body_stmt*           // canonical compensation keyword
 // was doing the FRAMEWORK's routing job in disguise, which is why a file could not serve
 // without one. Serve-by-default does that job now -- a file in a served folder answers at its
 // convention URL with whatever it renders, shows, or gives back -- so the block had nothing
-// left to do. Explicit routing lives in `map route`, and a request handler in `listen for`.
+// left to do. Explicit routing lives in `map route`, and a request handler stands on its own: `request for sh.X at /path`.
 //
 // The WORD stays RESERVED (the PAGE terminal below is kept deliberately) for future hardware
 // and desktop surfaces, and so an old `page at /x` fails loud with a migration message rather
@@ -1591,19 +1655,53 @@ sector_profile_decl: _SECTOR _PROFILE STRING sector_profile_item* closer
 
 include_decl: INCLUDE STRING
 
-// ── require role ─────────────────────────────────────────────
+// ── require role / require person ────────────────────────────
 
+// `require person` (RULED by Ron 2026-10-08): the handler needs someone signed in, whoever they
+// are; 401 asking to sign in otherwise. `person` stays a NAME, as in `grant role ... for person`,
+// so `session.person` still reads as an ordinary dotted name; the transformer accepts only `person`.
 require_role_decl: REQUIRE ROLE role_list
+                 | REQUIRE NAME                -> require_person_decl
 
 role_list: role_val (OR role_val)*
 role_val: STRING | NAME
+
+// ── verify signature ─────────────────────────────────────────
+// A webhook handler clause: prove an inbound payload came from who it claims, by HMAC-SHA256 over
+// the RAW request bytes, compared constant-time against a signature header, failing closed. The
+// secret is `using env.X` (a value_expr so env.SECRET parses); a STRING LITERAL secret is refused in
+// the transformer with a message pointing at env., never here, so the error can teach. `header "X"`
+// names a non-default signature header; `within N minutes` adds a freshness bound over a signed
+// timestamp. Runtime lives in the interpreter, which runs it FIRST in the handler, before shape
+// validation and the body. See mohio_transformer_ast.verify_signature_decl and the interpreter's
+// _verify_webhook_signature.
+verify_signature_decl: VERIFY SIGNATURE USING value_expr (HEADER STRING)? (WITHIN duration_expr)?
 
 // ── grant role ───────────────────────────────────────────────
 // Establishes a SERVER-verified role at login. Pairs with require role:
 // require role GUARDS (compares against declared literals); grant role
 // ESTABLISHES (from a computed value -- a string or a looked-up field like
 // user.role), so it takes a value_expr, not a role literal.
-grant_role_decl: GRANT ROLE value_expr
+//
+// The OPTIONAL `for person <who>` clause (T1-DURABLE-PRINCIPAL) sets session.person at this
+// authentication boundary: the human the application asserts is here. `for` is the applies-to
+// connector (as in `request for sh.X`, `cm.report "..." for NAME`). `person` stays a NAME so
+// `session.person` still reads as an ordinary dotted name; the transformer checks the word is
+// `person`. Granting a role WITHOUT the clause behaves exactly as before -- the person is an
+// addition, never a requirement.
+grant_role_decl: GRANT ROLE value_expr (FOR NAME value_expr)?
+
+// ── end session (logout) ─────────────────────────────────────
+// The inverse of `grant role`. `grant role` establishes a server-verified identity on the session;
+// `end session` ends the whole session -- roles dropped, session contents gone, the session id
+// invalidated so the old cookie can never be resurrected. Verb-first and reads as the intent:
+// "end session" is logging out. It reuses the shared invalidation primitive rotation and expiry
+// already call, so a session ends the same way however it ends.
+end_session_stmt: END _SESSION
+// `end every session for person <who>` (RULED by Ron): end EVERY session that person holds, in
+// every session store, each ending audited. Not a logout of the caller -- an administrative act on
+// someone else's sessions -- so it is its own statement and never counts as an auth boundary.
+                | END EVERY _SESSION FOR NAME value_expr   -> end_person_sessions_stmt
 
 // ── rate limit ───────────────────────────────────────────────
 
@@ -1648,8 +1746,45 @@ purpose_block: PURPOSE STRING body_stmt* closer
 for_purpose: FOR_PURPOSE STRING
 
 block_stmt: listen_block
+          // ═══ LOCK (Batch 16, handler registry) -- do not weaken ═══════════════════════════════
+          // THE RULE (Ron's words): "No handler should be dependent on a containing handler - all
+          // should be top level and allow for containment but not be dependent on containment. NO
+          // page wrapper should ever be needed."
+          //
+          // DEPENDENT means: a handler that only receives requests because some ENCLOSING block put
+          // it on the router. A standalone handler is NOT dependent -- it registers itself. A handler
+          // MAY be written inside a journey (which gives it that journey's scope/classification) or
+          // inside another handler/conditional (allowed containment, preserved exactly), but it is
+          // never REQUIRED to be, and no wrapper adds routing it did not already have.
+          //
+          // Each of new_block / request_inbound_block / connection_block / change_block /
+          // from_connector_block is a top-level statement that already names what it listens for, so
+          // it stands alone. Dispatch is a per-handler REGISTRY (top_handlers() in mohio_ast;
+          // _route_program / _exec_JourneyDecl / _dispatch_over in the interpreter), NOT a container.
+          //
+          // HISTORY: the bare `listen for` wrapper was retired (Batch 15) but Batch 15 still gathered
+          // every top-level handler into ONE synthetic shared ListenBlock, which bound every handler
+          // to every other -- the same dependence under a new name. Batch 16 removed that gather and
+          // made each handler a standalone registry entry; the bare wrapper now fails loud.
+          //
+          // Do NOT reintroduce container dispatch or a required wrapper. An existing example, corpus
+          // file or older design record never outranks this rule.
+          // ══════════════════════════════════════════════════════════════════════════════════════
+          | new_block
+          | request_inbound_block
+          | connection_block
+          | change_block
+          | from_connector_block
           | client_idle_block
           | purpose_block
+          // A top-level `limits` block declares the ambient AI ceiling for a folder-scoped
+          // journey.mho, where no `journey ... journey: done` wrapper is written (Batch 34). It
+          // was a journey-body / ai-body alternative only, so the canonical wrapperless form
+          // failed check with "Unmatched block closer 'limits: done'", making "declare the ceiling
+          // once for the application" true only in the older wrapper form. Same ambient-ceiling
+          // behaviour Batch 31 built; `_exec_LimitsBlock` sets it and pages under the folder
+          // inherit it via `_resolve_ai_limits`.
+          | limits_block
           // miotest_block / miotest_unit / miotest_ai were defined in this grammar and referenced
           // by NOTHING -- orphan rules. They could never match, so `miotest "suite"` fell through
           // to a declaration and silently created a variable named miotest. Wired in here.
@@ -1698,6 +1833,8 @@ block_stmt: listen_block
           | call_block
           | call_procedure
           | sign_block
+          | token_create_block
+          | token_revoke_block
           | try_block
           | transaction_block
           | string_op_stmt
@@ -1718,9 +1855,17 @@ block_stmt: listen_block
 
 // ── listen for ───────────────────────────────────────────────
 
+// LOCK (Batch 16): the FIRST alternative parses `listen for` with an OPTIONAL subject. A subject
+// present (`listen for sh.X`) is a still-valid single-handler form; a subject ABSENT with a body of
+// handlers is the RETIRED bare wrapper -- the transformer (mohio_transformer_ast.listen_block) fails
+// it loud, because a wrapper made each handler depend on it. See the full lock at block_stmt above.
+// The two client alternatives (`listen for NAME on sel`, `listen for sel`) are browser event
+// listeners, a different form entirely, and are untouched. Do not make the bare wrapper parse to a
+// routing container again.
 listen_block: LISTEN FOR (SH_REF (AT (PATH_LIT | STRING))?)? listener_body* closer
             | LISTEN FOR NAME _ON? sel (ON_PAUSE duration_expr)? client_stmt* closer  -> client_listen_block
             | LISTEN FOR sel client_stmt* closer                  -> client_listen_change
+            | LISTEN FOR _END _OF sel client_stmt* closer          -> client_listen_end
 
 // on.idle -- whole-page inactivity. on.pause debounces ONE selector on ONE event; this
 // watches the document for any sign of a person and fires when there has been none for
@@ -1729,10 +1874,11 @@ client_idle_block: ON_IDLE duration_expr client_stmt* closer
 
 // ── MioScript: Mohio words that run in the browser ────────────
 client_stmt: PUT client_value INTO sel                               -> client_put
+           | INJECT client_value INTO sel                            -> client_inject
            | TOGGLE _THE NAME _OF sel BETWEEN STRING AND STRING    -> client_toggle
-           | _MARK sel _AS NAME                                    -> client_mark
-           | _UNMARK sel _AS NAME                                  -> client_unmark
-           | TOGGLE sel _AS NAME                                    -> client_markstate
+           | _MARK sel _AS STATE_NAME                              -> client_mark
+           | _UNMARK sel _AS STATE_NAME                            -> client_unmark
+           | TOGGLE sel _AS STATE_NAME                              -> client_markstate
            | _VALIDATE _AS NAME                                    -> client_validate
            | REQUEST STRING INTO sel                                 -> client_request
            | SEND sel TO STRING client_send_handler* closer          -> client_send
@@ -1743,24 +1889,64 @@ client_stmt: PUT client_value INTO sel                               -> client_p
            | _ENABLE sel                                            -> client_enable
            | _DISABLE sel                                           -> client_disable
            | STR_AFTER duration_expr client_stmt* closer             -> client_after
+           | EVERY duration_expr _AS NAME client_stmt* closer        -> client_every
+           | STOP NAME                                               -> client_stop_interval
            | _GO _TO STRING                                        -> client_goto
            | _GO _BACK                                             -> client_goback
            | _RELOAD                                                -> client_reload
+           | _RESET sel                                             -> client_reset
            | _CLEAR sel                                             -> client_clear
+           | _CLEAR NAME                                            -> client_clear_var
            | _FOCUS sel                                             -> client_focus
            | _SCROLL _TO sel                                       -> client_scrollto
            | REMOVE sel                                              -> client_removeelem
            | _SELECT sel                                            -> client_selecttext
            | APPEND_KW client_value _TO sel                         -> client_append
            | NOTIFY client_value                                     -> client_notify
+           | _ALERT client_value                                     -> client_alert
+           | SHARE SELECTOR _ON NAME                                 -> client_share_elem_to
+           | SHARE SELECTOR                                          -> client_share_elem
+           | SHARE client_value _ON NAME                             -> client_share_to
+           | SHARE client_value                                      -> client_share
+           | SHARE _ON NAME                                          -> client_share_page_to
+           | SHARE                                                   -> client_share_page
+           | _CONFIRM client_value                                   -> client_confirm
+           | COPY SELECTOR                                          -> client_copy_elem
+           | COPY client_value                                      -> client_copy_value
+           | _PLAY sel                                              -> client_play
+           | _PAUSE sel                                             -> client_pause
+           | STOP sel                                               -> client_stopmedia
            | HOLD NAME "="? client_value                             -> client_hold
+           // The client mirror of the server's five state operators (build lane task 2,
+           // Ron ruling 2026-10-04): `hold` freezes a page value until `release`; these four
+           // act on a FROZEN client value the same way their server counterparts act on a
+           // held variable, and `release`/`forget` refuse a name that was never frozen.
+           // `clear NAME` (a frozen value, empties it, stays frozen) is a DIFFERENT rule from
+           // the existing `_CLEAR sel -> client_clear` just above (a DOM element by selector) --
+           // the two never collide, a NAME token and a SELECTOR/STRING token never overlap.
+           | RELEASE NAME                                            -> client_release
+           | FORGET NAME                                              -> client_forget_var
+           | RENAME NAME TO NAME                                      -> client_rename
+           | REPLACE_KW NAME WITH client_value                        -> client_replace_var
+           | REPLACE_KW STRING _WITH client_value _IN NAME (_AS NAME)? -> client_replace_in
+           // A bare page value, read/write with no freeze at all -- the client's own plain
+           // assignment, for a running value a page keeps recapturing (the last keystroke, the
+           // last selection). This is what `hold` was used for before this ruling; existing
+           // `.mho` using `hold` for that purpose moves to this bare form, and `hold` itself is
+           // reserved for a value that must not change again until released.
+           | NAME client_value                                        -> client_assign
            | TOGGLE sel                                              -> client_togglevis
 
 ?sel: SELECTOR | STRING
 
 client_subject: NAME
 
-client_when: client_cond_chain client_stmt*
+// A client `check` branches the same way the server one does: `when <cond>`, and the check's
+// subject may be repeated for readability (`check status / when status is "yes"`), matching the
+// server shape a coder already knows. The bare condition-first form (no `when`) still parses, so
+// nothing that worked before breaks; `when` is the canonical, server-matching spelling.
+client_when: _WHEN NAME? client_cond_chain client_stmt*
+           | client_cond_chain client_stmt*
 
 ?client_cond_chain: client_cond
                   | client_cond (AND client_cond)+   -> cond_all
@@ -1786,6 +1972,7 @@ client_otherwise: _OTHERWISE client_stmt*
 
 client_value: STRING                  -> client_literal
             | RESULT_REF              -> client_result
+            | USERVAR_DOTTED          -> client_marked
             | NAME                    -> client_the
 
 client_send_handler: ON_SUCCESS client_stmt*    -> client_on_success
@@ -1805,7 +1992,7 @@ from_connector_body: WHEN dotted_name body_stmt*
 
 new_block: NEW SH_REF (AT (PATH_LIT | STRING))? body_stmt* closer
 
-// inbound: request for sh.[Shape] inside listen for
+// inbound: request for sh.[Shape] -- a top-level handler (Batch 15; formerly only inside `listen for`)
 request_inbound_block: REQUEST FOR SH_REF (AT (PATH_LIT | STRING))? body_stmt* closer
 
 // outbound: request [result] from [connector].[op] in logic zone
@@ -1976,7 +2163,7 @@ groupby_expr: NAME          // by merchant
 
 // ── grab ─────────────────────────────────────────────────────
 
-grab_block: GRAB NAME FROM source_ref match_clause? result_handlers closer
+grab_block: GRAB NAME FROM source_ref match_clause* result_handlers closer
 grab_inline: GRAB NAME FROM source_ref WHERE dotted_name IS value_expr
 
 // ── compare ──────────────────────────────────────────────────
@@ -2034,11 +2221,18 @@ calc_field: NAME agg_func
 
 join_block: (WITH | WITH_REQUIRED | WITH_ALL) NAME FROM source_ref join_body* closer
 
+// `join_block` nests here so a `with` can carry its own `with` for the grandchild -- no depth
+// cap at the grammar level. A nested `with` / `with.required` EXECUTES, on find and on retrieve,
+// including sibling `with`s side by side and nested inside another `with` (verified by running,
+// tests/test_battery_retrieve_sibling_withs.py). Still refused by name, at check and at run
+// (T1-NATIVE-JOIN-NESTING-AND-UNIT6): `with.all` anywhere but the top level of a `find`,
+// `with.all` beside or containing siblings, and `with.all` with a per-parent `up to`.
 join_body: match_clause
          | return_clause
          | where_clause
          | order_clause
          | limit_clause
+         | join_block
 
 // ── save ─────────────────────────────────────────────────────
 
@@ -2059,8 +2253,10 @@ save_field: (NAME | TYPE_NAME) value_expr                    // static:  furnace
 
 UPSERT.2: /upsert(?![A-Za-z0-9_])/
 
-save_or_update_block: SAVE OR UPDATE source_ref match_clause save_field* result_handlers closer
-                    | UPSERT source_ref match_clause save_field* result_handlers closer
+// Stacked match lines are AND-ed into one composite key (MHC-B011). With one match line only, a
+// second `match b to Y` line was read as a FIELD named `match`.
+save_or_update_block: SAVE OR UPDATE source_ref match_clause+ save_field* result_handlers closer
+                    | UPSERT source_ref match_clause+ save_field* result_handlers closer
 
 // ── save all from (bulk insert) ───────────────────────────────
 
@@ -2068,16 +2264,16 @@ save_all_block: SAVE ALL? TO source_ref FROM value_expr result_handlers closer
 
 // ── update ───────────────────────────────────────────────────
 
-update_block: UPDATE source_ref update_body* result_handlers closer
+update_block: UPDATE source_ref (AS NAME)? update_body* result_handlers closer
 
 update_body: match_clause
            | save_field
 
 // ── remove ───────────────────────────────────────────────────
 
-remove_block: REMOVE FROM source_ref remove_condition result_handlers closer
+remove_block: REMOVE FROM source_ref (AS NAME)? remove_condition result_handlers closer
 
-remove_condition: match_clause
+remove_condition: match_clause+    // stacked match lines are AND-ed (MHC-B011)
                | where_clause
                | (where_clause AND where_clause)
 
@@ -2092,10 +2288,13 @@ remove_all_block.3: REMOVE_ALL FROM source_ref (result_handlers closer)?
 remove_all_spaced.4: REMOVE ALL FROM source_ref
 
 // ── check (MioQL existence / count / unique) ───────────────────
+// STACKED MATCH LINES (MHC-B011, 2026-10-07): `match a to X` on one line and `match b to Y` on the
+// next are AND-ed, exactly as on retrieve and find. These forms took one match line only, so a
+// second line failed to parse with a message pointing at `when empty`.
 
-check_mioql_block: CHECK_EXISTS NAME IN source_ref match_clause result_handlers closer
-                | CHECK_COUNT (AS NAME)? IN source_ref (where_clause | match_clause)? result_handlers closer
-                | CHECK_UNIQUE IN source_ref match_clause result_handlers closer
+check_mioql_block: CHECK_EXISTS NAME IN source_ref match_clause+ result_handlers closer
+                | CHECK_COUNT (AS NAME)? IN source_ref (where_clause | match_clause+)? result_handlers closer
+                | CHECK_UNIQUE IN source_ref match_clause+ result_handlers closer
 
 // `check unique` REDESIGN (T1-CHECK-UNIQUE-REDESIGN, ruled 2026-08-11): now routes through the
 // shared match_clause exactly like its siblings above (check exists / check count), instead of
@@ -2115,7 +2314,7 @@ check_mioql_block: CHECK_EXISTS NAME IN source_ref match_clause result_handlers 
 // The required match/where filter is what disambiguates it from the value-check
 // block `check <expr> when ...` (which cannot take a match/where). Binds NAME to a
 // boolean. One word, one job, different context: `check` here is the DB existence test.
-check_exists_bare_block: CHECK NAME IN source_ref (match_clause | where_clause) result_handlers closer
+check_exists_bare_block: CHECK NAME IN source_ref (match_clause+ | where_clause) result_handlers closer
 
 // ── pull — queue/stream consumption, bounded retrieval ────────
 // pull up to N from db.[table] — bounded batch retrieval
@@ -2132,7 +2331,7 @@ pull_body: where_clause
 
 // ── get (assertive internal retrieval) ────────────────────────
 
-get_block: GET NAME FROM source_ref match_clause? result_handlers closer
+get_block: GET NAME FROM source_ref match_clause* result_handlers closer
 
 // ── apply (single / collection) ───────────────────────────────
 
@@ -2240,24 +2439,45 @@ sql_block: SQL_KW raw_sql_content closer
 
 raw_sql_content: raw_sql_line+
 
-raw_sql_line: /[^\n]+/
+// No SQL statement line is ever exactly a block closer (`name: done` or a bare `done`), so such a
+// line ends the raw text rather than being swallowed into it with every handler after it
+// (HC-120 family). The transformer then checks the closer names `sql`.
+raw_sql_line: /(?![ \t]*(?:[A-Za-z_][A-Za-z0-9_.]*[ \t]*:[ \t]*)?done(?![A-Za-z0-9_])[ \t\r]*(?:\/\/[^\n]*)?(?:\n|$))[^\n]+/
 
 // show HTML block — raw HTML lines between "show" and "show: done".
 // Mirrors the sql_block forgiveness principle (no syntax restriction inside);
 // {{ }} interpolates in the executor. Disambiguates from `show value_expr`
 // structurally: raw HTML is not a value_expr, so only the block form matches it.
-show_block: SHOW raw_show_content closer
+show_block.-3: SHOW raw_show_block_content closer
+
+// The bare `show` block keeps the same capture, and a line that is ITS closer (`show: done`, or a
+// bare `done`) is never its text, for the reason raw_show_line gives above. Aliased to the render
+// names so the transformer reads one shape.
+raw_show_block_content: raw_show_block_line+ -> raw_show_content
+raw_show_block_line: /(?![ \t]*(?:show[ \t]*:[ \t]*)?done(?![A-Za-z0-9_])[ \t\r]*(?:\/\/[^\n]*)?(?:\n|$))[^\n]+/ -> raw_show_line
 
 // render is the canonical view container (HTML output). Same capture as show_block;
 // `show <value>` (value emit) is unchanged.
 // `render` defaults to HTML. Script is NOT allowed in an html render -- it must be
 // declared: `render scripts`. The container names the content, so the escape hatch is
 // explicit and the compiler can enforce it instead of trusting a style guide.
-render_block: RENDER RENDER_KIND? raw_show_content closer
+// The kind may be written bare (`render code`) or with the language's `as` modifier marker
+// (`render as code`), the same `as` that leads `as text` / `as redirect` / `amount as USD`. Both
+// spellings apply the same kind; `_AS` is filtered so the transform sees the RENDER_KIND either way.
+// A `render as <word>` where the word is NOT a kind (`render as text`) falls through to the body and
+// is refused by the unknown-kind check in the transform, the same as bare `render text`.
+render_block: RENDER (_AS? RENDER_KIND)? raw_show_content RENDER_CLOSER
 
 raw_show_content: raw_show_line+
 
-raw_show_line: /[^\n]+/
+// HC-120/124/128. The lookahead used to end in `$`, which (no multiline flag) matches only at the
+// very end of the input, and it was anchored at the word `render`; the dynamic lexer can start a raw
+// line at the indentation instead. So every indented `render: done` was ALSO valid page text, and
+// when the honest parse failed further down (a malformed query in a later handler) Earley took the
+// parse where a render ran on to a LATER `render: done`, every handler between became HTML, and
+// `mio check` validated that tree clean while serve had no such routes. Now a line that is the
+// render closer, at any indentation, with or without a trailing comment, is never page text.
+raw_show_line: /(?![ \t]*render[ \t]*:[ \t]*done(?![A-Za-z0-9_])[ \t\r]*(?:\/\/[^\n]*)?(?:\n|$))[^\n]+/
 
 // ── miomap convert ───────────────────────────────────────────
 
@@ -2562,12 +2782,23 @@ rank_option: OPTION value_expr (IF condition)? rank_weight?    -> rank_opt
 
 rank_weight: _WEIGHT value_expr
 
-// CANONICAL: `check confidence above N`. Locked Apr 3 (LDD v2.0) and never overturned.
-// A Jun 30 compiler chat found a stale "retired" marker, autonomously replaced this with
-// an invented `threshold N`, and never asked. `threshold` is a SHAPE field modifier
-// (like min/max); it was never a confidence form. This restores the locked design.
+// CANONICAL: `confidence above N`, and only that (RULED by Ron 2026-10-10). History, because this
+// form has been reversed more than once and the record has to survive the next session:
+//   Mar 25  `confidence above N` was the form.
+//   Apr 3   `check confidence above N` was locked as canonical (LDD v2.0).
+//   Jun 30  a compiler chat replaced the gate with an invented `threshold N` (a SHAPE field
+//           modifier, never a confidence form); later restored to `check confidence above N`.
+//   Sep 2   (123c021) a confidence gate on an AI block with no confidence refuses. Unchanged.
+//   Oct 10  ruled: only `confidence above N`. `check confidence above N` and `confidence is above
+//           N` both REFUSE, teaching `confidence above N`, and `mio fmt --write` rewrites both.
+//           The ruling cites 806e1619, 759e93a8, cf7f88d3 and 9f54c704 for the earlier turns;
+//           none of the four is in this repository's history or the pre-scrub backup, so they
+//           are recorded as cited, not verified.
+// The `check` and `is` alternatives below stay in the grammar ON PURPOSE: a form that stops
+// parsing dies as a bare syntax error, while a parsed one refuses at its own line with the fix.
+// `threshold N` still refuses (ai_decide_block).
 //
-// `check confidence above N` is the GATE -- it decides which path fires, confident or
+// `confidence above N` is the GATE -- it decides which path fires, confident or
 // `not confident`. It is NOT the score. The score is `<name>.confidence`, always
 // available after the block on either path. They coexist and are different things.
 //
@@ -2576,10 +2807,8 @@ rank_weight: _WEIGHT value_expr
 // ever built, so the interpreter's lookup always fell through to a hardcoded 0.85. Every
 // ai.decide in Mohio ran at 0.85 regardless of what was declared: a fraud model asking
 // for 0.99 silently got 0.85. It parsed, it checked clean, and it did nothing.
-ai_decide_body: CHECK _CONFIDENCE ABOVE value_expr -> confidence_check
-              // The bare form is the Mar 25 predecessor, superseded Apr 3. It is still
-              // wired -- three demo files use it, and an unwired form does not fail, it
-              // silently becomes junk variables. Nothing may drop in silence.
+ai_decide_body: CHECK _CONFIDENCE ABOVE value_expr -> confidence_check    // refused: drop `check`
+              // The canonical gate (RULED 2026-10-10).
               | _CONFIDENCE ABOVE value_expr -> confidence_check
               // `confidence IS above N` -- the spoken form a coder reaches for by analogy with
               // `when x is above n`. It had no confidence alternative, so it fell through the
@@ -2664,7 +2893,14 @@ weigh_clause: WEIGH weigh_list
 compare_weigh_line: WEIGH weigh_list
 
 
-weigh_list: dotted_name ("," dotted_name)*
+weigh_list: weigh_item ("," weigh_item)*
+// `weigh patient stripped` (RULED by Ron): the one way to send a record to an AI call without its
+// protected fields. `stripped` trails the noun it describes, an adjective, never a verb.
+weigh_item: dotted_name STRIPPED?
+// A LITERAL weighed as context (`weigh message.body, "returns policy: 30 days"`, RULED by Ron
+// 2026-08-30, built 2026-10-11): the model reads it; the record keeps its source line and the
+// classification `literal`, never its text.
+          | literal                         -> weigh_literal
 
 // Priority 9 beats the cw_not_confident guard's 5. This rule is reachable ONLY from the AI
 // block bodies, so where `not confident` is legal it wins here, and where it is not legal
@@ -2708,6 +2944,15 @@ ai_connect_names: NAME ("," NAME)*
 
 ai_connect_body: order_block
                | on_failure_handler
+               // A coder-declared provider carries its own endpoint + key. The inline form binds a
+               // NAME on one line (`address .. key .. as NAME`) so a reordered line can never pair
+               // one provider's address with another's key; the standalone form is the two lines
+               // `address ..` and `key ..` under `ai.connect NAME` (pairing enforced at check).
+               // `address` widened to STRING|ENV_REF|SECRET_REF (a self-hosted URL may live in env);
+               // `key` is env/secret only, matching the five existing `key` sites.
+               | _ADDRESS (STRING | ENV_REF | SECRET_REF) _KEY (ENV_REF | SECRET_REF) _AS NAME  -> aic_provider_decl
+               | _ADDRESS (STRING | ENV_REF | SECRET_REF)                                       -> aic_address
+               | _KEY (ENV_REF | SECRET_REF)                                                    -> aic_key
 
 ai_connect_subgroup: ai_connect_names order_block
 
@@ -2715,13 +2960,22 @@ order_block: _ORDER order_provider* closer
 
 order_provider: NAME (_MODEL STRING)?    // provider + optional model override
 
-// Inline ai.connect for use at call time: run image_gen with ai.connect ...
-ai_connect_inline: AI_CONNECT (_ORDER)? order_provider_inline ("," order_provider_inline)*
-
-order_provider_inline: NAME (_MODEL STRING)?
-
-// ai.create — block form with required limits
-ai_create_block: AI_CREATE NAME (RETURNS type_name)? (FROM dotted_name)? (AS NAME)? ai_create_full_body* result_handlers closer
+// ai.create — block form: KIND first, NAME last (Ron 2026-09-26). `as NAME` binds the result the way
+// `as` binds a name everywhere else in the language, and the leading word is the MODALITY (text /
+// image / video / audio / logic / data), reusing ai_create_type so the transformer reads it unchanged.
+//     ai.create image as pic
+//         prompt "a red barn"
+//     ai.create: done
+// The old `ai.create NAME returns TYPE` form is the SAME grammatical shape with the words meaning the
+// opposite things, so the two cannot coexist -- the second alternative below matches the old shape only
+// to REFUSE it with a migration message (`-> ai_create_block_retired`), never to run it.
+ai_create_block: AI_CREATE ai_create_type (AS NAME)? (FROM dotted_name)? ai_create_full_body* result_handlers closer
+               | AI_CREATE NAME RETURNS type_name (FROM dotted_name)? (AS NAME)? ai_create_full_body* result_handlers closer -> ai_create_block_retired
+               // A word in the KIND position that is not a built modality. A planned mioai kind
+               // (`story`) refuses as declared-and-not-built-yet, arriving with mioai; any other word
+               // refuses naming the kinds that exist. The built kinds lex as their own terminals
+               // (_IMAGE/_TEXT/...), never as NAME, so this alternative never captures a real kind.
+               | AI_CREATE NAME (AS NAME)? (FROM dotted_name)? ai_create_full_body* result_handlers closer -> ai_create_block_unknown_kind
 
 ai_create_full_body: _CONFIDENCE ABOVE value_expr   -> confidence_check
                    | _CONFIDENCE IS ABOVE value_expr   -> confidence_check_is_form
@@ -2783,8 +3037,10 @@ create_source:   _SOURCE   dotted_name         // knowledge base for ai.respond
 
 name_value_pair: NAME value_expr
 
-// ai.create — legacy inline stmt form (kept for backward compat)
-ai_create_stmt: AI_CREATE NAME? ai_create_type ai_create_body*
+// ai.create — legacy inline stmt form. RETIRED (FAC-23): `ai.create pic image` silently generated
+// text because the modality word was dropped in the transform. It refuses now, pointing at the block
+// form, rather than being rebuilt (`-> ai_create_inline_retired`).
+ai_create_stmt: AI_CREATE NAME? ai_create_type ai_create_body* -> ai_create_inline_retired
 
 ai_create_type: _IMAGE -> create_type_image
               | _AUDIO -> create_type_audio
@@ -2793,13 +3049,16 @@ ai_create_type: _IMAGE -> create_type_image
               | _VIDEO -> create_type_video
               | _DATA  -> create_type_data
 
-ai_create_body: AS SH_REF
-              | _COUNT NUMBER
-              | _REALISTIC NUMBER
-              | FROM DB_REF
-              | _PROMPT STRING
-              | TO DB_REF
-              | TO PATH_LIT
+// Each alternative is NAMED so the executor can tell them apart: `count N` and `realistic N` both
+// arrived as a bare NUMBER once their keywords were filtered, and nothing read either. `realistic`
+// is built (0.0 = fully synthetic, from the source's fields only); the others refuse as not built.
+ai_create_body: AS SH_REF            -> create_as_shape
+              | _COUNT NUMBER        -> create_count
+              | _REALISTIC NUMBER    -> create_realistic
+              | FROM DB_REF          -> create_from_db
+              | _PROMPT STRING       -> create_prompt
+              | TO DB_REF            -> create_to_db
+              | TO PATH_LIT          -> create_to_path
 
 ai_override_stmt: AI_OVERRIDE NAME WITH value_expr
 
@@ -2828,8 +3087,9 @@ always_clause: ALWAYS body_stmt*
 // error-status-after-an-action is `on.failure` / `on.success`. Two words for one job.
 // The rule stays reachable so the word still PARSES and the transformer can fail loud
 // naming the replacement, instead of the developer getting a bare syntax error. The word
-// stays HELD -- `catch` may return with its original during-execution meaning inside
-// `mio test`, so it is never freed for use as an identifier.
+// stays HELD as a statement -- `catch` may return with its original during-execution meaning
+// inside `mio test`. As a NAME (a field, a column, a variable) it is released (RULED by Ron
+// 2026-10-09): only the statement form refuses.
 catch_clause: CATCH body_stmt*                         -> retired_catch
 
 transaction_block: TRANSACTION body_stmt* closer
@@ -2845,6 +3105,7 @@ action_stmt: give_back_stmt
            | grab_stage_stmt
            | give_stmt
            | jump_to_stmt
+           | redirect_stmt
            | halt_stmt
            | stop_stmt
            | show_block
@@ -2865,6 +3126,7 @@ action_stmt: give_back_stmt
            | service_call_stmt
            | require_role_decl
            | grant_role_decl
+           | end_session_stmt
            | verify_token_stmt
            | cm_action_stmt
            | run_async_block
@@ -2883,6 +3145,7 @@ action_stmt: give_back_stmt
            | extract_stmt
            | hash_block
            | check_against_stmt
+           | check_against_missing_closer
            | load_pack_stmt
            | inject_stmt
            | encode_stmt
@@ -2933,7 +3196,7 @@ give_back_stmt: GIVE BACK http_status? give_back_val TRUSTED? give_back_mod? for
 // optional there. It is an ordinary string, so `{{ }}` works for renaming in transit.
 give_stmt: GIVE value_expr give_back_mod? give_as_name? trailing_qualifier?
 
-give_as_name: STRING
+give_as_name: STRING | dotted_name    // a bare name reads as "{{ name }}" (OR-7, RULED 2026-10-12)
 
 give_back_block_body: NAME value_expr    // field  value pairs
 
@@ -2999,6 +3262,12 @@ trailing_qualifier: IF condition
 
 jump_to_stmt: JUMP TO (PATH_LIT | dotted_name | STRING) trailing_qualifier?
 
+// `redirect "/x"` DECLARED, NOT BUILT (Ron, 2026-09-25). Without this rule `redirect "/x"` parsed
+// as an ordinary variable named `redirect` and did nothing -- a silent no-op. This gives it a
+// statement of its own so the transformer can REFUSE it loud, pointing at `jump to` (which already
+// performs a 303 redirect after a POST). See T1-REDIRECT-UNBUILT.
+redirect_stmt: REDIRECT (PATH_LIT | dotted_name | STRING) trailing_qualifier?
+
 // ── halt ─────────────────────────────────────────────────────
 
 halt_stmt: HALT trailing_qualifier?
@@ -3059,20 +3328,55 @@ var_state_stmt: _CLEAR dotted_name                        -> clear_stmt
 
 // ── verify token ─────────────────────────────────────────────
 
-verify_token_stmt: VERIFY TOKEN FROM verify_source verify_body* closer?
+// A body needs its closer. With `closer?` the grammar could not tell which block a `verify: done`
+// closed, and a verify followed by more code swallowed every statement after it into its own
+// handler (measured 2026-10-06). The one-line bearer form, with no body, keeps no closer.
+verify_token_stmt.5: VERIFY TOKEN FROM verify_source (_AS NAME)? verify_body+ closer
+                 | VERIFY TOKEN FROM verify_source
 
 verify_source: dotted_name STRING?    // request.header "Authorization"
 
 verify_body: _SCOPE STRING
            | on_failure_handler
+           | on_success_handler
 
 // ── sign ─────────────────────────────────────────────────────
 
-sign_block: SIGN (_URL | UPLOAD _URL) FOR value_expr sign_body* closer
+sign_block: SIGN (_URL | UPLOAD _URL) FOR value_expr (_AS NAME)? sign_body* closer
 
+// `named NAME` is the RETIRED capture spelling (ruled by Ron, 2026-10-06: `as` is the capture word
+// for the whole credential family). It still parses so mio check can refuse it with the `as` form.
 sign_body: _EXPIRES IN duration_expr
          | _NAMED NAME
          | on_failure_handler
+
+// ── one-time links: mioauth.token.create / mioauth.token.revoke ──────────
+// RULED by Ron, 2026-10-06 (Q774). A link that acts once, for one purpose, for a while:
+//     mioauth.token.create as approve_token
+//         for member.id                 whom or what the link acts for
+//         scope "approve:payment-1"     what it is for (its one job, as on verify token)
+//         expires in 1 hour             required
+//         one time                      the default; `up to 3 times` for a link used more than once
+//     mioauth.token.create: done
+// The raw token lives only in the `as` name; only its SHA-256 is stored. `verify token from X
+// as grant` checks it (a GET, without using it up) or redeems it once (any other method).
+// `mioauth.token.revoke` with `for` and `scope` revokes every unused matching token; with `token X`
+// it revokes that one presented token.
+MIOAUTH_TOKEN_CREATE.3: "mioauth.token.create"
+MIOAUTH_TOKEN_REVOKE.3: "mioauth.token.revoke"
+_ONE.2: /one(?![A-Za-z0-9_])/
+
+token_create_block: MIOAUTH_TOKEN_CREATE (_AS NAME)? token_body* closer
+token_revoke_block: MIOAUTH_TOKEN_REVOKE token_body* closer
+
+token_body: _FOR value_expr            -> token_for
+          | _SCOPE value_expr          -> token_scope
+          | _EXPIRES IN duration_expr  -> token_expires
+          | _ONE _TIME                 -> token_one_time    // the default; may be written out
+          | _UP _TO NUMBER _TIMES      -> token_uses        // a link that works more than once says
+                                                             // so: `up to 3 times` (ruled 2026-10-06)
+          | TOKEN value_expr           -> token_value       // revoke: the presented token itself
+          | _NAMED NAME                -> token_named
 
 // ── cm.* compliance actions ───────────────────────────────────
 
@@ -3125,13 +3429,20 @@ MIO_SERVICE_ROOT.1: /(?:miotranslate|mioresponse|mioschedule|miosecurity|miovali
 // `alias.canonical ...` as a service call, silently destroying the assignment.
 // The meaningful inline forms (give back / show / jump) remain; assignments and
 // other statements are handled by the `statement*` that follows in the handlers.
-inline_action: give_back_stmt | show_stmt | jump_to_stmt
+inline_action: give_back_stmt | show_stmt | jump_to_stmt | redirect_stmt
 
 // ─────────────────────────────────────────────────────────────
 // RESULT HANDLERS
 // ─────────────────────────────────────────────────────────────
 
 result_handlers: result_handler*
+               // A confidence gate written AFTER a handler (RULED 2026-10-10: the gate is
+               // `confidence above N`, before the handlers). Parsed only to refuse it at its own
+               // line, naming the ordering; without it the canonical form in the wrong place died
+               // as a bare syntax error. It must FOLLOW a handler: a gate written first in a block
+               // with no clauses is a clause, and its own rules (123c021) answer it.
+               | result_handler+ misplaced_confidence_gate result_handler*
+misplaced_confidence_gate: _CONFIDENCE ABOVE value_expr
 
 // DESIGN SPEC (2026-03-30): `otherwise` is the final fallback of a VERB BLOCK. It runs when
 // NEITHER on.failure NOR on.success fired -- in `find`, on.failure means "no results", so
@@ -3234,6 +3545,12 @@ ANY.3:        /any(?![A-Za-z0-9_])/
 // ── where ─────────────────────────────────────────────────────
 
 where_clause: WHERE where_condition
+            // The comparison in ( ), where comparisons live, with `=` as equality (RULED by Ron
+            // 2026-10-10: inside ( ) a single `=` is "is the same as"). The same wc_cmp node. It
+            // sits HERE, on the query's `where`, not in where_condition: check/when shares that
+            // rule and already reads `when (x = 5)` as a parenthesised comparison.
+            | WHERE wc_paren
+wc_paren: "(" dotted_name MATH_CMP_OP value_expr ")"   -> wc_cmp
 
 where_condition: dotted_name IS ABOVE value_expr                     -> wc_above
                | dotted_name IS BELOW value_expr                     -> wc_below
@@ -3242,21 +3559,37 @@ where_condition: dotted_name IS ABOVE value_expr                     -> wc_above
                | dotted_name IS _MORE _THAN value_expr             -> wc_above
                | dotted_name IS _GREATER _THAN value_expr          -> wc_above
                | dotted_name IS _LESS _THAN value_expr             -> wc_below
-               // `is at least` / `is at most` are client_cond (MioScript validate-block) only --
-               // this server-side where_condition rule exists solely to catch the misuse and fail
-               // loud (T1-CONDITIONAL-VOCAB-SERVER-CLIENT-SPLIT); it never builds a real comparison.
-               | dotted_name IS _AT _LEAST value_expr                -> wc_atleast_clientonly
-               | dotted_name IS _AT _MOST value_expr                 -> wc_atmost_clientonly
+               // `is at least` / `is at most` on the server (RULED by Ron 2026-10-11, superseding the
+               // client-only ruling of 2026-08-19): the same comparison as `is not below` / `is not
+               // above`, so the in-memory filter, the SQL pushdown and MongoDB read it unchanged.
+               | dotted_name IS _AT _LEAST value_expr                -> wc_not_below
+               | dotted_name IS _AT _MOST value_expr                 -> wc_not_above
+               // The LENGTH form, `is at least 8 characters`: the field's text has at least that
+               // many characters (RULED by Ron 2026-10-11), the same words a validate block uses.
+               | dotted_name IS _AT _LEAST value_expr _CHARACTERS    -> wc_minlen
+               | dotted_name IS _AT _MOST value_expr _CHARACTERS     -> wc_maxlen
+               // A bare DATE between two date literals, the same date-literal anchor `is after` /
+               // `is before` use, so a date is written the same way everywhere (no quotes needed).
+               // Listed BEFORE the value_expr form so a date anchor wins the ambiguity (value_expr
+               // also admits a bare DATE_LIT but does not resolve it as a date).
+               | dotted_name IS BETWEEN since_anchor AND since_anchor -> wc_between
                | dotted_name IS BETWEEN value_expr AND value_expr     -> wc_between
                | dotted_name IS_NOT ABOVE value_expr                  -> wc_not_above
                | dotted_name IS_NOT BELOW value_expr                  -> wc_not_below
                | dotted_name IS_NOT _MORE _THAN value_expr          -> wc_not_above
                | dotted_name IS_NOT _LESS _THAN value_expr          -> wc_not_below
+               // `is not after DATE` = on-or-before (through end of that day); `is not before DATE`
+               // = on-or-after (from the start of that day). The inclusive single date bound, the
+               // `is not` pattern (above) extended from numbers to dates. No new words.
+               | dotted_name IS_NOT STR_AFTER since_anchor            -> wc_not_after
+               | dotted_name IS_NOT STR_BEFORE since_anchor           -> wc_not_before
                | dotted_name IS_IN time_period_expr                   -> wc_time_in
                | dotted_name IS OLDER THAN since_anchor               -> wc_older
                | dotted_name IS NEWER THAN since_anchor               -> wc_newer
                | dotted_name IS_EMPTY                                 -> wc_empty
                | dotted_name IS_NOT EMPTY                             -> wc_not_empty
+               | dotted_name NOT_EMPTY                                -> wc_not_empty   // the mirror of
+                                                                      // `name is.empty` (T1-SPLIT-OPERATOR-FAMILIES)
                | dotted_name IS EMPTY                                 -> wc_is_empty
                | dotted_name IS NOT EMPTY                             -> wc_is_not_empty
                // A TEXT PREDICATE TAKES A VALUE, NOT ONLY A LITERAL (2026-09-13). These four
@@ -3285,17 +3618,32 @@ where_condition: dotted_name IS ABOVE value_expr                     -> wc_above
                | dotted_name IS NOT BELOW value_expr                  -> wc_not_below
                | dotted_name IS NOT _MORE _THAN value_expr            -> wc_not_above
                | dotted_name IS NOT _LESS _THAN value_expr            -> wc_not_below
+               // The spaced tokenisation of `is not after/before DATE` (combined IS_NOT form above);
+               // must sit BEFORE wc_is / wc_not_is or the catch-all reads `not` as the value, exactly
+               // like the spaced IS NOT ABOVE/BELOW siblings just above.
+               | dotted_name IS NOT STR_AFTER since_anchor            -> wc_not_after
+               | dotted_name IS NOT STR_BEFORE since_anchor           -> wc_not_before
                | dotted_name IS value_expr                            -> wc_is
                | dotted_name IS_NOT value_expr                        -> wc_not_is
                | dotted_name IS NOT value_expr                        -> wc_not_is
-               | dotted_name NAME                                         -> wc_is_name
+               // The two-bareword shorthand `where status active` (field value, no `is`) is DELETED
+               // (Ron, 2026-09-25). It failed the Walk-By, reading as two nouns rather than a sentence,
+               // and the ordinary `where status is active` (wc_is, above) already says it. Deleting it
+               // also removes a DEFECT'S CAUSE: `dotted_name NAME` was the only place a bareword could
+               // sit in the FIELD position, which is why a subject-less predicate (`when is even`) let
+               // `is` be read as a field and silently never matched. With this gone, `when is even`
+               // fails at the grammar instead of reaching the Batch 32/33 guard. See
+               // T1-WHERE-CONDITION-FORK-SPLIT.
                | dotted_name value_list                               -> wc_in_list
                | dotted_name IS_NOT value_list                        -> wc_not_in_list
                | dotted_name IS ABOVE _AVERAGE OF DB_REF            -> wc_above_avg
                | dotted_name MATCHES dotted_name                    -> wc_pattern
                | dotted_name CMP_OP value_expr                        -> wc_cmp
 
-value_list: (NAME | STRING | NUMBER) ("," (NAME | STRING | NUMBER))+
+// A list item is a word, quoted text, a number, a dotted name or a {{ value }} (RULED 2026-10-15,
+// T1-INLIST-VALUE-FORMS): a dotted name and {{ x }} resolve here as in every other value position.
+value_list: _value_list_item ("," _value_list_item)+
+_value_list_item: NAME | STRING | NUMBER | USERVAR_DOTTED | TEMPLATE_STR | dotted_name_with_dot
 
 time_period_expr: LAST duration_expr
                | THIS NAME
@@ -3319,13 +3667,15 @@ and_clause: AND dotted_name IS ABOVE value_expr         -> and_above
           | AND dotted_name IS NEWER THAN duration_expr  -> and_newer
           | AND dotted_name IS_EMPTY                     -> and_empty
           | AND dotted_name IS_NOT EMPTY                 -> and_not_empty
+          | AND dotted_name NOT_EMPTY                    -> and_not_empty
           | AND dotted_name CONTAINS (STRING | dotted_name) -> and_contains
           | AND dotted_name STARTS (STRING | dotted_name)   -> and_starts
           | AND dotted_name IS value_expr                -> and_is
           | AND dotted_name IS_NOT value_expr            -> and_is_not
           | AND dotted_name value_list                   -> and_in_list
           | AND dotted_name IS_NOT value_list            -> and_not_in_list
-          | AND dotted_name SINCE value_expr             -> and_since
+          | AND dotted_name SINCE since_anchor           -> and_since   // a date, `now`, an anchor word
+          | AND dotted_name SINCE value_expr             -> and_since   // a variable cutoff
 
 // ── order ─────────────────────────────────────────────────────
 // Canonical: order.up by field / order.down by field
@@ -3341,7 +3691,12 @@ limit_clause: UP TO NUMBER (FROM source_ref)?
 
 skip_clause: SKIP_KW NUMBER
 
+// `paginate by <value>` (FAC-22, Ron 2026-09-22): a literal page number OR a variable/expression
+// resolved at run time. A literal keeps its check-time range validation; a variable is validated
+// when it runs -- an invalid value (not a whole number, or below one) fails loud, and a missing
+// value takes the `default`. NUMBER is listed first so a literal still parses to the literal branch.
 paginate_clause: PAGINATE BY NUMBER
+               | PAGINATE BY value_expr (DEFAULT value_expr)?   // a MISSING value takes the default (ruled 2026-09-22)
 
 cursor_clause: CURSOR FROM dotted_name
 
@@ -3367,6 +3722,9 @@ since_clause: dotted_name SINCE since_anchor   -> since_clause
 since_anchor: dt_point
 
 dt_point: NOW_CALL "-" duration_expr                              -> dt_now_offset
+        | NOW_WORD "-" duration_expr                              -> dt_now_offset
+        | NOW_CALL                                                -> dt_now_bare
+        | NOW_WORD                                                -> dt_now_bare
         | dt_anchor_word "-" duration_expr                        -> dt_anchor_offset
         | dt_anchor_word                                          -> dt_anchor_bare
         | DATE_LIT                                                -> dt_date_lit
@@ -3396,7 +3754,7 @@ return_field: dotted_name ("." AVERAGE)? (AS NAME)?
 
 // ── export ───────────────────────────────────────────────────
 
-export_clause: EXPORT (AS_CSV | AS_JSON | AS_PDF | "as.xlsx") TO value_expr
+export_clause: EXPORT (AS_CSV | AS_JSON | AS_PDF | AS_XLSX) TO value_expr
 
 // ── inject ───────────────────────────────────────────────────
 
@@ -3412,14 +3770,32 @@ condition: value_expr IS NOT? value_expr      -> cond_is
          | value_expr BELOW value_expr         -> cond_below
          | value_expr IS _MORE _THAN value_expr  -> cond_is_morethan
          | value_expr IS _LESS _THAN value_expr  -> cond_is_lessthan
+         // `is at least` / `is at most` (RULED by Ron 2026-10-11): >= and <=, in a while, a trailing
+         // guard and check/when alike. Without these, `while x is at most 3` read `at` as a variable.
+         // The length form, `is at least 8 characters`, compares the text's length (RULED by Ron
+         // 2026-10-11), as in where_condition.
+         | value_expr IS _AT _LEAST value_expr  -> cond_is_atleast
+         | value_expr IS _AT _MOST value_expr   -> cond_is_atmost
+         | value_expr IS _AT _LEAST value_expr _CHARACTERS -> cond_is_atleast_chars
+         | value_expr IS _AT _MOST value_expr _CHARACTERS  -> cond_is_atmost_chars
          | value_expr IS _EVEN                   -> cond_is_even
          | value_expr IS _ODD                    -> cond_is_odd
          | value_expr IS ABOVE value_expr      -> cond_is_above
          | value_expr IS BELOW value_expr      -> cond_is_below
          | value_expr IS_NOT value_expr        -> cond_is_not
          | value_expr IS_EMPTY                 -> cond_is_empty
+         | IS_EMPTY value_expr                 -> cond_is_empty   // prefix too (Batch 31 item 8): the
+                                                                  // pair was asymmetric -- is.empty was
+                                                                  // POSTFIX only and not.empty PREFIX
+                                                                  // only, so `is.empty x` fell through
+                                                                  // to a SILENT FALSE. Both operators
+                                                                  // now work in both positions.
          | cond_is_empty_spaced
          | NOT_EMPTY value_expr                -> cond_not_empty
+         | value_expr NOT_EMPTY                -> cond_not_empty   // postfix too, the mirror of the above
+         | value_expr NOT_FOUND                -> cond_not_found   // `member not.found`: the lookup came
+                                                                  // back with nothing (T1-SPLIT-OPERATOR-
+                                                                  // FAMILIES). Subject first, like not.empty.
          | value_expr CONTAINS value_expr      -> cond_contains
          | value_expr STARTS_WITH value_expr   -> cond_starts
          | value_expr ENDS_WITH value_expr     -> cond_ends
@@ -3469,6 +3845,7 @@ value_expr: literal
           | DB_REF
           | MIOAI_REF
           | string_op_expr
+          | stripped_expr
           | concat_expr
           | dotted_name
           | math_expr
@@ -3480,6 +3857,7 @@ value_expr: literal
           | miocache_exists_expr
           | miocookie_get_expr
           | cast_expr
+          | in_timezone_expr
           | type_cast_mod value_expr
 
 // String operations as expressions (for use in assignment context)
@@ -3491,6 +3869,10 @@ STR_BEFORE.3:   /before(?![A-Za-z0-9_])/
 STR_LEFT.3:     /left(?![A-Za-z0-9_])/
 STR_RIGHT.3:    /right(?![A-Za-z0-9_])/
 STR_DEFAULT.3:  /default(?![A-Za-z0-9_])/
+
+// `<record> stripped`: the record without its [phi]/[pci]/[pii] fields, for an outside call's payload.
+stripped_expr: value_expr STRIPPED
+STRIPPED.2: /stripped(?![A-Za-z0-9_])/
 
 string_op_expr: value_expr MASK_ALL _EXCEPT (LAST | FIRST) NUMBER   // source-first: card_number mask.all except last 4
               | value_expr TRUNCATE_TO NUMBER (WORDS_KW | CHARACTERS_KW | CHARS_KW)?  // source-first: body truncate.to 40 words
@@ -3533,12 +3915,15 @@ concat_expr: concat_term (CONCAT_OP concat_term)+
 // -- a VARIABLE lookup, which resolved to nothing. `hold s ("x" & unique.id)` printed
 // "x". No error. Both generators silently produced empty string in every concat.
 // The contract is a fresh value on EVERY read; a concat is a read.
+// F4 (RULED by Ron, 2026-10-06): a grouped calculation joins too, `"x" & (n + 1)`. Only the
+// parenthesized form is added, so `"x" & n + 1` still has one reading and `+` stays math.
 concat_term: STRING
            | dotted_name
            | template_str
            | literal
            | cast_expr
            | random_expr
+           | math_expr
 
 color_lit: COLOR_LIT
 percent_lit: PERCENT_LIT
@@ -3548,7 +3933,9 @@ type_cast_mod: AS_JSON | AS_CSV | AS_PDF | AS_HTML
              | AS_INT | AS_NUMBER | AS_STRING | AS_BOOLEAN | AS_DECIMAL
              | AS_DAYS | AS_HOURS | AS_MINUTES | AS_SECONDS | AS_WEEKS
              | AS_UC | AS_LC | AS_UPPERCASE | AS_LOWERCASE | AS_TITLE | AS_SENTENCE | AS_ABSOLUTE
-             | ROUND_UP | ROUND_DOWN | ROUND_TO NUMBER
+             // round.up N / round.down N take places like round.to N (RULED 2026-10-06);
+             // with no number they round to zero places, as before.
+             | ROUND_UP NUMBER? | ROUND_DOWN NUMBER? | ROUND_TO NUMBER
 
 miocookie_exists_expr: MIOCOOKIE_EXISTS (STRING | dotted_name)
 miocache_exists_expr:  MIOCACHE_EXISTS  (STRING | dotted_name)
@@ -3556,6 +3943,17 @@ miocookie_get_expr:    MIOCOOKIE_GET    (STRING | dotted_name) (_DEFAULT value_e
 
 
 cast_expr: value_expr type_cast_mod
+
+// T1-DB-TYPED-STORAGE (RULED by Ron, 2026-10-05): display conversion -- translate a stored
+// (UTC) datetime into another zone for display. The zone is a literal name or a value (e.g. a
+// `timezone`-typed field): `show payment.created in.timezone "Asia/Bahrain"` /
+// `show payment.created in.timezone customer.zone`. Reachable from value_expr directly, the
+// same way cast_expr is, so it works inside `show` and anywhere else a value_expr is valid --
+// show_mod (IN dotted_name / AS NAME / WITH value_expr) was considered and rejected: verified
+// by reading _exec_ShowStmt that ShowStmt.modifier is captured by the transformer and never
+// read by the interpreter at all, so building on it would have been silently inert from day one,
+// same as its three existing siblings already are.
+in_timezone_expr: value_expr IN_TIMEZONE (STRING | dotted_name)
 
 literal: STRING | NUMBER | TRUE | FALSE | NULL_KW | NONE_KW
        | paragraph_string
@@ -3614,16 +4012,18 @@ list_lit: "[" (value_expr ("," value_expr)*)? "]"
 // ─────────────────────────────────────────────────────────────
 
 time_expr: NOW_CALL (("-"|"+") duration_expr)?
+         | NOW_WORD ("-"|"+") duration_expr
          | UUID_CALL
          | TODAY | YESTERDAY
          | LAST_WEEK | LAST_MONTH | LAST_QUARTER | LAST_YEAR
          | THIS_WEEK | THIS_MONTH | THIS_QUARTER | THIS_YEAR
          | SINCE time_anchor
 
-time_anchor: NOW_CALL "-" duration_expr | LAST_MONTH | YESTERDAY | LAST_WEEK
+time_anchor: NOW_CALL "-" duration_expr | NOW_WORD "-" duration_expr | LAST_MONTH | YESTERDAY | LAST_WEEK
 
 datetime_expr: DATE_LIT (_AT TIME_LIT NAME?)?
              | time_expr
+             | NOW_WORD                                           -> datetime_now_bare
 
 duration_expr: NUMBER time_unit
              | NUMBER NAME time_unit   // e.g. 30 business days
@@ -3712,11 +4112,19 @@ miotest_expect_body: dotted_name _IS value_expr
 
 // ── mioapp — Native Mobile Target (Phase 3) ──────────────────────────────
 // Grammar ready. Code generation backend is commercial Phase 3.
+//
+// screen_block, layout_block, mioapp_decl, on_appear_block and content_block (the rules
+// that used to live here) were never referenced by any other grammar rule, so they were
+// structurally unreachable from any parse -- the same class as miochain's four block rules
+// (see CLAUDE.md). Removed 2026-10-05 rather than left in place, because "screen"/"layout"
+// as a bare word already have real, working enforcement: mohio_reachability.py's
+// _ORPHAN_VAR_REFUSALS refuses each at check and run time, naming it "declared but NOT
+// built yet -- it arrives with the mobile surface." "mioapp" is reserved the same way
+// mohio_services.py's SERVICE_ROOTS already does, independent of any grammar rule. Neither
+// refusal depended on the grammar rules deleted here; verified by running both before and
+// after removal. NAV_TO/NAV_BACK/NAV_FORWARD/NAV_ROOT and nav_stmt stay -- that part of the
+// Phase 3 surface IS wired (see below).
 
-MIOAPP.3:         /mioapp(?![A-Za-z0-9_])/
-SCREEN.3:         /screen(?![A-Za-z0-9_])/
-LAYOUT_KW.3:      /layout(?![A-Za-z0-9_])/
-NAVIGATE_TO.3:    "navigate to"
 NAV_TO.3:         "nav to"
 NAV_BACK.3:       "nav.back"
 
@@ -3726,46 +4134,6 @@ nav_stmt: NAV_TO NAME (_WITH NAME)?    // nav to ScreenName [with data]
         | NAV_ROOT                       // go to root
 NAV_FORWARD.3:    "nav.forward"
 NAV_ROOT.3:       "nav.root"
-NAVIGATE_BACK.3:  "navigate.back"
-NAVIGATE_ROOT.3:  "navigate.root"
-REQUIRE_BIO.3:    "require biometric"
-REQUIRE_LOC.3:    "require location"
-REQUIRE_CAM.3:    "require camera"
-REQUIRE_PUSH.3:   "require push"
-
-mioapp_decl: MIOAPP NAME mioapp_body* closer
-mioapp_body: _TARGET  NAME (_AND NAME)?  // target ios / target ios and android
-           | _VERSION STRING
-           | _BUNDLE  STRING
-           | _BACKEND (ENV_REF | STRING)
-
-screen_block: SCREEN NAME screen_body* closer
-screen_body:  _TITLE STRING
-            | "require biometric"
-            | "require location"
-            | "require camera"
-            | "require push"
-            | on_appear_hook
-            | on_load_hook
-            | display_block
-            | content_block
-            | statement
-
-// Mobile lifecycle hooks — inside screen/view blocks
-on_appear_hook: "on.appear" body_stmt* closer
-on_load_hook:   "on.load"   body_stmt* closer
-
-// mobile display uses display_block (same rule works for both web and mobile)
-
-on_appear_block: "on.appear" body_stmt* "on.appear" ":" DONE
-layout_block: LAYOUT_KW layout_item* LAYOUT_KW ":" DONE
-
-layout_item: _HEADER value_expr
-           | _CARD value_expr body_stmt* _CARD ":" DONE
-           | _BUTTON STRING "require biometric"? body_stmt* _BUTTON ":" DONE
-           | _NAVIGATE _TO NAME (_WITH NAME)?
-           | show_stmt
-           | each_block
 
 // ── mioknow — Persistent AI Memory and Knowledge Graph (Phase 3) ─────────
 // Grammar ready. Execution is Phase 3 commercial.
@@ -4180,7 +4548,22 @@ hash_field: value_expr AS NAME          // form.password as hashed_password
 // a check-against PARSED CLEAN and could never run -- a live silent no-op. Measured before the
 // change: on.failure yes, on.success yes, `otherwise` SILENT, `when` REFUSED. It takes all four
 // from the one shared rule now, so `check_against_body` no longer exists.
-check_against_stmt: CHECK value_expr _AGAINST value_expr result_handlers
+// RULED (Ron, 2026-10-04): check_against_stmt gets the closer `check: done`, the same closer
+// every other check block uses -- it was the one result_handlers production missing one, which
+// let a statement written after a bare check-against silently absorb into its last handler's
+// body (see tests/test_check_against_statement_swallowing.py for the full account). The old
+// unclosed form now fails loud, naming the fix -- see check_against_missing_closer below.
+check_against_stmt.5: CHECK value_expr _AGAINST value_expr result_handlers closer
+
+// TRAP: the old, unclosed form. HIGH PRIORITY ON THE CORRECT FORM ABOVE (.5, matching
+// retired_if_block's own convention) so Earley prefers it whenever a closer can satisfy it --
+// without that priority, this trap's mere existence pulled ambiguous parses toward itself even
+// when a closer WAS written, because letting a `show` inside the handler absorb the closer as
+// ITS OWN (show_block) was an easier parse than binding the closer to the outer statement.
+// Verified by running: without the priority, the closed form silently mis-swallowed again, as
+// well as misparsed entirely with no error with this trap once it existed. This rule should
+// match ONLY when check_against_stmt genuinely cannot (no closer anywhere to be found).
+check_against_missing_closer: CHECK value_expr _AGAINST value_expr result_handlers
 
 
 
@@ -4267,7 +4650,6 @@ app_config_body: _NAME         STRING
 // Declared inside page blocks for client-side assets
 
 SCRIPT_KW.2: /script(?![A-Za-z0-9_])/
-STYLE_KW.2:  /style(?![A-Za-z0-9_])/
 
 script_section: SCRIPT_KW script_body* closer
 
@@ -4275,11 +4657,12 @@ script_body: _ADD STRING              // add "/js/app.js"
            | _INLINE STRING           // inline script block
            | NAME value_expr
 
-style_section: STYLE_KW style_body* closer
-
-style_body: _ADD STRING               // add "/css/main.css"
-          | _INLINE STRING
-          | NAME value_expr
+// `style` is FREED (Batch 38 item 0, Ron 2026-09-25). The `STYLE_KW` / `style_section` /
+// `style_body` rules here were an orphan block no rule reached, so a bare `style` silently became a
+// variable and `render style` was never a real block. Removed so `style` is an ordinary variable
+// name with nothing reserving it. The LIVE `_STYLE` body word inside `create_style` (the
+// image/audio/video `style` line) is a DIFFERENT terminal and stays; a body word inside a block and
+// a bare variable elsewhere are separated by context, so freeing the bare word reserves nothing away.
 
 // ── mioschedule named declaration ────────────────────────────
 // Declared in journey.mho — schedule name, timing, what to run
@@ -4442,13 +4825,14 @@ miofile_stmt: MIOFILE_READ   value_expr (_AS NAME)?
             | MIOFILE_WRITE  value_expr value_expr
             | MIOFILE_DELETE value_expr
             | MIOFILE_EXISTS value_expr
-            | MIOFILE_MOVE   value_expr _TO value_expr
-            | MIOFILE_COPY   value_expr _TO value_expr
+            // `allow overwrite` (the words the `copy` block already uses): a move or copy onto an
+            // existing file replaces it only when the program says so (ruled 2026-10-06).
+            | MIOFILE_MOVE   value_expr _TO value_expr (ALLOW OVERWRITE)?
+            | MIOFILE_COPY   value_expr _TO value_expr (ALLOW OVERWRITE)?
             | MIOFILE_LIST   value_expr (_AS NAME)?
 
 // ── mioauth — authentication ───────────────────────────────────
 MIOAUTH_LOGIN.3:     "mioauth.login"
-MIOAUTH_BIOMETRIC.3: "mioauth.biometric"
 MIOAUTH_LOGOUT.3:   "mioauth.logout"
 MIOAUTH_VERIFY.3:   "mioauth.verify"
 MIOAUTH_REFRESH.3:  "mioauth.refresh"
@@ -4488,7 +4872,7 @@ miostream_stmt: MIOSTREAM_OPEN  NAME?
 // Runtime calls happen in code
 MIOSCHEDULE_RUN.3:    "run mioschedule"
 
-mioschedule_run: MIOSCHEDULE_RUN "." NAME (_IMMEDIATELY | _NOW)?
+mioschedule_run: MIOSCHEDULE_RUN "." NAME (_IMMEDIATELY | NOW_WORD)?
 
 // ── mioimage — image processing ───────────────────────────────
 MIOIMAGE_RESIZE.3:    "mioimage.resize"
@@ -4607,9 +4991,6 @@ view_param: NAME AS type_name (REQUIRED | OPTIONAL | DEFAULT value_expr)?
 
 display_block: DISPLAY_KW body_stmt* _DISPLAY ":" DONE
 
-// content_block — mobile content zone (avoids DISPLAY_KW ambiguity)
-content_block: _SECTION body_stmt* _SECTION ":" DONE
-
 template_decl: TEMPLATE_KW NAME view_param* closer
 
 // ─────────────────────────────────────────────────────────────
@@ -4634,7 +5015,7 @@ name_list: NAME ("," NAME)*
 // so they get their own rule rather than widening `name_list` everywhere it is used.
 ext_list: (NAME | TYPE_NAME) ("," (NAME | TYPE_NAME))*
 
-type_name: TYPE_NAME | NAME | SH_REF | TABLE_KW | LIST_KW TYPE_NAME | LIST_KW NAME | LIST_KW SH_REF    // list text / list sh.Shape / order as sh.Order
+type_name: TYPE_NAME | NAME | SH_REF | TABLE_KW | TIMEZONE | LIST_KW TYPE_NAME | LIST_KW NAME | LIST_KW SH_REF | LIST_KW TIMEZONE    // list text / list sh.Shape / order as sh.Order / zone as timezone
 
 // `table` becomes a keyword so `shape_decl_unnamed` can require it. It was previously reachable
 // only as a bare NAME, which is why it must be re-admitted to `type_name` above -- without that
@@ -4691,7 +5072,6 @@ _AUTH.2: /auth(?![A-Za-z0-9_])/
 _AUTHORIZE.2: /authorize(?![A-Za-z0-9_])/
 _AVERAGE.2: /average(?![A-Za-z0-9_])/
 _BACK.2: /back(?![A-Za-z0-9_])/
-_BACKEND.2: /backend(?![A-Za-z0-9_])/
 _BASE64.2: /base64(?![A-Za-z0-9_])/
 _BASIC.2: /basic(?![A-Za-z0-9_])/
 _BCC.2: /bcc(?![A-Za-z0-9_])/
@@ -4704,16 +5084,16 @@ _BOOL.2: /bool(?![A-Za-z0-9_])/
 _BREACH.2: /breach(?![A-Za-z0-9_])/
 _BUCKET.2: /bucket(?![A-Za-z0-9_])/
 _BUILD.2: /build(?![A-Za-z0-9_])/
-_BUNDLE.2: /bundle(?![A-Za-z0-9_])/
-_BUTTON.2: /button(?![A-Za-z0-9_])/
 _CACHE.2: /cache(?![A-Za-z0-9_])/
 _CALLS.2: /calls(?![A-Za-z0-9_])/
 _CANONICAL.2: /canonical(?![A-Za-z0-9_])/
-_CARD.2: /card(?![A-Za-z0-9_])/
 _CC.2: /cc(?![A-Za-z0-9_])/
 _CEILING.2: /ceiling(?![A-Za-z0-9_])/
 _CHAIN.2: /chain(?![A-Za-z0-9_])/
-_CHANGE.2: /change(?![A-Za-z0-9_])/
+// `_CHANGE` freed 2026-09-26 (E, dead-duplicate sweep): it was an orphaned FILTERED duplicate of
+// the kept `CHANGE` terminal (line ~257) that the `change to sh.X` handler uses. Referenced only in
+// the retired task_param comment near line 1211; `change` as a word works through its handler. Its
+// two siblings `_CONNECTION` and `_REQUEST` were freed in the same sweep for the same reason.
 _CHARACTERS.2: /characters(?![A-Za-z0-9_])/
 _CHECKED.2: /checked(?![A-Za-z0-9_])/
 _CHUNK.2: /chunk(?![A-Za-z0-9_])/
@@ -4726,8 +5106,8 @@ _COMPANY.2: /company(?![A-Za-z0-9_])/
 _COMPRESS.2: /compress(?![A-Za-z0-9_])/
 _COMPRESSION.2: /compression(?![A-Za-z0-9_])/
 _CONFIDENCE.2: /confidence(?![A-Za-z0-9_])/
+_CONFIRM.2: /confirm(?![A-Za-z0-9_])/
 _CONNECT.2: /connect(?![A-Za-z0-9_])/
-_CONNECTION.2: /connection(?![A-Za-z0-9_])/
 _CONTACT.2: /contact(?![A-Za-z0-9_])/
 _CONTAINING.2: /containing(?![A-Za-z0-9_])/
 _CONTAINS.2: /contains(?![A-Za-z0-9_])/
@@ -4887,7 +5267,6 @@ _MOVING_AVERAGE.2: /moving_average(?![A-Za-z0-9_])/
 _MS.2: /ms(?![A-Za-z0-9_])/
 _NAME.2: /name(?![A-Za-z0-9_])/
 _NAMED.2: /named(?![A-Za-z0-9_])/
-_NAVIGATE.2: /navigate(?![A-Za-z0-9_.])/
 _NEGATIVE.2: /negative(?![A-Za-z0-9_])/
 _NEVER.2: /never(?![A-Za-z0-9_])/
 _NO.2: /no(?![A-Za-z0-9_.])/
@@ -4897,7 +5276,7 @@ _NOTE.2: /note(?![A-Za-z0-9_])/
 _NOTES.2: /notes(?![A-Za-z0-9_])/
 _NOTIFICATION.2: /notification(?![A-Za-z0-9_])/
 _NOTIFY.2: /notify(?![A-Za-z0-9_])/
-_NOW.2: /now(?![A-Za-z0-9_])/
+NOW_WORD.2: /now(?![A-Za-z0-9_])/
 _OF.2: /of(?![A-Za-z0-9_])/
 _OFF.2: /off(?![A-Za-z0-9_])/
 _OFFSET.2: /offset(?![A-Za-z0-9_])/
@@ -4918,12 +5297,14 @@ _PART.2: /part(?![A-Za-z0-9_])/
 _PASS.2: /pass(?![A-Za-z0-9_])/
 _PASSWORD.2: /password(?![A-Za-z0-9_])/
 _PATH.2: /path(?![A-Za-z0-9_])/
+_PAUSE.2: /pause(?![A-Za-z0-9_])/
 _PCI.2: /pci(?![A-Za-z0-9_])/
 _PDF.2: /pdf(?![A-Za-z0-9_])/
 _PER.2: /per(?![A-Za-z0-9_])/
 _PERCENTAGE_OF.2: /percentage_of(?![A-Za-z0-9_])/
 _PERCENTILE.2: /percentile(?![A-Za-z0-9_])/
 _PERSONA.2: /persona(?![A-Za-z0-9_])/
+_PLAY.2: /play(?![A-Za-z0-9_])/
 _PORT.2: /port(?![A-Za-z0-9_])/
 _PREFIX.2: /prefix(?![A-Za-z0-9_])/
 _PRESERVE.2: /preserve(?![A-Za-z0-9_])/
@@ -4959,7 +5340,6 @@ _REGULATORY.2: /regulatory(?![A-Za-z0-9_])/
 _RELOAD.2: /reload(?![A-Za-z0-9_])/
 _REMEMBER.2: /remember(?![A-Za-z0-9_])/
 _REPEATS.2: /repeats(?![A-Za-z0-9_])/
-_REQUEST.2: /request(?![A-Za-z0-9_])/
 _REQUESTS.2: /requests(?![A-Za-z0-9_])/   // `max requests N per second` -- the rate backstop's operand
 _REQUIRED.2: /required(?![A-Za-z0-9_])/
 _REQUIREMENTS.2: /requirements(?![A-Za-z0-9_])/
@@ -5023,7 +5403,6 @@ _SEARCHABLE.2: /searchable(?![A-Za-z0-9_])/
 _SECOND.2: /second(?![A-Za-z0-9_])/
 _SECONDS.2: /seconds(?![A-Za-z0-9_])/
 _SECRET.2: /secret(?![A-Za-z0-9_])/
-_SECTION.2: /section(?![A-Za-z0-9_])/
 _SECTOR.2: /sector(?![A-Za-z0-9_])/
 _SECURE.2: /secure(?![A-Za-z0-9_])/
 _SECURITY.2: /security(?![A-Za-z0-9_])/
@@ -5061,7 +5440,6 @@ _SYNC.2: /sync(?![A-Za-z0-9_])/
 _TAGGED.2: /tagged(?![A-Za-z0-9_])/
 _TAGS.2: /tags(?![A-Za-z0-9_])/
 _TAKE.2: /take(?![A-Za-z0-9_])/
-_TARGET.2: /target(?![A-Za-z0-9_])/
 _TEMP.2: /temp(?![A-Za-z0-9_])/
 _TEMPERATURE.2: /temperature(?![A-Za-z0-9_])/
 _TEMPLATE.2: /template(?![A-Za-z0-9_])/
@@ -5079,7 +5457,6 @@ _TIME.2: /time(?![A-Za-z0-9_])/
 _TIMEOUT.2: /timeout(?![A-Za-z0-9_])/
 _TIMES.2: /times(?![A-Za-z0-9_])/
 _TIMEZONE.2: /timezone(?![A-Za-z0-9_])/
-_TITLE.2: /title(?![A-Za-z0-9_])/
 _TO.2: /to(?![A-Za-z0-9_])/
 _TOKEN.2: /token(?![A-Za-z0-9_])/
 _TOKENS.2: /tokens(?![A-Za-z0-9_])/

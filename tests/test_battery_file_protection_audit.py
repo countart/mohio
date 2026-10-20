@@ -49,6 +49,8 @@ from mohio_transformer_ast import transform  # noqa: E402
 from mohio_interpreter import MohioInterpreter  # noqa: E402
 from mohio_server import MohioServer, create_app  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _guard_token import guard_token
 
 _p = _f = 0
 _failures = []
@@ -81,14 +83,14 @@ def program(tag, read_key=None, db=False):
             'shape Doc\n    f as file' + tag + '\n        accept txt\n        max size 5 mb\n'
             '    name as text\nshape: done\n'
             'shape Login\n    who as text\nshape: done\n'
-            'listen for\n'
-            '    new sh.Doc at /d\n        give back [200] "stored"\n    new: done\n'
-            '    new sh.Login at /login\n        grant role "clinician"\n'
-            '        give back [200] "in"\n    new: done\n'
+            'journey WrapApp\n'
+            '    listen for sh.Doc at /d\n        give back [200] "stored"\n    listen: done\n'
+            '    listen for sh.Login at /login\n        grant role "clinician"\n'
+            '        give back [200] "in"\n    listen: done\n'
             + ('    request for sh.Doc at /read\n        require role "clinician"\n'
                '        miofile.read "' + read_key + '" as c\n'
                '        give back [200] c\n    request: done\n' if read_key else '') +
-            'listen: done\n')
+            'journey: done\n')
 
 
 def serve(src, db=None):
@@ -117,7 +119,7 @@ def store_one(tag, blob=b"SENSITIVE MEDICAL CONTENT", db=None):
     before = set(os.listdir(STORE))
     it, client, buf = serve(program(tag, db=bool(db)), db=db)
     with contextlib.redirect_stdout(buf):
-        client.post("/d", data={"_csrf": it._issue_csrf(), "name": "Ada"},
+        client.post("/d", data={"_csrf": guard_token(client, it, "/d"), "name": "Ada"},
                     files={"f": ("doc.txt", blob, "text/plain")})
     keys = [n for n in os.listdir(STORE) if n not in before]
     return it, client, buf.getvalue(), (keys[0] if keys else None), file_rows(it)
@@ -165,7 +167,7 @@ print("\n-- an unauthorized read writes NO access record, because no read happen
 it4, client4, buf4 = serve(program(" [phi]", read_key=key))
 with contextlib.redirect_stdout(buf4):
     resp4 = client4.get("/read")
-check("it is refused", resp4.status_code == 403, resp4.status_code)
+check("it is refused", resp4.status_code == 401, resp4.status_code)
 check("...and nothing claims a file was read", file_rows(it4) == [], file_rows(it4))
 
 print("\n-- reading an untagged file records it as plaintext --")
@@ -185,7 +187,7 @@ before = set(os.listdir(STORE))
 it6, client6, buf6 = serve(program(" [phi]", db=True), db=_db)
 with contextlib.redirect_stdout(buf6):
     for blob in (b"SECRET ONE", b"SECRET TWO"):
-        client6.post("/d", data={"_csrf": it6._issue_csrf(), "name": "Ada"},
+        client6.post("/d", data={"_csrf": guard_token(client6, it6, "/d"), "name": "Ada"},
                      files={"f": ("doc.txt", blob, "text/plain")})
 conn = sqlite3.connect(_db)
 try:
@@ -217,7 +219,7 @@ def cloud_attempt(tag):
         it, client, buf = serve(src)
         with contextlib.redirect_stdout(buf):
             try:
-                client.post("/d", data={"_csrf": it._issue_csrf(), "name": "Ada"},
+                client.post("/d", data={"_csrf": guard_token(client, it, "/d"), "name": "Ada"},
                             files={"f": ("n.txt", b"plain notes", "text/plain")})
             except Exception:
                 pass
@@ -261,7 +263,7 @@ else:
         try:
             it, client, buf = serve(src)
             with contextlib.redirect_stdout(buf):
-                client.post("/d", data={"_csrf": it._issue_csrf(), "name": "Ada"},
+                client.post("/d", data={"_csrf": guard_token(client, it, "/d"), "name": "Ada"},
                             files={"f": ("n.txt", b"plain notes", "text/plain")})
             return buf.getvalue(), file_rows(it)
         finally:
@@ -362,25 +364,33 @@ check("the write is still recorded as local",
 check("...and nothing warns about a bucket it never reached",
       "WARNING: unencrypted content" not in out, out[-200:])
 
-print("\n-- WHAT THIS RECORD MAKES VISIBLE: a classified value written in the clear --")
-# `miofile.write` does NOT seal a classified value the way an upload is sealed, so a [phi] field
-# written to a file lands readable on disk. That is a real exposure, and closing it is not this
-# commit's job; the point here is that the trail now SAYS so rather than being silent about it.
+print("\n-- a classified value never reaches a file in the clear --")
+# This case once recorded the exposure: `miofile.write` of a [phi] field landed readable on disk,
+# and the trail said so. The egress gate (RULED, sweep part 2) closed it: a tagged value written
+# to a file refuses unless masked. So the classified write now refuses and leaves nothing on disk,
+# and the masked write goes through and is recorded truthfully as plaintext, masked as written.
 _dbp = os.path.join(TMP, "phi.db")
 os.environ['DATABASE_URL'] = _dbp
-rows, _o = verbs('shape Patient\n    ssn as text [phi]\n    name as text\nshape: done\n'
-                 'connect db as sqlite from env.DATABASE_URL\n'
-                 'save to db.patients\n    ssn "111-11-1111"\n    name "Ada"\nsave: done\n'
-                 'retrieve p from db.patients\n    match name to "Ada"\n'
-                 '    on.failure\n        show "none"\nretrieve: done\n'
-                 'miofile.write "chart.txt" p.ssn\nshow "d"\n')
-check("the write of a classified value is recorded", len(rows) == 1, rows)
-check("...as PLAINTEXT, which is the truth and the finding",
-      rows and rows[0].get('protection') == 'plaintext', rows)
-with open(os.path.join(AREA, "chart.txt"), 'rb') as fh:
+_PHI_SRC = ('shape Patient\n    ssn as text [phi]\n    name as text\nshape: done\n'
+            'connect db as sqlite from env.DATABASE_URL\n'
+            'save to db.patients\n    ssn "111-11-1111"\n    name "Ada"\nsave: done\n'
+            'retrieve p from db.patients\n    match name to "Ada"\n'
+            '    when p is empty\n        show "none"\nretrieve: done\n')
+try:
+    rows, _o = verbs(_PHI_SRC + 'miofile.write "chart.txt" p.ssn\nshow "d"\n')
+    _refused = ""
+except Exception as _e:  # noqa: BLE001
+    _refused = str(_e)
+check("writing a classified value to a file refuses", "[phi]" in _refused
+      and "mask a protected value first" in _refused, _refused[:300])
+check("...and nothing reached the disk", not os.path.exists(os.path.join(AREA, "chart.txt")))
+rows, _o = verbs(_PHI_SRC + 'miofile.write "chart-masked.txt" p.ssn mask.all except last 4\n'
+                 'show "d"\n')
+check("the masked write is recorded, as plaintext since that is what was written",
+      len(rows) == 1 and rows[0].get('protection') == 'plaintext', rows)
+with open(os.path.join(AREA, "chart-masked.txt"), 'rb') as fh:
     _on_disk = fh.read()
-check("...and the file on disk confirms the record is not flattering it",
-      _on_disk == b"111-11-1111", _on_disk[:40])
+check("...and the file on disk holds only the mask", _on_disk == b"*******1111", _on_disk[:40])
 
 
 # ── always on ────────────────────────────────────────────────────────────────────────────────

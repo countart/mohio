@@ -192,8 +192,9 @@ if SUITE in ("all", "parse"):
     # ── Declarations ──────────────────────────────────────────
     run("sector_financial",     "sector: financial")
     run("sector_healthcare",    "sector: healthcare")
-    run("compliance_hipaa",     "compliance: HIPAA")
-    run("compliance_pci",       "compliance: PCI_DSS")
+    # A graded framework needs the store its trail is written to (refused at check without one).
+    run("compliance_hipaa",     "connect db from env.DATABASE_URL\ncompliance: HIPAA")
+    run("compliance_pci",       "connect db from env.DATABASE_URL\ncompliance: PCI_DSS")
     run("connect_db",           "connect db as postgres from env.DATABASE_URL")
     run("hold_simple",          "hold THRESHOLD 0.85")
     run("hold_eq",              "hold THRESHOLD = 0.85")
@@ -255,6 +256,7 @@ task greet
 task: done
 """)
     run("task_keyword_param", """
+connect db as sqlite from env.DATABASE_URL
 shape Transaction
     id as uuid required
 shape: done
@@ -303,121 +305,145 @@ call: done
 
     # ── MioQL — retrieve ───────────────────────────────────────
     run("retrieve_basic", """
+connect db as sqlite from env.DATABASE_URL
 retrieve member from db.members
     match id to request.id
 retrieve: done
 """)
     run("retrieve_as_alias", """
+connect db as sqlite from env.DATABASE_URL
 retrieve member as username from db.members
     match id to request.id
 retrieve: done
 """)
     run("retrieve_one", """
+connect db as sqlite from env.DATABASE_URL
 retrieve.one member from db.members
     match email to request.email
 retrieve.one: done
 """)
     run("retrieve_on_failure", """
+connect db as sqlite from env.DATABASE_URL
 retrieve member from db.members
     match id to request.id
     on.failure
-        give back [404] "Not found"
+        give back [503] "lookup unavailable"
 retrieve: done
 """)
 
     # ── MioQL — find ───────────────────────────────────────────
     run("find_basic", """
+connect db as sqlite from env.DATABASE_URL
 find members in db.members
     where status is active
 find: done
 """)
     run("find_above", """
+connect db as sqlite from env.DATABASE_URL
 find flagged in db.transactions
     where amount is above 10000
 find: done
 """)
     run("find_below", """
+connect db as sqlite from env.DATABASE_URL
 find small in db.transactions
     where amount is below 100
 find: done
 """)
     run("find_between", """
+connect db as sqlite from env.DATABASE_URL
 find mid in db.members
     where score is between 700 and 850
 find: done
 """)
     run("find_contains", """
+connect db as sqlite from env.DATABASE_URL
 find smiths in db.members
     where last_name contains "Smith"
 find: done
 """)
     run("find_starts", """
+connect db as sqlite from env.DATABASE_URL
 find info in db.members
     where email starts "info@"
 find: done
 """)
     run("find_is_in_days", """
+connect db as sqlite from env.DATABASE_URL
 find recent in db.transactions
     where created_at is.in last 30 days
 find: done
 """)
     run("find_is_in_hours", """
+connect db as sqlite from env.DATABASE_URL
 find recent in db.transactions
     where created_at is.in last 24 hours
 find: done
 """)
     run("find_and_is_in", """
+connect db as sqlite from env.DATABASE_URL
 find recent in db.transactions
     where member_id is request.member_id
     and created_at is.in last 24 hours
 find: done
 """)
     run("find_older_than", """
+connect db as sqlite from env.DATABASE_URL
 find old in db.sessions
     where created_at is older than 90 days
 find: done
 """)
     run("find_is_empty", """
+connect db as sqlite from env.DATABASE_URL
 find pending in db.orders
     where deleted_at is empty
 find: done
 """)
     run("find_in_list", """
+connect db as sqlite from env.DATABASE_URL
 find active in db.members
     where status active, pending
 find: done
 """)
     run("find_not_in_list", """
+connect db as sqlite from env.DATABASE_URL
 find allowed in db.members
     where status is.not banned, deleted
 find: done
 """)
     run("find_order_up", """
+connect db as sqlite from env.DATABASE_URL
 find members in db.members
     order.up by name
 find: done
 """)
     run("find_order_down", """
+connect db as sqlite from env.DATABASE_URL
 find tx in db.transactions
     order.down by created_at
 find: done
 """)
     run("find_up_to", """
+connect db as sqlite from env.DATABASE_URL
 find members in db.members
     up to 25
 find: done
 """)
     run("find_skip", """
+connect db as sqlite from env.DATABASE_URL
 find members in db.members
     skip 40
 find: done
 """)
     run("find_paginate", """
+connect db as sqlite from env.DATABASE_URL
 find members in db.members
     paginate by 25
-    cursor from request.cursor
 find: done
 """)
+    # cursor pagination and paginate-with-or/not now refuse AT CHECK (T1-EXECUTOR-BRANCH-DEFERRALS),
+    # so the paginate case above tests the built bare-paginate form; the cursor form moved to a
+    # reject test below.
     # 2026-09-01: `find ... by <field>` REFUSES when nothing says what each group comes back
     # as. CORRECTED same day: the first version of this comment (and the message it asserted)
     # said summarize "does not parse in this build" and that grouping had no working companion.
@@ -432,6 +458,7 @@ find: done
     # ...and the companion form the message points at must PARSE, or the message sends the
     # developer somewhere that does not exist -- which is exactly the bug being corrected.
     run("find_by_group_with_summarize", """
+connect db as sqlite from env.DATABASE_URL
 find totals by status in db.orders
     summarize
         total amount.sum
@@ -445,6 +472,7 @@ find members in db.members
 find: done
 """, expect="error", error_contains="not yet built on `find`")
     run("find_match_to", """
+connect db as sqlite from env.DATABASE_URL
 find active in db.members
     match status to "active"
 find: done
@@ -452,6 +480,7 @@ find: done
 
     # ── MioQL — save / update / remove ─────────────────────────
     run("save_basic", """
+connect db as sqlite from env.DATABASE_URL
 save to db.members
     name    request.name
     email   request.email
@@ -464,17 +493,19 @@ save or update db.members
 save: done
 """)
     run("update_basic", """
+connect db as sqlite from env.DATABASE_URL
 update db.members
     match id to member.id
     status "active"
 update: done
 """)
     run("remove_basic", """
+connect db as sqlite from env.DATABASE_URL
 remove from db.sessions
     match user_id to user.id
 remove: done
 """)
-    run("remove_all", "remove.all from db.temp_imports\nremove.all: done")
+    run("remove_all", "connect db as sqlite from env.DATABASE_URL\nremove.all from db.temp_imports\nremove.all: done")
 
     # ── Flow control ──────────────────────────────────────────
     run("check_when", """
@@ -601,42 +632,81 @@ shape: done
 """, expect="error", error_contains="the shape above it has no name")
 
     # ── Listen for ────────────────────────────────────────────
+    # Handlers stand alone (Batch 16): no `listen for` wrapper -- each is a top-level statement.
+    # RULED by Ron, 2026-10-07: `new` is not a handler. Arriving data is `listen for sh.X`.
     run("listen_new", """
 shape Transaction
     amount as int
 shape: done
-listen for
-    new sh.Transaction
-        require role "screener"
-        give back [200] "ok"
-    new: done
+listen for sh.Transaction
+    require role "screener"
+    give back [200] "ok"
 listen: done
 """)
+    run("new_is_not_a_handler", """
+shape Transaction
+    amount as int
+shape: done
+new sh.Transaction
+    require role "screener"
+    give back [200] "ok"
+new: done
+""", expect="error", error_contains="is not a handler")
+    # RULED by Ron: `end every session for person <who>` ends every session that person holds.
+    run("end_every_session_for_person", """
+shape Revoke
+    who as text
+shape: done
+listen for sh.Revoke at /revoke
+    require role "admin"
+    end every session for person Revoke.who
+    give back [200] "revoked"
+listen: done
+""")
+    # RULED by Ron: `stripped` trails the record it describes, at the call (weigh, or a payload).
+    run("weigh_record_stripped", """
+connect db from env.DATABASE_URL
+ai.decide flag returns boolean
+    confidence above 0.5
+    weigh patient stripped, note
+    ai.audit to decision_audit_log
+    not confident
+        give back pending "human"
+    on.failure
+        show "down"
+ai.decide: done
+""")
+    run("payload_record_stripped", """
+miohttp.post "https://example.com/x"
+    body patient stripped
+    as r
+miohttp.post: done
+""")
+    run("end_every_session_needs_person", """
+end every session for client "x"
+""", expect="error", error_contains="write `for person <who>`")
     run("listen_request_inbound", """
 shape InvoiceDownload
     invoice_id as text
 shape: done
-listen for
-    request for sh.InvoiceDownload
-        require role "member"
-    request: done
-listen: done
+request for sh.InvoiceDownload
+    require role "member"
+request: done
 """)
     run("listen_from_connector", """
-listen for
-    from Stripe
-        when payment.succeeded
-            update db.orders
-                status "paid"
-                match id to event.order_id
-            update: done
-        otherwise
-            miolog.info "Unhandled event"
-listen: done
-""")
+from Stripe
+    when payment.succeeded
+        update db.orders
+            status "paid"
+            match id to event.order_id
+        update: done
+    otherwise
+        miolog.info "Unhandled event"
+""", expect="error", error_contains="not built in this release")
 
     # ── AI primitives ─────────────────────────────────────────
     run("ai_decide_full", """
+connect db from env.DATABASE_URL
 ai.decide isFraudulent returns boolean
     confidence above 0.85
     weigh transaction.amount, member.history
@@ -658,7 +728,7 @@ ai.connect fraud_chain
     order: done
 ai.connect: done
 """)
-    run("ai_audit_stmt",    "ai.audit to fraud_audit_log")
+    run("ai_audit_stmt",    "connect db from env.DATABASE_URL\nai.audit to fraud_audit_log")
 
     # ── New verbs ─────────────────────────────────────────────
     run("load_pack",        "load pack miogscreen",
@@ -667,13 +737,13 @@ ai.connect: done
 apply miogscreen.remove_background as clean_image
     target_color #00FF00
 apply: done
-""")
+""", expect="error", error_contains="not executable in this build")
     run("apply_collection", """
 apply miogscreen to every portrait in portrait_file
     method mask
     tolerance 5%
 apply: done
-""")
+""", expect="error", error_contains="not executable in this build")
     run("modify_every", """
 modify every portrait in portrait_file
     apply miogscreen.remove_background
@@ -689,16 +759,18 @@ get config from cache.settings
 get: done
 """)
     run("pull_bounded", """
+connect db as sqlite from env.DATABASE_URL
 pull up to 100 from db.transactions
-    where status is pending
 pull: done
 """)
+    # filtering a pull now refuses AT CHECK (T1-EXECUTOR-BRANCH-DEFERRALS): the runtime fetched
+    # unfiltered, so a `where`/`match` on a pull is deferred. The bounded form above is built.
     run("request_outbound", """
 request ocr_result from GoogleVision.ocr
     with vision_request
     on.failure give back [503] "unavailable"
 request: done
-""")
+""", expect="error", error_contains="not executable in this build")
 
     # ── mioconnect ────────────────────────────────────────────
     run("mioconnect_full", """
@@ -743,6 +815,7 @@ validate: done
 
     # ── Saga / journey ────────────────────────────────────────
     run("saga_basic", """
+connect db as sqlite from env.DATABASE_URL
 saga fulfill_order
     step reserve_inventory
         save to db.holds
@@ -782,23 +855,48 @@ saga: done
     run("append_stmt",      'append ".pdf" to filename')
 
     # ── Rerun ─────────────────────────────────────────────────
-    run("rerun_simple",     "rerun sendAlert with event")
-    run("rerun_n",          "rerun.3 sendAlert with event")
-    run("rerun_after",      "rerun.after 5 seconds sendAlert with event")
+    run("rerun_simple",     "rerun sendAlert with event", expect="error", error_contains="not executable in this build")
+    run("rerun_n",          "rerun.3 sendAlert with event", expect="error", error_contains="not executable in this build")
+    run("rerun_after",      "rerun.after 5 seconds sendAlert with event", expect="error", error_contains="not executable in this build")
 
     # ── Sign / verify ─────────────────────────────────────────
     run("sign_url", """
+sign url for cloud_storage as download_url
+    expires in 30 minutes
+sign: done
+""")
+    # `named` as a capture word is retired for `as` (ruled 2026-10-06); it still parses so mio
+    # check can teach the `as` form.
+    run("sign_url_named_retired", """
 sign url for cloud_storage
     expires in 30 minutes
     named download_url
 sign: done
+""", expect="error", error_contains="is retired as a capture word")
+    run("token_create", """
+connect db as sqlite from env.DATABASE_URL
+mioauth.token.create as approve_token
+    for "m-1"
+    scope "approve:payment-1"
+    expires in 1 hour
+    one time
+mioauth.token.create: done
+verify token from approve_token as grant
+    scope "approve:payment-*"
+    on.failure
+        show "refused"
+verify: done
+mioauth.token.revoke
+    for "m-1"
+    scope "approve:*"
+mioauth.token.revoke: done
 """)
     run("verify_token", """
 verify token from request.header "Authorization"
     scope "read:members"
     on.failure give back [401] "Unauthorized"
 verify: done
-""", expect="error", error_contains="verify token is declared in the grammar but not built")
+""", expect="error", error_contains="T1-VERIFY-BEARER-TOKEN")
 
     # ── miomap — field direction arrows ──────────────────────
     run("miomap_arrow_canonical", """
@@ -875,6 +973,7 @@ always
 try: done
 """)
     run("transaction_block", """
+connect db as sqlite from env.DATABASE_URL
 transaction
     save to db.orders
         amount cart.total
@@ -1051,8 +1150,9 @@ greet: done
     # This test now asserts the settled behaviour. The empty-block guard is still live and is
     # pinned by nc_block_truly_empty_fails_loud below.
     run("check_confidence_above_before_fallback_parses", """
+connect db from env.DATABASE_URL
 ai.decide isFraudulent returns boolean
-    check confidence above 0.85
+    confidence above 0.85
     weigh transaction.amount
     ai.audit to fraud_audit_log
     not confident
@@ -1067,7 +1167,7 @@ ai.decide: done
     # swallow the following clause, this is the case that would go quiet.
     run("nc_block_truly_empty_fails_loud", """
 ai.decide isFraudulent returns boolean
-    check confidence above 0.85
+    confidence above 0.85
     weigh transaction.amount
     ai.audit to fraud_audit_log
     not confident
@@ -1098,8 +1198,9 @@ ai.decide: done
     # had the gate trailing the handlers; that ordering is now refused BY NAME (see
     # confidence_gate_after_handlers_refused below), not silently misread.
     run("check_confidence_above_is_canonical", """
+connect db from env.DATABASE_URL
 ai.decide isFraudulent returns boolean
-    check confidence above 0.85
+    confidence above 0.85
     weigh transaction.amount
     ai.audit to fraud_audit_log
     not confident
@@ -1110,7 +1211,7 @@ ai.decide: done
 """, expect="pass")
 
     # ...and the ordering it used to use now fails LOUD, naming the real cause. Saying "`when`
-    # is not available" to someone who wrote `check confidence above` would be true about the
+    # is not available" to someone who wrote `confidence above` would be true about the
     # wrong thing.
     run("confidence_gate_after_handlers_refused", """
 ai.decide isFraudulent returns boolean
@@ -1120,7 +1221,7 @@ ai.decide isFraudulent returns boolean
         give back [202] "Referred"
     on.failure
         give back [503] "AI unavailable"
-    check confidence above 0.85
+    confidence above 0.85
 ai.decide: done
 """, expect="error", error_contains="must come BEFORE the handlers")
 
@@ -1153,6 +1254,7 @@ ai.decide: done
 
     run("pass_ai_decide_full", """
 sector: financial
+connect db from env.DATABASE_URL
 ai.decide isFraudulent returns boolean
     confidence above 0.85
     weigh transaction.amount, member.history

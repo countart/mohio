@@ -44,6 +44,7 @@ alone cannot tell a meaningless re-serialization from a real schema change. Both
 from __future__ import annotations
 
 import hashlib
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 import json
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple

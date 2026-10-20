@@ -1,6 +1,14 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
 # Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
-"""A classified value is sealed wherever it is written, not only in the column that declares it.
+"""A classified value is sealed wherever it may be written, and refused where it may not.
+
+RULED by Ron 2026-10-08 (HC-039): a [phi], [pci] or [pii] value written into a field that carries
+no tag REFUSES, at check where visible and at run otherwise. Sealing it there was not enough: a
+program that knew the destination only as ordinary text read it back as plain text, unmasked,
+with no protected access recorded. This battery asserts that refusal (the first section and the
+served path), and follows the value into a TAGGED destination for everything else it always
+proved: sealed, indexed by the same HMAC, readable, one layer, matchable, countable, erasable.
+The history below is the earlier finding, kept because it explains the seam.
 
 THE LEAK, measured by reading the database file directly. A `[phi]` field copied into a variable
 and saved to a column nobody tagged landed in PLAINTEXT, while the same value in its own column
@@ -45,10 +53,14 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import os as _os_fd
+sys.path.insert(0, _os_fd.path.join(_os_fd.path.dirname(_os_fd.path.dirname(_os_fd.path.abspath(__file__))), "tests"))
+from _failure_detail import seen as _seen  # noqa: E402  (a served 5xx answers a reference only)
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+from _aad_assert import bound_reason  # noqa: E402
 os.chdir(ROOT)
 
 _p = _f = 0
@@ -72,6 +84,8 @@ _n = [0]
 HEAD = ('shape Patient\n    ssn as text [phi]\n    name as text\nshape: done\n'
         'shape Note\n    body as text\n    who as text\nshape: done\n'
         'connect db as sqlite from env.DATABASE_URL\n')
+# The same program with the destination field tagged: where a [phi] value may be written.
+HEAD_TAGGED = HEAD.replace('    body as text\n', '    body as text [phi]\n')
 
 
 def run(src, db, key="testkey"):
@@ -113,19 +127,29 @@ TRAVEL = (HEAD +
           'x p.ssn\n'
           'save to db.notes\n    body x\n    who "Ada"\nsave: done\n'
           'show "written"\n')
+TRAVEL_TAGGED = TRAVEL.replace(HEAD, HEAD_TAGGED, 1)
 
 # ── the leak itself, read off the disk ───────────────────────────────────────────────────────
-print("\n== a [phi] value copied into an UNTAGGED column is sealed on disk ==")
+print("\n== a [phi] value copied into an UNTAGGED column is REFUSED (HC-039) ==")
 db = new_db()
-run(TRAVEL, db)
+out = run(TRAVEL, db)
+check("the program refuses, naming the untagged field and the fix",
+      "carries no tag" in out and "body as text [phi]" in out, out[-500:])
+check("...and nothing reached the untagged column", raw(db, "notes") in ([], [{"error": "no such table: notes"}]),
+      raw(db, "notes"))
+print("\n== into a TAGGED column the copy is sealed on disk ==")
+db = new_db()
+run(TRAVEL_TAGGED, db)
 note = (raw(db, "notes") or [{}])[0]
 pat = (raw(db, "patients") or [{}])[0]
-check("the untagged column holds ciphertext, not the secret",
-      str(note.get("body", "")).startswith("enc:v1:"), note.get("body"))
+check("the tagged destination holds ciphertext, not the secret",
+      not bound_reason(str(note.get("body", "")), "notes", "body", note.get("id"), "testkey", "111-11-1111"),
+      note.get("body"))
 check("...and the plaintext is nowhere in that row",
       "111-11-1111" not in str(note), note)
-check("the tagged column is still sealed as it always was",
-      str(pat.get("ssn", "")).startswith("enc:v1:"), pat.get("ssn"))
+check("the source column is still sealed as it always was",
+      not bound_reason(str(pat.get("ssn", "")), "patients", "ssn", pat.get("id"), "testkey", "111-11-1111"),
+      pat.get("ssn"))
 
 print("\n-- and it is still FINDABLE and ERASABLE, which is what keeps this honest --")
 # The index is an HMAC over the PLAINTEXT. Encryption stays at the write, so the plaintext is
@@ -159,30 +183,34 @@ check("a number shaped like an SSN in an untagged variable stays plaintext",
 # ── the round trip ───────────────────────────────────────────────────────────────────────────
 print("\n== the travelled value reads back correctly ==")
 db = new_db()
-run(TRAVEL, db)
-out = run(HEAD + 'retrieve n from db.notes\n    match who to "Ada"\n'
+run(TRAVEL_TAGGED, db)
+out = run(HEAD_TAGGED + 'retrieve n from db.notes\n    match who to "Ada"\n'
                  '    on.failure\n        show "none"\nretrieve: done\n'
                  'show ("body is: " & n.body)\n', db)
-check("it decrypts on the way out", "111-11-1111" in out, out[-300:])
-check("...and never surfaces as ciphertext", "enc:v1:" not in out, out[-300:])
+# The destination is tagged, so the read decrypts AND masks: the plaintext never prints.
+check("it decrypts on the way out, masked as its tag requires",
+      "****1111" in out and "111-11-1111" not in out, out[-300:])
+check("...and never surfaces as ciphertext", "enc:v" not in out, out[-300:])
 
 print("\n-- no double encryption: one layer, not a blob inside a blob --")
 db = new_db()
-run(TRAVEL, db)
+run(TRAVEL_TAGGED, db)
 # Re-reading and re-saving the same travelled value must not wrap it twice. The already-encrypted
 # guard is what holds here, and a second layer would be unrecoverable.
-run(HEAD + 'retrieve n from db.notes\n    match who to "Ada"\n'
+run(HEAD_TAGGED + 'retrieve n from db.notes\n    match who to "Ada"\n'
            '    on.failure\n        show "none"\nretrieve: done\n'
            'y n.body\n'
            'save to db.notes\n    body y\n    who "Bob"\nsave: done\nshow "again"\n', db)
 rows = {r.get("who"): r for r in raw(db, "notes")}
 bob = rows.get("Bob", {})
-check("the re-saved copy is ciphertext", str(bob.get("body", "")).startswith("enc:v1:"), bob)
-check("...with exactly one layer", str(bob.get("body", "")).count("enc:v1:") == 1, bob.get("body"))
-out = run(HEAD + 'retrieve n from db.notes\n    match who to "Bob"\n'
+check("the re-saved copy is ciphertext, sealed for its own row",
+      not bound_reason(str(bob.get("body", "")), "notes", "body", bob.get("id"), "testkey", "111-11-1111"), bob)
+check("...with exactly one layer", str(bob.get("body", "")).count("enc:v") == 1, bob.get("body"))
+out = run(HEAD_TAGGED + 'retrieve n from db.notes\n    match who to "Bob"\n'
                  '    on.failure\n        show "none"\nretrieve: done\n'
                  'show ("body is: " & n.body)\n', db)
-check("...and it still reads back as the value", "111-11-1111" in out, out[-300:])
+check("...and it still reads back as the value, masked",
+      "****1111" in out and "111-11-1111" not in out and "enc:v" not in out, out[-300:])
 
 # ── matching, counting and erasing a travelled value ─────────────────────────────────────────
 print("\n== a travelled value stays matchable, countable and erasable BY ITS VALUE ==")
@@ -191,7 +219,7 @@ print("\n== a travelled value stays matchable, countable and erasable BY ITS VAL
 def seeded():
     """Two distinct secrets travelled into an untagged column, one of them twice."""
     db = new_db()
-    run(HEAD +
+    run(HEAD_TAGGED +
         'save to db.patients\n    ssn "aaa"\n    name "one"\nsave: done\n'
         'save to db.patients\n    ssn "zzz"\n    name "two"\nsave: done\n'
         'retrieve p1 from db.patients\n    match name to "one"\n'
@@ -215,7 +243,7 @@ def whos(out):
     return [l.strip() for l in out.splitlines() if l.strip() in ("one", "two", "dup")]
 
 
-FIND = (HEAD + 'find rows in db.notes\n    where body is "{v}"\nfind: done\n'
+FIND = (HEAD_TAGGED + 'find rows in db.notes\n    where body is "{v}"\nfind: done\n'
                 'repeat each r in rows\n    show r.who\nrepeat: done\n')
 
 db = seeded()
@@ -226,19 +254,19 @@ check("the other secret finds its own row, and only its own", got == ["one"], go
 got = whos(run(FIND.format(v="nothere"), db))
 check("a value that is genuinely absent still finds nothing", got == [], got)
 
-out = run(HEAD + 'find rows in db.notes\n    where body is "zzz"\nfind: done\n'
+out = run(HEAD_TAGGED + 'find rows in db.notes\n    where body is "zzz"\nfind: done\n'
                  'show rows.count\n', db)
 check("counting by value counts both", "2" in out, out[-300:])
 
 print("\n-- erasure, the property the blind index exists for --")
 db = seeded()
-run(HEAD + 'remove from db.notes\n    where body is "zzz"\nremove: done\nshow "removed"\n', db)
+run(HEAD_TAGGED + 'remove from db.notes\n    where body is "zzz"\nremove: done\nshow "removed"\n', db)
 left = sorted(r.get("who") for r in raw(db, "notes"))
 check("both rows holding that secret are erased by its value", left == ["one"], left)
 
 print("\n-- check unique and check exists answer truthfully about a travelled value --")
 db = seeded()
-UNIQ = (HEAD + 'check unique in db.notes\n    match body to "{v}"\n'
+UNIQ = (HEAD_TAGGED + 'check unique in db.notes\n    match body to "{v}"\n'
                 '    when empty\n        show "AVAILABLE"\n'
                 '    otherwise\n        show "TAKEN"\ncheck: done\n')
 out = run(UNIQ.format(v="zzz"), db)
@@ -253,18 +281,18 @@ print("\n== ordering and range REFUSE on a column that actually holds encrypted 
 # declaration instead of the data. Measured before: ordering sorted the ciphertext, and a range
 # comparison returned an empty list over rows that hold the value.
 db = seeded()
-out = run(HEAD + 'find rows in db.notes\n    order.up by body\nfind: done\nshow "sorted"\n', db)
+out = run(HEAD_TAGGED + 'find rows in db.notes\n    order.up by body\nfind: done\nshow "sorted"\n', db)
 check("ordering refuses instead of sorting ciphertext",
       "encrypted_field_not_rangeable" in out, out[-300:])
 check("...and says why, in the words the declared case already uses",
       "only be matched for equality" in out, out[-300:])
-out = run(HEAD + 'find rows in db.notes\n    where body is above "m"\nfind: done\nshow "ranged"\n', db)
+out = run(HEAD_TAGGED + 'find rows in db.notes\n    where body is above "m"\nfind: done\nshow "ranged"\n', db)
 check("a range comparison refuses instead of returning an empty list",
       "encrypted_field_not_rangeable" in out, out[-300:])
 
 print("\n-- an ORDINARY column is untouched by all of this --")
 db = seeded()
-out = run(HEAD + 'find rows in db.notes\n    order.up by who\nfind: done\n'
+out = run(HEAD_TAGGED + 'find rows in db.notes\n    order.up by who\nfind: done\n'
                  'repeat each r in rows\n    show r.who\nrepeat: done\n', db)
 check("ordering a plain column still works", "dup" in out and "one" in out, out[-300:])
 check("...and is not refused", "encrypted_field_not_rangeable" not in out, out[-300:])
@@ -286,33 +314,49 @@ _g = '\n'.join(l for l in mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8').sp
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 
 db = new_db()
-_src = ('shape Patient\n    ssn as text [phi]\n    name as text\nshape: done\n'
-        'shape Note\n    body as text\n    who as text\nshape: done\n'
-        'shape Req\n    q as text\nshape: done\n'
-        'connect db as sqlite from env.DATABASE_URL\n'
-        'listen for\n    new sh.Req at /w\n'
-        '        save to db.patients\n            ssn "111-11-1111"\n'
-        '            name "Ada"\n        save: done\n'
-        '        retrieve p from db.patients\n            match name to "Ada"\n'
-        '            on.failure\n                give back [404] "none"\n'
-        '        retrieve: done\n'
-        '        x p.ssn\n'
-        '        save to db.notes\n            body x\n            who "Ada"\n        save: done\n'
-        '        give back [200] "stored"\n    new: done\nlisten: done\n')
+_src = (('shape Patient\n'
+         '    ssn as text [phi]\n'
+         '    name as text\n'
+         'shape: done\n'
+         'shape Note\n'
+         '    body as text\n'
+         '    who as text\n'
+         'shape: done\n'
+         'shape Req\n'
+         '    q as text\n'
+         'shape: done\n'
+         'connect db as sqlite from env.DATABASE_URL\n'
+         'listen for sh.Req at /w\n'
+         '    save to db.patients\n'
+         '        ssn "111-11-1111"\n'
+         '        name "Ada"\n'
+         '    save: done\n'
+         '    retrieve p from db.patients\n'
+         '        match name to "Ada"\n'
+         '        when p is empty\n'
+         '            give back [404] "none"\n'
+         '    retrieve: done\n'
+         '    x p.ssn\n'
+         '    save to db.notes\n'
+         '        body x\n'
+         '        who "Ada"\n'
+         '    save: done\n'
+         '    give back [200] "stored"\n'
+         'listen: done\n'
+         ''))
 _prev = os.environ.get('DATABASE_URL')
 os.environ['DATABASE_URL'] = db
 try:
     _client = TestClient(create_app(MohioServer(_tf(_P.parse(_src), _src), MohioInterpreter())),
                          raise_server_exceptions=False)
-    body = _client.post("/w", json={"q": "x"}).text
+    body = _seen(_client.post("/w", json={"q": "x"}).text)   # a served 5xx answers a reference
 finally:
     if _prev is not None:
         os.environ['DATABASE_URL'] = _prev
-check("the served write reports success", "stored" in body, body[:200])
-note = (raw(db, "notes") or [{}])[0]
-check("and the untagged column on disk holds ciphertext, not the secret",
-      str(note.get("body", "")).startswith("enc:v1:"), note.get("body"))
-check("...with the plaintext nowhere in the row", "111-11-1111" not in str(note), note)
+check("the served write is refused at run, naming the untagged field (no check ran here)",
+      "protected_into_untagged_field" in body and "stored" not in body, body[:300])
+check("...and nothing reached the untagged column", raw(db, "notes") in ([], [{"error": "no such table: notes"}]),
+      raw(db, "notes"))
 
 shutil.rmtree(TMP, ignore_errors=True)
 if _failures:

@@ -68,9 +68,36 @@ mio warmup
 
 *Every Mohio program is a `.mho` file.*
 
+> **Cloning here versus starting your own app.** This guide clones the repository so you have the
+> examples and source to learn from, which is what you want while learning. When you go to build your
+> OWN app to deploy, do NOT clone this repository as the starting point; install the package and
+> scaffold a clean project instead: `pip install mohio` then `mio new my-app`. The difference, and why
+> deploying a clone deploys the compiler's own demo, is covered in
+> `../Docs/guides/deploying-a-mohio-project.md`.
+
 > **Looking for Mohio Home** (the installer/console that puts Mohio on a machine without a
 > clone)? It's a separate, soft-release product, see the root `README.md`. Everything in this
 > guide runs from the clone above, on Mac, Windows, or Linux, with nothing else installed.
+
+### What an install includes, and what it does not
+
+There are two dependency sets, and it is worth knowing which you have. A plain `pip install mohio` (and a
+clone's `pip install -e .`) pulls the LEAN runtime: the compiler, the web server, AI, at-rest encryption,
+password hashing, and HTML sanitizing, ten packages, everything you need to run and serve an app on
+SQLite, which is built into Python. It does NOT include a driver for any other database, nor the test
+tools. The project's `requirements.txt` (used by the Dockerfile in the deploy guide) is the FULLER set,
+fifteen packages: the same ten plus the PostgreSQL, MySQL and MongoDB drivers and the test dependencies.
+The sets differ on purpose; the trap is only in not knowing. When a plain install needs a database beyond
+SQLite, add just that driver with an extra:
+
+```bash
+pip install "mohio[postgres]"     # PostgreSQL
+pip install "mohio[mysql]"        # MySQL / MariaDB
+pip install "mohio[mongo]"        # MongoDB
+```
+
+Each driver is imported lazily, only when you `connect` to that backend, so a plain install runs fine
+until the day you point it at one of these, and then the error names the missing driver.
 
 ---
 
@@ -126,12 +153,10 @@ shape Member
     name as text
 shape: done
 
-listen for
-    request for sh.Member at /
-        name "World"
-        give back [200] "Hello, {{ name }}."
-    request: done
-listen: done
+request for sh.Member at /
+    name "World"
+    give back [200] "Hello, {{ name }}."
+request: done
 ```
 
 Run it:
@@ -264,11 +289,9 @@ shape Payment
     amount as decimal
 shape: done
 
-listen for
-    new sh.Payment at /pay
-        require role "processor"
-        give back [200] "Payment received"
-    new: done
+listen for sh.Payment at /pay
+    require role "processor"
+    give back [200] "Payment received"
 listen: done
 ```
 

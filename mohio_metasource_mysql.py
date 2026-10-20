@@ -35,6 +35,7 @@ made outside Mohio.
 from __future__ import annotations
 
 import os
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 

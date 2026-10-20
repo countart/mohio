@@ -15,6 +15,8 @@ os.environ.setdefault('DATABASE_URL', ':memory:')
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _aad_assert import bound_reason  # noqa: E402
 
 _raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
@@ -52,11 +54,13 @@ def test_encryption_roundtrip_and_at_rest():
     if str(got) != '123-45-6789':
         fails.append(f"find round-trip: got {got!r}")
 
-    # 3. at rest -> ciphertext (raw sql sees enc:v1:)
+    # 3. at rest -> ciphertext, sealed for its own row (raw sql sees the stored value)
     got = _val(run(SHAPE + DB + SAVE +
-                   'retrieve raw from db.*\n    sql\n        SELECT ssn FROM people\n    sql: done\nretrieve: done\ngive back 200 raw.first.ssn\n'))
-    if not (isinstance(got, str) and got.startswith('enc:v1:')):
-        fails.append(f"at-rest ciphertext: got {got!r}")
+                   'retrieve raw from db.*\n    sql\n        SELECT ssn, id FROM people\n    sql: done\nretrieve: done\ngive back 200 raw.first\n'))
+    _why = bound_reason((got or {}).get('ssn'), 'people', 'ssn', (got or {}).get('id'),
+                        'test-secret-key-123', '123-45-6789') if isinstance(got, dict) else repr(got)
+    if _why:
+        fails.append(f"at-rest ciphertext: {_why}")
 
     # 4. non-encrypted field stays plaintext at rest
     got = _val(run(SHAPE + DB + SAVE +
@@ -84,9 +88,11 @@ def test_zone_seals_every_field():
     # every field is ciphertext at rest
     for fld in ('ssn', 'dob', 'notes'):
         got = _val(run(ZONE + DB + SAVE +
-                       f'retrieve raw from db.*\n    sql\n        SELECT {fld} FROM intakes\n    sql: done\nretrieve: done\ngive back 200 raw.first.{fld}\n'))
-        if not (isinstance(got, str) and got.startswith('enc:v1:')):
-            fails.append(f"zone field {fld} not sealed: {got!r}")
+                       f'retrieve raw from db.*\n    sql\n        SELECT {fld}, id FROM intakes\n    sql: done\nretrieve: done\ngive back 200 raw.first\n'))
+        _why = bound_reason((got or {}).get(fld), 'intakes', fld, (got or {}).get('id'),
+                            'test-secret-key-123') if isinstance(got, dict) else repr(got)
+        if _why:
+            fails.append(f"zone field {fld} not sealed: {_why}")
     # round-trips back to plaintext
     got = _val(run(ZONE + DB + SAVE +
                    'find rows in db.intakes\nfind: done\ngive back 200 rows.first.notes\n'))
@@ -107,9 +113,11 @@ def test_generic_zone_seal_no_class():
     os.environ['MOHIO_ENCRYPTION_KEY'] = 'test-secret-key-123'
     Z = 'shape Journal sec.encrypt\n    title as text\n    entry as text\nshape: done\n'
     S = 'save to db.journals\n    title "private"\n    entry "secret"\nsave: done\n'
-    at_rest = _val(run(Z + DB + S + 'retrieve raw from db.*\n    sql\n        SELECT entry FROM journals\n    sql: done\nretrieve: done\ngive back 200 raw.first.entry\n'))
+    at_row = _val(run(Z + DB + S + 'retrieve raw from db.*\n    sql\n        SELECT entry, id FROM journals\n    sql: done\nretrieve: done\ngive back 200 raw.first\n'))
     back = _val(run(Z + DB + S + 'find rows in db.journals\nfind: done\ngive back 200 rows.first.entry\n'))
-    assert isinstance(at_rest, str) and at_rest.startswith('enc:v1:'), f"generic zone not sealed: {at_rest!r}"
+    _why = bound_reason(at_row.get('entry'), 'journals', 'entry', at_row.get('id'), 'test-secret-key-123',
+                        'secret') if isinstance(at_row, dict) else repr(at_row)
+    assert not _why, f"generic zone not sealed: {_why}"
     assert str(back) == 'secret', f"generic zone round-trip: {back!r}"
 
 

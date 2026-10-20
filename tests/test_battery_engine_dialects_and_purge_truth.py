@@ -169,7 +169,7 @@ def my_read(url, sql):
 
 ENGINES = [("sqlite", "sqlite", os.path.join(TMP, "raw.db"), sqlite_read)]
 
-PG = os.environ.get("MOHIO_TEST_PG", "postgresql://postgres:postgres@localhost:5432/postgres")
+PG = os.environ.get("MOHIO_TEST_PG", "postgresql://nobody:none@127.0.0.1:1/none")
 try:
     import psycopg2
     psycopg2.connect(PG, connect_timeout=3).close()
@@ -177,10 +177,15 @@ try:
 except Exception as e:
     skip("postgres raw sql", str(e).splitlines()[0][:70])
 
-for _label, _port, _dbname in (("mysql", 3307, "mohio_meta_test"),
-                               ("mariadb", 3306, "mohio_meta_maria")):
-    _url = os.environ.get("MOHIO_TEST_%s" % _label.upper(),
-                          "mysql://mohio:mohio_test_pw@127.0.0.1:%d/%s" % (_port, _dbname))
+for _label, _url_default in (
+        # The engine runner supplies the isolated database through MOHIO_TEST_MYSQL; without it the
+        # leg meets this closed port and skips, never a shared target (T1-CANFAIL-ENGINE-PROOF-ISOLATION).
+        ("mysql", "mysql://nobody:none@127.0.0.1:1/none"),
+        # No Mohio-owned MariaDB container exists; this points at a closed loopback port so an
+        # unconfigured run takes its own graceful-skip path instead of ever reaching a real
+        # server on this machine (3306 here is NOT a Mohio container).
+        ("mariadb", "mysql://nobody:nopass@127.0.0.1:1/none")):
+    _url = os.environ.get("MOHIO_TEST_%s" % _label.upper(), _url_default)
     try:
         import pymysql
         _u = _up.urlparse(_url)
@@ -202,7 +207,8 @@ for label, eng, url, read in ENGINES:
           [tuple(r) for r in (rows if isinstance(rows, (list, tuple)) else [])] == [(1, "ONE")],
           rows)
     check("%s: ...and the SELECT came back to the program as named fields" % label,
-          "'label': 'ONE'" in out or '"label": "ONE"' in out, out[-300:])
+          # a record shows as field: value pairs (record display, ruled 2026-10-15), never host form
+          "label: ONE" in out and "'label': 'ONE'" not in out, out[-300:])
     read(url, "DROP TABLE IF EXISTS rawprobe")
 
 print("\n-- each runtime states its own dialect, rather than inheriting SQLite's --")

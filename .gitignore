@@ -1,0 +1,90 @@
+# Mohio public repository -- .gitignore
+# github.com/countart/mohio  (Business Source License 1.1, open core; see LICENSE)
+
+# -- Secrets and environment: never commit keys --
+.env
+*.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.staging
+*.key
+*.pem
+*.cert
+secrets/
+secret.json
+
+# -- Language packs: only the demonstration packs are public --
+mohio_data/maps/*.langmap
+!mohio_data/maps/en-emoji.langmap
+!mohio_data/maps/en-klingon.langmap
+
+# -- Sector profiles: none ship in this repository --
+# Applications write their own profile beside the program.
+mohio_data/sectors/
+
+# -- Python --
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# -- Virtual environments --
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# -- Databases (created at run time) --
+*.db
+*.sqlite
+*.sqlite3
+
+# -- Mohio runtime and build artifacts --
+# The parser cache and `mio warmup` output are generated next to the source; build them in the
+# deploy step rather than committing them.
+*.pkl
+*.cache
+*.mho.compiled
+.parser_cache
+.mohocache/
+audit_logs/
+*.audit.jsonl
+mio_cache/
+.mio/
+
+# -- Runtime file areas: never commit what a program wrote or a user uploaded --
+# miofile resolves to ./mio_files when MIOFILE_ROOT is unset, and uploads land in ./uploads when
+# MOHIO_UPLOAD_DIR is unset. Both default inside the repository.
+mio_files/
+uploads/
+
+# -- Logs --
+*.log
+logs/
+*.jsonl
+
+# -- Editors and operating systems --
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -- Node --
+node_modules/
+package-lock.json
+
+# -- Backup and scratch --
+*.bak
+*.tmp
+*.orig
+tmp*.mho

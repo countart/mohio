@@ -2,25 +2,48 @@
 <!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Local Development Setup
 
-## Quick Start (no database needed)
+## Live-database test engines (for working on the compiler itself)
 
-For simple .mho files that don't use a database:
+The test suite's live-database batteries (`tools/run_tests.py --engines`) use THREE DEDICATED
+DOCKER CONTAINERS, and only these three -- never a locally installed server, never the Postgres/
+MySQL/MariaDB instances described further down this page for running Zork:
 
+| Engine   | Container      | Port | Credential              |
+|----------|----------------|------|--------------------------|
+| Postgres | `mohio-pg`     | 5433 | `postgres` / `mohiotest` |
+| MySQL    | `mohio-mysql`  | 3309 | `root` / `mohiotest`     |
+| Oracle   | `mohio-oracle` | 1521 | `mohio` / `mohiotest` (service `FREEPDB1`) |
+
+Start them with (adjust images/tags as needed):
 ```bash
-# Clone the repo
-git clone https://github.com/countart/mohio
-cd mohio
-
-# Windows
-setup_mohio.bat
-
-# Mac/Linux
-chmod +x setup_mohio.sh
-./setup_mohio.sh
-
-# Check any .mho file
-python mio.py check tests/fraud_demo_simple.mho
+docker run -d --name mohio-pg    -p 5433:5432 -e POSTGRES_PASSWORD=mohiotest -e POSTGRES_DB=mohio postgres:16-alpine
+docker run -d --name mohio-mysql -p 3309:3306 -e MYSQL_ROOT_PASSWORD=mohiotest -e MYSQL_DATABASE=mohio mysql:8.0
+docker run -d --name mohio-oracle -p 1521:1521 -e ORACLE_PASSWORD=mohiotest gvenzl/oracle-free:slim
+# then create the mohio app user/schema in Oracle and the marker table in each -- see
+# tests/_engine_isolation.py's docstring for the exact marker a battery checks for.
 ```
+
+Every live battery REFUSES to run unless it finds a marker table (`mohio_test_container_marker`)
+that only these containers carry -- a port number is not proof of what is listening there. A
+battery that cannot find the marker treats that as a hard, loud failure, not a quiet skip,
+because something answering on the expected port that is NOT the Mohio container is the one
+case that must never be silently trusted.
+
+**The native installs described below in this page (a locally installed Postgres on 5432, or a
+locally installed MySQL/MariaDB on 3306/3307) are NO LONGER USED by the test suite.** They
+predate the container setup above and the test suite's own hardcoded defaults used to point at
+them by accident; that has been fixed, and every live battery's default now points only at the
+three containers. If you have one of those native installs for an unrelated reason (your own
+Zork database, below, or anything else), the test suite will never touch it, and this page makes
+no further changes to it.
+
+---
+
+## Installing Mohio
+
+Install and run your first file with **`start-here/QUICKSTART.md`**, the one canonical install walkthrough
+(kept in one place so the steps cannot drift). This document picks up after that, for the database-backed
+local setup QUICKSTART does not cover.
 
 ---
 

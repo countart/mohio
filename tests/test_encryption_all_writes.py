@@ -23,6 +23,8 @@ os.environ.setdefault('DATABASE_URL', ':memory:')
 from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _aad_assert import bound_reason  # noqa: E402
 
 _raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
@@ -42,9 +44,16 @@ def _val(body):
 
 
 def raw_ssn(where_name):
-    """Read ssn straight from the table (bypassing decrypt) to see what is AT REST."""
-    return (f'retrieve raw from db.*\n    sql\n        SELECT ssn FROM people\n'
-            f'    sql: done\nretrieve: done\ngive back 200 raw.first.ssn\n')
+    """Read ssn and its row id straight from the table (bypassing decrypt) to see what is AT REST."""
+    return (f'retrieve raw from db.*\n    sql\n        SELECT ssn, id FROM people\n'
+            f'    sql: done\nretrieve: done\ngive back 200 raw.first\n')
+
+
+def sealed_for_row(at, plain):
+    """'' when the row read by raw_ssn holds `plain` sealed for that row (T1-ENCRYPTION-AAD)."""
+    if not isinstance(at, dict):
+        return "no row read back: %r" % (at,)
+    return bound_reason(at.get('ssn'), 'people', 'ssn', at.get('id'), 'test-secret-key-123', plain)
 
 
 _p = _f = 0
@@ -66,8 +75,8 @@ SEED = 'save to db.people\n    ssn "000-00-0000"\n    name "Ada"\nsave: done\n'
 UPDATE = ('update db.people\n    match name to "Ada"\n    ssn "123-45-6789"\nupdate: done\n')
 
 at_rest = _val(run(SHAPE + DB + SEED + UPDATE + raw_ssn("Ada")))
-check("update: tagged field is ciphertext at rest",
-      isinstance(at_rest, str) and at_rest.startswith('enc:v1:'),
+check("update: tagged field is ciphertext at rest, sealed for its row",
+      not sealed_for_row(at_rest, "123-45-6789"),
       f"got {at_rest!r} -- if this is a bare SSN, update stored PHI in plaintext")
 
 # and it must still round-trip back to plaintext on read
@@ -85,10 +94,9 @@ UPSERT = ('save or update db.people\n    match name to "Bea"\n    ssn "555-66-77
           'save: done\n')
 
 at_rest = _val(run(SHAPE + DB + UPSERT +
-                   'retrieve raw from db.*\n    sql\n        SELECT ssn FROM people\n'
-                   '    sql: done\nretrieve: done\ngive back 200 raw.first.ssn\n'))
-check("upsert: tagged field is ciphertext at rest",
-      isinstance(at_rest, str) and at_rest.startswith('enc:v1:'),
+                   raw_ssn("Bea")))
+check("upsert: tagged field is ciphertext at rest, sealed for its row",
+      not sealed_for_row(at_rest, "555-66-7777"),
       f"got {at_rest!r} -- if this is a bare SSN, upsert stored PHI in plaintext")
 
 back = _val(run(SHAPE + DB + UPSERT +
@@ -135,8 +143,8 @@ MODIFY = ('modify every p in db.people\n    apply p\n        ssn "555-55-5555"\n
           '    apply: done\nmodify: done\n')
 
 at_rest = _val(run(SHAPE + DB + SEED + MODIFY + raw_ssn("Ada")))
-check("modify: tagged field is ciphertext at rest",
-      isinstance(at_rest, str) and at_rest.startswith('enc:v1:'),
+check("modify: tagged field is ciphertext at rest, sealed for its row",
+      not sealed_for_row(at_rest, "555-55-5555"),
       f"got {at_rest!r} -- if this is a bare SSN, modify stored PII in plaintext")
 
 # Round-trip: what modify encrypted must read back as plaintext, or the fix would have
@@ -161,8 +169,8 @@ check("modify: an UNTAGGED field is NOT encrypted (the trigger is the tag)",
 FLOW = ('map m\n    data\n        src.v -> db.people.ssn\nmap: done\n'
         'create src\n    v "777-77-7777"\ncreate: done\nflow m.src\n')
 at_rest = _val(run(SHAPE + DB + FLOW + raw_ssn("flow")))
-check("flow: tagged field is ciphertext at rest",
-      isinstance(at_rest, str) and at_rest.startswith('enc:v1:'),
+check("flow: tagged field is ciphertext at rest, sealed for its row",
+      not sealed_for_row(at_rest, "777-77-7777"),
       f"got {at_rest!r} -- if this is a bare SSN, flow stored PII in plaintext")
 
 # The fail-loud must hold on these two paths too: no key -> refuse, never plaintext.

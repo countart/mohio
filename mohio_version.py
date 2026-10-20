@@ -12,7 +12,7 @@ tests/test_structural_invariants.py fails loud if anything starts to.
 """
 
 # The compiler/CLI release.
-VERSION = "5.1.0"
+VERSION = "6.0.0"
 
 # The LANGUAGE spec this build implements. A different thing, deliberately: the toolchain
 # ships faster than the language changes.
@@ -45,7 +45,14 @@ def _resolve_build_sha():
         _stamp = _Path(__file__).with_name('_build_sha.txt')
         if _stamp.is_file():
             sha = _stamp.read_text(encoding='utf-8').strip()
-            if sha:
+            # `_build_sha.txt` is committed carrying the git export-subst placeholder `$Format:%h$`.
+            # `git archive` (the source-archive mechanism the application lane used) SUBSTITUTES it
+            # with the real short commit, so an extracted archive -- which has no `.git` for the
+            # rev-parse below -- still reports its commit. A plain checkout keeps the LITERAL
+            # placeholder, so it must be ignored here (never returned as a version) and left to the
+            # rev-parse step. An unexpanded value is exactly the false-version case this must not
+            # emit: a build reports a real commit or an explicit unknown, never `$Format:%h$`.
+            if sha and not sha.startswith('$Format'):
                 return sha
     except Exception:
         pass

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mohio"
-version = "5.1.0"
+version = "6.0.0"
 readme = "README.md"
 description = "Mohio, an AI-native language where AI reasoning and compliance are compiler-enforced primitives."
 # The floor is what the suite is ACTUALLY exercised on, and that is 3.12: the development
@@ -18,7 +18,7 @@ description = "Mohio, an AI-native language where AI reasoning and compliance ar
 # codebase need 3.12+. A 3.12 floor still admits every 3.13 image above it.
 # Re-ruled 2026-09-02 (an earlier pass had applied 3.13 before this was checked).
 requires-python = ">=3.12"
-dependencies = ["lark>=1.1.0", "anthropic>=0.96.0", "cryptography>=49.0.0", "tiktoken>=0.13.0", "bcrypt>=4.0", "nh3>=0.2.0", "fastapi>=0.110.0", "uvicorn>=0.30.0", "starlette>=0.37.0", "python-multipart>=0.0.9"]
+dependencies = ["lark>=1.1.0", "anthropic>=0.96.0", "cryptography>=49.0.0", "tiktoken>=0.13.0", "bcrypt>=4.0", "nh3>=0.2.0", "fastapi>=0.110.0", "uvicorn>=0.30.0", "starlette>=0.37.0", "python-multipart>=0.0.9", "tzdata>=2026.1"]
 
 [project.optional-dependencies]
 # RH-2: bcrypt and nh3 moved to base dependencies above -- a bare `pip install mohio` needs both
@@ -30,15 +30,16 @@ serve = ["fastapi>=0.110.0", "uvicorn>=0.30.0", "starlette>=0.37.0", "python-mul
 postgres = ["psycopg2-binary>=2.9.0"]
 mongo = ["pymongo>=4.0.0"]
 mysql = ["pymysql>=1.1.0"]
+oracle = ["oracledb>=2.0.0"]
 auth = []
 
 [project.scripts]
 mio = "mio:main"
 
 [tool.setuptools]
-py-modules = ["mio", "mio_utils", "mohio_ai", "mohio_ast", "mohio_audit_grades", "mohio_capability", "mohio_classification", "mohio_decisions", "mohio_enforce", "mohio_fmt", "mohio_framework", "mohio_html_sanitize", "mohio_interpreter", "mohio_langmap", "mohio_layer3", "mohio_metasource", "mohio_metasource_mongo", "mohio_metasource_mysql", "mohio_metasource_postgres", "mohio_metasource_shared", "mohio_metasource_sqlite", "mohio_metasource_store", "mohio_mioscript", "mohio_pretokenizer", "mohio_reachability", "mohio_schema", "mohio_sector_loader", "mohio_server", "mohio_services", "mohio_symbol_table", "mohio_test_grammar", "mohio_transformer", "mohio_transformer_ast", "mohio_version", "mohio_write_effects", "mohio_write_intent"]
+py-modules = ["mio", "mio_utils", "mohio_ai", "mohio_ast", "mohio_audit_grades", "mohio_capability", "mohio_classification", "mohio_db_drivers", "mohio_decisions", "mohio_egress", "mohio_enforce", "mohio_fmt", "mohio_framework", "mohio_html_sanitize", "mohio_interpreter", "mohio_langmap", "mohio_layer3", "mohio_metasource", "mohio_metasource_mongo", "mohio_metasource_mysql", "mohio_metasource_postgres", "mohio_metasource_shared", "mohio_metasource_sqlite", "mohio_metasource_store", "mohio_mioscript", "mohio_outbound", "mohio_pretokenizer", "mohio_reachability", "mohio_runtime_vocab", "mohio_schema", "mohio_sector_loader", "mohio_segment", "mohio_sector_sign", "mohio_server", "mohio_services", "mohio_symbol_table", "mohio_test_grammar", "mohio_timezones", "mohio_transformer", "mohio_treepickle", "mohio_transformer_ast", "mohio_version", "mohio_write_effects", "mohio_write_intent"]
 packages = ["mohio_data"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-mohio_data = ["*.lark", "sectors/*.sector", "maps/*.langmap"]
+mohio_data = ["*.lark", "*.json", "sectors/*.sector", "maps/*.langmap"]

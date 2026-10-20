@@ -20,42 +20,45 @@ Mohio programs are `.mho` files. The CLI is `mio`. Every block has a named close
 ```mohio
 // This is a comment. Only // — never ##.
 
-connect db as postgres from env.DATABASE_URL   // one connect at the top
+connect db from env.DATABASE_URL   // one connect at the top
 
 shape Screening                                // declare the shape you handle
     member_id as int
+    amount as decimal
+    member_history as text
+    device_fingerprint as text
 shape: done
 
-listen for
-    new sh.Screening at /screen
-        require role "screener"                    // role values always quoted
+listen for sh.Screening at /screen
+    require role "screener"                    // role values always quoted
 
-        retrieve member from db.members
-            match id to request.member_id
-            on.failure
-                give back [404] "Member not found."
-        retrieve: done
+    retrieve member from db.members
+        match id to Screening.member_id
+        when member is empty
+            give back [404] "Member not found."
+    retrieve: done
 
-        ai.decide is_fraudulent returns boolean
-            confidence above 0.85
-            weigh
-                transaction.amount,
-                member.history,
-                device.fingerprint
-            ai.audit to fraud_audit_log   // ai.audit goes BEFORE not confident
-            not confident
-                give back [202] "Flagged for review."
-            on.failure
-                give back [503] "AI service unavailable."
-        ai.decide: done
+    ai.decide is_fraudulent returns boolean
+        confidence above 0.85
+        weigh
+            Screening.amount,
+            Screening.member_history,
+            Screening.device_fingerprint
+        ai.audit to fraud_audit_log   // ai.audit goes BEFORE not confident
+        not confident
+            give back [202] "Flagged for review."
+        on.failure
+            give back [503] "AI service unavailable."
+    ai.decide: done
 
-        check is_fraudulent
-            when true
-                give back 200 "Blocked." as json
-            otherwise
-                give back 200 "Approved." as json
-        check: done
-    new: done
+    ai.decide is_fraudulent                    // run the decision here; declaring only defines it
+
+    check is_fraudulent
+        when true
+            give back 200 "Blocked." as json
+        otherwise
+            give back 200 "Approved." as json
+    check: done
 listen: done
 ```
 
@@ -101,17 +104,15 @@ name request.name default "guest"   // with fallback
 ```mohio
 // `listen for` is the entry point. The WORD carries the method -- you never
 // declare GET/POST. Each listener closes with its own named closer.
-listen for
-    request for sh.Page at /path       // GET  -- read a page or data
-        give back [200] "Here you go."
-    request: done
-    new sh.Form at /submit             // POST -- a submission arrived
-        give back [201] "Created."
-    new: done
-    request for sh.User at /users/{{id}}  // URL parameter -> request.id, or bare id
-        give back [200] "User {{ request.id }}"
-    request: done
+request for sh.Page at /path       // GET  -- read a page or data
+    give back [200] "Here you go."
+request: done
+listen for sh.Form at /submit             // POST -- a submission arrived
+    give back [201] "Created."
 listen: done
+request for sh.User at /users/{{id}}  // URL parameter -> read it as bare id, NOT request.id
+    give back [200] "User {{ id }}"
+request: done
 ```
 
 ### Responses
@@ -141,7 +142,7 @@ check: done
 ### Database operations
 
 ```mohio
-connect db as postgres from env.DATABASE_URL    // once, at top
+connect db from env.DATABASE_URL    // once, at top
 
 // Save
 save to db.table
@@ -151,7 +152,7 @@ save: done
 // Retrieve one record
 retrieve thing from db.table
     match id to request.id
-    on.failure
+    when thing is empty
         give back [404] "Not found."
 retrieve: done
 
@@ -217,10 +218,12 @@ ai.decide: done
 
 ```mohio
 // ai.create — generate from a prompt (simplest form)
-ai.create text prompt "A friendly one-line welcome for a new player."
+ai.create text as welcome
+    prompt "A friendly one-line welcome for a new player."
+ai.create: done
 
 // ai.create — generate FROM a source object, with free-form hints
-ai.create summary from report
+ai.create text as summary from report
     tone "executive"
     length "brief"
     on.failure
@@ -283,7 +286,7 @@ sector: healthcare          // activates HIPAA, HITECH
 One `sector:` per file. Put it at the top, before `connect`. Sectors are hierarchical and additive — adding subsectors layers on more rules, and a deeper declaration applies every layer above it:
 
 ```mohio
-sector: financial.banking.retail   // financial + banking + retail rules, all active
+sector: financial, banking, retail   // financial + banking + retail rules, all active
 ```
 
 Your own declarations can tighten a profile's defaults, but a broader layer's security baselines are non-overridable no matter what you declare (hardcoded secrets, CVV storage, PHI encryption).
@@ -327,32 +330,28 @@ Every block closes with its own name followed by `: done`.
 ### Require authentication
 
 ```mohio
-listen for
-    request for sh.Dashboard at /dashboard
-        require role "member"
-        // ... rest of the handler
-    request: done
-listen: done
+request for sh.Dashboard at /dashboard
+    require role "member"
+    // ... rest of the handler
+request: done
 ```
 
 ### Paginated list endpoint
 
 ```mohio
-listen for
-    request for sh.Transactions at /transactions
-        require role "analyst"
+request for sh.Transactions at /transactions
+    require role "analyst"
 
-        find transactions in db.transactions
-            where account_id is request.account_id
-            order.down by created_at
-            paginate by 25
-            on.failure
-                give back [500] "Could not load transactions."
-        find: done
+    find transactions in db.transactions
+        where account_id is request.account_id
+        order.down by created_at
+        paginate by 25
+        on.failure
+            give back [500] "Could not load transactions."
+    find: done
 
-        give back 200 transactions as json
-    request: done
-listen: done
+    give back 200 transactions as json
+request: done
 ```
 
 ### Conditional sector threshold

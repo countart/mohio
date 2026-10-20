@@ -4,7 +4,7 @@
 // only the rows whose `created_at` falls inside it.
 // Run it:  mio run cookbook/sales-by-quarter.mho
 
-connect db as sqlite from env.DATABASE_URL
+connect db as sqlite from env.DATABASE_URL default "app.db"
 
 // Q1 2026: January through March (the end date is exclusive).
 timespan first_quarter

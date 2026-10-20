@@ -40,7 +40,7 @@ Colab serve test, which is why that test was inconclusive on file exposure — i
 ## Per-IP request backstop (added 2026-09-01, T0-RATE-LIMIT-BACKSTOP)
 `mio serve` now carries a crude per-IP request ceiling, default 2000/sec, settable in the app and by env:
 
-```
+```mohio
 journey App
     limits
         max requests 2000 per second
@@ -54,8 +54,8 @@ Resolution order is the same one the framework and session store already use: a 
 and never appears in a program — the coder declares the ceiling, the runtime hides the mechanism.
 
 Two defaults worth knowing, because each is wrong in the other deployment:
-- The counted address is the SOCKET PEER. `X-Forwarded-For` is honoured only when `MOHIO_TRUSTED_PROXY` says a
-  proxy really is in front. Honouring it unconditionally would let an attacker send a fresh value per request
+- The counted address is the SOCKET PEER. `X-Forwarded-For` is honored only when `MOHIO_TRUSTED_PROXY` says a
+  proxy really is in front. Honoring it unconditionally would let an attacker send a fresh value per request
   and never hit the limit; ignoring it behind a real proxy would put the whole site in one bucket.
 - 2000 is deliberately middle-high. A NAT'd classroom, office or cafe is ONE address to a per-IP counter, so
   the default has to leave a shared address ample headroom while still tripping on a single-address flood.

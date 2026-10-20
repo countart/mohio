@@ -43,6 +43,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+from _aad_assert import bound_reason  # noqa: E402
 os.chdir(ROOT)
 
 _p = _f = 0
@@ -126,16 +128,21 @@ READ_NO_TAG_ANYWHERE = (
 print("\n== a ciphertext in an UNTAGGED column is read back as its value ==")
 db, ct = fresh_db()
 out = run(READ_TAGGED_DECLARED, db)
-check("the value comes back decrypted", SECRET in out, out[-300:])
-check("...not as the raw ciphertext it used to return", "enc:v1:" not in out, out[-300:])
+# A V2 VALUE IS BOUND TO ITS PLACE (T1-ENCRYPTION-AAD, RULED by Ron 2026-10-18): copied raw out of
+# patients.ssn into notes.body it refuses loud, naming the wrong place, instead of reading back as
+# the note. A value that travels THROUGH Mohio (read, then written) is re-sealed for its new place.
+check("a v2 value copied into another table and column refuses, naming the wrong place",
+      "encryption.wrong_place" in out and SECRET not in out, out[-300:])
+check("...not as the raw ciphertext it used to return", "enc:v" not in out, out[-300:])
 
 print("\n-- even when the reading program declares no tagged field at all --")
 # The whole-program early return was the second gate. A program that declares no encrypted field
 # skipped the walk entirely, so this case did not even reach the per-column decision.
 db, ct = fresh_db()
 out = run(READ_NO_TAG_ANYWHERE, db)
-check("a program with no tag of its own still reads the value", SECRET in out, out[-300:])
-check("...and never sees `enc:v1:`", "enc:v1:" not in out, out[-300:])
+check("a program with no tag of its own refuses the misplaced value the same way",
+      "encryption.wrong_place" in out and SECRET not in out, out[-300:])
+check("...and never sees `enc:v1:`", "enc:v" not in out, out[-300:])
 
 print("\n== NO INFERENCE: a genuinely plaintext value is untouched ==")
 # Nothing here looks at a plaintext value and guesses what it is. The only question asked is
@@ -158,8 +165,12 @@ out = run('shape Patient\n    ssn as text [phi]\n    name as text\nshape: done\n
           '    on.failure\n        show "none"\nretrieve: done\n'
           'show ("ssn is: " & p.ssn)\n', db)
 check("a tagged column still decrypts, then masks as it always has",
-      "****1111" in out and "enc:v1:" not in out, out[-300:])
-check("the stored value is still ciphertext at rest", ct.startswith("enc:v1:"), ct[:40])
+      "****1111" in out and "enc:v" not in out, out[-300:])
+_cn = sqlite3.connect(db)
+_pid = _cn.execute("select id from patients").fetchone()[0]
+_cn.close()
+check("the stored value is still ciphertext at rest, sealed for its own row",
+      not bound_reason(ct, "patients", "ssn", _pid, "testkey", SECRET), bound_reason(ct, "patients", "ssn", _pid))
 
 print("\n-- THE BOUNDARY: this restores READABILITY, it does not move the mask --")
 # Stated as an assertion rather than left to be discovered. Decryption is now a property of the
@@ -169,9 +180,16 @@ print("\n-- THE BOUNDARY: this restores READABILITY, it does not move the mask -
 # ruling (see WRITE-PATH-VALUE-BOUND-FORK.md). Before this change the second case returned an
 # unusable `enc:v1:` blob, which the runtime's own fail-loud calls the outcome it must never
 # produce, so this is not a step back from a working mask -- there was never a mask here.
-db, _ = fresh_db()
+# LEGACY v1 carries no place, so a v1 value planted elsewhere still reads, as before (the reason for
+# T1-ENCRYPTION-V1-UPGRADE). Built the way a build before v2 wrote it.
+sys.argv = ["mio.py"]
+os.environ["MOHIO_ENCRYPTION_KEY"] = "testkey"
+from mohio_interpreter import MohioInterpreter as _MI  # noqa: E402
+_it = _MI()
+_legacy = _it._encrypt_field(SECRET, _it._encryption_key())
+db, _ = fresh_db(plant_value=_legacy)
 out = run(READ_NO_TAG_ANYWHERE, db)
-check("the travelled value is readable", SECRET in out, out[-300:])
+check("a legacy v1 travelled value is readable", _legacy.startswith("enc:v1:") and SECRET in out, out[-300:])
 check("...and is NOT masked, because no field name here is classified",
       "****1111" not in out, out[-300:])
 
@@ -182,7 +200,7 @@ db, _ = fresh_db()
 out = run(READ_NO_TAG_ANYWHERE, db, key=None)
 check("no key plus a ciphertext value refuses", "key_missing" in out or "cannot be read back" in out,
       out[-400:])
-check("...rather than handing back the ciphertext", "enc:v1:" not in out.split("body is:")[-1],
+check("...rather than handing back the ciphertext", "enc:v" not in out.split("body is:")[-1],
       out[-400:])
 
 print("\n== the shadow index columns are still stripped from a row ==")
@@ -210,14 +228,23 @@ _g = '\n'.join(l for l in mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8').sp
 _P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 
 db, ct = fresh_db()
-_src = ('shape Req\n    q as text\nshape: done\n'
-        'shape Note\n    body as text\n    who as text\nshape: done\n'
-        'connect db as sqlite from env.DATABASE_URL\n'
-        'listen for\n    new sh.Req at /n\n'
-        '        retrieve n from db.notes\n            match who to "Ada"\n'
-        '            on.failure\n                give back [404] "none"\n'
-        '        retrieve: done\n'
-        '        give back [200] n.body\n    new: done\nlisten: done\n')
+_src = (('shape Req\n'
+         '    q as text\n'
+         'shape: done\n'
+         'shape Note\n'
+         '    body as text\n'
+         '    who as text\n'
+         'shape: done\n'
+         'connect db as sqlite from env.DATABASE_URL\n'
+         'listen for sh.Req at /n\n'
+         '    retrieve n from db.notes\n'
+         '        match who to "Ada"\n'
+         '        on.failure\n'
+         '            give back [404] "none"\n'
+         '    retrieve: done\n'
+         '    give back [200] n.body\n'
+         'listen: done\n'
+         ''))
 _prev = os.environ.get('DATABASE_URL')
 os.environ['DATABASE_URL'] = db
 try:
@@ -227,7 +254,7 @@ try:
 finally:
     if _prev is not None:
         os.environ['DATABASE_URL'] = _prev
-check("a served handler does not receive ciphertext", "enc:v1:" not in body, body[:200])
+check("a served handler does not receive ciphertext", "enc:v" not in body, body[:200])
 
 shutil.rmtree(TMP, ignore_errors=True)
 if _failures:

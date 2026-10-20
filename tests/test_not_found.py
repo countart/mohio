@@ -55,10 +55,14 @@ def marks(out):
     return {m for m in ('MARK_FAIL', 'MARK_SUCCESS', 'MARK_EMPTY', 'MARK_RESULTS') if m in out}
 
 
-print("=== 1. genuine failure (no db connection) -> on.failure ===")
-m = marks(run_mho('find carrying in db.items\n    match location to "inventory"\n' + TAIL))
-check("on.failure fires", 'MARK_FAIL' in m, str(m))
-check("success branch does NOT fire", 'MARK_SUCCESS' not in m, str(m))
+print("=== 1. a forgotten `connect db` is REFUSED at check, not silently routed to on.failure ===")
+# A `db.X` with no `connect db` used to reach the runtime `no_db_connection` and get SWALLOWED by
+# on.failure, so a forgotten connection looked like an operational failure. It is now refused at
+# check (the connection sibling), so the mistake is loud and never masquerades as a runtime break.
+# The genuine on.failure path (a real DB error) is proven by case 2 below, a missing table.
+out1 = run_mho('find carrying in db.items\n    match location to "inventory"\n' + TAIL)
+check("db.X with no `connect db` refuses loudly (never opened), not swallowed by on.failure",
+      'never opened' in out1 and 'MARK_FAIL' not in out1, out1[-200:])
 
 print("\n=== 2. MISSING TABLE -> on.failure (NOT empty-success) ===")
 m = marks(run_mho('connect db as sqlite from env.DATABASE_URL\n'

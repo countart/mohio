@@ -17,7 +17,7 @@ A loop repeats a piece of work. Mohio has four loop shapes, each named for the t
 
 ### 1. `repeat N times` — a fixed number of times
 
-```
+```mohio
 repeat 3 times
     show "hello"
 repeat: done
@@ -27,10 +27,10 @@ Prints `hello` three times. The count can be any number or expression.
 
 ### 2. `while <condition>` — for as long as something is true
 
-```
-n = 0
-while n < 3
-    n = (n + 1)
+```mohio
+n 0
+while n is less than 3
+    n (n + 1)
 while: done
 show n          // 3
 ```
@@ -39,7 +39,7 @@ Runs while `n < 3`; ends the moment that turns false.
 
 ### 3. `each item in list` — once for every item
 
-```
+```mohio
 names as list "Aria", "Bo", "Cy"
 each name in names
     show name
@@ -52,11 +52,11 @@ The loop variable (`name`) holds one item per pass.
 
 Use it when nothing external decides the count — a game loop, reading until input ends, polling until a signal. It runs until a `stop` inside it fires.
 
-```
-i = 0
+```mohio
+i 0
 loop
-    i = (i + 1)
-    stop when i > 4
+    i (i + 1)
+    stop when i is more than 4
 loop: done
 show i          // 5
 ```
@@ -80,11 +80,11 @@ repeat: done            // runs one pass, then stops
 
 **`stop when <condition>`** — break only when the condition is true. This is how most real loops end:
 
-```
-n = 0
+```mohio
+n 0
 repeat 100 times
-    n = (n + 1)
-    stop when n > 2
+    n (n + 1)
+    stop when n is more than 2
 repeat: done
 show n                  // 3
 ```
@@ -93,7 +93,7 @@ show n                  // 3
 
 **`stop <name>`** — in nested loops, break a specific *named* loop from inside an inner one. Only `loop` can be named:
 
-```
+```mohio
 rows as list "a", "b", "c"
 loop outer
     each row in rows
@@ -104,13 +104,13 @@ loop: done
 
 **`stop <name> when <condition>`** — both at once: break the named loop, but only when the condition holds:
 
-```
-total = 0
+```mohio
+total 0
 nums as list 1, 2, 3
 loop outer
     each x in nums
-        total = (total + x)
-        stop outer when total > 5
+        total (total + x)
+        stop outer when total is more than 5
     each: done
 loop: done
 show total              // 6
@@ -131,7 +131,7 @@ Every counting loop is protected against running forever. If a loop spins past a
 
 This is what makes an open-ended `loop` safe to write: the worst case is a clear error pointing you at the missing `stop`, never a hung server.
 
-```
+```mohio
 loop
     show "working"
 loop: done
@@ -145,20 +145,20 @@ loop: done
 
 The everyday loop job: build up a total, count, or string. Set a variable **before** the loop, update it **inside**.
 
-```
-total = 0
+```mohio
+total 0
 nums as list 10, 20, 30
 each n in nums
-    total = (total + n)
+    total (total + n)
 each: done
 show total          // 60
 ```
 
 ### Two rules that make accumulators work
 
-**Math needs parentheses.** Write `total = (total + n)`, not `total = total + n`.
+**Math needs parentheses.** Write `total (total + n)`, wrapping the calculation in `( )`; `total total + n` without them is not valid.
 
-**Use `=`, not `hold`, for anything you'll change.** `hold` freezes a value until you `release` it — right for something you want guarded, wrong for an accumulator. `lock` is the one that can never change again. A plain assignment (`total = 0`) creates a value you can update.
+**Use a plain variable, not `hold`, for anything you'll change.** A plain variable is named bare and restated to change it (`total 0`, then `total (total + n)`), which is exactly what an accumulator needs. `hold` freezes a value until you `release` it, right for something you want guarded, wrong for an accumulator (verified: `hold x 0` then `x (x + 1)` fails at run, because a held value cannot be restated). `lock` is the one that can never change again. (`=` is optional sugar, `total = 0` reads the same as `total 0`; the bare form is what Mohio teaches.)
 
 ### Variables you change in a loop stick around
 
@@ -174,12 +174,12 @@ An assignment inside a loop updates the variable in the surrounding code — tha
 
 `skip` jumps to the next pass without finishing the current one — handy for ignoring items you don't care about. Like `stop`, it's most useful with a condition:
 
-```
-total = 0
+```mohio
+total 0
 nums as list 1, 2, 3, 4
 each x in nums
-    skip when x < 3
-    total = (total + x)
+    skip when x is less than 3
+    total (total + x)
 each: done
 show total          // 7 — 1 and 2 were skipped, 3 + 4 added
 ```
@@ -203,6 +203,6 @@ show total          // 7 — 1 and 2 were skipped, 3 + 4 added
 | Break a named loop on a condition | `stop outer when <condition>` |
 | Skip the rest of the current pass | `skip` |
 | Skip a pass when a condition is true | `skip when <condition>` |
-| Build up a total/count/text | `hold x 0` before the loop, `x = (x + …)` inside |
+| Build up a total/count/text | `x 0` before the loop, `x (x + …)` inside (a plain variable, not `hold`) |
 | A value that never changes | `lock name = value` |
-| A value you'll update | `name = value` |
+| A value you'll update | `name value` |

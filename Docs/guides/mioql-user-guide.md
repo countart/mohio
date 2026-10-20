@@ -7,7 +7,7 @@ MioQL is how Mohio talks to your database. It is four words: `find`, `check`,
 You declare the connection once at the top of the file, and every query uses it.
 
 ```
-connect db as sqlite from env.DATABASE_URL
+connect db from env.DATABASE_URL
 ```
 
 After that, `db.<table>` is how you name a table: `db.products`, `db.users`,
@@ -20,7 +20,7 @@ After that, `db.<table>` is how you name a table: `db.products`, `db.users`,
 `find` returns a list. You name the list, say which table, and add any filters.
 The block closes with `find: done`.
 
-```
+```mohio
 find items in db.products
     match category to "widgets"
 find: done
@@ -39,7 +39,7 @@ items.position.2   // the 2nd row (1-based)
 
 A bare `find` with no filter returns the whole table:
 
-```
+```mohio
 find everyone in db.users
 find: done
 ```
@@ -48,8 +48,9 @@ find: done
 
 `where` takes one condition. The field comes first, then the test:
 
-```
-find adults in db.members where age is above 21
+```mohio
+find adults in db.members
+    where age is above 21
 find: done
 ```
 
@@ -64,6 +65,7 @@ The conditions you can write:
 - `where name starts "A"`
 - `where notes is empty`
 - `where notes is not empty`
+- `where notes not.empty` (the dotted mirror of `is.empty`, same meaning as `is not empty`)
 
 Quote text values. A bare word is read as a reference, so `where status is active`
 (no quotes) looks for a variable named `active` and tells you to quote it if there
@@ -74,7 +76,7 @@ is none. That is on purpose: it fails loud instead of matching nothing.
 `match` is the equality filter, one `field to value` pair per line. Use it when
 you are matching exact values:
 
-```
+```mohio
 find widgets in db.products
     match category to "widgets"
     match in_stock to "yes"
@@ -83,11 +85,18 @@ find: done
 
 Multiple `match` lines are ANDed together (all must hold).
 
+A `where` or `match` compares a value against a column of a declared kind, and the value must be of the
+same kind. A value of a different kind refuses at check rather than silently finding nothing: `match amount
+to true` against a money column, or a text literal against a uuid column, is refused and named, not answered
+with zero rows. An empty value refuses for every column kind, and the refusal names `is empty` as the way
+to ask whether a column has no value. An in-list is judged item by item. Kept as before: numeric text
+against a number column, and quoted date text against a date column.
+
 ### Grouping and paging
 
 Group with `by`, and say what each group comes back as with a `summarize` block:
 
-```
+```mohio
 find totals by status in db.orders
     summarize
         total amount.sum
@@ -104,7 +113,7 @@ total: 5, howmany: 1}]`.
 rows belong to a `calculate` block instead: `running_sum`, `moving_average by N`, `rank within
 <field>`, `std_deviation`, `variance`, `percentile N`.
 
-```
+```mohio
 find rows in db.orders
     order.up by id
     calculate
@@ -150,7 +159,7 @@ its own keyword, and each closes with `check: done`.
 
 ### check exists — is there a match?
 
-```
+```mohio
 check exists found in db.users
     match email to "taken@x.com"
     when empty
@@ -174,7 +183,7 @@ authorization gate written this way never denied.
 
 Bind the number with `as`:
 
-```
+```mohio
 check count as total in db.users
     on.success
         show total
@@ -189,7 +198,7 @@ The answer branches on `when empty` (available) and `otherwise` (taken), the sam
 mechanism as `check <name> / when empty / otherwise` and the same one `check exists`
 uses. `on.success` / `on.failure` are refused here, for the reason given above.
 
-```
+```mohio
 check unique in db.users
     match email to "new@x.com"
     when empty
@@ -211,26 +220,35 @@ write the keyword.
 `retrieve` returns a single record. Name it, say the table with `from`, and match
 on `field to value`. It closes with `retrieve: done`.
 
-```
-retrieve member from db.members where email to "amy@x.com"
-    on.success
-        show member.name
+```mohio
+retrieve member from db.members match email to "amy@x.com"
     on.failure
-        show "not found"
+        show "the member store is unavailable"
 retrieve: done
+check member
+    when member is empty
+        show "not found"
+    otherwise
+        show member.name
+check: done
 ```
 
-There is a short one-liner for the simple case, with `to` pairs and no closer:
+A no-match is a successful empty result, not a failure, so test the not-found case with
+`when member is empty`, or with its dotted mirror `when member not.found` (the lookup came back
+empty). `on.failure` fires only when the read itself ERRORED, such as the database
+being unreachable, and never for a row that simply is not there. `retrieve` always closes with
+`retrieve: done`; there is no closerless one-liner form.
 
-```
-retrieve member from db.members where email to "amy@x.com"
-```
+These dotted operators (`not.empty`, `not.found`, the mirror of `is.empty`) work wherever the
+operator they mirror works, and they always take a subject first: `member not.found`, never a bare
+`not.found`. A test written before its subject (`when not.found`) refuses at check, naming the fix,
+because it has nothing to test and would fail at run.
 
 ---
 
 ## save — write a row
 
-```
+```mohio
 save to db.products
     name "Alpha"
     category "widgets"
@@ -241,7 +259,7 @@ save: done
 
 ## update: change an existing row
 
-```
+```mohio
 update db.products
     category "gadgets"
     match name to "Alpha"
@@ -256,7 +274,7 @@ all before the `match` line.
 
 ## remove: delete a row
 
-```
+```mohio
 remove from db.products
     match name to "Alpha"
 remove: done
@@ -272,7 +290,7 @@ mean to delete several at once.
 
 Any block can be wrapped in `try` to react to something going wrong inside it:
 
-```
+```mohio
 try
     save to db.users
         name "Bo"
@@ -302,6 +320,12 @@ A loop of `save` writes each row as it goes, so if something fails partway the r
 before it stay written. That is usually what you want for independent records, and it is the
 wrong answer for a batch that only makes sense complete.
 
+**Inside a handler you often do not need this.** A handler that makes more than one write is already
+all-or-nothing: it commits on a 2xx response and rolls back on a refusal or an exception (see the
+handlers chapter, `Docs/manual/mohio-manual-part8-ch29-listening-for-requests.md`). Reach for an
+explicit `transaction` when you want to control the boundary yourself, for a loop or batch like the one
+below, or for writes outside a handler such as a script or a job.
+
 Wrap the loop in `transaction` and the whole block lands or none of it does:
 
 ```mohio
@@ -309,7 +333,7 @@ shape Order
     ref as text
     amount as int
 shape: done
-connect db as sqlite from env.DATABASE_URL
+connect db from env.DATABASE_URL
 incoming as list "A-1", "A-2", "A-3"
 transaction
     repeat each ref in incoming
@@ -343,16 +367,14 @@ is the small-batch answer.
 All of these work directly inside a `request for` handler. Find a list, then
 respond with it:
 
-```
-connect db as sqlite from env.DATABASE_URL
-listen for
-    request for sh.Catalog at /catalog
-        find items in db.products
-            match category to "widgets"
-        find: done
-        give back ok items.count
-    request: done
-listen: done
+```mohio
+connect db from env.DATABASE_URL
+request for sh.Catalog at /catalog
+    find items in db.products
+        match category to "widgets"
+    find: done
+    give back ok items.count
+request: done
 ```
 
 `give back ok items` returns the rows. `give back ok items.count` returns the

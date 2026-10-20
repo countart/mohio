@@ -19,33 +19,12 @@ python --version
 
 ---
 
-## Install in 3 Steps
+## Install
 
-**Step 1 -- Clone the repo**
-```
-git clone https://github.com/countart/mohio
-cd mohio
-```
+Install Mohio and get the `mio` command with **`../../start-here/QUICKSTART.md`**, the one canonical install
+walkthrough (kept in one place so the steps cannot drift). Once `mio` runs, come back here for serving.
 
-**Step 2 -- Install it**
-```
-pip install -e .
-```
-This installs Mohio's dependencies AND the `mio` command itself. After this, `mio` works
-directly, from any folder, the same on Mac, Windows, and Linux -- no `python` prefix needed.
-
-**Step 3 -- Warm up the compiler** (first run only, takes a few seconds)
-```
-mio warmup
-```
-You will see a message like:
-```
-[warmup] Go grab a coffee -- back in about 20 seconds
-[warmup] Grammar compiled and cached.
-[warmup] Cold-start delay eliminated.
-```
-
-**Run a real demo:**
+**Run a real demo** to confirm serving works:
 ```
 mio serve tests/support_escalation_demo.mho
 ```
@@ -75,11 +54,9 @@ shape Greeting
     name as text
 shape: done
 
-listen for
-    request for sh.Greeting at /
-        give back [200] "Hello from Mohio!"
-    request: done
-listen: done
+request for sh.Greeting at /
+    give back [200] "Hello from Mohio!"
+request: done
 ```
 
 ---
@@ -107,15 +84,18 @@ mio check --all
 Mohio does not read a `.env` file on its own -- set the variable directly, in your shell,
 before running:
 
+For SQLite, `DATABASE_URL` is a PLAIN FILE PATH (or `:memory:`), not a `sqlite:///...` URL -- a URL form is
+read as a filename literally and fails at runtime with "unable to open database file".
+
 Windows (PowerShell):
 ```
-$env:DATABASE_URL="sqlite:///myapp.db"
+$env:DATABASE_URL="myapp.db"
 $env:ANTHROPIC_API_KEY="your-key-here"
 ```
 
 Mac or Linux:
 ```
-export DATABASE_URL=sqlite:///myapp.db
+export DATABASE_URL=myapp.db
 export ANTHROPIC_API_KEY=your-key-here
 ```
 
@@ -163,7 +143,7 @@ mio serve app.mho --port 8081
 ```
 
 **App starts but browser shows nothing**
-Make sure your .mho file has a `listen for` block.
+Make sure your .mho file has a request handler (a `listen for sh.X` or `request for sh.X` block).
 Check `http://localhost:8080/mio/health` -- if it returns a running status
 (JSON like `{"status":"running", ...}`) the server is up and the issue is in your routes.
 

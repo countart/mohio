@@ -28,6 +28,7 @@ European packs set SVO (or omit it) and Layer 3 does nothing -- the "button"
 is off. A pack like Hindi sets SOV and ships per-construct role orders, and the
 button is on. This is the push-of-a-button switch: one header line flips Layer 3
 from no-op to active for that pack, data-driven exactly like Layer 2.
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 
 BOUNDED-NATURAL, NOT FREE ORDER (v1)
 ------------------------------------

@@ -19,10 +19,8 @@ shape Ping
     name as text required
 shape: done
 
-listen for
-    new sh.Ping at /ping
-        give back [200] "pong"
-    new: done
+listen for sh.Ping at /ping
+    give back [200] "pong"
 listen: done
 ```
 

@@ -61,6 +61,30 @@ addition drifts away from the value it started as. A value that genuinely cannot
 is refused rather than silently rounded into approximate arithmetic -- money either computes
 exactly or the program is told why not.
 
+Because it is exact, two money values that should be equal ARE equal, so you can branch on it
+directly:
+
+```mohio
+a as USD
+a 0.10
+b as USD
+b 0.20
+total (a + b)
+expected as USD
+expected 0.30
+check total
+    when total is expected
+        show "exact"
+    otherwise
+        show "drifted"
+check: done
+```
+```
+exact
+```
+
+In floating point that same comparison would take the "drifted" branch.
+
 ### Declaration and the currency set
 
 Declare a currency-typed value with `<name> as <CODE>`, then assign it the ordinary way:
@@ -95,8 +119,19 @@ chapter uses once storage is involved.
 | BRL | `R$` | 2 | `.` | `,` | before |
 | ZAR | `R` | 2 | (space) | `.` | before |
 | KRW | `₩` | **0** | `,` | `.` | before |
+| BHD | `BD ` | **3** | `,` | `.` | before |
+| KWD | `KD ` | **3** | `,` | `.` | before |
+| OMR | `OMR ` | **3** | `,` | `.` | before |
+| JOD | `JD ` | **3** | `,` | `.` | before |
+| TND | `DT ` | **3** | `,` | `.` | before |
+| IQD | `IQD ` | **3** | `,` | `.` | before |
+| LYD | `LD ` | **3** | `,` | `.` | before |
 
-Eighteen currencies, verified together, the same amount (`1234.5`) through each one:
+Twenty-five currencies. JPY and KRW carry zero decimal places; the seven dinars at the bottom
+(BHD, KWD, OMR, JOD, TND, IQD, LYD) carry three, because they divide into 1000, not 100; every other
+currency carries two. The worked example below runs the same amount (`1234.5`) through each of the
+eighteen two-and-zero-place currencies; the three-decimal dinars are shown on their own terms just
+below it.
 
 ```mohio
 shape Prices
@@ -185,7 +220,97 @@ JPY and KRW round to whole units, no decimal places -- `1234.5` rounds up to `1,
 same rounding every currency uses at its own precision. EUR and BRL swap the thousands and decimal
 separators from USD's convention; CHF uses an apostrophe for thousands; SEK/NOK put the symbol
 after the amount with a space before it. Each currency formats correctly on its own terms, not
-forced through one Western convention.
+forced through one Western convention. INR is grouped in threes here (`1,234.50`), not the
+Indian lakh/crore grouping; either way the stored amount is exact, only the display grouping
+differs.
+
+### The three-decimal dinars
+
+The seven dinar currencies divide into 1000, so they carry three decimal places, not two. An amount
+at three places is exact; a fourth place rounds away:
+
+```mohio
+a as BHD
+a 0.001
+show a
+b as BHD
+b 1.2345
+show b
+c as BHD
+c 1234.5
+show c
+```
+```
+BD 0.001
+BD 1.235
+BD 1,234.500
+```
+
+`0.001` is exact at three places, `1.2345` rounds half-up to `BD 1.235`, and `1234.5` formats as
+`BD 1,234.500` with the symbol, the thousands separator and all three places. The same holds for
+KWD, OMR, JOD, TND, IQD and LYD.
+
+### Over-precision, and `as decimal` versus a currency type
+
+A currency-typed value holds exactly its currency's number of decimal places, and a value written with
+more precision is quantized to that many places, rounded half-up. When an over-precise LITERAL is
+written directly, Mohio warns at run so the loss on every write does not go unseen (the assignment
+path was made to warn in build Batch 26, matching the create-field path that already did):
+
+```mohio
+price as USD
+price 1.005
+show price
+```
+```
+[mohio.money] WARNING: Line 2: USD holds 2 decimal places, so 1.005 is stored as $1.01 -- the extra precision is dropped, silently, on every write. Write the amount at USD's precision so the value you see is the value you keep:
+    price 1.01        // stored as $1.01
+(A warning now; under a regulated sector profile this becomes a refusal.)
+$1.01
+```
+
+`1.005` becomes `$1.01`, `0.0001` becomes `$0.00`, `2.675` becomes `$2.68`, half-up at two places, and
+the warning shows the value AS STORED so you can see exactly what you keep. It fires wherever an
+over-precise literal is written directly, a typed-variable assignment and a create field alike. Two
+cases stay SILENT on purpose: a correctly-scaled literal (`0.500` in a BHD field), and a COMPUTED value
+that happens to round (only a literal you wrote warns, not the result of a division). As the message
+says, under a regulated sector profile this is meant to become a refusal rather than a warning.
+
+**Money is a currency type, not plain `as decimal`.** A value declared `as decimal` keeps whatever
+precision you give it and applies no rounding and no currency:
+
+```mohio
+amount as decimal
+amount 1.005
+show amount
+```
+```
+1.005
+```
+
+`1.005` stays `1.005`. Plain decimal is right for a measurement or a rate, where the exact figure is
+what you want; it is the wrong tool for money, because it will not hold the currency's places, will
+not round half-up, and does not carry a currency, so cross-currency math is not caught. Declare money
+with a currency type (`amount as USD`) and let the type carry the precision, the rounding and the
+currency, rather than reaching for plain decimal and writing your own precision check.
+
+**Money is a currency type, not plain `as decimal`.** A value declared `as decimal` keeps whatever
+precision you give it and applies no rounding and no currency:
+
+```mohio
+amount as decimal
+amount 1.005
+show amount
+```
+```
+1.005
+```
+
+`1.005` stays `1.005`. Plain decimal is right for a measurement or a rate, where the exact figure is
+what you want; it is the wrong tool for money, because it will not hold the currency's places, will
+not round half-up, and does not carry a currency, so cross-currency math is not caught. Declare money
+with a currency type (`amount as USD`) and let the type carry the precision, the rounding and the
+currency, rather than reaching for plain decimal and writing your own precision check.
 
 ### Safe math
 
@@ -251,6 +376,17 @@ Response  500  currency_mismatch: Cannot do math across currencies (USD + EUR). 
 the other first -- there is no fixed rate between them.
 ```
 
+### Money against another kind
+
+Money compares and combines only with money of the same currency, or with a plain number where the rules
+above apply. Money against a value of any other kind refuses rather than coercing it. `when amount is true`
+does not read `true` as a number; `when amount is more than true` does not coerce the boolean and answer
+yes; `when amount is ""` and `match amount to true` do not quietly compare or find nothing. A true-or-false,
+a written empty text, null, a time word (`today`, `now`), a list, and a name or column declared boolean,
+date, datetime, uuid, list, text or email all refuse against money, on `when is`, `is more than`,
+`is less than`, the paren forms, `where is`, `where is more than`, `where between` and `match`. Asking
+whether an amount has no value is `is empty`, which is defined and is not a cross-kind comparison.
+
 ### Storage and read-back
 
 Money written to a database is stored as its exact decimal text -- `0.10`, not the float `0.1` --
@@ -258,7 +394,7 @@ and reads back both as that exact amount and with its currency restored, because
 shape carries the currency, not the column.
 
 ```mohio
-connect db as sqlite from env.DATABASE_URL
+connect db from env.DATABASE_URL
 
 shape Store
     prices as table
@@ -301,11 +437,13 @@ on every engine" from this chapter; repeat exactly the two claims above, with th
 
 ### Boundaries -- what money does not do, stated so this section stays trustworthy
 
-- **Currency conversion is a separate, paid service, not part of the free type.** Converting USD
-  to EUR needs a live exchange rate from somewhere, and that rate needs to be sourced and audited
-  the way any other external fact a compliance-relevant decision depends on does. The type you have
-  today holds an amount in ONE currency exactly; it does not convert between currencies. That is
-  coming as its own capability, not silently bundled into `+`.
+- **Converting between currencies: the conversion is free, the live rate feed is the paid part.**
+  Converting USD to EUR needs an exchange rate, and a rate that changes by the second has to be
+  sourced and audited like any other external fact a compliance-relevant decision depends on. Ron's
+  ruling (`T1-PAYGATE-PRINCIPLE`): the governed conversion operation is FREE, the language primitive;
+  what is paid is Mohio operating a LIVE RATE FEED for you. The type you have today holds an amount in
+  ONE currency exactly and does not convert yet; conversion is coming as its own capability, never
+  silently bundled into `+`. Adding two currencies without a rate stays refused.
 - **`%` on money drops the currency.** `%` computes a remainder (modulo), not "N percent of," and
   it is outside the money-math ruling above -- verified: `price % 8` on a `USD` value returns a
   bare number, not money. Do the percentage arithmetic on the plain number and re-tag the result as
@@ -343,6 +481,37 @@ binding.** A flat shape referenced only as `sh.X` on a route does not, on its ow
 path which table it governs, so a direct `save`/`update` against that kind of shape still does not
 fill in defaults -- documented in the Shapes chapter. The two forms look similar and answer a
 different question; which one you have determines whether this section's guarantee applies.
+
+### Rendering the bare number: `no.symbol`
+
+Sometimes you want the number without the currency symbol: a table column that a front end will
+align, or a value a locale service will re-render for the reader in its own convention. Declare the
+field `no.symbol`:
+
+```mohio
+shape Prices
+    catalog as table
+        price as USD no.symbol
+shape: done
+```
+
+A `no.symbol` money field renders the BARE number and keeps everything true about the money: the
+currency CODE and the exact SCALE stay on the value, only the symbol is dropped. Verified by running:
+a `USD` field renders `8.50` where the ordinary form renders `$8.50`, and the scale is the currency's,
+so a `BHD` field keeps its three places. It changes only the RENDER path. JSON and `give back` are
+unchanged, because a currency already serializes to its plain number there regardless of this
+modifier. (One current wrinkle: the CLI `show` echo still prints the symbol, so read the formatting on
+the rendered page, not the run log.)
+
+**Why this is one word and not a family of locale options.** The boundary Ron ruled is that the
+compiler owns what is true about the MONEY, and a service owns what is true about the READER. The code
+and the scale are properties of the money: `8.500` BHD is three-place whoever looks at it. How that
+same amount appears, `$8.50`, `8,50 kr`, or a bare `8.50` for a reader whose locale is decided
+elsewhere, is a property of the READER, not the currency, and the same amount renders three ways
+depending on who is looking. So locale-aware rendering belongs to Mio Currency when it exists, not to
+the compiler, and `no.symbol` is the one thing the compiler can offer today: hand back the
+true number and its code, and let the locale layer format it later. A pile of locale flags on the
+compiler would be the compiler claiming to own something it does not.
 
 ---
 

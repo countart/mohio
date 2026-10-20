@@ -53,6 +53,7 @@ from __future__ import annotations
 # ================================================================================
 
 from dataclasses import dataclass, field
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 from typing import Optional
 from lark import Token, Tree
 import re, sys
@@ -199,11 +200,11 @@ class CompileContext:
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
 
-    def error(self, msg, line, hint=""):
-        self.errors.append(CompileError(msg, line, hint))
+    def error(self, msg, line, hint="", code=""):
+        self.errors.append(CompileError(msg, line, hint, code))
 
-    def warn(self, msg, line, hint=""):
-        self.warnings.append(CompileWarning(msg, line, hint))
+    def warn(self, msg, line, hint="", code=""):
+        self.warnings.append(CompileWarning(msg, line, hint, code))
 
     def push_block(self, name, line):
         self.block_stack.append((name, line))
@@ -227,6 +228,14 @@ class CompileContext:
     def crypto(self):
         return self.sector == "crypto" or self.sector_base == "crypto"
 
+    @property
+    def regulated(self):
+        # T1-PROFILE-RULES LIMITATION: a sector PROFILE cannot yet carry rules like "an empty request
+        # contract is an error", so this keys the fail-closed behaviour to a set of regulated sector
+        # NAMES for now, exactly as the financial multi-write warning keys on `financial`. When
+        # profiles can carry rules, this moves into the profile and stops being name-keyed.
+        return self.sector_base in ("financial", "healthcare", "government", "legal", "insurance")
+
 
 def get_line(node):
     if isinstance(node, Token):
@@ -249,6 +258,77 @@ def first_token(tree, *types):
             if r:
                 return r
     return None
+
+
+# A field or identifier NAME may be spelled with a type word (email, date, url, list, image, audio,
+# video, file, time), which the lexer tags TYPE_NAME, not NAME -- TYPE_NAME beats NAME. The grammar
+# accepts (NAME | TYPE_NAME) in every name slot (shape_field mohio.lark:787, save_field:2051,
+# match_pair:3228, and every decl head), so a NAME-only lookup silently DROPS such a name. That was
+# T1-SHAPE-EMAIL-FIELD-DROPPED: `_shape_field_names` read a field name with first_token(NAME), missed
+# `email`, and the shape's contract lost the field with no error. This is the one place that rule
+# lives, mirroring mohio_transformer_ast._FIELD_NAME_TOKENS / _field_name_token; every extractor of a
+# field or identifier name goes through it so a type-word name is never dropped again.
+_NAME_TOKENS = ('NAME', 'TYPE_NAME')
+
+
+def field_name_token(tree):
+    """The token naming a field or identifier, whether it tokenized as NAME or as a type word."""
+    return first_token(tree, *_NAME_TOKENS)
+
+_SECRET_PREFIX = re.compile(
+    r'^(?:(?:sk|pk|rk)_(?:live|test)_|ghp_|gho_|ghs_|ghu_|github_pat_|xox[baprs]-|'
+    r'AKIA|ASIA|AIza|ya29\.|glpat-)')
+
+# A CREDENTIAL CONTEXT on the same line: a value being hashed (`... using bcrypt`) or assigned
+# where the surrounding words say "secret". In that context a 20+ char string is a credential even
+# when it reads as words -- a hardcoded PASSPHRASE-password (`correct-horse-battery-staple` fed to
+# bcrypt) is still a hardcoded credential, unlike a readable workflow STATE with no such context.
+_CRED_CONTEXT = re.compile(
+    r'(?:\bhash\b|hashed|_hash\b|\bbcrypt\b|\bscrypt\b|\bargon2\b|\bpbkdf2\b|'
+    r'\bpassword\b|\bpasswd\b|\bpassphrase\b|\bsecret\b|\btoken\b|'
+    r'\bapi[_-]?key\b|\bapikey\b|\bprivate[_-]?key\b|\bcredential\b)', re.IGNORECASE)
+
+
+def _looks_like_secret_literal(s):
+    """A 20+ char quoted literal that looks like a real credential, NOT a readable identifier.
+
+    A readable workflow state or HTML id -- `pending_human_approval`, `approved_to_schedule`,
+    `treasury-payment-row` -- decomposes into dictionary-ish words and carries no high-entropy run,
+    so it is NOT a credential and must not be flagged (Q7, 2026-09-20: the old `{20,}` shape punished
+    readable naming, which is backwards for this language). A real API key, token or hash has a
+    HIGH-ENTROPY RUN: a maximal letters-and-digits run (no `_`/`-`) of length >= 12 that mixes at
+    least one digit with letters -- the shape of a Stripe secret key (sk_live_ or sk_test_ followed
+    by a body of 24 or more letters and digits), an AWS access key id (AKIA followed by 16 capitals
+    and digits), a hex hash, a base62 token. Well-known key prefixes match outright.
+    """
+    if _SECRET_PREFIX.match(s):
+        return True
+    for run in re.findall(r'[A-Za-z0-9]{12,}', s):
+        if any(c.isdigit() for c in run) and any(c.isalpha() for c in run):
+            return True
+    return False
+
+
+def _strip_trailing_comment(line):
+    """Remove a trailing `//` comment from a single line, respecting string literals so a `//` inside
+    a string (a URL) is not mistaken for a comment start. The raw-source keyword scans in the
+    validation pass use this so a reserved word or a retired form written as PROSE in a comment
+    (`show "hi" // invoke this later`) is not refused. Strings are kept, only the comment is cut."""
+    in_str = None
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if in_str is not None:
+            if c == in_str:
+                in_str = None
+        elif c in ('"', "'"):
+            in_str = c
+        elif c == '/' and i + 1 < n and line[i + 1] == '/':
+            return line[:i]
+        i += 1
+    return line
+
 
 def find_subtree(tree, name):
     if isinstance(tree, Tree):
@@ -399,6 +479,7 @@ class MohioValidator:
         self._walk(self.tree)
         self._check_duplicate_declarations()
         self._check_write_on_get()
+        self._check_prefix_predicate_in_check_when()
         self._check_unclosed()
         return self.ctx
 
@@ -443,8 +524,94 @@ class MohioValidator:
                               "repeat -- a browser, a link preview or a crawler may fetch it "
                               "more than once. The runtime already refuses this at the moment "
                               "the request arrives; this says it before you deploy. Move the "
-                              "write into a `new sh.X` handler, which answers a POST."))
+                              "write into a `listen for sh.X` handler, which answers a POST."))
                     break
+
+    # Condition rules that a check/when block reaches (via its `WHEN where_condition` /
+    # `WHEN condition` forks) which, when a developer writes the predicate BEFORE its subject --
+    # `when is even`, meaning `when x is even` -- swallow the `is` keyword as the subject
+    # identifier and misparse. Run-verified this way (Batch 32, the position sweep):
+    #   when is above N / is below N   -> cond_above/below(`is`)
+    #       checks clean, then FAILS LOUD at run reading `is` as a variable (500). Caught here.
+    # The `is even / is odd / is empty / is more/less than N` cases used to parse as `wc_is_name`
+    # (`is` read as a field), and were caught here too. That grammar alternative was DELETED (Ron,
+    # 2026-09-25, T1-WHERE-CONDITION-FORK-SPLIT): with no bareword allowed in the field position,
+    # `when is even` now fails at the GRAMMAR (a friendly parse-error hint names the subject-first
+    # form), never reaching this guard. So `wc_is_name` is dropped from the list below; the
+    # `cond_above`/`cond_below` cases still parse and are still caught here.
+    _WRONGORDER_COND_RULES = ('cond_above', 'cond_below')
+
+    # Predicate keywords that, when they LEAD a check/when condition with a tail after them, mean the
+    # predicate was written before its subject (`is not empty`, `starts with "x"`, `is even n`,
+    # `matches other n`). These parse into `cond_bool`, which reads the keyword as a boolean variable
+    # and 500s at run on the undefined name -- loud, but only at run, slipping past `mio check`. The
+    # guard below refuses them at check. A BARE predicate word alone (`when is`, `when starts`) is left
+    # unchanged: one word, no tail, not a wrong-order predicate. `not` is excluded on purpose --
+    # `when not active` is a real form. (Batch 40 item 4's coverage-table holes.)
+    _PREDICATE_HEADS = frozenset(('is', 'starts', 'ends', 'contains', 'matches'))
+
+    def _check_prefix_predicate_in_check_when(self):
+        for cb in self.tree.iter_subtrees():
+            if str(getattr(cb, 'data', '')) != 'check_block':
+                continue
+            subj = None
+            for c in cb.children:
+                if isinstance(c, Tree) and c.data == 'value_expr':
+                    subj = tree_to_str(c).strip()
+                    break
+            import re as _re
+            _src_lines = self.source.split("\n") if self.source else []
+            for cw in cb.children:
+                if not (isinstance(cw, Tree) and cw.data == 'check_when'):
+                    continue
+                # A subject-less or trailing-subject predicate -- `is not empty`, `starts with "x"`,
+                # `is even n`, `matches other n` -- FRAGMENTS the parse (the leading keyword becomes a
+                # `cond_bool` read as a bare variable and the tail lands in sibling nodes), so the AST
+                # text of the first condition is unreliable for these. The SOURCE line is not: a `when`
+                # whose condition LEADS with a predicate keyword and carries a tail is one of these.
+                # A bare predicate word (`when is`, `when starts`) has no tail and is left alone; a
+                # subject-first condition (`when n is even`) leads with the subject, not the keyword.
+                _ln = get_line(cw)
+                _srcline = (_src_lines[_ln - 1].strip()
+                            if _ln and 0 <= _ln - 1 < len(_src_lines) else "")
+                _m = _re.match(r'^when\s+(is|starts|ends|contains|matches)\b\s+\S', _srcline)
+                if _m:
+                    _head = _m.group(1)
+                    _cond_txt = _srcline[len("when"):].strip()
+                    _cond_txt = _re.split(r'\s*->\s*', _cond_txt)[0].strip()   # drop a cosmetic arrow
+                    _fixed = f"{subj} {_cond_txt}" if subj else f"<subject> {_cond_txt}"
+                    self.ctx.error(
+                        f"`{_cond_txt}` puts the predicate before its subject, so `check`/`when` "
+                        f"reads `{_head}` as the value to test and this branch never matches.",
+                        _ln,
+                        hint=(f"Name the subject first, the way a trailing `if` already requires:\n"
+                              f"        when {_fixed}\n"
+                              f"A condition reads subject-first everywhere in Mohio, in each half of "
+                              f"a compound one too; the subject-less order is not a second spelling."))
+                    continue
+                # The AST recursion still catches a wrong-order operand in the SECOND half of a
+                # COMPOUND condition -- `when x is above 5 and is below 10`, where `is below 10` nests
+                # inside `cond_and` and the source line leads with the real subject `x`, so the line
+                # check above does not fire.
+                cond = next((c for c in cw.children if isinstance(c, Tree)), None)
+                if cond is None:
+                    continue
+                bad = next((n for n in cond.iter_subtrees()
+                            if n.data in self._WRONGORDER_COND_RULES
+                            and field_name_token(n) is not None
+                            and str(field_name_token(n)) == 'is'), None)
+                if bad is None:
+                    continue
+                wrong = " ".join(tree_to_str(bad).split()).strip()   # "is above 5", "is below 10"
+                fixed = f"{subj} {wrong}" if subj else f"<subject> {wrong}"
+                self.ctx.error(
+                    f"`{wrong}` puts the predicate before its subject, so `check`/`when` "
+                    f"reads `is` as the value to test and this branch never matches.",
+                    get_line(cw),
+                    hint=(f"Name the subject first, the way a trailing `if` already requires:\n"
+                          f"        when {fixed}\n"
+                          f"A condition reads subject-first everywhere in Mohio, in each half of "
+                          f"a compound one too; the subject-less order is not a second spelling."))
 
     # Constructs the OPEN runtime declines to run. Each is refused at run time already; the
     # point here is to say so at check time, where the decision to deploy is made.
@@ -511,7 +678,7 @@ class MohioValidator:
             for node in self.tree.iter_subtrees():
                 if str(getattr(node, 'data', '')) != rule:
                     continue
-                tok = first_token(node, 'NAME')
+                tok = field_name_token(node)
                 if not tok:
                     continue                      # `journey` may be unnamed; nothing to collide
                 name = str(tok)
@@ -536,27 +703,37 @@ class MohioValidator:
         a cast of a value in an expression). Both already had context exemptions -- `in_languages`
         for one -- so this follows the pattern rather than inventing a mechanism.
 
-        Walks BACKWARDS to the nearest section or block boundary: inside the `data` section of a
-        `map` if `data` is the last section header seen and the `map` block has not closed. Walks
-        the real lines rather than guessing from a window, because a pipeline chain can sit many
-        lines below its header.
+        The answer for a line is decided by the nearest boundary ABOVE it: inside the `data`
+        section of a `map` if that boundary is the `map` opener and a `data` header sits between the
+        opener and the line; a closed map (`map: done`) or another section (`route`) above it means
+        outside. It reads the real lines rather than guessing from a window, because a pipeline
+        chain can sit many lines below its header.
+
+        COMPUTED ONCE PER FILE, in one forward pass. It used to walk backwards from every line it
+        was asked about, which is quadratic in the length of the file: measured on a 3,820-line app,
+        18.8 of a warm `mio check`'s 23 seconds were spent here. The forward pass carries the same
+        two facts the backward walk found (the nearest boundary, and whether a `data` header came
+        after it), so every answer is the same.
         """
-        idx = line_no - 1                       # self.lines is 0-based; line numbers are 1-based
-        seen_data = False
-        for j in range(idx - 1, -1, -1):
-            t = self.lines[j].strip()
-            if not t or t.startswith('//'):
-                continue
-            if t in ('map: done',) or t.startswith('map: done'):
-                return False                    # a closed map above us: we are outside it
-            if t == 'data' or t.startswith('data '):
-                seen_data = True
-                continue
-            if t == 'route' or t.startswith('route '):
-                return False                    # a different section of the same map
-            if t == 'map' or t.startswith('map '):
-                return seen_data                # reached the opener: inside data iff we saw it
-        return False
+        marks = getattr(self, '_map_data_marks', None)
+        if marks is None or len(marks) != len(self.lines) + 1:
+            marks = [False] * (len(self.lines) + 1)   # index = 1-based line number
+            boundary, seen_data = None, False
+            for n, raw in enumerate(self.lines, 1):
+                marks[n] = boundary == 'map' and seen_data   # decided by the lines ABOVE line n
+                t = raw.strip()
+                if not t or t.startswith('//'):
+                    continue
+                if t.startswith('map: done'):
+                    boundary, seen_data = 'closed', False     # a closed map: outside it
+                elif t == 'data' or t.startswith('data '):
+                    seen_data = True
+                elif t == 'route' or t.startswith('route '):
+                    boundary, seen_data = 'route', False      # a different section of the map
+                elif t == 'map' or t.startswith('map '):
+                    boundary, seen_data = 'map', False        # the opener: inside data once seen
+            self._map_data_marks = marks
+        return marks[line_no] if 0 < line_no < len(marks) else False
 
     def _scan_source(self):
         # THE BODY OF A render/show BLOCK IS MARKUP, NOT MOHIO, and the line-level warnings below
@@ -577,6 +754,15 @@ class MohioValidator:
             if _st == 'render' or _st == 'show' or re.match(r'^(?:render|show)\s+\w+$', _st):
                 _raw_depth += 1
             s = raw.strip()
+            # A render/show INTERIOR line is MARKUP, not Mohio code, so none of the code-level
+            # warnings below (retired keywords like `set`/`route`/`emit`, reserved words, curly
+            # braces, arrows) describe it. The opener and closer lines are still Mohio and are still
+            # checked -- the depth is tracked ABOVE this guard. FAC-15 sibling sweep: `set up your
+            # account` written on a render line was refused as the retired `set`; the two checks that
+            # already carried a `not _line_is_markup` guard (the `#`/CSS and curly-brace warnings)
+            # are now covered by this one guard for the whole loop.
+            if _line_is_markup:
+                continue
             # A `#` STARTING A LINE OF MARKUP IS CSS, NOT A MISTAKEN COMMENT. `_line_is_markup`
             # above already carved render/show bodies out of the retired-curly-brace warning for
             # exactly this reason, and this check was never given the same exemption, so
@@ -590,6 +776,12 @@ class MohioValidator:
                 continue
             if s.startswith("//"):
                 continue
+
+            # A trailing `//` comment is prose, not code. Cut it from `s` (strings preserved) so every
+            # keyword scan below reads only the code, not a reserved word or retired form a developer
+            # mentioned in a comment. The raw line stays in `raw` for the credential scan (a secret in
+            # a comment is still a secret) and the start-of-line structural checks. (Batch 18 item 3.)
+            s = _strip_trailing_comment(s)
 
             # Cost controller (compile-time, best effort): a plain 'while' with no visible exit
             # (stop / give back / halt) is likely an infinite loop. while.active is intentionally
@@ -635,7 +827,8 @@ class MohioValidator:
             # JWT, the detector fired on NONE of them, and warned only about the `sk_live_`
             # key beside them.
             for secret in re.findall(r'"([A-Za-z0-9_\-]{20,})"', raw):
-                if "env." not in raw and "secret." not in raw:
+                if ("env." not in raw and "secret." not in raw
+                        and (_looks_like_secret_literal(secret) or _CRED_CONTEXT.search(raw))):
                     self.ctx.warn("Possible hardcoded credential.", i,
                         hint=f"Value '{secret[:8]}...' looks like a key. Use env.X or secret.X.")
             # A URL with USERINFO is not a guess about shape -- a password written into a URL
@@ -742,10 +935,15 @@ class MohioValidator:
             if re.match(r'\s*##', raw):
                 self.ctx.warn("'##' comments are retired.", i,
                     hint="Use '//' for single-line comments or '/* */' for block comments.")
-            # or if
-            if re.search(r'\bor\s+if\b', s):
+            # or if -- in CODE only: `show "go left or if not, right"` is prose inside a string.
+            if re.search(r'\bor\s+if\b', re.sub(r'//.*$', '', re.sub(r'"(?:[^"\\]|\\.)*"', '""', s))):
                 self.ctx.warn("'or if' is retired.", i,
                     hint="Use 'check / when / otherwise'. mio fmt converts automatically.")
+            # The bare `listen for` wrapper (no subject) is RETIRED and now fails loud in the AST
+            # transform (mohio_transformer_ast.listen_block), which every path -- check, run, serve --
+            # runs, so a warning here would only duplicate that error. A `listen for` WITH a subject
+            # (`listen for sh.X`) or a client selector (`listen for #btn on click`) is a different,
+            # still-valid form and is untouched.
             # `check confidence above N` is CANONICAL. Locked Apr 3 (LDD v2.0), never
             # overturned. A warning used to sit here telling developers it was retired and
             # to drop the `check` prefix -- written by a compiler chat off a stale marker,
@@ -754,13 +952,21 @@ class MohioValidator:
             # { } outside templates, and outside markup. Inside a render/show body the braces
             # belong to CSS or to the page's own markup, and calling those retired Mohio syntax
             # is simply wrong.
-            if (not _line_is_markup) and re.search(r'\{[^{]', s) and not re.search(r'\{\{', s):
+            # TEXT INSIDE A STRING IS NOT SYNTAX. A quoted regex quantifier (`pattern "[0-9]{8}"`)
+            # is text the program carries, and warning on it as retired syntax was wrong; string
+            # contents (escaped quotes included) and a trailing `//` comment are removed first.
+            _s_nostr = re.sub(r'"(?:[^"\\]|\\.)*"', '""', s)
+            _s_nostr = re.sub(r'//.*$', '', _s_nostr)
+            if (not _line_is_markup) and re.search(r'\{[^{]', _s_nostr) and not re.search(r'\{\{', _s_nostr):
                 self.ctx.warn("Curly braces '{ }' are retired.", i,
                     hint="Use named fields or 'as list sh.[Shape]' for nested structures.")
-            # Phase 3 reserved -- only flag as KEYWORDS, not inside string literals
-            # Strip string literals before checking to avoid false positives
-            # e.g. "You remember the leaflet" should never trigger this
+            # Phase 3 reserved -- only flag as KEYWORDS, not inside string literals OR comments.
+            # Strip string literals first, then a `//` comment, so a reserved word written as prose
+            # ("// invoke this later") is not refused. Strings are stripped BEFORE the comment so a
+            # `//` inside a string (a URL) is not read as a comment start. (Batch 18 item 3: a
+            # developer was refused for a word in a comment; same class as the langmap clitic bleed.)
             _stripped = re.sub(r'"[^"]*"|\'[^\']*\'', '', s)
+            _stripped = re.sub(r'//.*$', '', _stripped)
             for word in ("invoke", "recall", "mioagent"):
                 if re.search(rf'\b{re.escape(word)}\b', _stripped):
                     self.ctx.error(f"\'{word}\' is Phase 3 reserved -- not yet available.", i,
@@ -793,8 +999,9 @@ class MohioValidator:
                     hint="Nothing needs loading first. A language map is named where it is "
                          "used (`EN -> fr using maps/en-fr.langmap`), and a service is "
                          "called by name (`servicename.actionname`).")
-            # set retired
-            if re.match(r'\s*set\s+\w', raw):
+            # set retired. The retired statement is `set <name> <value>`; a field or variable CALLED
+            # set (`set as int`, a tennis score) is an ordinary name (RULED by Ron 2026-10-09).
+            if re.match(r'\s*set\s+(?!(?:as|is|to|default)\b)[A-Za-z_]', raw):
                 # RETIRED, not warned. A warning is silent acceptance with extra steps: the
                 # code still runs, so the dead keyword survives in docs and comes back as canon.
                 self.ctx.error("`set` is retired.", i,
@@ -803,10 +1010,13 @@ class MohioValidator:
                          "permanent constant.")
             # route retired
             if re.match(r'\s*route\s+(GET|POST|PUT|DELETE|PATCH)\b', raw, re.I):
-                self.ctx.warn("'route' is retired. Use 'listen for'.", i)
+                self.ctx.warn("'route' is retired.", i,
+                    hint="Write a handler on its own: `request for sh.X at /path`, or `listen for sh.X at /path` for a write. Use `map route` for explicit routing.")
             # emit retired
             if re.match(r'\s*emit\b', s):
-                self.ctx.warn("'emit' is retired and reserved.", i)
+                self.ctx.warn("'emit' is retired and reserved.", i,
+                    hint="There is no replacement construct for it. Rename the variable, or "
+                         "remove the line if it was left over from an earlier draft.")
             # A type label on a hold/assignment (space form) is parsed but dropped --
             # it does not coerce. Casting is the expression form: hold x = value as.int
             if re.match(r'\s*(?:hold|set)\s+[\w.]+\s+as\s+\w', raw) and ' as.' not in raw:
@@ -956,7 +1166,7 @@ class MohioValidator:
         line = get_line(tree)
         # Check role_val children -- warn if bare NAME (no quotes)
         for child in find_all_subtrees(tree, 'role_val'):
-            tok = first_token(child, 'NAME')
+            tok = field_name_token(child)
             str_tok = first_token(child, 'STRING')
             if tok and not str_tok:
                 self.ctx.warn(f"Role value '{tok}' should be in quotes.", line,
@@ -980,34 +1190,62 @@ class MohioValidator:
             self.ctx.sector      = segments[0]   # base for .financial/.healthcare checks
             self.ctx.sector_base = segments[0]
             self.ctx.sector_full = full_name
-            self._check_sector_trust(full_name, getattr(tree, 'meta', None))
+            # AN UNRESOLVED SECTOR WARNS AND RUNS (OR-0, RULED by Ron 2026-10-12). 2cfaa31 made it
+            # refuse; that contradicted the ruling and is reversed here. The warning names the sector,
+            # says no sector rules are applied, and hints the nearest installed profile. A certified
+            # profile that is present but fails to verify still refuses below, unchanged.
+            from mohio_sector_loader import (find_sector_profile as _fsp,
+                                             sector_requires_license as _srl,
+                                             sector_not_found_message as _snfm)
+            _line = getattr(getattr(tree, 'meta', None), 'line', 0) or 0
+            if _fsp(full_name) is None and not _srl(full_name):
+                self.ctx.warn(_snfm(full_name), _line)
+            else:
+                self._check_sector_trust(full_name, getattr(tree, 'meta', None))
         for c in tree.children:
             self._walk(c)
 
-        # Load sector profile if available
+        # Load sector profile if available. A certified `.sector` that fails to verify FAILS CLOSED:
+        # surface a compile error naming the file and why, and never fall back to a same-named `.mho`.
         try:
-            from mohio_sector_loader import get_sector_profile
-            profile = get_sector_profile(self.ctx.sector_full or self.ctx.sector_base)
-            self.ctx.sector_profile = profile
+            from mohio_sector_loader import (get_sector_profile, SectorVerificationError,
+                                             SectorUnenforceableRuleError)
+            try:
+                profile = get_sector_profile(self.ctx.sector_full or self.ctx.sector_base)
+                self.ctx.sector_profile = profile
+                # A level of the declaration with no profile adds nothing (broadest first, RULED
+                # 2026-10-13); say so rather than let the declaration read as fully governed.
+                from mohio_sector_loader import missing_level_message as _mlm
+                _mline = getattr(getattr(tree, 'meta', None), 'line', 0) or 0
+                for _lvl, _slug in (getattr(profile, 'missing_levels', None) or []):
+                    self.ctx.warn(_mlm(self.ctx.sector_full or self.ctx.sector_base, _lvl, _slug), _mline)
+            except SectorVerificationError as _e:
+                line = getattr(getattr(tree, 'meta', None), 'line', 0) or 0
+                self.ctx.error(str(_e), line,
+                    hint="A certified profile is a .sector signed by Mohio. A free community profile is "
+                         "a .mho file. Refused rather than downgraded, so a certified profile is never "
+                         "silently replaced by an unverified one.")
+                self.ctx.sector_profile = None
+            except SectorUnenforceableRuleError as _e:
+                # Same shape as the verification failure above: a deliberate refusal, not a crash.
+                # A profile naming a rule this loader does not enforce (mfa/session/lockout/password)
+                # must refuse at CHECK time too, not only surface as a runtime surprise at `mio run`.
+                line = getattr(getattr(tree, 'meta', None), 'line', 0) or 0
+                self.ctx.error(str(_e), line,
+                    hint="Remove the unenforced rule lines from the sector profile, or drop the "
+                         "`security requirements` block. `require role` covers access control today.")
+                self.ctx.sector_profile = None
         except ImportError:
             self.ctx.sector_profile = None
 
     def _check_sector_trust(self, sector_name, meta):
         line = getattr(meta, 'line', 0) if meta else 0
-        # Certified-sector paygate -- financial/healthcare require an enterprise
-        # license in an enforcing deployment. Fail loud at compile, never silent.
-        try:
-            from mohio_sector_loader import sector_requires_license, sector_entitled
-            if sector_requires_license(sector_name) and not sector_entitled(sector_name):
-                self.ctx.error(
-                    f"sector: {sector_name} is a certified compliance sector and requires an enterprise license.",
-                    line,
-                    hint="Set MOHIO_LICENSE for an enterprise deployment, or use a free sector such as 'ecommerce'. Contact hello@mohio.io."
-                )
-                return
-        except ImportError:
-            pass
-        # Sector truth lives in the loader, not here. The profile's declared tier
+        # PAYGATE KEYS ON TIER, NOT NAME (Ron's Batch-14 ruling). A pioneer's own self-built profile
+        # is a `.mho` and must NEVER be refused for its name, so the old name-based refusal (a
+        # PAID_SECTORS name required a license) is gone. Authenticity of a certified `.sector` is
+        # enforced by signature in the loader (fail closed); ENTITLEMENT (is this customer licensed
+        # for certified profiles) is a BACKEND decision and is deliberately NOT built here.
+        # Sector truth lives in the loader, not here. The profile's real tier
         # drives the guidance warning, and the loader decides whether a base is known,
         # so a loaded profile (a demo or a licensed profile) is never misflagged.
         from mohio_sector_loader import sector_tier, is_known_sector_base, PAID_SECTORS
@@ -1067,7 +1305,7 @@ class MohioValidator:
 
 
     def _v_compliance_decl(self, tree):
-        t = first_token(tree, "NAME")
+        t = field_name_token(tree)
         if t:
             self.ctx.compliance.append(str(t).upper())
         for c in tree.children:
@@ -1091,7 +1329,7 @@ class MohioValidator:
         line = get_line(tree)
         if self.ctx.financial:
             for fv in find_all_subtrees(tree, "save_field"):
-                tok = first_token(fv, "NAME")
+                tok = field_name_token(fv)
                 if tok and str(tok).lower() in PCI_NEVER_STORE:
                     self.ctx.error(f"PCI violation -- '{tok}' cannot be stored (sector: financial).",
                         get_line(fv) or line,
@@ -1171,7 +1409,7 @@ class MohioValidator:
     # AI blocks
     def _v_ai_decide_block(self, tree):
         line = get_line(tree)
-        tok = first_token(tree, "NAME")
+        tok = field_name_token(tree)
         name = str(tok) if tok else "unknown"
         text = tree_to_str(tree)
 
@@ -1224,7 +1462,7 @@ class MohioValidator:
         _type_node = find_subtree(tree, 'type_name')
         _rt = tree_to_str(_type_node).strip() if _type_node is not None else ''
         if _rt:
-            from mohio_interpreter import AI_DECIDE_RETURN_TYPES, _ai_return_type_message
+            from mohio_runtime_vocab import AI_DECIDE_RETURN_TYPES, _ai_return_type_message
             if _rt.lower() not in AI_DECIDE_RETURN_TYPES:
                 _msg = _ai_return_type_message(_rt).split(chr(10))
                 self.ctx.error(_msg[0], line,
@@ -1263,13 +1501,16 @@ class MohioValidator:
                     hint="A fallback that runs nothing is not a fallback. Put at least one "
                          "statement inside it, indented under `not confident` -- what should "
                          "happen when the AI is not sure enough: route to a human, return a safe "
-                         "default, or log the uncertainty.")
+                         "default, or log the uncertainty.",
+                    code="ai_decide_empty_not_confident")
             else:
                 self.ctx.error(f"ai.decide '{name}' is missing a 'not confident' block.", line,
-                    hint=f"Every ai.decide must define what happens when confidence falls below threshold.\nAdd 'not confident' inside 'ai.decide {name}'.")
+                    hint=f"Every ai.decide must define what happens when confidence falls below threshold.\nAdd 'not confident' inside 'ai.decide {name}'.",
+                    code="ai_decide_no_not_confident")
         if has_audit and has_nc and not audit_first:
             self.ctx.error(f"ai.decide '{name}' -- ai.audit must appear before 'not confident'.", line,
-                hint="Move ai.audit above the 'not confident' block.")
+                hint="Move ai.audit above the 'not confident' block.",
+                code="ai_decide_audit_order")
         # A (2026-08-27): was a WARNING, so two of the three advertised compile-time AI
         # guarantees were not guarantees at all. Now an ERROR, consistent with ai.audit's
         # DESTINATION name, which was already a hard build error -- it made no sense to refuse
@@ -1277,7 +1518,8 @@ class MohioValidator:
         if not has_audit:
             self.ctx.error(f"ai.decide '{name}' has no 'ai.audit' declaration.", line,
                 hint="Add 'ai.audit to [log_name]' so this AI decision produces an immutable record.\n"
-                     "An unaudited AI decision cannot be reviewed or defended after the fact.")
+                     "An unaudited AI decision cannot be reviewed or defended after the fact.",
+                code="ai_decide_no_audit")
         # B (2026-08-27): no detector existed at all -- removing on.failure produced nothing,
         # not even a warning. Structural, per C1: an EMPTY handler is refused too, because a
         # handler that runs nothing leaves the failure unhandled exactly as if it were absent.
@@ -1286,12 +1528,14 @@ class MohioValidator:
                 self.ctx.error(
                     f"ai.decide '{name}' has an EMPTY 'on.failure' handler.", line,
                     hint="A handler that runs nothing does not handle anything. Put at least "
-                         "one statement inside it.")
+                         "one statement inside it.",
+                    code="ai_decide_empty_on_failure")
             else:
                 self.ctx.error(f"ai.decide '{name}' has no 'on.failure' handler.", line,
                     hint=f"Add 'on.failure' inside 'ai.decide {name}' so the program says what "
                          f"happens when the AI service itself is unreachable.\n"
-                         f"Without it a provider outage becomes an unhandled error at runtime.")
+                         f"Without it a provider outage becomes an unhandled error at runtime.",
+                    code="ai_decide_no_on_failure")
         self._block(tree, "ai.decide")
 
     def _v_ai_override_stmt(self, tree):
@@ -1420,7 +1664,7 @@ class MohioValidator:
     # Structure blocks
     def _v_shape_decl(self, t):
         line = get_line(t)
-        tok = first_token(t, "NAME")
+        tok = field_name_token(t)
         if tok:
             self._check_reserved_name(str(tok), "shape", line)
         # Check shape fields against sector profile forbidden/never_store rules
@@ -1441,7 +1685,7 @@ class MohioValidator:
                             yield inner
 
             for field_node in _shape_fields(t):
-                field_tok = first_token(field_node, 'NAME')
+                field_tok = field_name_token(field_node)
                 if not field_tok:
                     continue
                 fname = str(field_tok).lower()
@@ -1467,7 +1711,7 @@ class MohioValidator:
 
     def _v_task_decl(self, tree):
         line = get_line(tree)
-        tok = first_token(tree, "NAME")
+        tok = field_name_token(tree)
         task_name = str(tok) if tok else "task"
         self._check_reserved_name(task_name, "task", line)
         closer = find_subtree(tree, "closer")
@@ -1485,7 +1729,7 @@ class MohioValidator:
 
     def _v_hold_decl(self, tree):
         line = get_line(tree)
-        tok = first_token(tree, "NAME")
+        tok = field_name_token(tree)
         if tok:
             self._check_reserved_name(str(tok), "variable", line)
         for c in tree.children:
@@ -1493,7 +1737,7 @@ class MohioValidator:
 
     def _v_assignment(self, tree):
         line = get_line(tree)
-        tok = first_token(tree, "NAME")
+        tok = field_name_token(tree)
         if tok:
             self._check_reserved_name(str(tok), "variable", line)
         for c in tree.children:
@@ -1501,9 +1745,9 @@ class MohioValidator:
 
     def _v_connect_decl(self, tree):
         line = get_line(tree)
-        # connect NAME as ... -- alias is the NAME token
-        toks = [t for t in tree.children 
-                if hasattr(t, 'type') and t.type == 'NAME']
+        # connect NAME as ... -- alias is the NAME (or type-word) token
+        toks = [t for t in tree.children
+                if hasattr(t, 'type') and t.type in _NAME_TOKENS]
         if toks:
             self._check_reserved_name(str(toks[0]), "connection", line)
         for c in tree.children:
@@ -1511,14 +1755,21 @@ class MohioValidator:
 
     def _v_journey_decl(self, t):
         line = get_line(t)
-        tok = first_token(t, "NAME")
+        tok = field_name_token(t)
         if tok:
             self._check_reserved_name(str(tok), "journey", line)
         self._block(t, "journey")
     def _v_saga_decl(self, t): self._block(t, "saga")
     def _v_step_block(self, t): self._block(t, "step")
     def _v_timespan_decl(self, t): self._block(t, "timespan")
-    def _v_listen_block(self, t): self._block(t, "listen")
+    def _v_listen_block(self, t):
+        self._block(t, "listen")
+        # `listen for sh.X` IS the handler for arriving data (RULED 2026-10-07; `new` is not a
+        # handler), so its request reads get the same shape allowlist `new sh.X` had. Without this,
+        # migrating a handler from `new` to `listen for` silently dropped the check-time refusal of
+        # an undeclared `request.<field>`. A `listen for` with no shape on it finds none and is
+        # unaffected.
+        self._q13_request_allowlist(t)
     def _v_retrieve_body(self, t):
         """`expect sh.X as NAME` inside a query body is declared but not built -- refuse it.
 
@@ -1580,31 +1831,30 @@ class MohioValidator:
         if shapes is None:
             shapes = self._q13_shapes = _shape_field_names(self.tree)
         declared = shapes.get(shape_name)
-        if not declared:
-            # No such shape, or a shape with no fields: a different diagnostic owns that.
+        if declared is None:
+            # No such shape -- a different diagnostic owns that.
             return
-        from mohio_pretokenizer import unmark_dotted
-        for sub in t.iter_subtrees():
-            if str(getattr(sub, 'data', '')) != 'dotted_name':
+        fieldless = not declared
+        for field, sub in self._request_field_reads(t):
+            if fieldless:
+                # A FIELDLESS request contract accepts ANY field (the allowlist has nothing to check
+                # against), which is a mass-assignment hole. Declaring an empty shape is fine and
+                # triggers nothing; only READING request.<field> from one does. By default a warning,
+                # so planning shapes up front and filling them in is not blocked; under a regulated
+                # sector it fails closed, because a regulated app shipping an open request contract is
+                # a real hole. (Keyed to the sector via ctx.regulated -- T1-PROFILE-RULES: a profile
+                # cannot carry this rule yet.)
+                report = self.ctx.error if self.ctx.regulated else self.ctx.warn
+                report(
+                    f"shape `{shape_name}` has no fields yet, so `request.{field}` accepts any value "
+                    f"a caller sends.",
+                    get_line(sub),
+                    hint=(f"Add the field to restrict it:\n"
+                          f"    shape {shape_name}\n"
+                          f"        {field} as <type>\n"
+                          f"    shape: done\n"
+                          f"(A warning while you build; an error under a regulated sector.)"))
                 continue
-            toks = [c for c in sub.children if isinstance(c, Token)]
-            # TWO shapes reach here, and only one of them exists on the path `mio check`
-            # actually runs. The pretokenizer collapses a dotted user name into a single
-            # USERVAR_DOTTED token (`__USERVAR__request.is_admin`), so the plain two-child
-            # form appears only when the grammar is driven directly, as a test harness does.
-            # Reading just the two-child form made this check pass its own unit test while
-            # doing nothing for a real `mio check` -- the exact false exoneration the
-            # debugging protocol warns about.
-            if len(toks) == 1 and getattr(toks[0], 'type', '') == 'USERVAR_DOTTED':
-                # unmark_dotted returns (root, [rest...]) -- a flat list() of that nests the
-                # tail and yields a list where a field name is expected.
-                _root, _rest = unmark_dotted(str(toks[0]))
-                parts = [_root] + list(_rest)
-            else:
-                parts = [str(c) for c in toks]
-            if len(parts) < 2 or parts[0] != 'request':
-                continue
-            field = parts[1]
             if field in declared or field in _REQUEST_BUILTINS:
                 continue
             self.ctx.error(
@@ -1617,6 +1867,27 @@ class MohioValidator:
                       f"this is how a caller smuggles an extra field into a write -- the "
                       f"whole payload used to be readable whether the shape mentioned it or "
                       f"not."))
+
+    def _request_field_reads(self, t):
+        """Yield (field, subtree) for every explicit `request.<field>` read under `t`. Shared by the
+        undeclared-field check and the fieldless-contract check so both see the same reads."""
+        from mohio_pretokenizer import unmark_dotted
+        for sub in t.iter_subtrees():
+            if str(getattr(sub, 'data', '')) != 'dotted_name':
+                continue
+            toks = [c for c in sub.children if isinstance(c, Token)]
+            # TWO shapes reach here, and only one of them exists on the path `mio check`
+            # actually runs. The pretokenizer collapses a dotted user name into a single
+            # USERVAR_DOTTED token (`__USERVAR__request.is_admin`), so the plain two-child
+            # form appears only when the grammar is driven directly, as a test harness does.
+            if len(toks) == 1 and getattr(toks[0], 'type', '') == 'USERVAR_DOTTED':
+                _root, _rest = unmark_dotted(str(toks[0]))
+                parts = [_root] + list(_rest)
+            else:
+                parts = [str(c) for c in toks]
+            if len(parts) < 2 or parts[0] != 'request':
+                continue
+            yield parts[1], sub
     def _v_check_block(self, t): self._block(t, "check")
 
     def _v_each_block(self, tree):
@@ -1863,7 +2134,7 @@ def _shape_field_bounds(tree):
     for node in tree.iter_subtrees():
         if str(getattr(node, 'data', '')) != 'shape_decl':
             continue
-        sh_tok = first_token(node, 'NAME')
+        sh_tok = field_name_token(node)
         if not sh_tok:
             continue
 
@@ -1878,7 +2149,7 @@ def _shape_field_bounds(tree):
 
         bounds = {}
         for fnode in _fields(node):
-            ftok = first_token(fnode, 'NAME')
+            ftok = field_name_token(fnode)
             if not ftok:
                 continue
             lo = hi = None
@@ -1929,13 +2200,38 @@ def _check_script_bounds(tree, ctx):
             # name; the number sits in a nested `literal`. Asking one subtree for both found
             # neither and the scan quietly did nothing.
             toks = [c for c in getattr(sub, 'children', []) if isinstance(c, Token)]
-            fname = next((str(t) for t in toks if t.type == 'NAME'), None)
+            fname = next((str(t) for t in toks if t.type in _NAME_TOKENS), None)
             if fname is None or fname not in declared:
                 continue
             num = next((c for inner in sub.iter_subtrees()
                         for c in getattr(inner, 'children', [])
                         if isinstance(c, Token) and c.type == 'NUMBER'), None)
             if num is None:
+                # A QUOTED TEXT VALUE, against the min/max a text field declares: its length, the
+                # same thing the request path checks (2026-10-12). This scan compared numbers only,
+                # so `name "x"` against `min 3` ran with nothing said.
+                txt = next((c for inner in sub.iter_subtrees()
+                            for c in getattr(inner, 'children', [])
+                            if isinstance(c, Token) and c.type == 'STRING'), None)
+                if txt is None or len(str(txt)) < 2:
+                    continue
+                length = len(str(txt)[1:-1])
+                lo, hi = declared[fname]
+                broke = None
+                if lo is not None and length < float(lo):
+                    broke = "shorter than the declared minimum of %s characters" % lo
+                elif hi is not None and length > float(hi):
+                    broke = "longer than the declared maximum of %s characters" % hi
+                if broke:
+                    ctx.warn(
+                        f"`{fname}` is {length} characters, which is {broke} on shape `{shape}` "
+                        f"-- and NOTHING CHECKS IT HERE. A shape's min and max are enforced where a "
+                        f"request is bound to it, which answers 422 with a message. A value "
+                        f"written directly in a script does not go through that, so this runs.",
+                        _line_of(txt) or _line_of(sh_tok) or 0,
+                        hint="The declaration is real and is enforced on the request path. This "
+                             "says out loud that the script path is not the enforcing one, rather "
+                             "than letting the line look checked when it is not.")
                 continue
             # NO NET ON THIS CONVERSION, deliberately. The grammar's NUMBER is a number
             # (mohio.lark), so a failure here does not mean `skip this field`, it means
@@ -1985,7 +2281,7 @@ def _shape_field_names(tree):
     for node in tree.iter_subtrees():
         if str(getattr(node, 'data', '')) != 'shape_decl':
             continue
-        name_tok = first_token(node, 'NAME')
+        name_tok = field_name_token(node)
         if not name_tok:
             continue
 
@@ -2000,7 +2296,7 @@ def _shape_field_names(tree):
 
         names = set()
         for fnode in _fields(node):
-            ftok = first_token(fnode, 'NAME')
+            ftok = field_name_token(fnode)
             if ftok:
                 names.add(str(ftok))
         shapes[str(name_tok)] = names
@@ -2059,8 +2355,8 @@ def _check_ai_test_coverage(tree, ctx, filename):
     def _find_ai_decides(node):
         if isinstance(node, Tree):
             if node.data == 'ai_decide_block':
-                name_tok = next((c for c in node.children 
-                                 if isinstance(c, Token) and c.type == 'NAME'), None)
+                name_tok = next((c for c in node.children
+                                 if isinstance(c, Token) and c.type in _NAME_TOKENS), None)
                 if name_tok:
                     ai_decides.append(str(name_tok))
             for c in node.children:
@@ -2176,9 +2472,9 @@ _FVISIBILITY = ("`private:` and `public:` declare JOURNEY-PATH VISIBILITY, and t
                 "not variable-assignment targets. The colon is what makes them a "
                 "declaration:\n"
                 "    journey App\n        private: /docs\n        public: /notice\n"
-                "        listen for\n            request for sh.Q at /home\n"
-                "                give back [200] \"ok\"\n            request: done\n"
-                "        listen: done\n    journey: done\n"
+                "        request for sh.Q at /home\n"
+                "            give back [200] \"ok\"\n        request: done\n"
+                "    journey: done\n"
                 "For who may reach a request, that is `require role \"admin\"`.")
 
 # THE REFUSAL TIER. Not modifiers only any more: `except` joins them because it is a pure
@@ -2341,6 +2637,28 @@ def _find_misread_name(declared, reads, writes_all):
     return hits[0] if len(hits) == 1 else None
 
 
+# A `{{ ... }}` interpolation READS the variables named inside it -- in a `show` string, a render
+# fence, a form/field/guard directive, a MioScript fragment, anywhere a token carries the pair. The
+# dead-store scan collects reads from NAME tokens, and an interpolated name never becomes a NAME
+# token (it rides inside a STRING or a raw render-line token), so a value used ONLY through `{{ }}`
+# looked unread and warned "set but never used" -- on the most basic thing a beginner writes, show a
+# value you computed. This extracts the variable ROOTS an interpolation reads so they count as reads.
+_INTERP_SPAN = re.compile(r'(?<!\\)\{\{(.*?)\}\}', re.DOTALL)   # `\{{ }}` is an escaped literal, not a read
+_INTERP_IDENT = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z0-9_]+)*')  # dotted root: `a.b` -> `a`
+
+
+def _interpolation_reads(text):
+    """The variable roots read by every `{{ ... }}` in `text`. `{{ user.name }}` reads `user`;
+    a quoted literal inside the pair (`{{ include "footer" }}`) is NOT a read, so it is stripped
+    first. Over-narrow would re-open the false warning; the roots are what a read actually needs."""
+    out = set()
+    for m in _INTERP_SPAN.finditer(text):
+        body = re.sub(r'"[^"]*"', ' ', m.group(1))   # drop string literals so their words are not read
+        for idm in _INTERP_IDENT.finditer(body):
+            out.add(idm.group(1))
+    return out
+
+
 def _check_dead_stores(tree, ctx, filename=""):
     """Assigned-but-never-read (dead store).
 
@@ -2414,6 +2732,15 @@ def _check_dead_stores(tree, ctx, filename=""):
                 _root = unmark_dotted(str(node))[0]
                 reads.add(_root)
                 read_lines.setdefault(_root, getattr(node, 'line', 0))
+            # A `{{ x }}` interpolation reads `x`, and it rides inside a STRING or a raw render-line
+            # token, never a NAME token -- so scan any token that carries the pair, whatever its type
+            # (show string, render fence, form/field directive, MioScript fragment). Without this a
+            # value shown only through `{{ }}` warned "set but never used" on correct code.
+            _sval = str(node)
+            if '{{' in _sval:
+                for _r in _interpolation_reads(_sval):
+                    reads.add(_r)
+                    read_lines.setdefault(_r, getattr(node, 'line', 0))
     _collect_reads(tree)
 
     # ---- writes, TOP-LEVEL statements only ----
@@ -2499,7 +2826,8 @@ def _check_dead_stores(tree, ctx, filename=""):
         if low in FOREIGN_KEYWORDS and name == low and name in reads:
             warned.add(name)
             ctx.warn(f"`{name}` is not a Mohio word. If you meant it as a variable name it will "
-                     f"work, but this line reads as an instruction and is not one.",
+                     f"work, but this line reads as an instruction and is not one. Use the "
+                     f"Mohio form shown below instead.",
                      line, hint=FOREIGN_KEYWORDS[low])
             continue
         # tiers 3-4 are the assigned-but-never-read detector. A name that IS read anywhere is a

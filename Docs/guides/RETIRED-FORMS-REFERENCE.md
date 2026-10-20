@@ -18,6 +18,7 @@ draft. Regenerate it from source rather than trusting a copy; that is the whole 
 | `hold NAME` + indented items (LIST block) | `create list NAME / ... / create: done`, or `NAME as list "a","b"` | transformer `hold_decl` ~1144 |
 | `hold NAME` + indented `field value` (PROFILE block) | `create NAME / field value / create: done` (opt. `as sh.Shape`) | transformer `hold_decl` ~1156 |
 | `[a, b, c]` list literal | `create list …` / `NAME as list …` (brackets are for field tags only) | transformer ~4530 |
+| `render x` (using `render` as a variable name) | choose another name; `render` opens a render block and is no longer a legal identifier (Batch 29, 2026-09-25) | grammar: `render` reserved as a block opener |
 
 ## Blocks, closers & control flow
 

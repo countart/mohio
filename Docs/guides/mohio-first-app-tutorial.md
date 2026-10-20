@@ -26,15 +26,13 @@ shape Feedback
     message as text required min 5 max 500
 shape: done
 
-listen for
-    request for sh.Feedback at /
-        render
-            <h1>Feedback</h1>
-            <p>Tell us what you think.</p>
-            {{ form sh.Feedback }}
-        render: done
-    request: done
-listen: done
+request for sh.Feedback at /
+    render
+        <h1>Feedback</h1>
+        <p>Tell us what you think.</p>
+        {{ form sh.Feedback }}
+    render: done
+request: done
 ```
 
 Save this as `feedback.mho` and run it:
@@ -72,23 +70,21 @@ shape Feedback
     message as text required min 5 max 500
 shape: done
 
-listen for
-    request for sh.Feedback at /
-        render
-            <h1>Feedback</h1>
-            <p>Tell us what you think.</p>
-            {{ form sh.Feedback }}
-        render: done
-    request: done
+request for sh.Feedback at /
+    render
+        <h1>Feedback</h1>
+        <p>Tell us what you think.</p>
+        {{ form sh.Feedback }}
+    render: done
+request: done
 
-    new sh.Feedback
-        save to db.feedback
-            name feedback.name
-            email feedback.email
-            message feedback.message
-        save: done
-        give back [200] "Thanks for the feedback."
-    new: done
+listen for sh.Feedback
+    save to db.feedback
+        name Feedback.name
+        email Feedback.email
+        message Feedback.message
+    save: done
+    give back [200] "Thanks for the feedback."
 listen: done
 ```
 
@@ -117,8 +113,8 @@ declared the rule; every route that receives a `Feedback` enforces it before you
 runs, automatically, on every field, every time -- that's the whole point of describing it once
 on the shape instead of validating it inside each handler.
 
-`new sh.Feedback` binds the incoming, now-validated data to a variable named after the shape,
-lowercased: `feedback`. `feedback.name`, `feedback.email`, `feedback.message` read its fields.
+`listen for sh.Feedback` binds the incoming, now-validated data; you read it by the shape's name
+exactly as declared: `Feedback.name`, `Feedback.email`, `Feedback.message` read its fields.
 `save to db.feedback` writes a row; no `create table` anywhere; the first `save` makes the table.
 
 ---
@@ -128,17 +124,15 @@ lowercased: `feedback`. `feedback.name`, `feedback.email`, `feedback.message` re
 A route is just `request for` at a path. Add one that reads every row back:
 
 ```mohio
-listen for
-    request for sh.Feedback at /feedback/list
-        find rows in db.feedback
-        find: done
-        listing ("{{ rows.count }} message(s):")
-        repeat each row in rows
-            listing (listing & "\n- " & row.name & ": " & row.message)
-        repeat: done
-        give back [200] listing
-    request: done
-listen: done
+request for sh.Feedback at /feedback/list
+    find rows in db.feedback
+    find: done
+    listing ("{{ rows.count }} message(s):")
+    repeat each row in rows
+        listing (listing & "\n- " & row.name & ": " & row.message)
+    repeat: done
+    give back [200] listing
+request: done
 ```
 
 (Add this block inside the same `listen for ... listen: done`, alongside the other two.)
@@ -162,23 +156,21 @@ A GET query parameter (`?q=...`) is read with `request.q` -- not through the sha
 search term isn't a field being submitted, it's part of the request itself:
 
 ```mohio
-listen for
-    request for sh.Feedback at /feedback/search
-        find hits in db.feedback
-            where message contains request.q
-        find: done
-        check hits.count
-            when 0
-                give back [200] "No matches."
-            otherwise
-                results ""
-                repeat each hit in hits
-                    results (results & "- " & hit.name & ": " & hit.message & "\n")
-                repeat: done
-                give back [200] results
-        check: done
-    request: done
-listen: done
+request for sh.Feedback at /feedback/search
+    find hits in db.feedback
+        where message contains request.q
+    find: done
+    check hits.count
+        when 0
+            give back [200] "No matches."
+        otherwise
+            results ""
+            repeat each hit in hits
+                results (results & "- " & hit.name & ": " & hit.message & "\n")
+            repeat: done
+            give back [200] results
+    check: done
+request: done
 ```
 
 ```bash
@@ -212,50 +204,48 @@ shape Feedback
     message as text required min 5 max 500
 shape: done
 
-listen for
-    request for sh.Feedback at /
-        render
-            <h1>Feedback</h1>
-            <p>Tell us what you think.</p>
-            {{ form sh.Feedback }}
-        render: done
-    request: done
+request for sh.Feedback at /
+    render
+        <h1>Feedback</h1>
+        <p>Tell us what you think.</p>
+        {{ form sh.Feedback }}
+    render: done
+request: done
 
-    new sh.Feedback
-        save to db.feedback
-            name feedback.name
-            email feedback.email
-            message feedback.message
-        save: done
-        give back [200] "Thanks for the feedback."
-    new: done
-
-    request for sh.Feedback at /feedback/list
-        find rows in db.feedback
-        find: done
-        listing ("{{ rows.count }} message(s):")
-        repeat each row in rows
-            listing (listing & "\n- " & row.name & ": " & row.message)
-        repeat: done
-        give back [200] listing
-    request: done
-
-    request for sh.Feedback at /feedback/search
-        find hits in db.feedback
-            where message contains request.q
-        find: done
-        check hits.count
-            when 0
-                give back [200] "No matches."
-            otherwise
-                results ""
-                repeat each hit in hits
-                    results (results & "- " & hit.name & ": " & hit.message & "\n")
-                repeat: done
-                give back [200] results
-        check: done
-    request: done
+listen for sh.Feedback
+    save to db.feedback
+        name Feedback.name
+        email Feedback.email
+        message Feedback.message
+    save: done
+    give back [200] "Thanks for the feedback."
 listen: done
+
+request for sh.Feedback at /feedback/list
+    find rows in db.feedback
+    find: done
+    listing ("{{ rows.count }} message(s):")
+    repeat each row in rows
+        listing (listing & "\n- " & row.name & ": " & row.message)
+    repeat: done
+    give back [200] listing
+request: done
+
+request for sh.Feedback at /feedback/search
+    find hits in db.feedback
+        where message contains request.q
+    find: done
+    check hits.count
+        when 0
+            give back [200] "No matches."
+        otherwise
+            results ""
+            repeat each hit in hits
+                results (results & "- " & hit.name & ": " & hit.message & "\n")
+            repeat: done
+            give back [200] results
+    check: done
+request: done
 ```
 
 Everything in this walkthrough was proven against the compiler, real requests included, not

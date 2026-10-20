@@ -10,7 +10,7 @@ Every runnable example here is verified against the current compiler. Inputs are
 
 ## Defining a task
 
-```
+```mohio
 task greet
     take name as text
     returns text
@@ -37,7 +37,7 @@ task: done
 ## Calling a task
 
 **No arguments — needs the closer:**
-```
+```mohio
 call generateReport
 call: done
 ```
@@ -49,7 +49,7 @@ call greet with "Aria"
 ```
 
 **Several inputs — one per line, by name:**
-```
+```mohio
 call bill
     who "Bo"
     amt 50
@@ -65,7 +65,7 @@ Each value binds to the input of the **same name** (`who` → `who`, `amt` → `
 
 Tasks and loops compose cleanly — call a task on each pass of a loop. Collections come from a `find`/`retrieve` result (Mohio has no list literals):
 
-```
+```mohio
 find guests in db.guests
 find: done
 
@@ -91,7 +91,7 @@ The `returns <type>` declaration is what makes this work — it turns the task's
 
 A no-argument task is captured the same way, with the block form:
 
-```
+```mohio
 call report as summary
 call: done
 show summary

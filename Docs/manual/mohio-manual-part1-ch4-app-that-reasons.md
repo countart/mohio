@@ -21,27 +21,25 @@ shape Transaction
     device_id as text required
 shape: done
 
-listen for
-    new sh.Transaction at /screen
-        ai.decide isFraudulent returns boolean
-            confidence above 0.85
-            weigh transaction.amount, transaction.device_id
-            ai.audit to fraud_audit_log
-            not confident
-                give back [202] "Flagged for manual review"
-            on.failure
-                give back [503] "AI service unavailable"
-        ai.decide: done
+listen for sh.Transaction at /screen
+    ai.decide isFraudulent returns boolean
+        confidence above 0.85
+        weigh Transaction.amount, Transaction.device_id
+        ai.audit to fraud_audit_log
+        not confident
+            give back [202] "Flagged for manual review"
+        on.failure
+            give back [503] "AI service unavailable"
+    ai.decide: done
 
-        ai.decide isFraudulent
+    ai.decide isFraudulent
 
-        check isFraudulent
-            when true
-                give back [422] "Transaction blocked"
-            otherwise
-                give back [200] "Approved"
-        check: done
-    new: done
+    check isFraudulent
+        when true
+            give back [422] "Transaction blocked"
+        otherwise
+            give back [200] "Approved"
+    check: done
 listen: done
 ```
 
@@ -78,11 +76,38 @@ Reading `fraud_audit_log` back afterward, in a fresh connection, not trusting th
 }
 ```
 
-Field NAMES are recorded for what the decision weighed (`transaction.amount`,
-`transaction.device_id`), never the values themselves -- the same value-never-logged discipline
+Field NAMES are recorded for what the decision weighed (`Transaction.amount`,
+`Transaction.device_id`), never the values themselves -- the same value-never-logged discipline
 the rest of the audit trail keeps. This record is what makes an AI decision something you can
 show a regulator afterward: which decision, what it returned, how confident, which model, and
 a request id tying it back to the exact call.
+
+**The record also carries what the decision cost.** Every `ai.decide` record includes `tokens` and `cost`, and
+crucially each carries its own BASIS sentence saying how that number was derived, so the trail never shows a bare
+figure you cannot account for:
+
+- `tokens_basis` says whether the token count was reported by the provider or estimated, naming the gap when it
+  is estimated.
+- `cost_basis` says how the cost was priced: from the shipped pricing table, from a family fallback when the
+  exact model is not in the table, or as a worst-case upper bound for a model Mohio does not recognize.
+
+Cost is priced from the model that ACTUALLY ANSWERED, not the alias the program named. A connection declares a
+model (or a chain falls over to another), and the record's `model` field is the one the provider resolved to and
+ran; the price is taken from that, so two decisions a year apart, or one that failed over to a different
+provider, each cost what their real model cost. On the mock provider there is no provider call, so both basis
+sentences say exactly that ("no provider call: there is no cost figure") rather than inventing a number, which is
+why the mock record above shows `mock-v1` and no spend.
+
+### A cost ceiling now stops an `ai.decide` before it overspends
+
+If the enclosing journey declares a cost ceiling, `ai.decide` now enforces it before the provider call (fixed
+2026-10-04; before this it read only `max tokens` off the journey and let cost run unchecked). A breach routes to
+the block's own `on.failure`, returns the status you give back there (a 503 in the build lane's end-to-end HTTP
+test), and records `ai_ceiling_refused` in the audit trail; a ceiling the decision stays under lets the real
+answer through, and a journey with no ceiling runs exactly as before. `ai.create` enforces the ceiling the same
+way. Not yet covered, named rather than silently implied: `ai.compare`, `ai.respond` and `ai.rank`, each a
+separate executor with the same gap. This was verified by the build lane over a real served request; it cannot be
+exercised on the mock provider, which makes no billable call.
 
 ### Verified working: no provider available
 

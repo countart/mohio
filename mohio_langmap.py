@@ -24,6 +24,7 @@ top of it translate.
 
 from __future__ import annotations
 import re
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 from pathlib import Path
 
 
@@ -49,6 +50,9 @@ MOHIO_REQUIRED_KEYWORDS = frozenset([
     "include", "validate",
     # Debug (new)
     "debug", "checkpoint",
+    # Typed storage (T1-DB-TYPED-STORAGE, ruled 2026-10-05): the journey zone, the datetime field
+    # override and the timezone type all use this word, so a complete language pack maps it.
+    "timezone",
 ])
 
 LANGMAP_VERSION = "1.0"  # minimum compatible langmap version
@@ -588,6 +592,7 @@ def translate_file(input_path: Path, output_path: Path,
             else:
                 direction = 'backward'
             translated = loader.translate(source, direction=direction)
+            # EGRESS-EXEMPT: program SOURCE text the developer asked to write; no runtime value
             output_path.write_text(translated, encoding='utf-8')
             print(f"  Translated: {input_path.name} -> {output_path.name}")
             print(f"  Pack: {candidate.name}")

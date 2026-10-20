@@ -13,3 +13,13 @@ _ROOT = Path(__file__).resolve().parent
 GRAMMAR_PATH = _ROOT / "mohio.lark"
 SECTORS_DIR = _ROOT / "sectors"
 MAPS_DIR = _ROOT / "maps"
+# The built-in AI provider routing table: name -> {api_format, base_url, env_key}. Shipped as a
+# data file (not hardcoded in Python) so it can be refreshed on a tag without a code change, and so
+# the model registry treadmill stays out of the compiler -- it carries endpoints and env-key names,
+# never model strings. Read with json.loads(PROVIDERS_PATH.read_text()).
+PROVIDERS_PATH = _ROOT / "providers.json"
+# MioScript `share VALUE on DESTINATION`: destination name -> that site's share-page URL
+# template, with {url} as the placeholder for the (URL-encoded) shared value. Data, not
+# hardcoded in the emitter, so a new destination is a one-line addition here, and an unknown
+# one is checked against this file rather than a list buried in Python.
+SHARE_DESTINATIONS_PATH = _ROOT / "share_destinations.json"

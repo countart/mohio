@@ -26,7 +26,11 @@ _DOTTED_PATTERN = re.compile(
     # A segment is a word OR a bare number, so `colors.position.2` / `colors.pos.2` keep the
     # numeric index instead of dropping it (which made numeric position a silent no-op on plain
     # lists). Word segments still start with a letter/underscore; number segments are all digits.
-    r'(?<!["\'\w])([a-z_][a-zA-Z0-9_]*)((?:\.(?:[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+))+)'
+    # The root may begin with a capital: a handler's request data is read by the shape's name exactly
+    # as declared (RULED by Ron 2026-10-10), so `Msg.text` must be marked the way `msg.text` was, or
+    # the type word `text` breaks the parse. Only a declared user name is ever marked, and never one
+    # that follows a dot: `Order` in `sh.Order.qty` is the middle of a chain, not its root.
+    r'(?<!["\'\w.])([A-Za-z_][a-zA-Z0-9_]*)((?:\.(?:[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+))+)'
 )
 
 # Runtime variable shapes -- always field access even if not explicitly declared

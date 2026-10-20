@@ -110,12 +110,55 @@ Upload field types: `image`, `pdf`, `audio`, `video`, and the generic `file`.
   `save` writes the path. The form is sent as `multipart/form-data` automatically
   when it contains an upload field.
 
+## A request shape with no fields accepts anything
+
+A `shape` is the contract for what a request may send. A shape with NO fields yet places no
+restriction, so reading a field from it accepts any value a caller sends. While you build, that is
+a WARNING, not an error, because planning a shape and filling it one field at a time is legitimate:
+
+```mohio
+shape Order
+shape: done
+journey App
+    listen for sh.Order at /order
+        show request.amount
+        give back [200] "ok"
+    listen: done
+journey: done
+```
+
+`mio check` reports:
+
+    Line 5: shape `Order` has no fields yet, so `request.amount` accepts any value a caller sends.
+    Add the field to restrict it:
+        shape Order
+            amount as <type>
+        shape: done
+    (A warning while you build; an error under a regulated sector.)
+
+The fix is to declare the field, which also gives it a type the gate can enforce:
+
+```mohio
+shape Order
+    amount as decimal
+shape: done
+journey App
+    listen for sh.Order at /order
+        show Order.amount
+        give back [200] "ok"
+    listen: done
+journey: done
+```
+
+Under a regulated sector this warning becomes an ERROR and `mio check` fails, because an open
+request contract is a real exposure. See the sector layer in `Docs/guides/compliance.md`.
+
 ## What is not in yet
 
 A `pattern` covers formats like zip codes, SSNs, or custom IDs and is enforced on
 the server (`mio check` errors if the expression does not compile). What remains is
-the live, in-browser behaviour: the show/hide password eye, validate-as-you-type,
-and confirm-password match-on-blur. Those are client behaviour and belong to
+the live, in-browser behavior: the show/hide password eye, validate-as-you-type,
+and confirm-password match-on-blur. Those are client behavior and belong to
 MioScript, not the form gate.
 
 Everything else a normal form needs, single and multi-line text, email,

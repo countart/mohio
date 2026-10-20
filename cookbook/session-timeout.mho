@@ -13,7 +13,7 @@
 // A bare `mio run` prints nothing here and that is correct: this file is listeners only,
 // so with no request to answer there is nothing for it to do.
 
-connect db as sqlite from env.DATABASE_URL
+connect db as sqlite from env.DATABASE_URL default "app.db"
 
 shape Relogin
     email as text required format "email"
@@ -29,50 +29,60 @@ on.idle 25 minutes
     show #relogin
 on.idle: done
 
-listen for
-    request for sh.Relogin at /
-        render
-            <h1>The ledger</h1>
-            <p>Your work is here.</p>
-            <div id="relogin" hidden>
-              <h2>Still there?</h2>
-              <p>For your security this page locked itself. Send yourself a link to carry on.</p>
-              {{ form sh.Relogin }}
-            </div>
-        render: done
-    request: done
+request for sh.Relogin at /
+    render
+        <h1>The ledger</h1>
+        <p>Your work is here.</p>
+        <div id="relogin" hidden>
+          <h2>Still there?</h2>
+          <p>For your security this page locked itself. Send yourself a link to carry on.</p>
+          {{ form sh.Relogin }}
+        </div>
+    render: done
+request: done
 
-    // Ask for a link. The token is what proves it was really them, so it is
-    // generated here and never chosen by the person asking.
-    new sh.Relogin at /relogin
-        link_token random.token length 32
-        save to db.relogin_links
-            email relogin.email
-            token link_token
-        save: done
-        miomail.send
-            to relogin.email
-            subject "Your link back to the ledger"
-            body ("Open this to carry on: /back with the token " & link_token)
-        give back [200] "Check your email for the link back."
-    new: done
+// Ask for a link. The token is what proves it was really them. Mohio makes it, keeps
+// only its fingerprint (never the token), and lets it work once, for this purpose, for
+// fifteen minutes. To use it elsewhere: mioauth.token.create, then verify token.
+listen for sh.Relogin at /relogin
+    mioauth.token.create as link_token
+        for Relogin.email
+        scope "relogin"
+        expires in 15 minutes
+        one time
+    mioauth.token.create: done
+    miomail.send
+        to Relogin.email
+        subject "Your link back to the ledger"
+        body ("Open this to carry on: /back?token=" & link_token)
+    give back [200] "Check your email for the link back."
+listen: done
 
-    // Come back. An unknown token is refused rather than ignored, so a guessed
-    // one fails loudly instead of quietly doing nothing.
-    new sh.Back at /back
-        retrieve.one link from db.relogin_links
-            match token to back.token
-        retrieve.one: done
-        // A token nobody was sent finds NOTHING, and finding nothing is a normal
-        // empty result, not an error. So the test is `is empty`, not `on.failure`:
-        // on.failure means the database itself went wrong, and it would never fire
-        // for a wrong token, which would let one straight through.
-        check link
-            when link is empty
-                give back [401] "That link is not one we sent."
-            otherwise
-                grant role "member"
-                give back [200] "Welcome back."
-        check: done
-    new: done
+// Opening the link only asks. Mail scanners open links on their own, so the link
+// itself never signs anyone in: here it is checked, not used, and the button below
+// sends it back. An unknown, used or expired link is refused by name.
+request for sh.Back at /back
+    verify token from Back.token as grant
+        scope "relogin"
+        on.failure
+            give back [401] "That link is not one we sent, or it was used or has expired."
+        on.success
+            render
+                <p>Carry on as {{ grant.for }}?</p>
+                {{ form sh.Back }}
+            render: done
+    verify: done
+request: done
+
+// Pressing the button redeems the link, once. Two presses at the same moment cannot
+// both get in: the database decides which one used it.
+listen for sh.Back at /back
+    verify token from Back.token as grant
+        scope "relogin"
+        on.failure
+            give back [401] "That link is not one we sent, or it was used or has expired."
+        on.success
+            grant role "member"
+            give back [200] "Welcome back."
+    verify: done
 listen: done

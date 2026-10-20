@@ -44,17 +44,27 @@ If you want a tool that generates an app from a description, other products do t
 
 ## Getting it, and somewhere to put it
 
-Two pieces sit either side of the language itself, and both are in **soft release** right now.
-Early, usable, and moving: expect rough edges and tell us where they are.
+Two pieces sit either side of the language itself.
 
-**Mohio Home** is the installer and console. It puts Mohio on your machine without the clone
-and `pip install` dance below, and gives you a place to see what your programs are doing.
+**Mohio Home** is the installer and console. It puts Mohio on your machine without a clone or
+`pip install`, and gives you a place to see what your programs are doing. Download for your system
+(these links always point at the current release):
 
-**[getmohio.com](https://getmohio.com)** is the platform: somewhere to serve a Mohio application
-once you have written one, rather than assembling hosting for it yourself.
+- Windows: download both into the same folder, then run the `.bat`:
+  - [bootstrap_windows.bat](https://github.com/countart/mohio-home-releases/releases/latest/download/bootstrap_windows.bat)
+  - [bootstrap_windows.ps1](https://github.com/countart/mohio-home-releases/releases/latest/download/bootstrap_windows.ps1)
+- macOS: [bootstrap_macos.command](https://github.com/countart/mohio-home-releases/releases/latest/download/bootstrap_macos.command)
+- Linux: [bootstrap_linux.sh](https://github.com/countart/mohio-home-releases/releases/latest/download/bootstrap_linux.sh)
+- All releases: [mohio-home-releases](https://github.com/countart/mohio-home-releases/releases)
 
-Neither is required. Everything in this README runs from a git clone on your own machine, which
-is what the rest of this page shows, and will keep working that way.
+**[getmohio.com](https://getmohio.com)** is the platform. Serve a Mohio application without
+assembling hosting yourself: each app gets its own database, durable file storage and secrets,
+deployed from a tagged release. Real applications are running on it now. Access is currently by
+invitation, with a free tier for pioneers; open sign-up follows once billing is in place. Ask on
+Discord for an invitation.
+
+Neither is required: everything else in this README runs from a clone or `pip install` on your own
+machine.
 
 ---
 
@@ -94,7 +104,7 @@ mio run tests/support_escalation_demo.mho --seed tests/seed_support_escalation.j
   [show] Referred to a human agent -- confidence below the sector floor
   [show] critical_decision complete
 
-  Result  MohioValue('critical_decision complete', 'string')
+  Result  critical_decision complete
 ```
 
 *(Trimmed to the load-bearing lines — the sector-profile and connect confirmations each print twice in the real output, once during static analysis and once at execution. The audit hash on the `[ai.audit]` line is different on every run by design.)*
@@ -137,7 +147,7 @@ Respond with only the JSON object.
   [show] Referred to a human agent -- confidence below the sector floor
   [show] critical_decision complete
 
-  Result  MohioValue('critical_decision complete', 'string')
+  Result  critical_decision complete
 ```
 
 Genuine model reasoning over the real ticket data (`72`, `frustrated`) — not a script. Claude's own confidence (0.62) still didn't clear the sector's 0.95 floor, so the same `not confident` path fired again, this time because the model itself wasn't certain enough, not because of a hardcoded mock value.
@@ -158,7 +168,7 @@ retrieve ticket from db.tickets
 retrieve: done
 
 ai.decide critical_decision returns boolean
-    check confidence above 0.95
+    confidence above 0.95
     weigh ticket.priority_score, ticket.sentiment
     ai.audit to escalation_audit_log
     not confident
@@ -174,7 +184,7 @@ show "critical_decision complete"
 
 Declaring an `ai.decide` does not run it. The bare name on its own line — `ai.decide critical_decision` — is what runs the block and binds the result to a variable of that name. Declare once, invoke wherever the decision is needed.
 
-`check confidence above 0.95` is not a typo — the program declares 0.95 up front because the active sector requires it. Try declaring less and `mio check` refuses to build the program at all (see the compliance section below). Zero API wiring in user code either way. The developer wrote intent. The runtime — and the sector profile — handled the rest.
+`confidence above 0.95` is not a typo: the program declares 0.95 up front because the active sector requires it. Try declaring less and `mio check` refuses to build the program at all (see the compliance section below). Zero API wiring in user code either way. The developer wrote intent. The runtime, and the sector profile, handled the rest.
 
 ---
 
@@ -272,7 +282,8 @@ is a way a governed decision quietly stops being governed.
 *(The count says four because the missing `not confident` block is reported twice, in two
 slightly different wordings, from two separate checks in the compiler. A known
 duplicate-reporting quirk, not fixed here, not hidden either.)* And the real `--json` output for
-the same file, with no invented error codes, just `"code": "ERROR"`:
+the same file, each error carrying a descriptive `code` alongside its line, message and hint, with
+`warnings` and `notices` arrays beside `errors` (trimmed here to the first two errors):
 
 ```json
 {
@@ -281,13 +292,13 @@ the same file, with no invented error codes, just `"code": "ERROR"`:
   "lines": 13,
   "errors": [
     {
-      "code": "ERROR",
+      "code": "ai_decide_no_not_confident",
       "line": 10,
       "message": "ai.decide 'critical_decision' is missing a 'not confident' block.",
       "hint": "Every ai.decide must define what happens when confidence falls below threshold.\nAdd 'not confident' inside 'ai.decide critical_decision'."
     },
     {
-      "code": "ERROR",
+      "code": "ai_decide_no_audit",
       "line": 10,
       "message": "ai.decide 'critical_decision' has no 'ai.audit' declaration.",
       "hint": "Add 'ai.audit to [log_name]' so this AI decision produces an immutable record.\nAn unaudited AI decision cannot be reviewed or defended after the fact."
@@ -343,6 +354,7 @@ The enforcement *mechanism* is wired and demonstrated above with the community p
 ### 3 — The code reads like you wrote it in English
 
 ```mohio
+connect db as postgres from env.DATABASE_URL
 find flagged in db.transactions
     where amount is above 10000
     and created_at is.in last 30 days
@@ -390,12 +402,12 @@ check: done
 Named provider groups with ordered fallback — declare once, reference anywhere:
 
 ```mohio
+connect db from env.DATABASE_URL   // where ai.audit keeps each decision's record
+
 ai.connect fraud_providers, text_gen
     order
-        anthropic
         anthropic model "claude-opus-4-8"
         openai    model "gpt-4o"
-        azure
     order: done
     on.failure give back "Could not connect to LLM provider."
 ai.connect: done
@@ -561,7 +573,7 @@ plaintext is visible in the trail rather than only on disk.
 
 ## Current state
 
-Current release: 5.1.0
+Current release: 6.0.0
 
 Mohio is built in the open and moving fast — the compiler updates multiple times a
 day. The core language is solid and tested; the surface around it is filling in.
@@ -716,6 +728,6 @@ For licensing: **hello@mohio.io**
 
 **Mohio Language Project · Particular LLC · BSL 1.1**
 
-*5.1.0 · Write intent. Execute reason. See everything.*
+*6.0.0 · Write intent. Execute reason. See everything.*
 
 </div>

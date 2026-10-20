@@ -111,10 +111,28 @@ An unknown cast (`as.frob`) also fails loud. Mohio never silently ignores a cast
 When you only want to round (no type change), use the `round.*` modifiers:
 
 ```
-total   (price) round.up        // ceiling
-total   (price) round.down      // floor
-total   (price) round.to 2      // 2 decimal places
+total   (price) round.up        // to a whole number, AWAY from zero
+total   (price) round.down      // to a whole number, TOWARD zero
+total   (price) round.up 2      // to 2 places, away from zero
+total   (price) round.down 2    // to 2 places, toward zero
+total   (price) round.to 2      // to 2 places, half away from zero
 ```
+
+`round.up` and `round.down` take an OPTIONAL number of places: bare, they round to a whole number;
+with `N`, to N places. `round.up` goes away from zero and `round.down` goes toward zero, so on a
+negative they are the opposite of ceiling and floor (`-2.3 round.up` is `-3`, `-2.7 round.down` is
+`-2`; verified by running). `round.to N` rounds to N places, ties going half away from zero. Any
+other rounding spelling refuses, naming the accepted forms.
+
+---
+
+## Money is not plain decimal
+
+`as.decimal` and `as decimal` keep whatever precision you give them and apply no rounding and no
+currency, which is right for a measurement or a rate but wrong for money. For money, declare a
+currency type (`amount as USD`): it holds exactly the currency's decimal places, rounds half-up, and
+carries the currency so cross-currency math is caught. See the money chapter,
+`Docs/manual/mohio-manual-part2-money.md`, "Over-precision, and `as decimal` versus a currency type".
 
 ---
 
@@ -127,7 +145,7 @@ total   (price) round.to 2      // 2 decimal places
 | Keep the fraction | `(field) as.number` |
 | Fixed decimal places | `(field) as.decimal.2` |
 | Number → text | `(value) as.text` |
-| Round only (no type change) | `(value) round.up` / `round.down` / `round.to N` |
+| Round only (no type change) | `(value) round.up [N]` / `round.down [N]` / `round.to N` |
 | Declare a field/param type | `name as integer` *(declaration, not a cast)* |
 
 **One rule to remember:** the cast is the **dotted** modifier — `as.int`. The

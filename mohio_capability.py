@@ -545,3 +545,98 @@ def is_stale(stored: CapabilityProfile, fresh: CapabilityProfile) -> bool:
     second ago. That split is the reason there are two hashes rather than one.
     """
     return stored.semantic_fingerprint() != fresh.semantic_fingerprint()
+
+
+# ── the envelope question: can this deployment commit two writes as ONE commit ────────────
+#
+# The audit envelope needs the data write and the envelope write to land together or not at all.
+# The gate that decides this used to ask "are you a SQL backend" (a hasattr check for a cursor and
+# a connection). That is the wrong question wearing the right answer: it is TRUE for the three SQL
+# runtimes because a single connection commits both writes at once, and FALSE for Mongo -- but
+# Mongo excludes itself by SHAPE, not by capability. MongoDB has had multi-document ACID
+# transactions since 4.0; the real reason a Mongo write cannot use the envelope today is two-fold
+# and neither is "Mongo is not SQL":
+#   1. a Mongo transaction needs a replica set or a sharded cluster (a standalone mongod has no
+#      oplog), so the capability is a property of the DEPLOYMENT, not the backend; and
+#   2. Mohio has no Mongo envelope PATH yet -- the envelope write, the ack, the relay and the
+#      hash-chained authoritative trail are all SQL-only, and where a Mongo deployment's chain
+#      should live (a Mongo collection with app-level chaining, or a required SQL sibling sink) is
+#      an unresolved design question. Until that is built and ruled, a Mongo regulated write cannot
+#      be given the envelope guarantee.
+#
+# So this asks the CAPABILITY question and reports it truthfully, while still returning False for
+# Mongo because the path does not exist yet -- and the reason it returns says which of the two
+# blockers applies, so a replica-set deployment is told the path is the thing missing rather than
+# the false "Mongo cannot do this."
+
+def _sql_two_write_capable(runtime) -> bool:
+    """A SQL runtime commits two writes as one commit on its single controlled connection.
+
+    This is the property the old hasattr check was a correct proxy for: a runtime that owns a
+    cursor, a connection whose commit the runtime controls, and a placeholder to write with can
+    put both the data row and the envelope row on that connection and commit them together.
+    """
+    return (hasattr(runtime, "raw_cursor")
+            and hasattr(runtime, "conn")
+            and hasattr(runtime, "sql_placeholder"))
+
+
+def _mongo_deployment_atomic(runtime):
+    """Can THIS Mongo deployment commit a multi-document transaction? (replica set / sharded).
+
+    Returns True, False, or None (could not determine). A standalone mongod has no oplog and
+    cannot; a replica set (`hello.setName`) or a mongos over a sharded cluster (`hello.msg ==
+    'isdbgrid'`) can. Probed, never assumed, because it is a property of the running deployment.
+    """
+    client = getattr(runtime, "_client", None)
+    if client is None:
+        return None
+    hello = None
+    for _probe in ("hello", "isMaster"):        # `isMaster` is the pre-3.6 spelling
+        try:
+            hello = client.admin.command(_probe)
+            break
+        except Exception:
+            # SILENT-SHAPE OK (swallow-and-fake, recorded): this does NOT fake a capability.
+            # A probe that raises is tried under its older spelling; if BOTH raise, `hello`
+            # stays None and the function returns the honest UNKNOWN third value below, which
+            # envelope_capability treats conservatively as not-capable. Nothing is defaulted
+            # to a plausible-but-wrong answer -- the loud path is "cannot determine, so refuse."
+            continue
+    if hello is None:
+        return None
+    if hello.get("setName") or hello.get("msg") == "isdbgrid":
+        return True
+    return False
+
+
+def envelope_capability(runtime):
+    """Can a regulated write on this runtime commit its data and its audit envelope as ONE commit?
+
+    Returns (capable: bool, reason: str). `capable` is True only when the deployment can commit
+    two writes atomically AND Mohio has an implemented envelope path for that backend. The reason
+    is written to be read by an operator, and it names which blocker applies so a Mongo replica set
+    is not told the false "Mongo cannot do this."
+    """
+    if _sql_two_write_capable(runtime):
+        return True, "single-connection two-write commit"
+    name = type(runtime).__name__
+    if name in ("MongoRuntime",):
+        atomic = _mongo_deployment_atomic(runtime)
+        if atomic is True:
+            return (True,
+                    "this Mongo deployment is a replica set or sharded cluster and commits the data "
+                    "document and the audit envelope in one multi-document transaction (WP-A6).")
+        if atomic is False:
+            return (False,
+                    "this Mongo deployment is a standalone mongod, which has no oplog and cannot "
+                    "commit a multi-document transaction. Run a replica set (even a single-node "
+                    "one) for atomic multi-document writes. The Mongo envelope path also does not "
+                    "exist yet -- see WP-A6.")
+        return (False,
+                "could not determine this Mongo deployment's topology, so it is treated as unable "
+                "to commit two writes atomically. The Mongo envelope path also does not exist -- see "
+                "WP-A6.")
+    return (False,
+            "%s does not present a way to commit two writes as one commit that Mohio knows how to "
+            "use for the audit envelope." % name)

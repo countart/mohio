@@ -13,7 +13,7 @@ the same construct against a real `sql` failure; this chapter's trap is the piec
 ### `try` / `on.failure` -- catching a real failure
 
 ```mohio
-connect db as sqlite from env.DATABASE_URL
+connect db from env.DATABASE_URL
 
 try
     retrieve one from db.nobody_here
@@ -35,12 +35,22 @@ rejected write, a table that does not exist. It does NOT run for an ordinary emp
 `retrieve`/`find` finding nothing is a normal, successful outcome, checked with `is empty`, never
 a failure (see `Docs/guides/mioql-user-guide.md`).
 
+**One failure `on.failure` does NOT catch: a connection that cannot be opened.** A connection is opened at
+`connect`, which runs BEFORE your `try`, your handler or your task. So a bad or unreachable `DATABASE_URL`
+fails at the `connect` line itself, before the rest of the program runs, and no `on.failure` after it is
+reached (verified by running: a bad `DATABASE_URL` fails at the `connect` line, and the program stops there).
+`on.failure` catches failures of operations that run INSIDE it: a rejected write, a missing table, a
+connector call, an AI call. "My task handles connection failures" is a reasonable and wrong assumption -- a
+task's `on.failure` never sees a connection failure, because the connection was already opened, or already
+failed, before the task ran. Handle a possibly-missing database at deploy time by getting `DATABASE_URL`
+right, not with an `on.failure` inside a task.
+
 ### The day-two trap: a bare `try` with no `on.failure` catches nothing
 
 Same program, `on.failure` removed:
 
 ```mohio
-connect db as sqlite from env.DATABASE_URL
+connect db from env.DATABASE_URL
 
 try
     retrieve one from db.nobody_here

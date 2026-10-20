@@ -127,7 +127,7 @@ show "55 scores a {{ low }}"</pre>
     <p class="desc">Connect a database, add books, and query the ones you have not read yet.</p>
     <p class="run">Run it: <code>mio run cookbook/reading-list.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
     <p class="label">Source</p>
-    <pre>connect db as sqlite from env.DATABASE_URL
+    <pre>connect db as sqlite from env.DATABASE_URL default "app.db"
 
 save to db.books
     title "The Left Hand of Darkness"
@@ -167,7 +167,7 @@ repeat: done</pre>
     <p class="desc">Filter records to a named date window with <code>timespan</code> &mdash; a declared [start, end) range applied inside a find.</p>
     <p class="run">Run it: <code>mio run cookbook/sales-by-quarter.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
     <p class="label">Source</p>
-    <pre>connect db as sqlite from env.DATABASE_URL
+    <pre>connect db as sqlite from env.DATABASE_URL default "app.db"
 
 // Q1 2026: January through March (the end date is exclusive).
 timespan first_quarter
@@ -213,7 +213,7 @@ repeat: done</pre>
     <p class="desc">Hash a password, check a login attempt against the stored hash, and grant a role on success &mdash; the real, already-built way to log a user in.</p>
     <p class="run">Run it: <code>mio run cookbook/password-login.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
     <p class="label">Source</p>
-    <pre>connect db as sqlite from env.DATABASE_URL
+    <pre>connect db as sqlite from env.DATABASE_URL default "app.db"
 
 hash "correct-horse-battery-staple" as stored_hash using bcrypt
 
@@ -244,6 +244,7 @@ check member
                 show "invalid email or password"
             on.failure
                 show "invalid email or password"
+        check: done
     otherwise
         check "correct-horse-battery-staple" against member.hashed_password
             on.success
@@ -251,6 +252,7 @@ check member
                 show "login ok, role granted: {{ member.role }}"
             on.failure
                 show "invalid email or password"
+        check: done
 check: done</pre>
     <p class="label">Output</p>
     <pre class="output">4 warning(s) -- run mio check for details
@@ -282,7 +284,7 @@ the request/new/check handlers that do that half.</pre>
     <p class="desc">Declare work that runs on its own, without anyone asking &mdash; a named schedule, a time written bare, and the task it runs.</p>
     <p class="run">Run it: <code>mio run cookbook/nightly-schedule.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
     <p class="label">Source</p>
-    <pre>connect db as sqlite from env.DATABASE_URL
+    <pre>connect db as sqlite from env.DATABASE_URL default "app.db"
 
 save to db.sessions
     member "ada"
@@ -326,7 +328,7 @@ A schedule is declared. Run it on demand with:  run mioschedule.nightly_cleanup 
     <p class="desc">A <code>map</code> describes where values go and says nothing about when. It holds chains, and a chain is a line of stages: places a value sits, and shapes it is reformed by on the way.</p>
     <p class="run">Run it: <code>mio run cookbook/map-moving-values.mho</code> (uses SQLite. A plain run keeps its data in a file between runs, so add <code>--memory</code> for a clean database and exactly this output)</p>
     <p class="label">Source</p>
-    <pre>connect db as sqlite from env.DATABASE_URL
+    <pre>connect db as sqlite from env.DATABASE_URL default "app.db"
 
 // The shape a value passes THROUGH. It reforms the value and hands it on, which is
 // what makes a shape usable as a stage rather than only as a description.

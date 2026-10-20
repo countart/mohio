@@ -118,7 +118,8 @@ def _record(ctx, exc):
     from mohio_reachability import CompileError
     msg = getattr(exc, "message", None) or str(exc)
     line = getattr(exc, "line", 0) or 0
-    ctx.errors.append(CompileError(msg.strip(), line=line))
+    code = getattr(exc, "code", "") or ""
+    ctx.errors.append(CompileError(msg.strip(), line=line, code=code))
 
 
 def has_errors(ctx) -> bool:

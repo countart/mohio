@@ -266,6 +266,7 @@ def required_grade(frameworks, *, return_unratified=False):
 # entry_hash. Verification skips such rows, so they are audit records that are invisible to
 # the audit. A test can only guess at this by reading source; the storage layer can refuse it.
 import os as _os
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 import threading as _threading
 
 _CHAINED_WRITE = _threading.local()
@@ -281,6 +282,27 @@ class chained_write:
     def __exit__(self, *exc):
         _CHAINED_WRITE.active = False
         return False
+
+
+def audit_append_only_refusal(table, operation):
+    """The message for a program write to an audit relation, or None when `table` is not one.
+
+    AUDIT RELATIONS ARE APPEND-ONLY FOR EVERY VERB (Ron, 2026-10-13, pre-tag). The only writer of an
+    audit relation is the chaining path (`chained_write`, the envelope and the ack inserts); a
+    program verb never writes one -- not save, update, save-or-update, modify, remove, remove.all,
+    cm.purge or a raw sql statement. Measured before: `remove.all from db.data_audit_log` emptied the
+    trail and `mio audit verify` then reported 0 entries with the chain intact. One predicate, one
+    message, every call site."""
+    if not is_audit_table(table):
+        return None
+    return (f"`{operation}` on db.{table}: {table} is an audit relation, and audit relations are "
+            f"append-only. No program write may add, change or delete their rows; the audit chain "
+            f"writes them, and verification depends on every row staying exactly as written.")
+
+
+AUDIT_APPEND_ONLY_FIX = ("Remove this write. To erase a person, purge their DATA table: erasure "
+                         "destroys their key, and audit rows keep no readable identity (OR-3). To "
+                         "read the trail, use `mio audit read`.")
 
 
 def assert_write_allowed(table):

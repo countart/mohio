@@ -41,6 +41,14 @@ bcrypt>=4.0
 # 'cryptography'" and PHI/PII would not be sealed. Required for any encryption-backed compliance.
 cryptography>=49.0.0
 
+# ── Time zones ───────────────────────────────────────────────
+# zoneinfo (stdlib) needs a real IANA time zone database to resolve a zone name. Windows ships
+# none at all, and some minimal Linux images don't either -- verified: zoneinfo.available_
+# timezones() returns ZERO names on a plain Windows install without this. Required for every
+# `timezone "..."` declaration (journey default, field override, the timezone type) and for
+# `in.timezone` to resolve any zone name at all, not an optional convenience.
+tzdata>=2026.1
+
 # ── HTTP Server (mio serve) ──────────────────────────────────
 fastapi>=0.110.0
 uvicorn>=0.30.0

@@ -44,6 +44,7 @@ says how current the index is, and stops there.
 from __future__ import annotations
 
 import datetime
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 import json
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional

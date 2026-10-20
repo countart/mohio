@@ -232,7 +232,7 @@ mioconnect Stripe
     operation: done
 mioconnect: done
 
-hold payment = "tok_visa"
+hold payment "tok_visa"
 
 Stripe.charge with payment as receipt
 check receipt.ok

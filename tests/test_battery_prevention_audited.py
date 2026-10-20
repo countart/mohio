@@ -28,6 +28,9 @@ Run: PYTHONPATH=$PWD DATABASE_URL=:memory: python tests/test_battery_prevention_
 """
 import os
 import sys
+import os as _os_fd
+sys.path.insert(0, _os_fd.path.join(_os_fd.path.dirname(_os_fd.path.dirname(_os_fd.path.abspath(__file__))), "tests"))
+from _failure_detail import seen as _seen  # noqa: E402  (a served 5xx answers a reference only)
 
 sys.argv = ['mio.py']
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -87,21 +90,21 @@ SHAPE = ('shape Patient\n'
 SEED = ('        save to db.patients\n            email "a@b.com"\n            name "Ada"\n'
         '        save: done\n'
         '        retrieve p from db.patients\n            match name to "Ada"\n'
-        '            on.failure\n                give back [404] "none"\n'
+        '            when p is empty\n                give back [404] "none"\n'
         '        retrieve: done\n')
 
 
 def purpose_app(scope, use='give back 200 p.email'):
-    return (SHAPE + 'shape Q\nshape: done\nlisten for\n    new sh.Q at /p\n' + SEED +
+    return (SHAPE + 'shape Q\nshape: done\njourney WrapApp\n    listen for sh.Q at /p\n' + SEED +
             f'        purpose "{scope}"\n            {use}\n        purpose: done\n'
-            '    new: done\nlisten: done\n')
+            '    listen: done\njourney: done\n')
 
 
 # ── 1. the purpose-limitation refusal ────────────────────────────────────────────────────────
 print("\n== a purpose violation is recorded, not only refused ==")
 status, body, logs = serve(purpose_app("marketing"))
 check("the control still refuses", status == 500, (status, body[:120]))
-check("...citing GDPR Art. 5(1)(b) as it always did", "5(1)(b)" in body, body[:160])
+check("...citing GDPR Art. 5(1)(b) as it always did (in the detail logged for it)", "5(1)(b)" in _seen(body), _seen(body)[:300])
 viol = rows_of(logs, 'security_audit_log', 'purpose_violation')
 check("...and NOW writes a security_audit_log row", len(viol) == 1, logs.get('security_audit_log'))
 # NO `if viol:` GUARD. It was written that way first, and the mutation proof showed why that is
@@ -140,7 +143,7 @@ check("...marked as a derived use", dv and dv[0].get('use') == 'derived', dv)
 
 # ── 2. the saga compensation ─────────────────────────────────────────────────────────────────
 SAGA_HEAD = ('shape Q\nshape: done\nconnect db as sqlite from env.DATABASE_URL\n'
-             'listen for\n    new sh.Q at /p\n'
+             'journey WrapApp\n    listen for sh.Q at /p\n'
              '        saga placeOrder\n'
              '            step reserve\n'
              '                save to db.reservations\n                    item "widget"\n'
@@ -150,7 +153,7 @@ SAGA_HEAD = ('shape Q\nshape: done\nconnect db as sqlite from env.DATABASE_URL\n
              '            step: done\n')
 SAGA_TAIL = ('            on.failure\n                give back [500] "could not place"\n'
              '        saga: done\n'
-             '        give back 201 "placed"\n    new: done\nlisten: done\n')
+             '        give back 201 "placed"\n    listen: done\njourney: done\n')
 FAILING_STEP = ('            step charge\n'
                 '                save to db.charges\n'
                 '                    amount undefined_thing.nope\n'
@@ -182,14 +185,14 @@ check("...and records no compensation",
 
 # ── the control that was already right, still right ──────────────────────────────────────────
 print("\n== role denial, which was already audited, is untouched ==")
-status, body, logs = serve('shape Q\nshape: done\nlisten for\n    new sh.Q at /p\n'
+status, body, logs = serve('shape Q\nshape: done\n    listen for sh.Q at /p\n'
                            '        require role "admin"\n'
                            '        give back 200 "ok"\n'
-                           '    new: done\nlisten: done\n')
-check("role denial still refuses", status == 403, (status, body[:120]))
+                           '    listen: done\n')
+check("role denial still refuses (401: nobody is signed in)", status == 401, (status, body[:120]))
 denied = rows_of(logs, 'security_audit_log', 'access_denied')
 check("...and still records access_denied with its reason",
-      len(denied) == 1 and denied[0].get('reason') == 'role_not_present', denied)
+      len(denied) == 1 and denied[0].get('reason') == 'not_signed_in', denied)
 check("...in the same log the purpose violation now uses",
       'security_audit_log' in logs, sorted(logs))
 

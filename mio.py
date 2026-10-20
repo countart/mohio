@@ -22,6 +22,18 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
+import builtins as _builtins  # noqa: E402
+
+
+def _print_program_output(line):
+    """The PROGRAM'S OWN OUTPUT (`show`, a give back) to the terminal. It was masked by the display
+    rule inside the interpreter (the egress gate's `display` boundary: [phi]/[pci] hidden, [pii] in
+    full, the standing ruling), so it is printed as it is; the trace scrub every other print takes
+    would hide a [pii] value the display rule deliberately shows."""
+    # EGRESS-EXEMPT: program output, already masked by the gate's display rule in the interpreter
+    _builtins.print(line)
+
 import json
 import os
 import re
@@ -51,7 +63,7 @@ def _cache_debug():
 
 # ONE source. mio serve bannered 0.3.8 while /mio/health reported 0.4.4 -- two hardcoded
 # strings in one binary. A version that disagrees with itself makes a deploy unprovable.
-from mohio_version import VERSION, LANGUAGE_VERSION
+from mohio_version import VERSION, BUILD_SHA
 
 # -- Colour helpers -------------------------------------------------------------
 _USE_COLOUR = sys.stdout.isatty() and os.name != "nt"
@@ -210,6 +222,7 @@ def _make_parser_cached(grammar):
         try:
             fd, tmp_path = tempfile.mkstemp(
                 dir=str(cache_file.parent), prefix=f".{cache_file.name}.", suffix=".tmp")
+            # EGRESS-EXEMPT: the compiler's own parser cache; no program value
             with os.fdopen(fd, "wb") as f:
                 pickle.dump({"parser": parser,
                              "re_module": getattr(saved_re, "__name__", "re")},
@@ -218,6 +231,19 @@ def _make_parser_cached(grammar):
                 os.fsync(f.fileno())          # bytes are on disk before the rename
             os.replace(tmp_path, cache_file)  # atomic on POSIX and on Windows
             tmp_path = None
+            # PRUNE STALE HASHES (Batch 34). One pickle per historical grammar hash used to
+            # accumulate forever in each of the three cache dirs -- the suite measurement found 44,
+            # about 88 MB. The current grammar has exactly one valid pickle; every other
+            # `mohio_parser_*.pkl` in THIS directory is a dead hash from an older grammar and can
+            # never be loaded again (the hash is over grammar content). Remove them right after the
+            # current one lands, so the set stays at one and cannot grow. Best-effort: a pickle a
+            # concurrent process still holds open on Windows simply survives to the next run.
+            for _old in cache_file.parent.glob("mohio_parser_*.pkl"):
+                if _old.name != cache_file.name:
+                    try:
+                        _old.unlink()
+                    except OSError:
+                        pass
             if _cache_debug():
                 print("  [parser] cached for future startups", file=sys.stderr)
         except (TypeError, pickle.PicklingError, AttributeError) as e:
@@ -254,7 +280,7 @@ def _source_hash(source: str) -> str:
 
 
 # Cache format version. Bump only if the cache *structure* changes.
-_AST_CACHE_VERSION = 2
+_AST_CACHE_VERSION = 3   # 3: trees keep every token position (mohio_treepickle); older caches dropped end positions
 
 _COMPILER_FINGERPRINT = None
 def _compiler_fingerprint() -> str:
@@ -303,19 +329,103 @@ def _compiler_fingerprint() -> str:
     return _COMPILER_FINGERPRINT
 
 
+_PARSE_FINGERPRINT = None
+def _parse_fingerprint() -> str:
+    """Hash of ONLY the inputs that determine the PARSE TREE: the grammar, the pretokenizer, the
+    symbol-table extractor that feeds it, the langmap preprocessor and its data files, and the
+    reserved-word set the pretokenizer uses. A scanner, interpreter, AST-builder or CLI change
+    touches none of these, so the parse cache survives it -- which is the point: Batch 9 changed
+    only `mohio_reachability.py` and the blunt `_compiler_fingerprint` discarded every cached parse.
+
+    Splitting the fingerprint is SAFE here, and cannot bring back the bug `_compiler_fingerprint`
+    guards against (a cached clean verdict replayed after a new scanner), because ONLY THE PARSE IS
+    CACHED, NEVER THE VERDICT. Layer 1, the AST build and every scan re-run on every check, so a new
+    rule always runs -- there is no cached verdict to replay.
+    """
+    global _PARSE_FINGERPRINT
+    if _PARSE_FINGERPRINT is not None:
+        return _PARSE_FINGERPRINT
+    import hashlib, os, glob
+    here = os.path.dirname(os.path.abspath(__file__))
+    h = hashlib.sha256()
+    h.update(f"parse-v{_AST_CACHE_VERSION}|".encode())
+    # No try/except swallowing anywhere below: a fingerprint that silently omits one of its
+    # inputs on a read error is the very stale-cache bug this fingerprint exists to prevent -- a
+    # grammar or pretokenizer edit that coincided with a transient read failure (a locked file on
+    # Windows) would leave the omitted input out of the key and a stale parse would be served. On a
+    # working install every read below succeeds, so this fails loud only when the install is
+    # already broken, where a clear traceback beats a quietly-wrong cache key.
+    # mohio_segment.py shifts and joins the segments of a segmented parse into the tree this caches;
+    # mohio_treepickle.py writes every cached tree and decides which token fields survive the cache.
+    for fn in ('mohio_pretokenizer.py', 'mohio_symbol_table.py', 'mohio_langmap.py', 'mohio_segment.py',
+               'mohio_treepickle.py'):
+        with open(os.path.join(here, fn), 'rb') as f:
+            h.update(fn.encode())
+            h.update(f.read())
+    h.update(b'grammar|')
+    h.update(mohio_data.GRAMMAR_PATH.read_bytes())
+    from mohio_transformer import MOHIO_RESERVED_EXACT
+    h.update(b'reserved|')
+    h.update(repr(sorted(MOHIO_RESERVED_EXACT)).encode())
+    # THE TREE IS A PICKLE OF LARK OBJECTS, so its validity is bound to the Lark version that built
+    # it and the Python that pickled it, neither of which the file hashes above capture. A cache
+    # built on one machine and shipped to another with the same Mohio compiler but a different Lark
+    # or Python would otherwise match this key and be loaded -- an unpickle that at best raises (a
+    # silent reparse) and at worst yields a structurally different tree. Binding both in makes such a
+    # cache a CLEAN MISS that reparses, never a wrong tree. A deploy that pins Lark and Python (a
+    # requirements file) keeps an identical fingerprint, so the cache still travels for the real case.
+    import sys as _sys
+    import lark as _lark
+    h.update(b'lark|')
+    h.update(str(getattr(_lark, '__version__', 'unknown')).encode())
+    h.update(b'py|')
+    h.update(('%d.%d' % _sys.version_info[:2]).encode())
+    # Langmap DATA files translate a non-English source before it is parsed, so a langmap edit
+    # changes the tree for any file using it. Hashing all of them is safe (a langmap edit is rare)
+    # and keeps this a single global fingerprint rather than a per-file one.
+    maps_dir = os.path.join(here, 'mohio_data', 'maps')
+    for lm in sorted(glob.glob(os.path.join(maps_dir, '*.langmap'))):
+        with open(lm, 'rb') as f:
+            h.update(os.path.basename(lm).encode())
+            h.update(f.read())
+    _PARSE_FINGERPRINT = h.hexdigest()[:16]
+    return _PARSE_FINGERPRINT
+
+
 def _ctx_has_errors(ctx) -> bool:
     return bool(ctx is not None and getattr(ctx, 'errors', None))
 
 
-def _load_ast_cache(source_path: str, source: str):
-    """
-    Load cached AST only if BOTH the source AND the compiler are unchanged,
-    and the cached build was clean. Returns (tree, ctx) or None.
+def _app_cache_key(source_path: str):
+    """A short hash of the WHOLE-APP declaration set (page + includes + journey) for `source_path`.
+    The page's parse tree now depends on what its includes and journey DECLARE (those names are fed
+    to the pretokenizer), so the parse cache must invalidate when an included file's declarations
+    change, not only when the page itself changes. Hashing the declaration SET is the tightest
+    correct dependency: an include edit that changes no declared name (a string value, a comment)
+    legitimately keeps the cache; adding, renaming or removing a declaration reparses the page.
+    Returns None for a non-file source (`<string>`) or on any read failure, which reproduces the
+    pre-integration key exactly (a file with no includes/journey hashes only its own names)."""
+    if not source_path or source_path == "<string>":
+        return None
+    import hashlib
+    from mohio_symbol_table import app_mark_names
+    # app_mark_names is internally robust (it skips an unreadable app file, never raises on one), so
+    # there is no failure to swallow here. A genuine error (a real bug) is left to surface loudly
+    # rather than silently disabling cache invalidation, and the two cache callers already treat an
+    # exception from this as a miss (reparse), never a false hit.
+    return hashlib.sha256(repr(sorted(app_mark_names(source_path))).encode()).hexdigest()[:16]
 
-    A cache that was written by a different compiler version, or that recorded
-    a failed build, is treated as a miss -- never replayed. This prevents an
-    old compiler from poisoning serve/check with errors the current compiler
-    would not produce.
+
+def _load_ast_cache(source_path: str, source: str):
+    """Load a cached PARSE TREE, keyed on the source, the files that affect PARSING
+    (`_parse_fingerprint`), and the whole-app declaration set (`_app_cache_key`). Returns the tree,
+    or None on a miss.
+
+    ONLY THE PARSE IS CACHED, NEVER THE VERDICT. Layer 1, the AST build and every whole-program scan
+    re-run on every check, so a new scanner rule can never be skipped by a stale cache. That is why
+    this no longer keys on the whole-compiler fingerprint and no longer stores the ctx: a scanner or
+    interpreter change keeps the parse (the 87s on a large app), and a re-worded or added rule always
+    runs, because there is no cached verdict to replay.
     """
     import os, pickle
     cache_path = _ast_cache_path(source_path)
@@ -326,34 +436,41 @@ def _load_ast_cache(source_path: str, source: str):
             cached = pickle.load(f)
         if cached.get('hash') != _source_hash(source):
             return None  # source changed
-        if cached.get('compiler') != _compiler_fingerprint():
-            return None  # compiler changed -- never trust an old build
-        ctx = cached.get('ctx')
-        if _ctx_has_errors(ctx):
-            return None  # never replay a cached failure
-        return cached.get('tree'), ctx
+        if cached.get('parse') != _parse_fingerprint():
+            return None  # a parse-affecting file changed -- reparse
+        if cached.get('app') != _app_cache_key(source_path):
+            return None  # an included file's or the journey's declarations changed -- reparse
+        if _cache_debug():
+            # Opt-in, like the parser cache's own line: a test can ask whether this file's parse was
+            # READ from its cache, instead of inferring it from a timing difference that load can invert.
+            print(f"  [ast] cache hit: {cache_path}", file=sys.stderr)
+        return cached.get('tree')
     except Exception:
         pass  # Corrupted cache -- re-parse
     return None
 
 
-def _save_ast_cache(source_path: str, source: str, tree, ctx):
+def _save_ast_cache(source_path: str, source: str, tree, ctx=None):
+    """Save the PARSE TREE, whenever the parse SUCCEEDED. A file whose parse succeeds but whose
+    scans find errors still caches its tree: the parse is reusable, and the errors are re-produced
+    fresh on the next check. `ctx` is accepted for call-site compatibility and is NOT stored -- the
+    verdict is never cached.
     """
-    Save parsed AST to cache file -- but ONLY for clean builds. A ctx carrying
-    errors is never cached, so a failure can never be persisted and replayed.
-    """
-    import pickle
-    if _ctx_has_errors(ctx):
-        return  # never cache an error-state build
+    if tree is None:
+        return  # nothing parsed -- nothing to cache
+    # Through the tree pickler: a tree read back from this cache is the tree a fresh parse built,
+    # every token position included (plain pickle dropped every end position).
+    import mohio_treepickle as _treepickle
     cache_path = _ast_cache_path(source_path)
     try:
+        # EGRESS-EXEMPT: the compiler's own parse cache; no program value
         with open(cache_path, 'wb') as f:
-            pickle.dump({
-                'hash':     _source_hash(source),
-                'compiler': _compiler_fingerprint(),
-                'tree':     tree,
-                'ctx':      ctx,
-            }, f, protocol=pickle.HIGHEST_PROTOCOL)
+            _treepickle.dump({
+                'hash':  _source_hash(source),
+                'parse': _parse_fingerprint(),
+                'app':   _app_cache_key(source_path),
+                'tree':  tree,
+            }, f)
     except Exception as e:
         # A cache-write failure is non-fatal (the program still runs; it just re-parses next
         # time), but it must not be SILENT. The old bare `except: pass` meant an unpicklable
@@ -374,7 +491,28 @@ def _source_snippet(source, line_no):
     return None
 
 
-def _construct_ai_runtime(api_key, verbose):
+def _declared_ai_keys(path):
+    """The env names a program's `ai.connect` blocks read their key from (`key env.MYKEY`, or the
+    inline `address .. key env.MYKEY as NAME`), across one .mho file or every .mho under a folder.
+    It decides only whether `--ai` may start: the key itself is resolved through the program when
+    the connection registers."""
+    import os as _os
+    import re as _re
+    files = []
+    if path and _os.path.isdir(path):
+        for _root, _dirs, _names in _os.walk(path):
+            files += [_os.path.join(_root, n) for n in _names if n.endswith('.mho')]
+    elif path and _os.path.isfile(path):
+        files = [path]
+    keys = set()
+    for f in files:
+        src = open(f, encoding='utf-8-sig').read()   # unreadable is loud, as it is when serve loads it
+        if 'ai.connect' in src:
+            keys.update(_re.findall(r'\bkey\s+env\.([A-Za-z_][A-Za-z0-9_]*)', src))
+    return sorted(keys)
+
+
+def _construct_ai_runtime(api_key, verbose, path=None):
     """A8: build the AI runtime, honoring MOHIO_AI=mock to force the labeled mock provider
     (classroom weeks 1-3 need mock mode; the real runtime needs a provider key). Any real provider
     key (Anthropic / OpenAI / Gemini) activates AnthropicAiRuntime, which routes by model prefix."""
@@ -383,7 +521,7 @@ def _construct_ai_runtime(api_key, verbose):
     if _os.environ.get("MOHIO_AI", "").strip().strip('"').strip("'").lower() == "mock":
         return MockAiRuntime()
     from mohio_ai import AnthropicAiRuntime
-    return AnthropicAiRuntime(api_key=api_key, verbose=verbose)
+    return AnthropicAiRuntime(api_key=api_key, verbose=verbose, declared_keys=_declared_ai_keys(path))
 
 
 def _beginner_parse_hint(e, source, line):
@@ -449,25 +587,6 @@ _BLOCK_OPENERS = (
     'send', 'new', 'request', 'sql', 'mioconnect', 'miovalidate', 'miocache', 'mioscript',
     'ai.decide', 'ai.explain', 'ai.agent', 'ai.resolve', 'ai.compare', 'ai.respond',
 )
-
-
-def _find_retired_set(source):
-    """`set` is retired. It was accepted as noise and SILENTLY DISCARDED -- exactly how a dead
-    keyword survives in docs and comes back as canon.
-
-    Detected at SOURCE level, not in the grammar: a `SET NAME ...` grammar rule makes Earley's
-    dynamic lexer match `set` INSIDE identifiers (`rset_skip` in the Zork demo split into
-    `r` + `set` + `_skip`). A word-boundary scan on the statement head has no such hazard.
-    """
-    import re as _r
-    for i, raw in enumerate(source.split('\n')):
-        line = raw.strip()
-        if not line or line.startswith('//'):
-            continue
-        m = _r.match(r'set\s+([A-Za-z_]\w*)\b', line)
-        if m:
-            return (m.group(1), i + 1)
-    return (None, None)
 
 
 def _find_unclosed_block(source):
@@ -614,12 +733,11 @@ def _find_unterminated_string(source):
 # `set` already gets.
 _RETIRED_FORMS = (
     (r'^route\b', 'route',
-     "A web address is declared with `listen for`, and the address rides on the request:\n"
-     "    listen for\n"
-     "        request for sh.Thing at /home\n"
-     "            ...\n"
-     "        request: done\n"
-     "    listen: done"),
+     "A web address is a handler on its own, and the address rides on it:\n"
+     "    request for sh.Thing at /home\n"
+     "        ...\n"
+     "    request: done\n"
+     "  (or `listen for sh.Thing at /home` ... `listen: done` for a POST). No wrapper block is needed."),
     (r'^make\b', 'make',
      "Use `create`.  create list colors  ...  create: done"),
     (r'^consider\b', 'consider',
@@ -655,28 +773,178 @@ _RETIRED_FORMS = (
      "back IS the response, with no routing code:\n"
      "    // index.mho, served at /\n"
      "    give back [200] \"<h1>Hello</h1>\"\n"
-     "To serve several addresses from one file, name them:\n"
-     "    listen for\n"
-     "        request for sh.Home at /about\n"
-     "            render\n                <p>About</p>\n"
-     "            render: done\n"
-     "        request: done\n"
-     "    listen: done\n"
+     "To serve several addresses from one file, write each handler on its own:\n"
+     "    request for sh.Home at /about\n"
+     "        render\n            <p>About</p>\n"
+     "        render: done\n"
+     "    request: done\n"
      "Page CLASSIFICATION (`private:` / `hidden:`) is a different thing and is unchanged."),
 )
 
 
-def _find_retired_form(source):
-    """Find a retired keyword at the head of a statement. Returns (word, line_no, guidance)."""
+_RENDER_INCLUDE_RE = re.compile(r'\{\{\s*include\s+"([^"]+)"\s*\}\}')
+
+
+def _render_only_fragments(paths):
+    """Absolute paths of the files a render includes (`{{ include "x" }}`). Those are page text and
+    are not parsed as Mohio on their own. A file that is ALSO included as a statement is still
+    checked as Mohio, through the page that includes it. Resolved the way the runtime resolves an
+    include: relative to the including file, then the current directory."""
+    import os as _os
+    found = set()
+    for p in paths:
+        try:
+            src = Path(p).read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            continue          # an unreadable file is reported by its own parse, not here
+        base = _os.path.dirname(_os.path.abspath(p))
+        for m in _RENDER_INCLUDE_RE.finditer(src):
+            for cand in (_os.path.join(base, m.group(1)), _os.path.abspath(m.group(1))):
+                if _os.path.isfile(cand):
+                    found.add(_os.path.abspath(cand))
+                    break
+    return found
+
+
+def _find_take_after_returns(source):
+    """(line, task name) of the first `take` line written after a `returns` in the same task, or
+    (None, None). Asked only after a parse has failed. `returns` may sit on the task line itself
+    (`task echo returns text`) or on its own line before the takes."""
+    import re as _r
+    task, seen_returns = None, False
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        line = _code_part(raw).strip()
+        m = _r.match(r'task\s+([A-Za-z_][A-Za-z0-9_]*)(\s+returns\b)?', line)
+        if m and not line.startswith('task:'):
+            task, seen_returns = m.group(1), bool(m.group(2))
+            continue
+        if task is None:
+            continue
+        if line.startswith('task: done') or line == 'done':
+            task, seen_returns = None, False
+        elif _r.match(r'returns\b', line):
+            seen_returns = True
+        elif seen_returns and _r.match(r'take\b', line):
+            return i + 1, task
+    return None, None
+
+
+def _find_rounding_misuse(source):
+    """The line of a rounding word written in a form Mohio does not have, or None. Asked only after
+    a parse has failed. The accepted forms follow a value: `x round.to N`, `x round.up [N]`,
+    `x round.down [N]`; this finds `round.to` with no whole-number count, a line led by a rounding
+    verb, and a bare `round` after a value."""
     import re as _r
     for i, raw in enumerate(_mask_noncode(source).split("\n")):
         line = _code_part(raw).strip()
         if not line:
             continue
+        if _r.search(r'(?<![A-Za-z0-9_.])round\.to(?![A-Za-z0-9_])(?!\s+\d+(?![\d.]))', line):
+            return i + 1
+        if _r.match(r'round\.(to|up|down)(?![A-Za-z0-9_])', line):
+            return i + 1
+        if _r.search(r'[A-Za-z0-9_)\]]\s+round\s*(\)|$)', line):
+            return i + 1
+    return None
+
+
+def _find_misplaced_no_symbol(source):
+    """The line of a `no.symbol` written anywhere but on a currency field declaration, or None.
+
+    The field form is `<name> as <CODE> ... no.symbol`; every other use follows a value, which is
+    not a form Mohio has. Text inside quotes and comments is masked, so a page that mentions the
+    word is not read as using it."""
+    import re as _r
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        line = _code_part(raw).strip()
+        if not _r.search(r'(?<![A-Za-z0-9_.])no\.symbol(?![A-Za-z0-9_])', line):
+            continue
+        if _r.match(r'^[A-Za-z_][A-Za-z0-9_]*\s+as\s+[A-Za-z]{3}\b', line):
+            continue
+        return i + 1
+    return None
+
+
+def _find_retired_form(source, err_line=None):
+    """Find a retired keyword at the head of a statement that can be the cause of a parse failure
+    reported at `err_line` (see _at_reported_position). Returns (word, line_no, guidance, header)."""
+    import re as _r
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        line = _code_part(raw).strip()
+        if not line or not _at_reported_position(source, i + 1, err_line):
+            continue
         for pattern, word, guidance in _RETIRED_FORMS:
             m = _r.search(pattern, line)
-            if m:
-                return (word or m.group(1), i + 1, guidance)
+            if not m:
+                continue
+            w = word or m.group(1)
+            if not _retired_word_is_a_name(line, m):
+                return (w, i + 1, guidance, 'is not a Mohio word any more.')
+            if w in _RESERVED_NOT_NAMES:
+                return (w, i + 1, _RESERVED_NOT_NAMES[w], 'is reserved, so it cannot be a name.')
+    return (None, None, None, None)
+
+
+# A RETIRED WORD IS ONLY RETIRED WHERE IT WOULD BE READ AS ITS OLD STATEMENT (RULED by Ron 2026-10-09).
+# As a field, a column, a variable or after a dot it is an ordinary name. The explainer for a syntax
+# error used to blame the first line STARTING with a retired word anywhere in the file, so a shape
+# field `make as text required` (a vehicle's make) was reported as the error while the real mistake
+# sat 600 lines further down.
+# One retired word is still a live word, so it is never a name: `if` is the trailing qualifier
+# (`option X if ...`). `catch` was released as a name 2026-10-09; only its statement refuses.
+_RESERVED_NOT_NAMES = {
+    'if': "Choose another name for this field or variable, for example `condition`.\n"
+          "`if` is still a word in Mohio (the trailing qualifier `option X if ...`); decisions use "
+          "`check` / `when` / `otherwise`.",
+}
+_NAME_FOLLOWS = re.compile(r'^\s*(?:as\b|"|\d|=|\.|:|\[|\(|to\b|is\b|[A-Za-z_]\w*\.)')
+
+
+def _retired_word_is_a_name(line, m):
+    """True when the retired word at the head of `line` is used as a NAME: a field declaration
+    (`make as text`), a value line (`make "Volvo"`, `make 3`), an assignment or a dotted name. Only
+    the bare head word is judged; a two-word form such as `request outbound` is its own statement."""
+    head = m.group(0)
+    if ' ' in head.strip() or '.' in head:
+        return False
+    return bool(_NAME_FOLLOWS.match(line[m.end():]))
+
+
+# The two-bareword where shorthand `where status active` (field value, no `is`) was DELETED
+# (Ron, 2026-09-25) -- it read as two nouns, not a sentence, and the ordinary `where status is
+# active` already says it. Deleting it also removed the only place a bareword could sit in the
+# FIELD position, which is why `when is even` (predicate before its subject) misparsed. Both now
+# fail at the grammar on some unrelated character further down; name the sentence form the reader
+# meant, the same way the retired-word table already does.
+_COND_PREDS = frozenset((
+    'is', 'contains', 'starts', 'ends', 'matches', 'between', 'older', 'newer',
+    'above', 'below', 'more', 'less', 'greater', 'in', 'not', 'empty', 'odd', 'even'))
+
+def _find_condition_shorthand(source):
+    """The removed `where X Y` shorthand, or a subject-less `when is <pred>`. Returns
+    (kind, line_no, guidance) where kind is 'where-shorthand' or 'when-subjectless'."""
+    import re as _r
+    for i, raw in enumerate(_mask_noncode(source).split("\n")):
+        line = _code_part(raw).strip()
+        if not line:
+            continue
+        # A condition with the predicate BEFORE its subject: `when is even`, `when is empty`.
+        if _r.match(r'^when\s+(?:is|is\.|not\.|starts|ends|contains|matches)\b', line):
+            return ("when-subjectless", i + 1,
+                    "A condition names its subject first, then the test:\n"
+                    "    check total\n"
+                    "        when total is even\n"
+                    "            ...\n"
+                    "    check: done\n"
+                    "`when is even` puts the test before its subject, so there is nothing to test.")
+        # The two-bareword shorthand: `where status active`, a field and a value with no `is`.
+        m = _r.match(r'^where\s+([A-Za-z_][\w.]*)\s+([A-Za-z_]\w*)\s*$', line)
+        if m and m.group(2).lower() not in _COND_PREDS:
+            fld, val = m.group(1), m.group(2)
+            return ("where-shorthand", i + 1,
+                    "A where clause reads as a sentence, with `is` between the field and the value:\n"
+                    f"    where {fld} is {val}\n"
+                    f"The two-word shorthand `where {fld} {val}` was removed.")
     return (None, None, None)
 
 
@@ -720,13 +988,48 @@ _CASE_GUIDANCE = (
     "is no executor for them yet, so a program using one checks clean and stops at runtime.")
 
 
-def _find_case_near_miss(source):
-    """A case transform spelled the way another language spells it. Returns (written, meant)."""
+_WHEN_IS_FIELD = re.compile(r'^(\s*)when\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*?)\.is(?![A-Za-z0-9_.])\s*(.*?)\s*(?:->)?\s*$')
+
+
+def _find_when_is_field(source, err_line):
+    """A `when <owner>.is ...` condition that can be the cause of a parse failure reported at
+    `err_line`. Returns (line, owner, enclosing check subject or None, value written or None)."""
+    lines = _mask_noncode(source).split("\n")
+    raw = source.split("\n")
+    for i, text in enumerate(lines):
+        m = _WHEN_IS_FIELD.match(text)
+        if not m or not _at_reported_position(source, i + 1, err_line):
+            continue
+        indent = len(m.group(1))
+        subject = None
+        for j in range(i - 1, -1, -1):
+            above = lines[j]
+            if not above.strip():
+                continue
+            depth = len(above) - len(above.lstrip())
+            if depth < indent:
+                cm = re.match(r'\s*check\s+([A-Za-z_][\w.]*)\s*$', above)
+                subject = cm.group(1) if cm else None
+                break
+        value = None
+        if m.group(3) and i < len(raw):
+            # The value as written, quotes included, read from the unmasked line.
+            vm = re.search(r'\.is\s+(.+?)\s*(?:->)?\s*$', raw[i])
+            value = vm.group(1) if vm else None
+        return (i + 1, m.group(2), subject, value)
+    return None
+
+
+def _find_case_near_miss(source, err_line=None):
+    """A case transform spelled the way another language spells it, on a line that can be the
+    cause of a parse failure reported at `err_line`. Returns (written, meant)."""
     import re as _re
-    text = _mask_noncode(source)
-    for wrong, right in _CASE_NEAR_MISS.items():
-        if _re.search(r'(?<![A-Za-z0-9_.])%s(?![A-Za-z0-9_])' % _re.escape(wrong), text):
-            return (wrong, right)
+    for i, text in enumerate(_mask_noncode(source).split("\n")):
+        if not _at_reported_position(source, i + 1, err_line):
+            continue
+        for wrong, right in _CASE_NEAR_MISS.items():
+            if _re.search(r'(?<![A-Za-z0-9_.])%s(?![A-Za-z0-9_])' % _re.escape(wrong), text):
+                return (wrong, right)
     return (None, None)
 
 
@@ -769,8 +1072,8 @@ def _find_unspellable_construct(source):
                     "`timezone \"EST\"` and `timeout after 10 minutes` are also body lines.\n"
                     "The WEEKDAY forms (`every monday at 9am`, `every day at 09:00`, "
                     "`on monday`) parse and are\n"
-                    "NOT WIRED YET -- they are accepted and do nothing, so use one of the "
-                    "forms above until they are."
+                    "NOT WIRED YET -- `mio check` refuses them rather than let them do nothing, "
+                    "so use one of the forms above until they are."
                     + ("" if named else
                        "\nA schedule needs a name of its own -- that is how it is run later "
                        "(`run mioschedule.<name> now`)."))
@@ -827,6 +1130,43 @@ def _find_capitalised_opener(source):
     return (None, None)
 
 
+_CLOSER_LINE = re.compile(r'^\s*(?:[A-Za-z_][\w.]*\s*:\s*done|done)\s*$')
+
+
+def _at_reported_position(source, found_line, err_line):
+    """True when a hint found on `found_line` can be the cause of a parse failure reported at
+    `err_line` (RULED by Ron 2026-10-09, from the Dispatch app: a syntax error at line 748 was
+    explained as a retired word on line 81, a valid shape field 667 lines earlier).
+
+    The parser reads every line before the reported one, so a cause above it must be part of the
+    statement that was still open there: the reported line itself, the code line just before it, or
+    a line whose block the reported line sits inside (deeper indented, or that block's own closer).
+    Anything else was read successfully and is not what failed. A failure with no line (the end of
+    the file) has no position to hold the hint to, so every hint stays admissible there."""
+    if not err_line or not found_line:
+        return True
+    if found_line == err_line:
+        return True
+    if found_line > err_line:
+        return False
+    lines = _mask_noncode(source).split("\n")
+    code = [n for n in range(found_line + 1, err_line) if n - 1 < len(lines) and lines[n - 1].strip()]
+    if not code:
+        return True                      # nothing but blank lines and comments between them
+    opener = lines[found_line - 1] if found_line - 1 < len(lines) else ""
+    indent = len(opener) - len(opener.lstrip())
+    for n in code + [err_line]:
+        text = lines[n - 1] if n - 1 < len(lines) else ""
+        depth = len(text) - len(text.lstrip())
+        if depth > indent:
+            continue
+        # The reported line is the closer of the found line's own block, or of a block around it
+        # (every line between is deeper): the parser often fails on the outer closer of the statement
+        # that did not parse (`when is even` reported at the check's `check: done`).
+        return n == err_line and bool(_CLOSER_LINE.match(text))
+    return True
+
+
 def _echo_line_if_new(source, want_line, already_shown):
     """Show the offending line, unless the report already showed that exact line.
 
@@ -847,6 +1187,13 @@ def _echo_line_if_new(source, want_line, already_shown):
 # made that mistake twice.
 _FOREIGN_PUNCTUATION = (
     # (pattern, what the reader wrote, what Mohio does instead)
+    (r'^\s*require\s+role\s+"[^"]*"\s*,',
+     "a comma between roles",
+     "Several roles are joined with `or`:\n    require role \"user\" or \"admin\""),
+    (r'^\s*verify\s+token\s+from\s+"',
+     "a quoted value after `verify token from`",
+     "`verify token from` reads a name, so give the token a name first:\n"
+     "    presented request.t\n    verify token from presented as grant"),
     (r'\{\s*$|^\s*\}',
      "a curly brace opening or closing a block",
      "Mohio blocks are indentation and a named closer, never braces:\n"
@@ -863,7 +1210,9 @@ _FOREIGN_PUNCTUATION = (
     (r';\s*$',
      "a semicolon ending the line",
      "Mohio lines end at the end of the line. There is no semicolon."),
-    (r'[A-Za-z_]\w*\s*\[\s*\d+\s*\]',
+    # `give back [409]` is a status code, never an index: the hint used to fire on any handler
+    # that answered with a status near the real mistake (a role list, a verify source).
+    (r'\b(?!back\b)[A-Za-z_]\w*\s*\[\s*\d+\s*\]',
      "square brackets to reach an item by number",
      "Mohio counts from 1 and reaches an item by position:\n"
      "    show colors.position.2      // or colors.pos.2\n"
@@ -969,6 +1318,78 @@ def _explain_unexpected(e, source, line, col):
     return None
 
 
+def _locate_unfinished(source):
+    """A position-less end-of-input error (Earley raises `UnexpectedEOF` with no line/col when a token
+    lexes but the parse can only fail at the end) points at the LAST line of the file, not the line the
+    mistake is on. Find the real line: blank each code line from the BOTTOM up, and the deepest line
+    whose removal lets the whole file parse is where the unfinished statement sits. Runs ONLY on the
+    error path, and returns (line_no, snippet) or (None, None) -- so an ambiguous case falls back to the
+    honest "on or above line N" message rather than pointing confidently at the wrong place."""
+    try:
+        from mohio_symbol_table import extract_symbols
+        from mohio_pretokenizer import pretokenize
+        from mohio_transformer import MOHIO_RESERVED_EXACT
+        parser = _make_parser_cached(_load_grammar())
+    except Exception:
+        return None, None
+
+    def _parses(text):
+        try:
+            st = extract_symbols(text)
+            parser.parse(pretokenize(text, st.all_user_names(), MOHIO_RESERVED_EXACT))
+            return True
+        except Exception:
+            return False
+
+    lines = source.split("\n")
+    idxs = [i for i, l in enumerate(lines) if l.strip()]
+    if not idxs or len(idxs) > 150:          # keep the error path cheap on large files
+        return None, None
+    for i in reversed(idxs):
+        trial = lines[:]
+        trial[i] = ""                         # blank, preserving line numbers
+        if _parses("\n".join(trial)):
+            return i + 1, _source_snippet(source, i + 1)
+    return None, None
+
+
+def _find_hyphenated_name(source, line, col):
+    """A hyphen inside what reads as a name -- `balance-hidden`, `is-active` -- fails at the `-` with
+    `No terminal matches '-'`, naming a character and never the name. A hyphen is only ever minus, and
+    minus lives inside parentheses; between two name fragments it is invalid. Recover the whole
+    hyphenated word so the message names what was written. Returns (word, line) or (None, None)."""
+    import re as _re
+    if not (line and col):
+        return None, None
+    lines = source.split("\n")
+    if line > len(lines):
+        return None, None
+    text = lines[line - 1]
+    idx = col - 1                       # 0-based position of the offending character
+    if idx < 0 or idx >= len(text) or text[idx] != '-':
+        return None, None
+    for mm in _re.finditer(r'[A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)+', text):
+        if mm.start() <= idx < mm.end():
+            return mm.group(0), line
+    return None, None
+
+
+def _find_type_after_value(source, line, col):
+    """`code 5 as text` with a reserved type word stops the parse ON the type word. Returns the
+    shared teaching message (mohio_ast.type_after_value_message) when the caret is there, else None."""
+    import re as _re
+    if not (line and col):
+        return None
+    lines = source.split("\n")
+    if line > len(lines):
+        return None
+    m = _re.match(r'\s*[A-Za-z_]\w*\s+\S.*?\s+as\s+([A-Za-z_][\w.]*)', lines[line - 1])
+    if not m or not (m.start(1) <= col - 1 < m.end(1)):
+        return None
+    from mohio_ast import type_after_value_message
+    return type_after_value_message(lines, line)
+
+
 def _print_parse_error_body(e, source="", filename=""):
     header = bold(red("Syntax error")) + (f"  {dim(filename)}" if filename else "")
     print(f"\n{header}\n")
@@ -982,6 +1403,10 @@ def _print_parse_error_body(e, source="", filename=""):
                 print(f"  {dim('  |')} {' ' * (col - 1)}{red('^')}")
             print()
     msg = str(e).split("\n")[0][:120]
+    # The position a hint must explain (see _at_reported_position). A failure at the end of the
+    # file carries wherever the file ran out, which is no position at all, so it holds none.
+    _at_eof = any(w in msg.lower() for w in ("end-of-input", "end of input"))
+    at = None if _at_eof else line
     # A BARE service root (`miopdf "x"`) is not a form -- every service is a dotted op.
     # It used to die as a generic "Syntax error" that never mentioned miopdf was a
     # reserved service, while the DOTTED form (`miopdf.from ...`) gave a clear, named,
@@ -997,11 +1422,64 @@ def _print_parse_error_body(e, source="", filename=""):
             print(f"    nothing is built behind it yet.")
         print(f"    If you meant a variable, pick a name that is not a service root.\n")
         return
+    # A `mioai.<method>` call written with a value after it (`mioai.text "hello"`) fails to parse,
+    # so it never reaches the check-time refusal and arrived here as a bare character. Say what the
+    # method is: retired, designed and not built, or not a mioai operation (RULED 2026-10-09).
+    _mio_m = re.match(r'\s*mioai\.([A-Za-z_]\w*)', _source_snippet(source, line) or "") if line else None
+    if _mio_m:
+        from mohio_ast import mioai_refusal
+        print(f"  {red('x')} {mioai_refusal(_mio_m.group(1))}\n")
+        return
+    # A `config` block never parses (`config: done` closes nothing the grammar knows), so it reached
+    # here as a bare character. It is the same refusal every other form of the block gives (Ron,
+    # 2026-10-13): application-level settings are not built yet, at the line that opened it.
+    if line and re.match(r'\s*config\s*:\s*done\s*$', _source_snippet(source, line) or ""):
+        _src_lines = (source or "").splitlines()
+        _open = next((i + 1 for i in range(min(line, len(_src_lines)) - 1, -1, -1)
+                      if re.match(r'\s*config\s*$', _src_lines[i])), line)
+        from mohio_reachability import app_config_refusal, APP_CONFIG_FIX
+        print(f"  {red('x')} {app_config_refusal(_open, 'config')}.")
+        print(f"    {dim(APP_CONFIG_FIX)}\n")
+        return
+    # `shape -Order` never parses, so it reaches here, not the check that refuses `shape _Order`.
+    # Both say the same thing: a shape name begins with a letter (RULED by Ron 2026-10-10).
+    _sn_m = re.match(r'\s*shape\s+([-_][\w-]*)', _source_snippet(source, line) or "") if line else None
+    if _sn_m:
+        from mohio_ast import shape_name_start_message
+        print(f"  {red('x')} {shape_name_start_message(line, _sn_m.group(1))}\n")
+        return
+    # `connect db as json` never parses, because json is a Mohio word, so it never reaches the
+    # check that refuses `connect db as csv`. The parse fails on that line: give the same refusal
+    # (RULED by Ron 2026-10-11). Any Mohio word in that slot is the same mistake. The caret is not
+    # consulted: after `readonly` the parse fails on `from`, and an engine word Mohio does not know
+    # is refused whatever else the line holds.
+    _cn_m = re.match(r'\s*connect\s+\w+\s+as\s+(?:(?:readonly|writeonly|readwrite)\s+)?([A-Za-z_]\w*)\b',
+                     _source_snippet(source, line) or "") if line else None
+    if _cn_m:
+        from mohio_db_drivers import is_supported_driver, unknown_driver_message
+        if not is_supported_driver(_cn_m.group(1)):
+            print(f"  {red('x')} {unknown_driver_message(_cn_m.group(1))}\n")
+            return
+    _tv = _find_type_after_value(source, line, col)
+    if _tv:
+        print(f"  {red('x')} {_tv}\n")
+        return
+    # `when actor.is "yes"` (RULED by Ron 2026-10-09, the Dispatch app's line 747): `is` dotted onto a
+    # name is read as a field, the value after it fits nowhere, and the parse fails on the NEXT line.
+    # Describe the condition, at its own line, naming the enclosing check's subject.
+    _wi = _find_when_is_field(source, at)
+    if _wi:
+        from mohio_ast import when_is_field_message
+        _wi_line, _wi_owner, _wi_subject, _wi_value = _wi
+        print(f"  {red('x')} {when_is_field_message(_wi_line, _wi_owner, _wi_subject, _wi_value)}")
+        _echo_line_if_new(source, _wi_line, line)
+        print()
+        return
     # A quote that is never closed swallows the rest of the file and kills the parse at
     # end-of-input, so it arrives here with no line, no caret, and an empty expected-list.
     # It is the commonest typo there is, so it is recovered before anything else.
     q_line, q_col = _find_unterminated_string(source)
-    if q_line:
+    if q_line and not (at and q_line > at):
         snippet = _source_snippet(source, q_line)
         print(f"  {red('x')} This text is opened with a quote that is never closed.")
         if snippet is not None:
@@ -1016,9 +1494,9 @@ def _print_parse_error_body(e, source="", filename=""):
 
     # A word that used to be Mohio dies on a character further along the line that had nothing
     # to do with it. Name the word the person actually typed, and what replaced it.
-    word, w_line, guidance = _find_retired_form(source)
+    word, w_line, guidance, w_head = _find_retired_form(source, at)
     if word:
-        print(f"  {red('x')} {bold(word)} is not a Mohio word any more.")
+        print(f"  {red('x')} {bold(word)} {w_head}")
         _echo_line_if_new(source, w_line, line)
         print()
         for g in guidance.splitlines():
@@ -1026,10 +1504,77 @@ def _print_parse_error_body(e, source="", filename=""):
         print()
         return
 
+    # F5 (RULED by Ron, 2026-10-06): `no.symbol` is a SHAPE FIELD modifier. Written after a value
+    # (`give back [200] r.amount no.symbol`, `show amt no.symbol`) the parse failed further down and
+    # borrowed the square-bracket hint, naming a problem the line did not have. Name the real one.
+    _ns_line = _find_misplaced_no_symbol(source)
+    if _ns_line and _at_reported_position(source, _ns_line, at):
+        print(f"  {red('x')} {bold('no.symbol')} is a field modifier, and here it follows a value.")
+        _echo_line_if_new(source, _ns_line, line)
+        print(f"\n    It belongs on the money field itself, in its shape, and then every place that")
+        print(f"    shows the field drops the symbol (show and render):")
+        print(f"        amount as USD no.symbol")
+        print(f"    A give back already sends money as its plain number, so it needs nothing here.\n")
+        return
+
+    # F1 (RULED by Ron, 2026-10-06): a `take` written after `returns` in a task is not a parameter
+    # any more, and `take v as text` there stops the parse with nothing said about the order.
+    _tk_line, _tk_task = _find_take_after_returns(source)
+    if _tk_line and _at_reported_position(source, _tk_line, at):
+        print(f"  {red('x')} This {bold('take')} comes after {bold('returns')} in task "
+              f"{bold(_tk_task)}, so it is not read as a parameter.")
+        _echo_line_if_new(source, _tk_line, line)
+        print(f"\n    Write the take lines first, then returns:")
+        print(f"        task {_tk_task}\n            take <param> as <type>\n"
+              f"            returns <type>\n            give back <value>\n        task: done\n")
+        return
+
+    # A rounding form that is not one of the three (RULED by Ron, 2026-10-06): name the accepted
+    # forms rather than leave a generic parse error.
+    _rd_line = _find_rounding_misuse(source)
+    if _rd_line and _at_reported_position(source, _rd_line, at):
+        from mohio_ast import ROUNDING_FORMS
+        print(f"  {red('x')} This line uses a rounding word in a form Mohio does not have.")
+        _echo_line_if_new(source, _rd_line, line)
+        print()
+        for _part in ROUNDING_FORMS.split(". "):
+            print(f"    {_part.rstrip('.')}.")
+        print()
+        return
+
+    # A hyphen inside a name (`toggle "#box" as balance-hidden`) fails at the `-` with a bare
+    # `No terminal matches '-'`. Name the whole word, at its line, instead of the punctuation.
+    _hy, _hy_line = _find_hyphenated_name(source, line, col)
+    if _hy:
+        _under = _hy.replace('-', '_')
+        _parts = _hy.split('-')
+        _camel = _parts[0] + ''.join(p[:1].upper() + p[1:] for p in _parts[1:])
+        print(f"  {red('x')} {bold(_hy)} has a hyphen, and a name here cannot contain one.")
+        _echo_line_if_new(source, _hy_line, line)
+        print(f"\n    A hyphen is only ever minus, and minus lives inside parentheses. In a name -- a "
+              f"state, a variable, a field -- join the words with an underscore or run them together:")
+        print(f"        {bold(_under)}   or   {bold(_camel)}\n")
+        return
+
+    # The removed two-bareword where shorthand, or a subject-less `when is <pred>`. Both fail at
+    # the grammar on a later character; name the sentence form the reader meant.
+    _ck, _ck_line, _ck_guidance = _find_condition_shorthand(source)
+    if _ck and _at_reported_position(source, _ck_line, at):
+        if _ck == "where-shorthand":
+            print(f"  {red('x')} This where clause is missing its {bold('is')}.")
+        else:
+            print(f"  {red('x')} This condition puts the test before its subject.")
+        _echo_line_if_new(source, _ck_line, line)
+        print()
+        for g in _ck_guidance.splitlines():
+            print(f"    {g}")
+        print()
+        return
+
     # A case transform spelled the way another language spells it. The vocabulary here is richer
     # than the one most people arrive with, which is why it gets missed: the word they know is
     # not the word, and what they got back was a character.
-    _wrong, _meant = _find_case_near_miss(source)
+    _wrong, _meant = _find_case_near_miss(source, at)
     if _wrong:
         print(f"  {red('x')} {bold(_wrong)} is not a Mohio word.")
         # NEVER ANSWER `did you mean` WITH A FORM THAT DOES NOT RUN. `as.title` is the nearest
@@ -1052,7 +1597,7 @@ def _print_parse_error_body(e, source="", filename=""):
     # a character on a later line and never mentioned the construct, so a working feature was
     # unreachable to anyone who had not read the grammar.
     uns, u_line, how = _find_unspellable_construct(source)
-    if uns:
+    if uns and _at_reported_position(source, u_line, at):
         print(f"  {red('x')} {bold(uns)} is built, but this is not how it is written.")
         _echo_line_if_new(source, u_line, line)
         print()
@@ -1066,7 +1611,7 @@ def _print_parse_error_body(e, source="", filename=""):
     # lines later), which reads as a mistake in the program. It is not one: there is no way to
     # write this today, and saying so is different from saying it is wrong.
     resv, r_line, what = _find_reserved_unbuilt(source)
-    if resv:
+    if resv and _at_reported_position(source, r_line, at):
         # The four words are `do.every`, `do.after`, `do.unless` and `do.encrypt`, each tracked
         # in the living backlog. Named here in full because the message interpolates
         # whichever one was written, so the words themselves appear nowhere else in this file.
@@ -1083,7 +1628,7 @@ def _print_parse_error_body(e, source="", filename=""):
         return
 
     h_line = _find_hash_comment(source)
-    if h_line:
+    if h_line and _at_reported_position(source, h_line, at):
         snippet = _source_snippet(source, h_line)
         print(f"  {red('x')} A comment in Mohio starts with {bold('//')}, not with #.")
         _echo_line_if_new(source, h_line, line)
@@ -1092,7 +1637,7 @@ def _print_parse_error_body(e, source="", filename=""):
         return
 
     cap, c_line = _find_capitalised_opener(source)
-    if cap:
+    if cap and _at_reported_position(source, c_line, at):
         print(f"  {red('x')} Mohio words are written in lower case, so {bold(cap)} is not read "
               f"as {bold(cap.lower())}.")
         _echo_line_if_new(source, c_line, line)
@@ -1130,6 +1675,22 @@ def _print_parse_error_body(e, source="", filename=""):
     # the one thing the parser does know: the file ended in the middle of something. So say
     # that, and point at the last line there was, which is where the reader has to look.
     if "end-of-input" in msg.lower() or "end of input" in msg.lower():
+        # FIRST, try to point AT the offending line rather than the file's last line. A bad token that
+        # lexed but the parser could only reject at end-of-input (common in a check/when or request
+        # handler body) arrives here with no position; `_locate_unfinished` recovers the actual line.
+        _u_line, _u_snip = _locate_unfinished(source)
+        if _u_line is not None:
+            print(f"  {red('x')} Line {_u_line} has something the parser cannot read, and it was "
+                  f"only caught at the end of the file.")
+            if _u_snip is not None:
+                print(f"\n  {dim(str(_u_line) + ' |')} {_u_snip}")
+            print(f"\n    A token here fits no statement in this block, so the parser read on to the "
+                  f"end still")
+            print(f"    waiting for the rest of something. Check line {_u_line} for a stray symbol, a "
+                  f"misspelled")
+            print(f"    word, or a value where a name belongs.")
+            print()
+            return
         code_lines = [(n, raw) for n, raw in enumerate(_mask_noncode(source).split("\n"), 1)
                       if raw.strip()]
         print(f"  {red('x')} The file ended while this was still unfinished.")
@@ -1187,13 +1748,77 @@ def _langmap_missing_note():
     print(f"    if this file is written in English.")
 
 
+def _wrapped_finding(marker_colored, marker_plain, message, indent="  ", width=None):
+    """A finding line, WORD-WRAPPED in code with a hanging indent, so a long message on an interactive
+    terminal never relies on the terminal's own soft-wrap -- which eats the space at the wrap column
+    and renders `It is` as `Itis`. Continuations align under the message text.
+
+    ONLY WHEN A REAL TERMINAL IS WRITING (or an explicit `width` is given, for tests). Piped or
+    captured output is not terminal-soft-wrapped, so there is no `Itis` there and the single-line form
+    is what tooling and tests read; wrapping it would only split a message a grep expects whole. So the
+    wrap tracks where the bug actually happens."""
+    import textwrap
+    if width is None:
+        _isatty = getattr(sys.stdout, 'isatty', None)   # missing on some wrapped streams; guard it
+        if not (_isatty and _isatty()):
+            return f"{indent}{marker_colored} {message}"     # piped/captured: single line, unchanged
+        import shutil
+        width = shutil.get_terminal_size((100, 24)).columns
+    width = max(40, min(int(width), 120))
+    lead = f"{indent}{marker_plain} "                 # visible leading, e.g. "  ! "
+    body_width = max(20, width - len(lead))
+    lines = textwrap.wrap(str(message), width=body_width,
+                          break_long_words=False, break_on_hyphens=False) or [str(message)]
+    pad = " " * len(lead)
+    out = [f"{indent}{marker_colored} {lines[0]}"]
+    out.extend(pad + ln for ln in lines[1:])
+    return "\n".join(out)
+
+
+_INCLUDED_SOURCE = {}
+
+
+def _finding_where(finding, source, filename):
+    """(source, label) for a finding's excerpt. A finding on a statement merged in from an
+    included file carries that file on its line (mohio_ast.SourceLine, HC-137), and is shown with
+    that file's own text and named `file:line`; anything else is this file's line as before."""
+    ln = getattr(finding, 'line', None)
+    path = getattr(ln, 'file', None)
+    if not path or (filename and os.path.realpath(path) == os.path.realpath(filename)):
+        return source, str(ln)
+    if path not in _INCLUDED_SOURCE:
+        try:
+            _INCLUDED_SOURCE[path] = open(path, encoding='utf-8-sig').read()
+        except OSError:  # SILENT-OK: an unreadable include prints no excerpt; its file and line are still named
+            _INCLUDED_SOURCE[path] = ''
+    base = os.path.dirname(os.path.abspath(filename)) if filename else os.getcwd()
+    try:
+        shown = os.path.relpath(path, base)
+    except ValueError:      # another drive on Windows: the full path is the honest name
+        shown = path
+    return _INCLUDED_SOURCE[path], f"{shown.replace(os.sep, '/')}:{int(ln)}"
+
+
+def _finding_file(finding):
+    """The included file a finding's line belongs to, as a path relative to the working directory
+    (the way the checked file itself is named), or None for a line of the checked file."""
+    path = getattr(getattr(finding, 'line', None), 'file', None)
+    if not path:
+        return None
+    try:
+        return os.path.relpath(path).replace(os.sep, '/')
+    except ValueError:      # another drive on Windows: the full path is the honest name
+        return path
+
+
 def _print_compile_error(err, source="", filename=""):
     """Print a single CompileError from the new transformer."""
     header = bold(red("Error")) + (f"  {dim(filename)}" if filename else "")
+    source, where = _finding_where(err, source, filename)
     snippet = _source_snippet(source, err.line)
     if snippet is not None:
-        print(f"  {dim(str(err.line) + ' |')} {snippet}")
-    print(f"  {red('x')} {err.message}")
+        print(f"  {dim(where + ' |')} {snippet}")
+    print(_wrapped_finding(red('x'), 'x', err.message))
     if err.hint:
         for hint_line in err.hint.splitlines():
             print(f"    {dim(hint_line)}")
@@ -1202,10 +1827,11 @@ def _print_compile_error(err, source="", filename=""):
 
 def _print_compile_warning(warn, source="", filename=""):
     """Print a single CompileWarning from the new transformer."""
+    source, where = _finding_where(warn, source, filename)
     snippet = _source_snippet(source, warn.line)
     if snippet is not None:
-        print(f"  {dim(str(warn.line) + ' |')} {snippet}")
-    print(f"  {yellow('!')} {warn.message}")
+        print(f"  {dim(where + ' |')} {snippet}")
+    print(_wrapped_finding(yellow('!'), '!', warn.message))
     if warn.hint:
         for hint_line in warn.hint.splitlines():
             print(f"    {dim(hint_line)}")
@@ -1242,6 +1868,26 @@ def _print_runtime_error(e, filename="", source="", line=0):
         for hint_line in str(hint).splitlines():
             print(f"    {dim(hint_line)}")
     print()
+
+
+def _display_target(target):
+    """A database address as it may be printed: the password of a url is never shown. An audit
+    command names the store it read in its messages, and the store is often a url carrying its
+    credentials, which went to the terminal and to any log of it in full."""
+    t = str(target)
+    if '://' not in t or '@' not in t:
+        return t
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        u = urlsplit(t)
+        if u.password is None:
+            return t
+        host = u.hostname or ''
+        if u.port:
+            host += ':%d' % u.port
+        return urlunsplit(u._replace(netloc='%s:***@%s' % (u.username or '', host)))
+    except ValueError:  # SILENT-OK: not a parseable url; show nothing that might be a secret
+        return '<the database address>'
 
 
 def _die(message, exit_code=1):
@@ -1292,9 +1938,12 @@ def _die_unexpected(exc, command):
 def _mask_noncode(src):
     """Return src with comment and raw-block interiors replaced by spaces, preserving
     every newline and character offset (so error line/col still line up with the source).
-    Raw blocks -- `sql`, a bare `show`, and `render`/`render html`/`render scripts` --
-    capture non-Mohio lines that legitimately contain ', ", and {{ }}; masking them keeps
-    the string-hygiene scan (Unit C) from mistaking raw SQL/HTML for Mohio code."""
+    Raw blocks -- `sql`, a bare `show`, and `render` in ANY kind or spelling (`render`,
+    `render html`/`scripts`/`code`/`fragment`, and the `render as <kind>` form) -- capture non-Mohio
+    lines that legitimately contain ', ", {{ }} and, for `render code`, whole lines of Mohio SOURCE
+    like `task: done`; masking them keeps the string-hygiene scan (Unit C) and every other line-level
+    check from mistaking that content for code. The render kind is DERIVED from the opener, not
+    enumerated, so a kind added later cannot silently escape the mask (it did twice: fragment, `as`)."""
     NL = chr(10)
     # Pass 1: blank // and /* */ comments, string-aware, offsets preserved.
     buf = list(src); i = 0; n = len(src); in_str = False
@@ -1324,16 +1973,34 @@ def _mask_noncode(src):
     # Pass 2: blank raw-content block interiors, line based (runs on the comment-masked
     # text, so an opener word sitting inside a former comment is already gone).
     def _opener(code):
-        if code in ("sql", "show", "render", "render html", "render scripts"):
-            return "render" if code.startswith("render") else code
+        # DERIVE the render kind, never enumerate it. Every `render`, `render <kind>` and
+        # `render as <kind>` opens a raw block that closes on `render: done`, so matching the
+        # `render` opener itself covers all of them. Enumerating the kinds (html/scripts/code) meant
+        # each kind added later escaped the mask and reintroduced FAC-15 in that kind: `fragment`
+        # (Batch 30) and the `as` spelling (Batch 40) both failed here until this derived instead.
+        if code == "render" or code.startswith("render "):
+            return "render"
+        if code in ("sql", "show"):
+            return code
         return None
+    import re as _re
+
+    def _closes(raw, code):
+        # The closer as the GRAMMAR reads it. A render ends only on its own `render: done` (spaces
+        # around the colon allowed), never on a bare `done` or any other closer: the text a page
+        # displays is never program code (RULED by Ron 2026-10-09). `show` and `sql` also close on a
+        # bare `done`, as their grammar rules do.
+        if raw == "render":
+            return bool(_re.match(r'^render\s*:\s*done(?![A-Za-z0-9_])\s*$', code))
+        return code == f"{raw}: done" or code == "done"
+
     out, raw = [], None
     for line in masked.split(NL):
         code = line.strip()
         if raw is None:
             out.append(line)                       # opener (or ordinary) line stays
             raw = _opener(code)
-        elif code == f"{raw}: done" or code == "done":
+        elif _closes(raw, code):
             out.append(line); raw = None           # closer stays
         else:
             out.append(' ' * len(line))            # raw interior -> spaces
@@ -1342,14 +2009,31 @@ def _mask_noncode(src):
 
 # -- Result formatter -----------------------------------------------------------
 
-def _print_result(result, verbose=False):
+def _list_text(value, interp):
+    """A list or a record as the program shows it: each item as `show` shows it alone, joined by
+    ", " (T1-LIST-DISPLAY-FORM and T1-RECORD-DISPLAY-FORM, RULED 2026-10-15), through the
+    interpreter's one display rule, which also masks a protected field."""
+    if interp is None or not hasattr(interp, '_display_str'):
+        if isinstance(value, dict):
+            return ", ".join(f"{k}: {v}" for k, v in value.items())
+        return ", ".join(str(v.to_python() if type(v).__name__ == "MohioValue" else v) for v in value)
+    from mohio_interpreter import MohioValue
+    return interp._display_str(MohioValue(value, 'shape' if isinstance(value, dict) else 'list'))
+
+
+def _print_result(result, verbose=False, interp=None):
     # THE WRAPPER IS NOT THE VALUE. Every runtime value is a MohioValue, and formatting one with
     # `%s` prints its repr: `print "hi"` reported `Result MohioValue('hi', 'string')`, showing a
     # pioneer the interpreter's own bookkeeping where their value belonged. Unwrapped here
     # because this is the display boundary; the double-wrapping that caused the other routes is
     # fixed at construction, and this is the remaining one where a bare wrapper is handed
     # straight to a format string.
-    if type(result).__name__ == "MohioValue":
+    # A PROGRAM VALUE IS NEVER A RESPONSE. `give back` and a refusal reach here as the interpreter's
+    # response envelope, a plain dict; a program's last value reaches here wrapped. A saved row with
+    # a `status` field used to print as `Response  due`, the row itself dropped, because the test
+    # below looked at the dict's keys rather than at where the value came from.
+    is_value = type(result).__name__ == "MohioValue"
+    if is_value:
         try:
             result = result.to_python()
         except Exception:                                       # noqa: BLE001
@@ -1363,15 +2047,21 @@ def _print_result(result, verbose=False):
     # showed `Response` with an empty status and an empty body -- a row is not an
     # envelope. The envelope is the thing that carries a status or a body, so that is what
     # is tested rather than the container type.
-    if isinstance(result, dict) and ("status" in result or "body" in result):
+    if not is_value and isinstance(result, dict) and ("status" in result or "body" in result):
         status = result.get("status", "")
         body   = result.get("body", "")
+        if isinstance(body, (list, dict)) and "json" in str(result.get("content_type") or ""):
+            # `give back ... as json` IS JSON: show the JSON it sends, exact numbers and all
+            from mohio_interpreter import _json_dumps_exact
+            body = _json_dumps_exact(body)
+        elif isinstance(body, (list, dict)):
+            body = _list_text(body, interp)
         if isinstance(status, int):
             status_str = green(str(status)) if status < 300 else \
                          yellow(str(status)) if status < 400 else red(str(status))
         else:
             status_str = str(status)
-        print(f"\n  {bold('Response')}  {status_str}  {body}")
+        _print_program_output(f"\n  {bold('Response')}  {status_str}  {body}")
         # The HOW, when the envelope carries one. Printed under the response rather than folded
         # into the body, so the body stays exactly the string several tests assert on.
         _hint = result.get("hint") or ""
@@ -1379,11 +2069,231 @@ def _print_result(result, verbose=False):
             for _hint_line in str(_hint).splitlines():
                 print(f"    {dim(_hint_line)}")
     else:
+        if isinstance(result, (list, dict)):
+            result = _list_text(result, interp)
         print(f"\n  {bold('Result')}  {result}")
     print()
 
 
 # -- Shared parse + validate step ----------------------------------------------
+
+def _check_new_handlers(source, filename):
+    """`new sh.X` is not a handler (RULED by Ron, 2026-10-07), and every one in the file is named.
+
+    A handler for arriving data is `listen for sh.X at /path` ... `listen: done`, which behaves
+    exactly as `new` did. Each `new sh.` line is listed with its replacement, so a file with forty
+    of them is fixed in one pass rather than one error at a time, and `mio fmt --write` makes every
+    swap. `new` stays reserved for an arrival condition that is not built yet
+    (T1-NEW-ARRIVAL-CONDITION). Comments and raw-text bodies are masked first, so a page that shows
+    the old spelling as text is not refused."""
+    import re as _re
+    masked = _mask_noncode(source).split('\n')
+    original = source.split('\n')
+    hits = []
+    for i, l in enumerate(masked):
+        m = _re.match(r'^(\s*)new(\s+sh\.\S.*)$', l)
+        if m:
+            shown = original[i].strip() if i < len(original) else l.strip()
+            hits.append((i + 1, shown, 'listen for' + shown[len('new'):]))
+    if not hits:
+        return
+    lines = '\n'.join(f"  Line {n}: {old}   ->   {new}" for n, old, new in hits)
+    _die(f"`new` is not a handler, so {len(hits)} line(s) here are refused:\n{lines}\n"
+         f"  A handler for arriving data is written `listen for sh.<Shape> at /path` and closed "
+         f"with `listen: done`; it behaves exactly as `new` did. Run `mio fmt --write {filename}` "
+         f"to make every swap. (`new` is reserved for an arrival condition that is not "
+         f"built yet: T1-NEW-ARRIVAL-CONDITION.)", exit_code=1)
+
+
+def _check_against_closers(source, filename):
+    """Every `check ... against` needs its own `check: done`, at its own indentation (HC-013).
+
+    THE CLOSER IS THE SAME WORD AS ITS PARENT'S. A `check ... against` nested under a `when` or an
+    `otherwise`, written without its closer, took the enclosing `check`'s `check: done` as its own.
+    The enclosing check was then left open, the handler ran on past `new: done` and swallowed every
+    route after it, and the errors pointed at closers that were correct (reproduced from the health
+    app's report: the Patient page's `request.id` checked against LoginRequest). The parse that
+    steals the closer is a valid parse, which is why the grammar's trap for the unclosed form never
+    fired. The layout says which block a closer belongs to, so it is read from the layout, before
+    the parse, and nothing about how anything parses changes. Raw-text bodies and comments are
+    blanked first (`_mask_noncode`, the same masking the ASCII gate uses), because a render body may
+    sit at any indentation, HTML at column 0 included."""
+    import re as _re
+    masked = _mask_noncode(source).split('\n')
+    original = source.split('\n')
+
+    def _ind(l):
+        return len(l) - len(l.lstrip(' '))
+
+    for i, l in enumerate(masked):
+        st = l.strip()
+        if not _re.match(r'^check\s+\S.*\s+against\s+\S', st):
+            continue
+        k = _ind(l)
+        closed, end = False, i
+        for j in range(i + 1, len(masked)):
+            t = masked[j]
+            ts = t.strip()
+            if not ts:
+                continue
+            if _ind(t) > k:
+                end = j
+                continue
+            closed = _ind(t) == k and bool(_re.match(r'^check:\s*done\b', ts))
+            break
+        if not closed:
+            pad = ' ' * k
+            shown = original[i].strip() if i < len(original) else st
+            _die(f"Line {i + 1}: `{shown}` needs its own closer, `check: done`, at its own "
+                 f"indentation. Its handlers end at line {end + 1}; without the closer, the next "
+                 f"`check: done` below is taken as this check's, and the block that closer belongs "
+                 f"to runs on past its own end and swallows what follows.\n"
+                 f"  Add `check: done` under it, at the same indentation:\n"
+                 f"{pad}{shown}\n{pad}    on.failure\n{pad}        ...\n{pad}check: done",
+                 exit_code=1)
+
+
+def _check_render_closers(source, filename):
+    """A `render` that runs past its handler refuses, naming both lines (HC-006).
+
+    A render body is raw text, so a render missing its own `render: done` took the NEXT one in the
+    file: everything between -- the handler's `request: done`, whole routes after it -- became page
+    text, those routes vanished, and `mio check` reported no errors. Reduced to 16 lines: `/a`'s
+    render without its closer swallowed the `/b` route entire. Indentation cannot bound a render
+    (its HTML may sit at column 0).
+
+    ONLY `render: done` CLOSES A RENDER, AND EVERY OTHER LINE IS PAGE TEXT (RULED by Ron 2026-10-09,
+    from the Volarix summit app). This used to treat any handler opener or closer line in the body
+    as proof the render had run on, so a page showing Mohio source in `<pre><code>` with a
+    `check: done` line of its own was refused. What is certain instead: a render that took a later
+    render's `render: done` holds that later render's OPENER in its body, and a render with no
+    `render: done` anywhere after it has none to close on. Either one refuses, naming the line."""
+    import re as _re
+    lines = source.split('\n')
+    _open = _re.compile(r'^render(\s+(as\s+)?[A-Za-z_]\w*)?\s*$')
+    _close = _re.compile(r'^render\s*:\s*done(?![A-Za-z0-9_])\s*$')
+    i = 0
+    while i < len(lines):
+        st = lines[i].strip()
+        if _open.match(st):
+            pad = ' ' * (len(lines[i]) - len(lines[i].lstrip(' ')))
+            for j in range(i + 1, len(lines)):
+                tj = lines[j].strip()
+                if _close.match(tj):
+                    i = j
+                    break
+                if _open.match(tj):
+                    _die(f"Line {i + 1}: this `render` has no `render: done` of its own, so its page "
+                         f"text runs on to line {j + 1}, where another `render` opens, and takes "
+                         f"everything between as text: any route in between would never exist.\n"
+                         f"  Close the render before line {j + 1}:\n"
+                         f"{pad}render\n{pad}    ...\n{pad}render: done", exit_code=1)
+            else:
+                _die(f"Line {i + 1}: this `render` has no `render: done`, so its page text runs to "
+                     f"the end of the file and takes every line after it as text.\n"
+                     f"  Close it where its page ends:\n"
+                     f"{pad}render\n{pad}    ...\n{pad}render: done", exit_code=1)
+        i += 1
+
+
+def _check_orphan_handlers(source, filename):
+    """A handler line after its block's closer refuses on its own line (HC-013, on the real file).
+
+    The health app's login wrote a `check ... against` with its handlers and its `check: done`, and
+    then the same `on.failure` / `give back` / `check: done` tail a second time. The repeated tail
+    belonged to no block; the parse could not place it, and the error surfaced a hundred lines
+    later as "`journey: done` closes the wrong block", pointing at a line that was correct. A
+    handler line directly after a closer at the SAME indentation is that orphan, so it is named
+    where it is, before the parse."""
+    import re as _re
+    masked = _mask_noncode(source).split('\n')
+    original = source.split('\n')
+
+    def _ind(l):
+        return len(l) - len(l.lstrip(' '))
+
+    prev = None   # (index, stripped) of the previous non-blank line
+    for i, l in enumerate(masked):
+        st = l.strip()
+        if not st:
+            continue
+        if prev is not None and _re.match(r'^(on\.failure|on\.success|otherwise)\s*$', st):
+            pi, pst = prev
+            # The ENCLOSING block decides: a handler after a nested block's closer belongs to the
+            # block around it (a find's on.failure after its `with: done`), unless that block is one
+            # that never takes handlers -- a route, a journey, a task, a loop, a branch, a render.
+            enc = next((masked[k].strip() for k in range(i - 1, -1, -1)
+                        if masked[k].strip() and _ind(masked[k]) < _ind(l)), '')
+            _no_handlers = _re.match(r'^(listen\s+for|request\s+for|journey|task|repeat|loop|while|'
+                                     r'each|when|shape|render)\b', enc)
+            # DEEPER than the closer above it, the handler sits inside the block that closer just
+            # ended (the health app's repeated tail): always an orphan. LEVEL with it, it belongs to
+            # the enclosing block, an orphan only when that block takes no handlers.
+            _closer = _re.match(r'^[\w.]+\s*:\s*done\s*$', pst)
+            if _closer and (_ind(l) > _ind(masked[pi])
+                            or (_ind(l) == _ind(masked[pi]) and _no_handlers)):
+                shown = original[i].strip()
+                _die(f"Line {i + 1}: this `{shown}` comes after `{pst}` on line {pi + 1}, "
+                     f"so it belongs to no block: the block it was written for is "
+                     f"already closed, and the error would otherwise surface far below, at a closer "
+                     f"that is correct.\n"
+                     f"  To fix it, remove this `{shown}` and what it runs (a repeated tail), or move "
+                     f"it above line {pi + 1} so it sits inside the block.", exit_code=1)
+        prev = (i, st)
+
+
+def _check_or_in_where(source, filename):
+    """`or` inside a `where` / `and` line refuses on its own line (the or-in-where message).
+
+    A where has no `or`. Written anyway, the parse had nowhere to put it, so the WHOLE block was read
+    as something else: `find rows in db.items / where status is "a" or status is "b"` checked clean
+    with warnings that `find`, `in` and `where` were "set but never used" -- the query silently
+    became assignments. Read from the line, before the parse, with strings and raw text blanked so
+    an `or` inside a value never trips it."""
+    import re as _re
+    masked = _mask_noncode(source).split('\n')
+    original = source.split('\n')
+    for i, l in enumerate(masked):
+        st = _re.sub(r'"(?:\\.|[^"\\])*"', '""', l.strip())
+        if not _re.match(r'^(where|and)\s', st) or not _re.search(r'\bor\b', st):
+            continue
+        shown = original[i].strip() if i < len(original) else st
+        pad = ' ' * (len(l) - len(l.lstrip(' ')))
+        _die(f"Line {i + 1}: `{shown}` uses `or`, and a `where` has no `or`, so the whole block "
+             f"around it would be read as something else and the filter would never run.\n"
+             f"  To keep rows that match either value of one field, list them in the where:\n"
+             f"{pad}where status \"a\", \"b\"\n"
+             f"  For either of several conditions, use a `match any` block:\n"
+             f"{pad}match any\n{pad}    status to \"a\"\n{pad}    kind to \"b\"\n{pad}match any: done",
+             exit_code=1)
+
+
+def _check_download_name(source, filename):
+    """A download's file name is text in quotes or a plain name; anything else refuses on its own line.
+
+    The name after `download` is a string (with `{{ }}` naming the file from a value) or, RULED
+    2026-10-12 (OR-7), a bare name read exactly as `"{{ name }}"`. An expression there still does not
+    parse, and the parse failed two lines further on, at the handler's `listen: done`, which pointed
+    at a line with nothing wrong on it (found with HC-124). Read from the line before the parse, with
+    comments and raw text blanked."""
+    import re as _re
+    masked = _mask_noncode(source).split('\n')
+    original = source.split('\n')
+    for i, l in enumerate(masked):
+        m = _re.match(r'^\s*give\b.*\bas[ \t]+download[ \t]+([^"\s].*?)\s*$', l)
+        if not m:
+            continue
+        name = m.group(1)
+        if _re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*', name):
+            continue          # a plain or dotted name: the grammar reads it as "{{ name }}"
+        shown = original[i].strip() if i < len(original) else l.strip()
+        _inner = name[1:-1].strip() if name.startswith('(') and name.endswith(')') else name
+        _die(f"Line {i + 1}: `{shown}` names the download with `{name}`, and a download's file name "
+             f"is text in quotes or a plain name, so this line cannot be read.\n"
+             f"  To name the file from a value, put the value inside the quotes:\n"
+             f"    {shown[:shown.rfind(name)]}\"{{{{ {_inner} }}}}\"",
+             exit_code=1)
+
 
 def _parse_and_validate(source, filename, verbose=False):
     """Parse source and run compile-time validation.
@@ -1395,6 +2305,12 @@ def _parse_and_validate(source, filename, verbose=False):
     reads it as a statement that evaluates a string and discards it rather than as the
     function's documentation. It was moved up so `help(_parse_and_validate)` shows it.
     """
+    # THE PROGRAM'S FOLDER FOR SECTOR PROFILES (T1-SECTOR-APP-FOLDER-PROFILE): the first program file
+    # this command parses names it; an include or a journey parsed after it is in the same app.
+    import mohio_sector_loader as _SLp
+    import os as _os_p     # this function imports `os` again further down, which makes the name local
+    if _SLp._program_folder is None and filename and _os_p.path.isfile(str(filename)):
+        _SLp.set_program_folder(_os_p.path.dirname(_os_p.path.abspath(str(filename))))
     # Per-file state. The missing-pack hint is set during THIS compile and must not survive it:
     # a stale hint would attach "that pack is NOT INSTALLED" to an unrelated error in a later
     # file, which is a confident wrong answer -- the worst kind of diagnostic.
@@ -1421,8 +2337,15 @@ def _parse_and_validate(source, filename, verbose=False):
         in_string = False
         string_char = None
         i = 0
-        lines = src.split(chr(10))
-        flat = src
+        lines = src.split(chr(10))          # ORIGINAL lines, for the error snippet
+        # SCAN THE MASKED SOURCE, so the ASCII rule applies only to CODE. `_mask_noncode` blanks
+        # comment and raw-block interiors (`sql`, a bare `show`, `render`/`render html`/`render
+        # scripts`) to spaces, preserving offsets -- so ordinary typographic punctuation, an
+        # accented name or a currency symbol in a render's visible TEXT or an ATTRIBUTE is content,
+        # not code, and is no longer refused as "Non-ASCII in executable code" (FAC-15). Strings are
+        # left intact by the mask, so the string-tracking below still skips their content. A non-ASCII
+        # identifier, keyword or operator sits in code and is still flagged.
+        flat = _mask_noncode(src)
         while i < len(flat):
             char = flat[i]
             # Skip line comments
@@ -1539,13 +2462,16 @@ def _parse_and_validate(source, filename, verbose=False):
             print(f"    Drop the `page ... page: done` wrapper: a file in a served folder answers")
             print(f"    at its own name with whatever it renders, shows, or gives back.")
             print(f"    For a different address, mount it in a `map route` block.")
-            print(f"    For a request handler, use `listen for ... request for ... at /path`.")
+            print(f"    For a request handler, write it on its own: "
+                  f"`request for sh.X at /path ... request: done`.")
             print(f"    The page CLASSIFICATION model (public:/private:/hidden:/authorize:) is")
             print(f"    unchanged -- that is access control, and separate from this.")
             sys.exit(1)
 
+    # The comma is the separator (Ron, 2026-10-13: keep the comma, d8260e9 stands). A trailing comment
+    # is allowed on the line, or the dotted form reached the parser and got a raw syntax error.
     _sector_dotted = _re_sector.compile(
-        r'^\s*sector\s*:\s*([A-Za-z][A-Za-z0-9_-]*(?:\s*\.\s*[A-Za-z][A-Za-z0-9_-]*)+)\s*$')
+        r'^\s*sector\s*:\s*([A-Za-z][A-Za-z0-9_-]*(?:\s*\.\s*[A-Za-z][A-Za-z0-9_-]*)+)\s*(?://.*|/\*.*)?$')
     for _ln, _raw in enumerate(source.split(chr(10)), 1):
         _m = _sector_dotted.match(_raw)
         if _m:
@@ -1698,53 +2624,83 @@ def _parse_and_validate(source, filename, verbose=False):
     # a keyword slot). English files are unaffected: no langmap means source is unchanged.
     _check_string_hygiene(source, filename)
     _check_ascii(source, filename)
+    _check_against_closers(source, filename)
+    _check_or_in_where(source, filename)
+    _check_render_closers(source, filename)
+    _check_download_name(source, filename)
+    _check_orphan_handlers(source, filename)
+    _check_new_handlers(source, filename)
 
-    # -1. AST cache check -- fastest path (cache hit = skip parse entirely)
-    # filename must be provided for cache to work
+    # -1. PARSE CACHE. The cache holds the TREE only, keyed on the source and the parse-affecting
+    # files (`_parse_fingerprint`). A hit skips the Earley parse (the 87s on a large app) but never
+    # the verdict: the symbol-table pass below, Layer 1, the AST build and every scan still run, so
+    # a new or re-worded rule always fires. This is why splitting the cache is safe -- there is no
+    # cached verdict to replay.
+    tree = None
     if filename and filename != "<string>":
-        cached = _load_ast_cache(filename, source)
-        if cached:
-            tree, ctx = cached
-            if tree and ctx:
-                if verbose:
-                    print(f"  [cache] [ok] AST cache hit -- skipping parse")
-                return tree, ctx
-        elif verbose:
-            print(f"  [cache] AST cache miss -- parsing fresh")
+        tree = _load_ast_cache(filename, source)
+        if verbose:
+            print(f"  [cache] parse cache {'hit -- skipping parse' if tree is not None else 'miss -- parsing fresh'}")
 
-    # 0. Symbol table pre-pass -- O(n) scan before Earley runs
-    # Collects all declared names so dotted name resolution is
-    # unambiguous. Also catches reserved word violations early.
+    # 0. Symbol table pre-pass -- O(n), ALWAYS run (its reserved-word warnings are part of the
+    # verdict, and on a cache hit it is the only place they come from). It also feeds the
+    # pretokenizer when a parse is actually needed.
     try:
         from mohio_symbol_table import extract_symbols
         from mohio_transformer import MOHIO_RESERVED_EXACT
         symbol_table = extract_symbols(source)
-        # Symbol table warnings always shown (reserved word violations etc)
         for w in symbol_table.warnings:
             print(f"  !  {w}")
-        # Pretokenizer marks dotted user-var accesses (e.g. x.text) as a single
-        # USERVAR_DOTTED token, so Earley never branches on them (big speedup) and
-        # a type-word field name like `.text`/`.int` is preserved instead of losing
-        # to the type terminal. Re-enabled after validating: zork_demo.mho (1100
-        # lines) checks clean, the gate is 155/155, and a corpus-wide `mio check`
-        # adds zero new failures. Central parse path -- fixes check, run, and serve.
-        from mohio_pretokenizer import pretokenize
-        parse_source = pretokenize(source, symbol_table.all_user_names(), MOHIO_RESERVED_EXACT)
+        _reserved = MOHIO_RESERVED_EXACT
     except ImportError:
         symbol_table = None
-        parse_source = source  # graceful degradation
+        _reserved = None
 
-    # 1. Parse pre-tokenized source (or original if pre-tokenizer unavailable)
-    try:
-        grammar = _load_grammar()
-        parser  = _make_parser_cached(grammar)
-        tree    = parser.parse(parse_source)
-    except Exception as e:
-        from lark.exceptions import UnexpectedInput
-        if isinstance(e, UnexpectedInput):
-            _print_parse_error(e, source, filename)
-            sys.exit(1)
-        _die(f"Parse failed: {e}", exit_code=1)
+    # 1. Parse (only on a cache miss). The pretokenizer marks dotted user-var accesses as a single
+    # USERVAR_DOTTED token so Earley never branches on them. Central parse path -- check, run, serve.
+    if tree is None:
+        try:
+            if symbol_table is not None:
+                from mohio_pretokenizer import pretokenize
+                # Mark against the WHOLE-APP declaration set, not just this file's names: a name
+                # declared in an include or the journey is then marked here too, so Earley never
+                # branches on it (the measured cold-parse win). The tree is IDENTICAL either way --
+                # marking picks a terminal, it does not change the grammar -- proven by the hostile
+                # pass and the file-by-file equivalence check. `app_mark_names` is internally robust
+                # (it skips an unreadable app file rather than raising), so no fallback guard is
+                # needed here; a real error surfaces through the enclosing parse handler below.
+                _names = symbol_table.all_user_names()
+                if filename and filename != "<string>":
+                    from mohio_symbol_table import app_mark_names
+                    _names = _names | app_mark_names(filename)
+                parse_source = pretokenize(source, _names, _reserved)
+            else:
+                parse_source = source  # graceful degradation
+            grammar = _load_grammar()
+            parser  = _make_parser_cached(grammar)
+            # SEGMENTED FIRST (mohio_segment.py): a file is cut only between two closed blocks of
+            # kinds proven to parse identically alone, the segments parse on every core and are
+            # cached one by one, so an edit re-parses only the segment it touched. The tree is the
+            # whole-file tree, every node and position. Anything that does not parse alone gives
+            # None, and the whole file parses as it always has, reporting any error exactly as before.
+            tree = None
+            if filename and filename != "<string>":
+                from mohio_segment import parse_segmented
+                tree = parse_segmented(parser, parse_source, filename, _parse_fingerprint())
+                if verbose and tree is not None:
+                    print("  [cache] parsed in segments")
+            if tree is None:
+                tree = parser.parse(parse_source)
+        except Exception as e:
+            from lark.exceptions import UnexpectedInput
+            if isinstance(e, UnexpectedInput):
+                _print_parse_error(e, source, filename)
+                sys.exit(1)
+            _die(f"Parse failed: {e}", exit_code=1)
+        # A successful parse is cached here (the tree only). A file that fails to parse never
+        # reaches this line, so a parse error is never cached.
+        if filename and filename != "<string>":
+            _save_ast_cache(filename, source, tree)
 
     if verbose:
         from mio_utils import tree_depth
@@ -1818,9 +2774,14 @@ def _resolve_includes(program, including_path, _seen=None, _depth=0, verbose=Fal
         if isinstance(stmt, IncludeDecl):
             target = _find_include_path(stmt.path, base_dir)
             if target is None:
-                raise FileNotFoundError(
+                _nf = FileNotFoundError(
                     f"include: cannot find '{stmt.path}' (looked relative to "
                     f"{base_dir} and the current directory)")
+                # Carried for `cmd_check`'s own catch (mio.py) to report the real source line
+                # rather than line 0 -- IncludeDecl.line is already populated by the generic
+                # line-propagation in MohioTransformer._call_userfunc.
+                _nf.mohio_line = getattr(stmt, 'line', 0) or 0
+                raise _nf
             real = os.path.realpath(target)
             if real in _seen:
                 continue  # already included once (duplicate or cycle) -- skip
@@ -1831,13 +2792,16 @@ def _resolve_includes(program, including_path, _seen=None, _depth=0, verbose=Fal
             # warm start still being spent parsing the include, against ~0.4s for the
             # same app with no include -- a warm start that looked correct and was
             # eighteen times slower than the cache promised.
-            _sub_cached = _load_ast_cache(target, sub_src)
-            if _sub_cached and _sub_cached[0] is not None:
-                sub_tree, _sub_ctx = _sub_cached
-            else:
-                sub_tree, _sub_ctx = _parse_and_validate(sub_src, target, verbose)
+            # `_parse_and_validate` now owns the parse cache (the tree only, keyed on the
+            # parse-affecting files), so an included file is parsed once and cached, and every check
+            # after reads it. Batch 11's separate lookup-and-save here is no longer needed.
+            sub_tree, _sub_ctx = _parse_and_validate(sub_src, target, verbose)
             sub_prog = _t(sub_tree, sub_src)
             _resolve_includes(sub_prog, target, _seen, _depth + 1, verbose)
+            # Every line in the included statements names its own file, so a finding on one is
+            # reported at that file and line, not at the including file's line of the same number.
+            from mohio_ast import tag_source_file
+            tag_source_file(sub_prog.statements, target)
             new_stmts.extend(sub_prog.statements)
         else:
             new_stmts.append(stmt)
@@ -1845,53 +2809,312 @@ def _resolve_includes(program, including_path, _seen=None, _depth=0, verbose=Fal
     return program
 
 
-def _apply_journey(program, file_path, verbose=False):
-    """htaccess-style auto-discovery: if a `journey.mho` exists in the same
-    directory as file_path, merge it as the shared 'spine' for every .mho in
-    that directory -- no explicit include needed.
+def _app_root_for_file(page_dir):
+    """The application root for a SINGLE file: the HIGHEST ancestor directory (including the file's
+    own) that holds a `journey.mho`, with none above it. A file with no `journey.mho` anywhere above
+    it is standalone -- its own directory, no cascade.
 
-    The journey is PREPENDED, so on a name conflict (same task/shape/ai.decide)
-    the main file's declaration is processed last and WINS. The journey is the
-    default; main always overrides. The journey file is never applied to itself.
+    WHY THE HIGHEST, NOT THE NEAREST, ANCESTOR (Batch 37 item 4): the security floor is declared at
+    the TOP of an application; a nearer subfolder journey is a tightening UNDER it, never the floor
+    itself, so the nearest journey would miss the root sector and let a loosening subfolder pass.
 
-    Security note: the journey is purely additive -- it can add shared
-    declarations but does not (and must not) disable a page's `sector:`
-    enforcement, which is applied independently. A future "block journey on this
-    page" control (mirroring htaccess) is deliberately NOT implemented yet so it
-    can never become a way to slip past sector security; for now the journey
-    applies to every page in the directory.
+    WHY NOT THE WORKING DIRECTORY: every single-file path used to default the cascade root to the
+    working directory, so the cascade -- and the sector tighten-only refusal riding on it --
+    assembled only when the developer happened to be standing in the app root. A security floor that
+    depends on which directory a command was run from is the gap this closes: a developer checking
+    one page of an application from ANYWHERE now gets the same answer as checking it from the app
+    root, because the root is found from the file, not from the cwd."""
+    page_dir = os.path.abspath(page_dir)
+    highest, cur = None, page_dir
+    while True:
+        if os.path.isfile(os.path.join(cur, 'journey.mho')):
+            highest = cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return highest or page_dir
+
+
+def _journey_chain_dirs(page_dir, app_root):
+    """The directories from the application ROOT down to the page's own directory (root-first),
+    while the page is actually under the root. A page outside the root cascades only within its
+    own directory. This is the walk T1-JOURNEY-CASCADE needs: a page inherits every ancestor
+    journey up to the root, not only the one beside it."""
+    page_dir = os.path.abspath(page_dir)
+    root = os.path.abspath(app_root) if app_root else page_dir
+    def _within(child, parent):
+        try:
+            return os.path.commonpath([os.path.realpath(child), os.path.realpath(parent)]) \
+                == os.path.realpath(parent)
+        except ValueError:
+            return False
+    if not _within(page_dir, root):
+        return [page_dir]
+    chain, cur = [], page_dir
+    while True:
+        chain.append(cur)
+        if os.path.realpath(cur) == os.path.realpath(root):
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    chain.reverse()          # root first, page's own directory last
+    return chain
+
+
+_JOURNEY_PROGRAMS = {}
+
+
+def _journey_program(journey_path, j_src, verbose=False):
+    """A journey's program, parsed, validated, transformed and with its includes resolved ONCE per
+    process, and handed to each page as its own deep copy.
+
+    Every page in a folder inherits the journey, so a 95-page check or serve used to repeat this
+    work 95 times: the parse came from the disk cache, but the cache load, the validation and the
+    transform ran again for each page (measured on the banking app: 10.9s of an 11.9s warm check).
+    The copy is what makes the reuse safe: a page's assembly and its run may annotate or rewrite
+    the nodes it was handed, and no page may see another page's changes. Keyed on the file's real
+    path and its exact text, so an edited journey is never served from the memo."""
+    import copy
+    key = (os.path.realpath(journey_path), j_src)
+    prog = _JOURNEY_PROGRAMS.get(key)
+    if prog is None:
+        from mohio_transformer_ast import transform as _t
+        # Same content-keyed AST cache the include path uses, so the shared spine is parsed once.
+        j_tree, _j_ctx = _parse_and_validate(j_src, journey_path, verbose)
+        prog = _t(j_tree, j_src)
+        _resolve_includes(prog, journey_path, verbose=verbose)  # a journey may include too
+        _JOURNEY_PROGRAMS[key] = prog
+    return copy.deepcopy(prog)
+
+
+def _apply_journey(program, file_path, verbose=False, app_root=None):
+    """htaccess-style auto-discovery, now CASCADING (T1-JOURNEY-CASCADE, Batch 36).
+
+    A page inherits the `journey.mho` in its own directory AND every `journey.mho` in an ancestor
+    directory up to the application root, applied ROOT-FIRST. Registration processes the root
+    journey first, each nearer journey after it, and the page LAST, so the NEAREST declaration
+    wins on restatement and the page still overrides them all -- exactly the resolution Ron ruled:
+    the root applies first and reaches subfolders, and a nearer journey overrides the root for
+    what it restates. A subfolder journey REPLACES rather than adds for what it declares, because
+    a re-registration by the same name (a shape, a task, a connection, the sector) is the later
+    one winning, not a merge.
+
+    The application root bounds the upward walk: `mio serve <dir>` / `mio check <dir>` pass the
+    served directory, and a single-file run passes the working directory, so a page run from the
+    app root (`mio run api/accounts.mho`) reaches the root journey. Before this, `_apply_journey`
+    read only the page's OWN directory, so a root journey's connection, shapes, sector and limits
+    never reached a page under `api/` -- the demo blocker: every such page ran with no database
+    connection while the root journey declared one.
+
+    SECURITY ONLY TIGHTENS is enforced separately, in the transformer/enforce layer, not here:
+    this assembles the cascade; a subfolder that would LOOSEN the root's sector or classification
+    is refused at check. This function never lets a nearer journey drop a security floor -- it
+    only orders the statements; the floor is enforced on the assembled program.
     """
-    from mohio_transformer_ast import transform as _t
+    from mohio_ast import SectorDecl
     if not file_path:
         return program
-    base_dir = os.path.dirname(os.path.abspath(file_path))
-    journey_path = os.path.join(base_dir, 'journey.mho')
-    if not os.path.isfile(journey_path):
-        # A leading underscore marks a file private to routing, and the spine is found
-        # by exact name -- so `_journey.mho` is silently not a journey at all. The
-        # sector floor, shared connections and compliance settings just stop applying,
-        # with nothing printed. That is the one combination worth stopping on, because
-        # the failure looks like nothing happening.
-        stray = os.path.join(base_dir, '_journey.mho')
-        if os.path.isfile(stray):
-            _die(f"Found `_journey.mho` in {base_dir}, but no `journey.mho`.\n\n"
-                 f"  The spine must be named `journey.mho` exactly. A leading "
-                 f"underscore keeps a file out of routing, so `_journey.mho` is never "
-                 f"applied to anything -- the sector, shared connections and compliance "
-                 f"it declares would silently not be in force.\n\n"
-                 f"  To proceed: rename it to `journey.mho`. It is never routable and "
-                 f"never served, so it does not need the underscore. If it is not meant "
-                 f"to be the spine, give it another name.", exit_code=1)
-        return program
-    if os.path.realpath(journey_path) == os.path.realpath(os.path.abspath(file_path)):
-        return program  # don't apply the journey to itself
-    j_src = open(journey_path, encoding='utf-8-sig').read()
-    j_tree, _j_ctx = _parse_and_validate(j_src, journey_path, verbose)
-    j_prog = _t(j_tree, j_src)
-    _resolve_includes(j_prog, journey_path, verbose=verbose)  # journey may include too
-    # Prepend: main statements run/register after the journey, so main wins.
-    program.statements = j_prog.statements + program.statements
+    page_path = os.path.abspath(file_path)
+    page_dir = os.path.dirname(page_path)
+    # A directory serve/check passes its directory as the root; a single file finds its app root
+    # from the file itself (the highest ancestor with a journey), so the cascade -- and the sector
+    # floor it carries -- is the same wherever the command was run from (Batch 37 item 4).
+    chain = _journey_chain_dirs(page_dir, app_root if app_root else _app_root_for_file(page_dir))
+    prepend = []
+    floor_sectors = []   # SECURITY ONLY TIGHTENS: the sector floor set by nearer-to-root journeys
+    def _tightens(nearer, floor):
+        # `nearer` (a dotted sector string) covers `floor` when it IS floor or adds levels under it
+        return nearer == floor or nearer.startswith(floor + '.')
+    # PAGE CLASSIFICATION ONLY TIGHTENS (T1-PAGE-CLASSIFICATION-MODEL, the same ruling extended
+    # from sector to the other journey-level security floor): a nearer journey may not weaken the
+    # classification an ancestor already set for a path. Strictness, loosest to strictest, matching
+    # the locked model's own ordering (private: UNLISTED but still reachable direct, same as public,
+    # so it sits only one notch tighter; authorize: requires login; hidden: never served at all --
+    # "the strongest tier" per the grammar's own design-lock comment).
+    _CLASS_RANK = {'public': 0, 'private': 1, 'authorize': 2, 'hidden': 3}
+    floor_classifications = []   # accumulates (kind, norm_path, source_journey_path) root-first
+    def _norm_jpath(p):
+        p = str(p or '')
+        return p[:-1] if len(p) > 1 and p.endswith('/') else p
+    for d in chain:
+        journey_path = os.path.join(d, 'journey.mho')
+        is_page_dir = (os.path.realpath(d) == os.path.realpath(page_dir))
+        if not os.path.isfile(journey_path):
+            # A leading underscore marks a file private to routing, and the spine is found by
+            # exact name -- so `_journey.mho` is silently not a journey at all. The sector floor,
+            # shared connections and compliance settings just stop applying, with nothing printed.
+            # That is the one combination worth stopping on, because the failure looks like nothing
+            # happening. Kept at the page's own directory, exactly as before the cascade.
+            if is_page_dir:
+                stray = os.path.join(d, '_journey.mho')
+                if os.path.isfile(stray):
+                    _die(f"Found `_journey.mho` in {d}, but no `journey.mho`.\n\n"
+                         f"  The spine must be named `journey.mho` exactly. A leading "
+                         f"underscore keeps a file out of routing, so `_journey.mho` is never "
+                         f"applied to anything -- the sector, shared connections and compliance "
+                         f"it declares would silently not be in force.\n\n"
+                         f"  To proceed: rename it to `journey.mho`. It is never routable and "
+                         f"never served, so it does not need the underscore. If it is not meant "
+                         f"to be the spine, give it another name.", exit_code=1)
+            continue
+        if os.path.realpath(journey_path) == os.path.realpath(page_path):
+            continue  # don't apply a journey.mho to itself
+        j_src = open(journey_path, encoding='utf-8-sig').read()
+        j_prog = _journey_program(journey_path, j_src, verbose)
+        # SECURITY ONLY TIGHTENS (Ron's ruling, the gap that prompted T1-JOURNEY-CASCADE): a
+        # nearer journey may add sector levels or a new sector, but it may NEVER drop or weaken a
+        # sector the root established. A nearer journey that restates the sector must COVER every
+        # floor sector -- with the same sector or a tighter one under it. If it does not, it is
+        # loosening a security floor from a subfolder, and it is refused at check, naming the root
+        # declaration it would have loosened. A nearer journey SILENT on the sector inherits the
+        # floor unchanged (its statements carry no SectorDecl, so nothing is dropped).
+        own_sectors = [s.sector for s in j_prog.statements if isinstance(s, SectorDecl) and s.sector]
+        if own_sectors and floor_sectors:
+            for f in floor_sectors:
+                if not any(_tightens(o, f) for o in own_sectors):
+                    # Levels are held joined by dots internally; a message shows them the way a
+                    # `sector:` line is written, with commas. The dotted form is retired and refuses,
+                    # so a message that showed it taught the reader a line that fails (17c).
+                    _shown = lambda s: ', '.join(str(s).split('.'))
+                    _die(
+                        f"The journey at {journey_path} sets sector "
+                        f"`{'; '.join(_shown(o) for o in own_sectors)}`, "
+                        f"which would LOOSEN the sector `{_shown(f)}` a parent journey already requires.\n\n"
+                        f"  A subfolder journey may only TIGHTEN security, never relax it: it can "
+                        f"add levels under `{_shown(f)}` (for example `sector: {_shown(f)}, <deeper>`) "
+                        f"or keep it as is, but it cannot drop it or switch to a sector that does not "
+                        f"include it.\n\n"
+                        f"  To proceed: include `{_shown(f)}` (or a level under it) in this journey's "
+                        f"`sector:` line, or remove the `sector:` line here to inherit `{_shown(f)}` "
+                        f"from the parent.", exit_code=1)
+        if own_sectors:
+            floor_sectors = own_sectors   # nearer replaces the floor, having covered it
+
+        # PAGE CLASSIFICATION ONLY TIGHTENS: this journey's own public:/private:/hidden:/
+        # authorize: entries, checked against every floor entry an ancestor already set.
+        # public:/private:/hidden:/authorize: are journey-BODY declarations (`journey NAME
+        # ... journey: done`), not bare top-level statements the way `sector:` is -- so they
+        # sit on JourneyDecl.body, and collecting them needs one level of unwrapping sector:
+        # never needed.
+        from mohio_ast import JourneyMeta as _JM2, JourneyDecl as _JD2
+        def _journey_metas(stmts):
+            for s in stmts:
+                if isinstance(s, _JM2):
+                    yield s
+                elif isinstance(s, _JD2):
+                    for s2 in _journey_metas(s.body):
+                        yield s2
+        own_class = [(m.kind, _norm_jpath(p), journey_path)
+                     for m in _journey_metas(j_prog.statements) if m.kind in _CLASS_RANK
+                     for p in (m.value or [])]
+        for (kind2, path2, _own_journey) in own_class:
+            for (kind, path, floor_journey) in floor_classifications:
+                if path2 == path:
+                    # Restating the SAME path: allowed only at the same strictness or tighter.
+                    if _CLASS_RANK[kind2] < _CLASS_RANK[kind]:
+                        _die(
+                            f"The journey at {journey_path} sets `{kind2}: {path2 or '/'}`, which "
+                            f"would LOOSEN `{kind}: {path or '/'}` the journey at {floor_journey} "
+                            f"already requires.\n\n"
+                            f"  A subfolder journey may only TIGHTEN a page's classification, never "
+                            f"relax it: `{path or '/'}` must stay `{kind}` or something stricter "
+                            f"here, not drop to `{kind2}`.\n\n"
+                            f"  To proceed: restate it as `{kind}: {path or '/'}` (or a stricter "
+                            f"kind), or remove this line to inherit `{kind}` from the parent "
+                            f"journey. A narrower path under `{path or '/'}` (for example "
+                            f"`{(path or '').rstrip('/')}/exception`) may still be carved out as "
+                            f"`public:`, the same exception mechanism a single journey already "
+                            f"supports.", exit_code=1)
+                elif path.startswith(path2 + '/'):
+                    # path2 is a BROADER ancestor of the floor path -- a weaker kind here would
+                    # swallow the stricter, narrower floor entry under its own wider coverage.
+                    if _CLASS_RANK[kind2] < _CLASS_RANK[kind]:
+                        _die(
+                            f"The journey at {journey_path} sets `{kind2}: {path2 or '/'}`, which "
+                            f"covers `{path}` too and would LOOSEN `{kind}: {path}` the journey at "
+                            f"{floor_journey} already requires there.\n\n"
+                            f"  A subfolder journey may only TIGHTEN a page's classification, never "
+                            f"relax it, even through a broader path that happens to cover a "
+                            f"narrower one a parent already protected.\n\n"
+                            f"  To proceed: narrow `{kind2}: {path2 or '/'}` so it does not cover "
+                            f"`{path}`, or raise it to `{kind}` (or stricter).", exit_code=1)
+                # elif path2.startswith(path + '/'): a NARROWER path under the floor -- the
+                # existing public:-overrides exception mechanism; allowed at any strictness.
+        floor_classifications.extend(own_class)
+
+        prepend.extend(j_prog.statements)
+    # Prepend root-first; the page's own statements register last, so the page wins over every
+    # journey and a nearer journey wins over the root.
+    program.statements = prepend + program.statements
+    # A JOURNEY IS SHARED, so what it declares is used by the pages under it (the Zork lane's false
+    # warning, 2026-10-10): an `ai.decide` declared here and invoked from index.mho was reported
+    # "declared but never invoked", because a journey checked on its own is a program of one file.
+    # The names every inheriting page writes travel with it; scan_ai_decide_never_invoked counts
+    # them. Only names, from the text with comments removed, so a check never parses the pages.
+    if os.path.basename(page_path) == 'journey.mho':
+        program.spine_names = _names_in_pages_under(page_dir, page_path)
+    # IS THIS PROGRAM SERVED AS CHECKED? A journey checked on its own, and an underscore partial
+    # (kept out of routing, reached only through a page that includes it), are never served as
+    # they stand: a page that serves them supplies what they lean on, such as the store an
+    # `ai.audit` writes to. Every served page is checked with its journeys prepended, so a page
+    # that truly lacks the store is still refused there (T1-CHECK-ALL-SPINE-NO-STORE).
+    _base = os.path.basename(page_path)
+    program.served_as_checked = not (_base == 'journey.mho' or _base.startswith('_'))
     return program
+
+
+def _names_in_pages_under(folder, journey_path):
+    """Every word written in the .mho pages under `folder` (the pages a journey there reaches),
+    comments and quoted text removed. Used only to tell whether a journey's declaration is used."""
+    names = set()
+    for root, _dirs, files in os.walk(folder):
+        for fn in files:
+            p = os.path.join(root, fn)
+            if not fn.endswith('.mho') or os.path.realpath(p) == os.path.realpath(journey_path):
+                continue
+            try:
+                src = open(p, encoding='utf-8-sig').read()
+            except OSError:
+                continue   # SILENT-OK: an unreadable page only means its names are not counted (a possible warning), never a passed check
+            src = re.sub(r'/\*.*?\*/', ' ', src, flags=re.S)
+            src = re.sub(r'//[^\n]*', ' ', src)
+            src = re.sub(r'"(?:[^"\\\n]|\\.)*"', ' ', src)
+            names.update(re.findall(r'[A-Za-z_]\w*', src))
+    return names
+
+def _webhook_startup_rotation_gate(program, interp=None):
+    """STARTUP half of the secret-rotation rule (item 7). Under a regulated sector, an app must not
+    START on a webhook secret that is missing its rotation record or is past its interval -- the same
+    condition `mio check` refuses, enforced again at boot so a deploy that skipped check cannot run
+    expired. Never mid-request: this runs once, here, at startup. Outside a sector the scan returns
+    nothing and this is a no-op. On the way through, it records each rotation to the audit chain the
+    first time a new rotation date is seen (once per rotation, not per request)."""
+    # Imported directly, not guarded: mohio_reachability is a core module. If it cannot import, the
+    # compiler is already broken, and a loud ImportError beats silently skipping a security gate. The
+    # CLI calls `webhook_rotation_problems` (the shared core), never a `scan_` function by hand -- that
+    # is a structural invariant; scanners run through run_scans, this gate reuses their logic.
+    from mohio_reachability import (webhook_rotation_problems, _rotation_error_message,
+                                    _webhook_secrets_under_sector, _rotation_status)
+    problems = webhook_rotation_problems(program)
+    if problems:
+        msg = "\n\n".join(_rotation_error_message(where, secret_env, status, detail)
+                          for (_vdecl, where, secret_env, status, detail) in problems)
+        _die(f"Cannot start under a regulated sector -- webhook secret rotation:\n\n{msg}", exit_code=1)
+    # Durable record: every secret here is 'ok' (the gate above refused otherwise). Record each
+    # rotation once, deduped by (secret, date), to the hash-chained audit sink.
+    if interp is not None:
+        for secret_env, (_vdecl, where) in _webhook_secrets_under_sector(program).items():
+            status, detail = _rotation_status(secret_env)
+            if status == 'ok':
+                try:
+                    interp.record_secret_rotation(secret_env, where)
+                except Exception as _e:
+                    print(f"  [rotation-audit] could not record rotation for env.{secret_env}: {_e}",
+                          file=sys.stderr)
+
 
 def _resolve_sqlite_db_path(mho_file, args):
     """Resolve the SQLite path for a CLI run/serve so data does not vanish on exit.
@@ -1918,6 +3141,50 @@ def _resolve_sqlite_db_path(mho_file, args):
     data_dir = os.path.join(os.path.expanduser('~'), '.mohio', 'data')
     os.makedirs(data_dir, exist_ok=True)
     return os.path.join(data_dir, f"{stem}-{key}.db")
+
+
+def _supplied_db_address(args):
+    """The address `--db` or `--memory` supplies for this run, or None when neither was given. The
+    CLI's own persistent file is not one: it is where an undeclared program's data lives, never a
+    database a declared `connect` lands on when its variable is unset (the connect flip)."""
+    if getattr(args, 'memory', False):
+        return ':memory:'
+    return getattr(args, 'db', None) or None
+
+
+def _app_identity(mho_file):
+    """Which app this is, as its audit envelopes record it (the relay-identifier blocker, RULED by Ron
+    2026-10-08): MOHIO_APP_ID when it is set, which a deployment whose paths differ from development
+    sets; otherwise a stable hash of the app root, the topmost folder above the program that holds a
+    `journey.mho` (the program's own folder when none does), so `mio serve app/` and `mio run
+    app/page.mho` are one app. None when there is neither a program nor the variable."""
+    import hashlib
+    explicit = (os.environ.get('MOHIO_APP_ID') or '').strip()
+    if explicit:
+        return explicit
+    if not mho_file:
+        return None
+    here = os.path.realpath(mho_file)
+    folder = here if os.path.isdir(here) else os.path.dirname(here)
+    root, probe = folder, folder
+    while True:
+        if os.path.isfile(os.path.join(probe, 'journey.mho')):
+            root = probe
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    return 'app:' + hashlib.sha256(os.path.normcase(root).encode('utf-8')).hexdigest()[:16]
+
+
+def _cli_interpreter(ai, verbose, mho_file, args):
+    """An interpreter for a CLI run/serve/test: the resolved SQLite path as before, and only the
+    flags as the supplied address."""
+    from mohio_interpreter import MohioInterpreter
+    interp = MohioInterpreter(ai=ai, verbose=verbose, db_path=_resolve_sqlite_db_path(mho_file, args))
+    interp.supplied_address = _supplied_db_address(args)
+    interp.app_id = _app_identity(mho_file)
+    return interp
 
 
 def cmd_run(args):
@@ -2016,14 +3283,11 @@ def cmd_run(args):
             from mohio_enforce import enforce_scans as _enforce_scans
             _enforce_scans(ctx, program)
         except Exception as _scan_err:
-            # A scanner hiccup must not crash an otherwise-valid run -- but it must not be
-            # SILENT either. A scanner that dies partway has checked some rules and not others,
-            # so the program proceeds with an unknown amount of enforcement actually applied.
-            # Swallowing that reports "clean" for a program nobody finished checking.
-            import sys as _sys
-            print(f"  [enforce] WARNING: a Layer 3 scanner failed ({type(_scan_err).__name__}: "
-                  f"{_scan_err}). Enforcement for this run is INCOMPLETE -- some checks did not "
-                  f"execute. Run `mio check` to see the full result.", file=_sys.stderr)
+            # FAILS LOUD (ruled by Ron, 2026-10-03): a scanner that dies partway has checked
+            # some rules and not others, so running anyway proceeds with an unknown amount of
+            # enforcement actually applied. This now blocks exactly like a Layer-1 error, through
+            # the SAME ctx.errors the "Build failed" check right below already acts on.
+            _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
         if ctx.errors:
             print(f"\n  {bold(red('Build failed'))}  {dim(filename)}\n")
             for e in ctx.errors:
@@ -2051,7 +3315,7 @@ def cmd_run(args):
                     "  Then retry:  mio run <file> --ai"
                 )
             try:
-                ai = _construct_ai_runtime(args.api_key, verbose)
+                ai = _construct_ai_runtime(args.api_key, verbose, path=filename)
                 if verbose:
                     print(dim(f"  AI runtime: Anthropic API ({ai._model})"))
             except RuntimeError as e:
@@ -2061,8 +3325,7 @@ def cmd_run(args):
             if verbose:
                 print(dim("  AI runtime: mock (use --ai for real Anthropic API)"))
 
-        interp = MohioInterpreter(ai=ai, verbose=verbose,
-                                  db_path=_resolve_sqlite_db_path(filename, args))
+        interp = _cli_interpreter(ai, verbose, filename, args)
 
         seed_data = None
         if args.seed:
@@ -2102,6 +3365,12 @@ def cmd_run(args):
         try: _cur = interp._current_line
         except Exception: pass
         _line = getattr(e, "line", 0) or _cur
+        # THE OUTPUT BEFORE THE FAILURE IS SHOWN FIRST. A runtime error used to discard every
+        # `show` the program had already made, so a program that printed three lines and failed
+        # on the fourth looked as though nothing ran at all, which sends debugging to the wrong
+        # line. `interp` may not exist when construction itself failed.
+        for _shown_line in (getattr(locals().get('interp'), 'shown', None) or []):
+            _print_program_output(f"  {_shown_line}")
         _print_runtime_error(e, filename, source=source, line=_line)
         if verbose:
             traceback.print_exc()
@@ -2112,13 +3381,13 @@ def cmd_run(args):
     # looked like it only ran the last iteration).
     shown = getattr(interp, 'shown', None) or []
     for line in shown:
-        print(f"  {line}")
+        _print_program_output(f"  {line}")
     # Echo the Result/Response only when it adds information beyond the show
     # output: a real give-back (dict), or a value-returning program with no show.
     if isinstance(result, dict) or not shown:
-        _print_result(result, verbose)
+        _print_result(result, verbose, interp)
     elif verbose:
-        _print_result(result, verbose)
+        _print_result(result, verbose, interp)
 
     # A RUNTIME FAILURE MUST NOT EXIT 0. Measured 2026-09-02: `mio run` exited 0 for every
     # runtime failure -- an unhandled `raise`, a missing database connection, and the
@@ -2193,6 +3462,11 @@ def _generate_applang_training_data(args):
              f"Point --db at the SQLite file that holds applang_map. "
              f"Exporting from {_scheme} is not built: the learned-language store is "
              f"SQLite-only today.")
+    from mohio_db_drivers import sqlite_path_from_address
+    try:
+        db_path = sqlite_path_from_address(db_path)    # `sqlite:///app.db` names the file app.db
+    except RuntimeError as e:
+        _die(str(e))
 
     if not os.path.exists(db_path) and db_path != ':memory:':
         _die(f"database not found at {db_path}")
@@ -2232,6 +3506,7 @@ def _generate_applang_training_data(args):
         # Write JSONL
         out_path = Path(output)
         count = 0
+        # EGRESS-EXEMPT: the learned-language store's word pairs; no tagged field is stored there
         with open(out_path, 'w', encoding='utf-8') as f:
             for row in rows:
                 weight = min(1.0, row['hit_count'] / max_hits)
@@ -2249,6 +3524,7 @@ def _generate_applang_training_data(args):
 
         # Write metadata
         meta_path = out_path.with_suffix('.meta.json')
+        # EGRESS-EXEMPT: the learned-language store's word pairs; no tagged field is stored there
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump({
                 "total_entries": count,
@@ -2384,6 +3660,7 @@ def cmd_translate(args=None):
             suffix = source_file.suffix
             out = source_file.parent / f'{stem}_{to_lang}{suffix}'
 
+        # EGRESS-EXEMPT: program SOURCE text the developer asked to write; no runtime value
         out.write_text(translated, encoding='utf-8')
         print(f"  [translate] written to: {out}")
         print(f"  [translate] done -- keywords translated to {to_lang}")
@@ -2456,55 +3733,293 @@ def cmd_warmup(args=None):
     for target in serve_targets:
         try:
             source = _Path(target).read_text(encoding='utf-8-sig')
-            cached = _load_ast_cache(target, source)
-            if cached and cached[0] is not None:
-                print(f"  [warmup] {target} -- AST cache valid.")
+            if _load_ast_cache(target, source) is not None:
+                print(f"  [warmup] {target} -- parse cache valid.")
                 continue
             print(f"  [warmup] Pre-parsing {target} (build-time only)...")
             try:
+                # `_parse_and_validate` caches the PARSE (the tree only) for any file that parses.
+                # The old full-pipeline-clean gate is gone: the cache no longer holds a verdict, so
+                # there is no clean/dirty verdict to guard -- every check re-runs Layer 1, the AST
+                # build and every scan against the cached tree.
                 tree, ctx = _parse_and_validate(source, target, verbose=False)
-                # Cache only if clean through the FULL pipeline, not just Layer 1. warmup is now
-                # the one legitimate cache-writer, so it owns the "clean means clean-through-L3"
-                # guarantee: run Layers 2+3 through the door (assembling includes/journey as the
-                # check path does) and cache only if nothing failed. Otherwise a warmup could
-                # persist an L1-clean/L2-dirty file as "clean" and a later check would replay it.
-                from mohio_enforce import enforce as _wenf, enforce_scans as _wenf_scans
-                _wctx, _wprog = _wenf(tree, source=source, filename=target, scan=False)
-                if _wprog is not None:
-                    try:
-                        _wprog = _resolve_includes(_wprog, target, verbose=False)
-                        _wprog = _apply_journey(_wprog, target, verbose=False)
-                    except Exception:
-                        _wprog = None
-                if _wprog is not None:
-                    _wenf_scans(_wctx, _wprog)
-                _full_clean = (_wprog is not None
-                               and not _ctx_has_errors(ctx)
-                               and not _ctx_has_errors(_wctx))
-                if _full_clean:
-                    _save_ast_cache(target, source, tree, ctx)
-                # The message must report what actually happened. It used to be decided
-                # by the Layer 1 error count while the WRITE was gated on _full_clean,
-                # so a file that failed at Layer 2 or 3 -- or whose includes could not
-                # be resolved -- printed "AST cached" having written nothing. A build
-                # step that reports success without producing the artifact is worse
-                # than one that fails: the slow start shows up in production instead.
-                errs = len(ctx.errors) if ctx else 0
-                if _full_clean:
-                    print(f"  [warmup] {target} -- AST cached.")
-                elif errs:
-                    print(f"  [warmup] {target} -- NOT cached: {errs} error(s). "
-                          f"Run mio check.")
+                if tree is not None:
+                    print(f"  [warmup] {target} -- parse cached.")
                 else:
-                    print(f"  [warmup] {target} -- NOT cached: it does not pass a full "
-                          f"check (includes, journey, or a later scan). Run mio check "
-                          f"on it; only a file that passes cleanly can be cached.")
+                    print(f"  [warmup] {target} -- NOT cached: it did not parse. Run mio check.")
             except Exception as e:
                 print(f"  [warmup] {target} -- parse error: {e}")
         except Exception as e:
             print(f"  [warmup] {target} -- could not read: {e}")
 
     print("  [warmup] Cold-start delay eliminated.")
+
+def _cached_parse_tree(source, filename):
+    """The parse tree for `source`: from the parse cache when it holds one, else parsed exactly as
+    `mio check` parses (pretokenized against the app's declared names) and saved to that cache.
+    Raises the parser's own error and prints nothing.
+
+    WHY IT IS SHARED (item 10, measured on the health app's folder): directory discovery parsed
+    every file with the raw parser, no cache and no pretokenizing, 281 seconds for 48 files before
+    the server could answer, and then compiled each file again. Discovery through this helper fills
+    the cache the compile reads, so a file is parsed once per run."""
+    is_file = bool(filename) and filename != "<string>"
+    tree = _load_ast_cache(filename, source) if is_file else None
+    if tree is not None:
+        return tree
+    from mohio_symbol_table import extract_symbols, app_mark_names
+    from mohio_transformer import MOHIO_RESERVED_EXACT
+    from mohio_pretokenizer import pretokenize
+    names = extract_symbols(source).all_user_names()
+    if is_file:
+        names = names | app_mark_names(filename)
+    tree = _make_parser_cached(_load_grammar()).parse(pretokenize(source, names, MOHIO_RESERVED_EXACT))
+    if is_file:
+        _save_ast_cache(filename, source, tree)
+    return tree
+
+
+def _declared_route_paths(abs_path):
+    """The route paths a file's top-level handlers DECLARE via `at`. Directory discovery uses these
+    instead of the file's name (Batch 37 item 2): a handler that writes `new sh.X at /api/pay`
+    answers at /api/pay, not at the filename-derived path. A file with no declared handler path
+    routes by filename as before. Returns [] if the file cannot be parsed here -- it then falls back
+    to filename routing and its parse error surfaces when the page is served, exactly as before."""
+    try:
+        source = Path(abs_path).read_text(encoding='utf-8-sig')
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError -- a non-UTF-8 file cannot declare a path here. It
+        # falls back to filename routing and is skipped, with its error reported, by the serve loop.
+        return []
+    try:
+        from mohio_transformer_ast import transform as _t
+        from mohio_ast import top_handlers
+        prog = _t(_cached_parse_tree(source, abs_path), source)
+    except Exception:
+        # A file that will not parse cannot declare a path here; leave it to filename routing, where
+        # its error is reported when the page is served. This is a routing HINT, never the place a
+        # parse error is first raised, so falling back is correct rather than a swallowed failure.
+        # (`except Exception` deliberately does not catch SystemExit -- a `_die` still propagates.)
+        return []
+    # EVERY HANDLER THE RUNTIME ROUTES, not only the top-level ones (HC-008). A handler written
+    # loose inside a `journey` body is routed by the program when its file is served
+    # (_exec_JourneyDecl's `journey_loose`; a ListenBlock's listeners are read the same way, for an
+    # older program that still holds one), but this read only the top level. Its path never entered the directory route table, so under
+    # `mio serve .` the request 404'd before reaching the file -- while serving that file alone
+    # answered it. Measured on the health app: /documents and /documents/reconcile 404'd. Routes
+    # whose path happened to equal the file name (/referrals in referrals.mho) only LOOKED fine,
+    # because the file-name fallback produced the same URL.
+    from mohio_ast import JourneyDecl, ListenBlock
+    handlers = list(top_handlers(prog.statements))
+    for stmt in prog.statements:
+        if isinstance(stmt, JourneyDecl):
+            handlers += top_handlers(stmt.body)
+            for b in (stmt.body or []):
+                if isinstance(b, ListenBlock):
+                    handlers += top_handlers(b.listeners)
+        elif isinstance(stmt, ListenBlock):
+            handlers += top_handlers(stmt.listeners)
+    paths = []
+    for h in handlers:
+        p = getattr(h, 'path', None)
+        if p and str(p).startswith('/'):
+            paths.append(str(p))
+    return paths
+
+
+def _load_authored_seed(directory, args, interps):
+    """Seed the application's AUTHORED data at startup, from `_seed.json` at the application root.
+
+    AUTHORED data -- the lookup and configuration rows that ARE the application, versioned with its
+    code -- ships in `_seed.json` (a leading underscore, so the static server never serves it) beside the pages and journey. `mio serve <dir>` loads it AUTOMATICALLY,
+    no flag, because a convention that needs a flag is not one; an explicit `--seed` overrides it.
+    Absent, nothing happens (no complaint): an app with no authored data ships no file. Malformed, it
+    fails loud naming the file, because a broken authored-data file must not deploy silently. Seeding
+    is idempotent (a row with an id upserts; a row without one is skipped when an identical row
+    exists), so re-running on every deploy and restart is safe.
+
+    AUTHORED, NOT ACCUMULATED: the file lives in the source tree and travels with the code, which is
+    what makes it authored. ACCUMULATED data -- the rows users create in use -- lives only in the
+    database, never in a repo file; putting a user's row here means committing user data to source
+    control, which is the visibly-odd thing this convention makes odd. `interps` is the per-page
+    interpreter map; all pages share one application database, so one interpreter seeds it once."""
+    if not interps:
+        return
+    # A stale `seed.json` (the OLD name) is now DEAD on both counts and silent on both: the loader
+    # reads only `_seed.json`, so an old file at this name seeds NOTHING, and the static server now
+    # denies the old name, so it no longer LEAKS either. Neither the dead load nor the closed leak
+    # announces itself, and someone copying an older example or project inherits exactly this file.
+    # Say so once, here, at serve: name the file, say it does nothing, and name the rename that fixes
+    # it (what / why / how, one line).
+    _stale = Path(str(directory)) / 'seed.json'
+    if _stale.is_file():
+        print("  [mohio.serve] WARNING: seed.json at the app root is no longer loaded or served -- "
+              "authored data now ships in _seed.json (a leading underscore keeps it off the web). "
+              "Rename it: seed.json -> _seed.json.")
+    _seed_path = None
+    if getattr(args, 'seed', None):
+        _seed_path = Path(args.seed)
+        if not _seed_path.exists():
+            _die(f"Seed file not found: {args.seed}", exit_code=3)
+    else:
+        # `_seed.json` -- a LEADING UNDERSCORE, on purpose. Authored data is authority configuration
+        # (a denylist, an allowlist, roles, thresholds), so it must never be served. A leading
+        # underscore is Mohio's private-file convention and the static server never serves such a file
+        # (verified: `/_seed.json` -> 404), so the file that seeds the app is not one a browser can
+        # fetch. The earlier name `seed.json` had no underscore and WAS served (T0-SEED-JSON-SERVED-AS-
+        # STATIC): the guide already documented the underscore name as the safe one, so this aligns the
+        # loader with the documented, served-safe name.
+        _conv = Path(str(directory)) / '_seed.json'
+        if _conv.is_file():
+            _seed_path = _conv
+    if _seed_path is None:
+        return
+    try:
+        import json as _json
+        _seed_data = _json.loads(_seed_path.read_text(encoding='utf-8'))
+    except Exception as _e:
+        _die(f"Cannot read authored-data seed `{_seed_path}`: {_e}. It must be JSON of the form "
+             f'{{"table": [{{"id": 1, ...}}]}}. Fix the file or remove it.', exit_code=1)
+    if not isinstance(_seed_data, dict):
+        _die(f"Authored-data seed `{_seed_path}` must be a JSON object mapping each table to its "
+             f'rows, like {{"table": [{{"id": 1, ...}}]}}.', exit_code=1)
+    # All pages share one application database; seed it once, through a page that HAS a database. If no
+    # page connects one, an explicit --seed is a mistake (there is nothing to seed into) while the
+    # convention file is simply not applicable and is left alone.
+    _seed_it = next((_it for _it in interps.values() if getattr(_it, '_db', None) is not None), None)
+    if _seed_it is None:
+        if getattr(args, 'seed', None):
+            _die("--seed was given, but no page declares a `connect` -- there is no database to seed "
+                 "into. Add `connect db as sqlite` (or postgres / mysql / mongodb), or drop --seed.")
+        return
+    # SEED DATA NEVER RE-APPLIES OVER A LIVE DATABASE AT START (Ron, 2026-10-13). It ran on every start
+    # and upserted each row by its id, so a row the app had changed since (a checker's authority
+    # binding, in the Volarix checkpoint) went back to its seeded value on the next restart, with
+    # nothing said. The convention file now seeds only when every table it names is absent or empty;
+    # an explicit `--seed` is the explicit command and still applies.
+    if not getattr(args, 'seed', None) and _seeded_tables_hold_rows(_seed_it._db, _seed_data):
+        _held = [t for t in _seed_data if _table_holds_rows(_seed_it._db, t)]
+        print(f"  {dim(f'authored data in {_seed_path.name} was not re-applied: the database already holds rows in ' + ', '.join(_held) + '. Seeding runs only on an empty database, so a restart never puts back what the app has changed. To apply it again on purpose: mio serve ... --seed ' + _seed_path.name)}")
+        return
+    try:
+        _seed_it.seed_db(_seed_data)
+    except Exception as _e:
+        _die(f"Authored-data seed `{_seed_path}` failed to load: {_e}", exit_code=1)
+    _rows = sum(len(v) for v in _seed_data.values() if isinstance(v, list))
+    print(f"  {dim(f'authored data: {_rows} row(s) across {list(_seed_data.keys())} from '
+                  f'{_seed_path.name} (applied to an empty database)')}")
+
+
+def _table_holds_rows(db, table):
+    """True when `table` exists and has at least one row. An absent table holds none; a table that
+    exists and cannot be counted is an error, raised, never read as empty."""
+    cols = db.table_columns(table) if hasattr(db, 'table_columns') else None
+    if not cols:
+        return False
+    return int(db.count(table) or 0) > 0
+
+
+def _seeded_tables_hold_rows(db, seed_data):
+    return any(_table_holds_rows(db, t) for t in (seed_data or {}) if isinstance(seed_data.get(t), list))
+
+
+_LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '::1')
+
+# What the platform sets on EVERY deployed app, read from its deploy job (getmohio-control,
+# app/Jobs/DeployApp.php): MOHIO_BUILD_SHA (line 267, the runtime image a tenant is built from, the
+# variable mohio_version.py documents as stamped by the deploy pipeline) and
+# MOHIO_LOCAL_DISK_EPHEMERAL (line 304, "a platform fact" set unconditionally). A developer's
+# machine sets neither.
+_PLATFORM_VARS = ('MOHIO_BUILD_SHA', 'MOHIO_LOCAL_DISK_EPHEMERAL')
+
+
+def _dev_serve_refusal(args, root):
+    """Why `mio serve --dev` may not run here, or None (T1-DEVELOPMENT-SERVE-MODE, RULED by Ron:
+    production is the default, and development is refused under a sector and on a deployment).
+
+    Development mode answers a refused page with its compiler error, so it is for one developer's
+    machine (RULED by Ron 2026-10-11): it binds a loopback host only, and it refuses on a platform
+    deploy, which it knows by the variables the platform sets on every deployed app (_PLATFORM_VARS).
+    A sector or compliance profile in force means a regulated app, which is served whole or not
+    at all."""
+    import re as _re
+    host = str(getattr(args, 'host', '') or '').strip().lower()
+    if host not in _LOOPBACK_HOSTS:
+        return (f"development mode binds this machine only, because a page that did not load "
+                f"answers with its compiler error, and --host is {host!r}. Leave --host out (it "
+                f"defaults to 127.0.0.1) or write `--host 127.0.0.1`; to serve other machines, "
+                f"serve without --dev.")
+    on_platform = [v for v in _PLATFORM_VARS if (os.environ.get(v) or '').strip()]
+    if on_platform:
+        return (f"{on_platform[0]} is set, which the platform sets on a deployed app, and development "
+                f"mode is for a developer's machine. Serve without --dev; a deployed app is served "
+                f"whole or not at all.")
+    files = []
+    if os.path.isdir(str(root)):
+        for d, dirs, fs in os.walk(str(root)):
+            dirs[:] = [x for x in dirs if not x.startswith('.')]
+            files += [os.path.join(d, f) for f in fs if f.endswith('.mho')]
+    else:
+        files = [str(root)]
+    for fp in sorted(files):
+        try:
+            text = Path(fp).read_text(encoding='utf-8-sig')
+        except (OSError, ValueError):
+            continue        # an unreadable file is refused as a load failure, named on its own
+        for n, line in enumerate(text.splitlines(), 1):
+            if _re.match(r'\s*(sector|compliance)\s*:', line):
+                return (f"a regulated profile is in force ({os.path.relpath(fp, str(root)) if os.path.isdir(str(root)) else fp} "
+                        f"line {n}: `{line.strip()}`), and a regulated app is served whole or not at "
+                        f"all. Serve without --dev, and fix every file that does not load.")
+    return None
+
+
+def _dev_shared_failures(directory, journeys):
+    """The shared files under `directory` that do not load: every journey, and every file a page or
+    journey includes as a statement (`include "_part.mho"`). A markup fragment reached only through
+    `{{ include }}` in a render is text, not a program, and is not checked here."""
+    import re as _re
+    import contextlib as _ctxl
+    import io as _io
+    targets = set(os.path.realpath(j) for j in journeys)
+    for d, dirs, fs in os.walk(str(directory)):
+        dirs[:] = [x for x in dirs if not x.startswith('.')]
+        for f in fs:
+            if not f.endswith('.mho'):
+                continue
+            try:
+                text = Path(os.path.join(d, f)).read_text(encoding='utf-8-sig')
+            except (OSError, ValueError):
+                continue    # reported as a load failure of its own
+            for m in _re.finditer(r'^\s*include\s+"([^"]+)"', text, _re.M):
+                p = _find_include_path(m.group(1), d)
+                if p:
+                    targets.add(os.path.realpath(p))
+    out = []
+    for fp in sorted(targets):
+        rel = os.path.relpath(fp, str(directory))
+        try:
+            src = Path(fp).read_text(encoding='utf-8-sig')
+            # The same three steps a page's compile runs: parse and validate, build, whole-program scans.
+            with _ctxl.redirect_stdout(_io.StringIO()):
+                _tree, _ctx = _parse_and_validate(src, fp, verbose=False)
+                if not _ctx.errors:
+                    from mohio_transformer_ast import transform as _t
+                    from mohio_enforce import enforce_scans as _es
+                    _es(_ctx, _t(_tree, src))
+            if _ctx.errors:
+                out.append(f"{rel} -- {len(_ctx.errors)} error(s)")
+        except SystemExit:
+            out.append(f"{rel} -- does not parse")
+        except Exception as e:      # a build error (a closer mismatch, say) is this file not loading
+            out.append(f"{rel} -- {_first_line(e)}")
+    return out
+
+
+def _first_line(err):
+    """The first line of an error's text that says something; some begin with a blank line."""
+    return next((ln.strip() for ln in str(err).splitlines() if ln.strip()), type(err).__name__)
+
 
 def _cmd_serve_directory(args, directory, verbose=False):
     """
@@ -2523,6 +4038,12 @@ def _cmd_serve_directory(args, directory, verbose=False):
 
     print(f"\n  {bold('mio serve')} {dim(f'v{VERSION}')} -- {bold('directory mode')}")
     print(f"  {dim('Scanning')} {bold(str(directory))}")
+    if getattr(args, 'dev', False):
+        _no_dev = _dev_serve_refusal(args, directory)
+        if _no_dev:
+            _die(f"`mio serve --dev` does not start: {_no_dev}", exit_code=1)
+        print(f"  {yellow('!')}  development mode: a file that does not load answers 503 instead of "
+              f"stopping the server. Never deploy this way.")
 
     # Discover all .mho files
     #   _name.mho  -- private: include target only, never routed
@@ -2533,6 +4054,7 @@ def _cmd_serve_directory(args, directory, verbose=False):
     #                  does not stop it being applied.
     mho_files = []
     journeys = []
+    pages = []
     for root, dirs, files in os.walk(str(directory)):
         # Skip hidden folders
         dirs[:] = [d for d in dirs if not d.startswith('.')]
@@ -2543,18 +4065,50 @@ def _cmd_serve_directory(args, directory, verbose=False):
             if f == 'journey.mho':
                 journeys.append(abs_path)
                 continue
-            rel_path = os.path.relpath(abs_path, str(directory))
-            # Build URL path
-            url_path = '/' + rel_path.replace(os.sep, '/')
-            url_path = url_path[:-4]  # remove .mho
-            if url_path.endswith('/index'):
-                url_path = url_path[:-6] or '/'  # /blog/index -> /blog/
-            if not url_path:
-                url_path = '/'
-            mho_files.append((url_path, abs_path))
+            pages.append(abs_path)
+    # A PROGRESS LINE PER FILE (item 10). Reading the routes parses each file, and on a first run
+    # (no parse cache yet) a 48-file app took minutes with nothing printed, which looks like a hang.
+    if pages:
+        print(f"  {dim(f'Reading {len(pages)} file(s); a first run parses each one, later runs reuse the cache.')}")
+    for i, abs_path in enumerate(pages, 1):
+        rel_path = os.path.relpath(abs_path, str(directory))
+        print(f"  {dim(f'[{i}/{len(pages)}]')} {rel_path.replace(os.sep, '/')}", flush=True)
+        # The filename-derived URL, the fallback for a file that declares no route path.
+        filename_url = '/' + rel_path.replace(os.sep, '/')
+        filename_url = filename_url[:-4]  # remove .mho
+        if filename_url.endswith('/index'):
+            filename_url = filename_url[:-6] or '/'  # /blog/index -> /blog/
+        if not filename_url:
+            filename_url = '/'
+        # THE DECLARED PATH WINS (Batch 37 item 2). A handler that writes `at /some/path` is
+        # registered at that path, not at the file's name -- a developer who declares a route and
+        # gets a different one is the same silent surprise as an unmatched POST. A file with no
+        # declared handler path routes by filename, as before.
+        declared = _declared_route_paths(abs_path)
+        for u in (declared or [filename_url]):
+            mho_files.append((u, abs_path))
 
     if not mho_files:
         _die(f"No .mho files found in {directory}")
+
+    # A route may be claimed by exactly one file. Two files answering the same method+path is a
+    # collision the router cannot resolve, and silently letting the second SHADOW the first is the
+    # same silent-surprise shape as the declared-path bug itself (Batch 37 item 2): a developer
+    # would deploy with one route dead and no word. Refuse at startup, naming both files. (A file
+    # legitimately declaring the same path more than once collapses to one route -- only DIFFERENT
+    # files colliding is refused.)
+    _by_url = {}
+    for _u, _fp in mho_files:
+        if _u in _by_url and os.path.realpath(_by_url[_u]) != os.path.realpath(_fp):
+            _die(f"Two files claim the route {bold(_u)}:\n"
+                 f"    {os.path.relpath(_by_url[_u], str(directory))}\n"
+                 f"    {os.path.relpath(_fp, str(directory))}\n\n"
+                 f"  A route answers from one file. This happens when a handler's `at` path (which "
+                 f"wins over the filename) lands on a path another file already owns. Change one of "
+                 f"the `at` paths, or rename a file, so each route has a single owner.", exit_code=1)
+        _by_url.setdefault(_u, _fp)
+    # Collapse a file's repeated identical path to a single route entry.
+    mho_files = list(dict.fromkeys(mho_files))
 
     print(f"  {dim('Routes discovered:')}")
     for url, filepath in sorted(mho_files):
@@ -2569,13 +4123,23 @@ def _cmd_serve_directory(args, directory, verbose=False):
     # Parse and compile all files
     programs = {}
     interps = {}
+    # A FILE THAT DOES NOT LOAD STOPS THE SERVER FROM STARTING (RULED by Ron 2026-10-08, replacing
+    # hc014). hc014 had a failed file's routes answer 500 while the rest of the app served; before
+    # that they were skipped and 404'd. Both are a partial app: the routes the files declare are not
+    # the routes being served. Every failure is collected, with its lines, and serve refuses to
+    # start naming each one, exactly as `mio serve file.mho` refuses a file that does not load.
+    failures = {}
+
+    def _load_failed(filepath, lines, reason):
+        failures.setdefault(os.path.realpath(filepath), (filepath, [], reason))[1].extend(
+            ln for ln in lines if ln)
 
     # Set up shared AI runtime
     from mohio_interpreter import MohioInterpreter, MockAiRuntime
     if args.ai:
         try:
             from mohio_ai import AnthropicAiRuntime
-            ai = _construct_ai_runtime(args.api_key, verbose)
+            ai = _construct_ai_runtime(args.api_key, verbose, path=directory)
         except ImportError:
             _die("Anthropic SDK not installed. Run: pip install anthropic")
         except RuntimeError as e:
@@ -2588,43 +4152,77 @@ def _cmd_serve_directory(args, directory, verbose=False):
     else:
         ai = MockAiRuntime()
 
+    # ONE COMPILE PER FILE (item 10). A file declaring several routes is one program: it was
+    # checked, assembled and had its declarations run once PER ROUTE, so a file with six routes
+    # paid six times at startup. Its later routes now share the first compile -- the same one
+    # interpreter for all of a file's routes that single-file serve has always used.
+    _compiled = {}
     for url_path, filepath in mho_files:
+        _prior = _compiled.get(os.path.realpath(filepath))
+        if _prior is not None:
+            if _prior[0] == 'failed':
+                pass          # already recorded with its lines when the file was compiled
+            else:
+                programs[url_path], interps[url_path] = _prior
+                print(f"  {green('v')}  {url_path}")
+            continue
         try:
             # Read inside the try so an unreadable page (not UTF-8, vanished, etc.)
             # is reported per-file and skipped like a parse error -- one bad page must
             # not crash the whole directory server with a raw traceback (Unit B).
             source = Path(filepath).read_text(encoding='utf-8-sig')
-            tree, ctx = _parse_and_validate(
-                source, filepath, verbose=False)
+            # A syntax error ends `_parse_and_validate` with its own printed report and an exit. It is
+            # caught here only so the NEXT file is checked too and every failure is named at once;
+            # the line comes from the report it printed.
+            import contextlib as _ctxl
+            import io as _io
+            _buf = _io.StringIO()
+            try:
+                with _ctxl.redirect_stdout(_buf):
+                    tree, ctx = _parse_and_validate(source, filepath, verbose=False)
+            except SystemExit:
+                _said = _buf.getvalue()
+                print(_said, end='')
+                import re as _re_ln
+                _m = _re_ln.search(r'^\s*(\d+) \|', _said, _re_ln.M)
+                _load_failed(filepath, [int(_m.group(1))] if _m else [], 'does not parse')
+                _compiled[os.path.realpath(filepath)] = ('failed', 1)
+                continue
+            print(_buf.getvalue(), end='')
             if ctx.errors:
-                print(f"  {yellow('!')} Skipping {filepath} -- parse errors")
+                for _e in ctx.errors:
+                    _print_compile_error(_e, source, filepath)
+                _load_failed(filepath, [getattr(_e, 'line', None) for _e in ctx.errors],
+                             f"{len(ctx.errors)} error(s)")
+                _compiled[os.path.realpath(filepath)] = ('failed', len(ctx.errors))
                 continue
             from mohio_transformer_ast import transform
             program = transform(tree, source)
             program = _resolve_includes(program, filepath, verbose=False)
-            program = _apply_journey(program, filepath, verbose=False)
+            # The served directory IS the application root, so the cascade walks from a page's
+            # folder up to it (T1-JOURNEY-CASCADE): a page under api/ inherits the root journey.
+            program = _apply_journey(program, filepath, verbose=False, app_root=str(directory))
             # Single door: Layer-3 scan on the assembled program before this route goes live.
             # A file that fails check/run must not be served just because it is in a directory.
             try:
                 from mohio_enforce import enforce_scans as _enforce_scans
                 _enforce_scans(ctx, program)
             except Exception as _scan_err:
-                # A crashing scanner must not kill an otherwise-valid command, but it must not be
-                # silent: enforcement for this run is INCOMPLETE and the program proceeds anyway.
-                import sys as _sys
-                print(f"  [enforce] WARNING: a Layer 3 scanner failed "
-                      f"({type(_scan_err).__name__}: {_scan_err}). Enforcement is INCOMPLETE -- "
-                      f"some checks did not execute. Run `mio check` for the full result.",
-                      file=_sys.stderr)
+                # FAILS LOUD (ruled by Ron, 2026-10-03), through the same ctx.errors the
+                # "skipped" check right below already acts on -- see _scan_incomplete_warn.
+                _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
             if ctx.errors:
-                print(f"  {red('x')}  {url_path} -- {len(ctx.errors)} error(s), skipped "
-                      f"(run `mio check {filepath}`)")
+                for _e in ctx.errors:
+                    _print_compile_error(_e, source, filepath)
+                _load_failed(filepath, [getattr(_e, 'line', None) for _e in ctx.errors],
+                             f"{len(ctx.errors)} error(s)")
+                _compiled[os.path.realpath(filepath)] = ('failed', len(ctx.errors))
                 continue
-            interp = MohioInterpreter(ai=ai, verbose=verbose,
-                                      db_path=_resolve_sqlite_db_path(filepath, args))
+            interp = _cli_interpreter(ai, verbose, filepath, args)
             interp.run_declarations(program)
             programs[url_path] = program
             interps[url_path] = interp
+            _compiled[os.path.realpath(filepath)] = (program, interp)
             # STATIC detection, at startup, before a single request. A convention-served GET
             # is read-only; a page that changes state on a bare page view is reported HERE so
             # the developer sees it while starting the server, not when a crawler finds it.
@@ -2647,15 +4245,65 @@ def _cmd_serve_directory(args, directory, verbose=False):
                         _verbs = ", ".join(f"{v} (line {ln})" if ln else v for v, ln in _bad)
                         print(f"  {yellow('!')}  {url_path} -- a convention-served page is "
                               f"read-only, and this one changes state: {_verbs}. It will "
-                              f"refuse the GET. Move the change into a `listen for` handler.")
+                              f"refuse the GET. Move the write into a handler that owns it (`listen for sh.X`, `change to sh.X`).")
             except Exception:
                 pass          # a reporting aid must never stop the server from starting
             print(f"  {green('v')}  {url_path}")
         except Exception as e:
             print(f"  {red('x')}  {url_path} -- {e}")
+            _load_failed(filepath, [getattr(e, 'line', None)], _first_line(e))
+            _compiled[os.path.realpath(filepath)] = ('failed', 1)
+
+    refused_routes = {}
+    if failures:
+        _listed = []
+        for _fp, _lines, _why in failures.values():
+            _rel = os.path.relpath(_fp, str(directory))
+            _at = (", line " + ", ".join(str(n) for n in sorted(set(_lines)))) if _lines else ""
+            _listed.append(f"    {_rel}{_at} -- {_why}")
+        # DEVELOPMENT STARTS THE FILES THAT LOAD (T1-DEVELOPMENT-SERVE-MODE), unless what failed is
+        # shared: a journey or an included file carries shapes, tasks and gates every page using it
+        # depends on, so those pages would be served wrong rather than refused.
+        _shared = _dev_shared_failures(directory, journeys) if getattr(args, 'dev', False) else []
+        if not getattr(args, 'dev', False) or _shared:
+            _also = ""
+            if _shared:
+                _also = ("\n  `--dev` does not start it either: a shared file did not load, and every "
+                         "page that uses it would run without what it declares:\n"
+                         + "\n".join(f"    {_s}" for _s in _shared))
+            _die(f"{len(failures)} file(s) in {directory} did not load, so the app is not started: serving "
+                 f"the rest would answer for routes these files declare with something else.\n"
+                 + "\n".join(_listed)
+                 + "\n  Run `mio check` on each, correct what it reports, and start `mio serve` again."
+                 + _also, exit_code=1)
+        for _u, _fp in mho_files:
+            _f = failures.get(os.path.realpath(_fp))
+            if _f:
+                refused_routes[_u] = {"file": os.path.relpath(_f[0], str(directory)).replace(os.sep, "/"),
+                                      "lines": sorted(set(_f[1])), "reason": _f[2]}
+        print(f"\n  {red('DEGRADED, NOT DEPLOYABLE')} -- {len(failures)} of "
+              f"{len({os.path.realpath(fp) for _u, fp in mho_files})} file(s) did not load. In development "
+              f"each of their routes answers 503 naming the file and line:")
+        print("\n".join(_listed))
+        print(f"  {dim('This clears only when every file loads. Run `mio check` on each.')}\n")
 
     if not programs:
         _die("No files compiled successfully.")
+
+    # AUTHORED-DATA SEED CONVENTION (T0-DATA-DEPLOY, authored half). An application ships its AUTHORED
+    # data -- the lookup and configuration rows that ARE the application, versioned with its code --
+    # in `_seed.json` at the application root (the directory being served; the leading underscore keeps it unserved). `mio serve <dir>` loads it
+    # automatically, no flag, because a convention that needs a flag is not one; an explicit `--seed`
+    # overrides it. Absent, nothing happens (no complaint): an app with no authored data ships no file.
+    # Malformed, it fails loud naming the file, because a broken authored-data file must not deploy
+    # silently. Seeding is idempotent (a row with an id upserts; a row without one is skipped when an
+    # identical row exists), so re-running it on every deploy and restart is safe.
+    #
+    # AUTHORED, NOT ACCUMULATED: the file lives in the source tree and travels with the code, which is
+    # what makes it authored; ACCUMULATED data -- the rows users create in use -- lives only in the
+    # database and never in a repo file. Putting a user's row here means committing user data to source
+    # control, which is the visibly-odd thing this convention makes odd.
+    _load_authored_seed(directory, args, interps)
 
     # T1-MAP-EXTRACTION (2026-08-24): apply the `map` route classifier.
     #
@@ -2712,101 +4360,16 @@ def _cmd_serve_directory(args, directory, verbose=False):
     try:
         from mohio_server import create_multi_app
         app = create_multi_app(programs, interps, verbose=verbose, app_dir=directory,
-                               redirects=redirects, status_responses=status_responses)
-    except (ImportError, AttributeError):
-        # Fallback: build basic multi-route app inline
-        try:
-            from fastapi import FastAPI, Request
-            from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse, Response
-            import uvicorn
-
-            app = FastAPI(title="Mohio Directory Server")
-
-            @app.get("/mio/health")
-            async def health():
-                return {"status": "ok", "mode": "directory",
-                        "routes": list(programs.keys())}
-
-            # Register a handler for each .mho file
-            for url_path, program in programs.items():
-                interp = interps[url_path]
-
-                # Create closure to capture url_path, program, interp
-                def make_handler(p, prog, interpr):
-                    async def handler(request: Request):
-                        body = {}
-                        try:
-                            body = await request.json()
-                        except Exception:
-                            pass
-                        result = interpr.handle_request(prog, {
-                            "method":  request.method,
-                            "path":    str(request.url.path),
-                            "headers": dict(request.headers),
-                            "body":    body,
-                            "query":   dict(request.query_params),
-                        })
-                        status = result.get("status", 200) if result else 200
-                        body_out = result.get("body", "") if result else ""
-                        content_type = result.get("content_type",
-                                                   "application/json") if result else "text/plain"
-                        def _to_xml(data, root="response"):
-                            import xml.sax.saxutils as _sx
-                            def _el(tag, val):
-                                tag = str(tag)
-                                if isinstance(val, dict):
-                                    return "<%s>%s</%s>" % (tag, "".join(_el(k, v) for k, v in val.items()), tag)
-                                if isinstance(val, (list, tuple)):
-                                    it = tag[:-1] if (tag.endswith("s") and len(tag) > 1) else "item"
-                                    return "<%s>%s</%s>" % (tag, "".join(_el(it, v) for v in val), tag)
-                                return "<%s>%s</%s>" % (tag, _sx.escape("" if val is None else str(val)), tag)
-                            return '<?xml version="1.0" encoding="UTF-8"?>' + _el(root, data)
-                        if "html" in content_type:
-                            return HTMLResponse(str(body_out), status_code=status)
-                        elif "xml" in content_type:
-                            return Response(_to_xml(body_out),
-                                            status_code=status,
-                                            media_type=content_type,
-                                            headers={"Cache-Control": "no-store"})
-                        elif "plain" in content_type:
-                            return PlainTextResponse(str(body_out),
-                                                     status_code=status,
-                                                     media_type=content_type)
-                        # JSON path: never emit None/empty (a client calling
-                        # response.json() throws on it) and coerce any
-                        # non-serializable value (datetime, MohioValue) via str().
-                        if body_out is None:
-                            body_out = ""
-                        import json as _json
-                        payload = body_out if isinstance(body_out, dict) else {"message": str(body_out)}
-                        return Response(
-                            content=_json.dumps(payload, ensure_ascii=False,
-                                                allow_nan=False, default=str),
-                            status_code=status,
-                            media_type="application/json",
-                            headers={"Cache-Control": "no-store"},
-                        )
-                    return handler
-
-                # Map exact URL
-                route = url_path if url_path != '/' else '/'
-                app.add_api_route(route, make_handler(url_path, program, interp),
-                                  methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-                # Also handle trailing slash variant
-                if route != '/' and not route.endswith('/'):
-                    app.add_api_route(route + '/', make_handler(url_path, program, interp),
-                                      methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-
-            print(f"\n  {green('v')}  {len(programs)} routes loaded")
-            print(f"  {bold('Listening on')}  http://{args.host}:{args.port}")
-            print(f"  {bold('Health')}        "
-                  f"http://{args.host}:{args.port}/mio/health")
-            print(f"\n  {dim('Press Ctrl+C to stop')}\n")
-
-            uvicorn.run(app, host=args.host, port=args.port,
-                        log_level="warning")
-        except ImportError as e:
-            _die(f"FastAPI/uvicorn required for serve: {e}")
+                               redirects=redirects, status_responses=status_responses,
+                               refused_routes=refused_routes)
+    except (ImportError, AttributeError) as e:
+        # NO SECOND, DEGRADED SERVER. This fell back to an inline FastAPI app that registered only
+        # exact URLs, dropped redirects and status responses, and answered every request through a
+        # `handle_request` the interpreter does not have, while printing "N routes loaded". An error
+        # building the real server is a fault to report, never a reason to serve something else.
+        _die(f"The directory server failed to start ({type(e).__name__}: {e}), so nothing is "
+             f"served. If a package is missing, install it (`pip install fastapi uvicorn`); "
+             f"otherwise this is a Mohio fault worth reporting with the line above.", exit_code=1)
     else:
         # create_multi_app built the app but nothing launched it -- the directory
         # branch fell through and the process exited, so `mio serve <dir>` never
@@ -2820,6 +4383,8 @@ def _cmd_serve_directory(args, directory, verbose=False):
         print(f"  {bold('Listening on')}  http://{args.host}:{args.port}")
         print(f"  {bold('Health')}        http://{args.host}:{args.port}/mio/health")
         print(f"\n  {dim('Press Ctrl+C to stop')}\n")
+        from mohio_server import install_log_timestamps
+        install_log_timestamps()     # every log line from here starts with its UTC time (unit D)
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
@@ -2848,22 +4413,42 @@ def cmd_serve(args):
     if path.is_dir():
         _cmd_serve_directory(args, path, verbose)
         return
+    if getattr(args, 'dev', False):
+        # One file either loads or does not, so --dev changes nothing here but its own refusals.
+        _no_dev = _dev_serve_refusal(args, path)
+        if _no_dev:
+            _die(f"`mio serve --dev` does not start: {_no_dev}", exit_code=1)
 
     source = _read_source(path)
 
     print(f"\n  {bold('mio serve')}  {dim(f'v{VERSION}')}")
     print(f"  {dim('Loading')} {bold(filename)}")
 
+    # `mio serve <file>` serves ONE page, on purpose (the one-file-per-page mode). But a developer
+    # who means their whole application and points at their entry file gets one page and no word --
+    # the same silent surprise that let an application lane's checks pass while the app did not work
+    # (Batch 36 carry B). The MODE is unchanged; this only adds the word. When there are OTHER
+    # routable pages beside this file, say how many were not loaded and name the directory form.
+    try:
+        _sib_dir = os.path.dirname(os.path.abspath(filename))
+        _siblings = [f for f in os.listdir(_sib_dir)
+                     if f.endswith('.mho') and not f.startswith('_')
+                     and f != 'journey.mho'
+                     and os.path.realpath(os.path.join(_sib_dir, f)) != os.path.realpath(os.path.abspath(filename))]
+        if _siblings:
+            print(f"  {yellow('Note')} serving ONE page. {len(_siblings)} other page(s) in this "
+                  f"folder are not loaded -- run {bold('mio serve .')} to serve the whole "
+                  f"application.")
+    except OSError:
+        pass
+
     # -- Parse: AST cache first ------------------------------------
     # If this is the first run or cache is stale, Earley parses the file.
     # This is slow on large files. We start uvicorn first so Railway
     # healthcheck passes, then serve requests once parsing completes.
-    _cached = _load_ast_cache(filename, source)
-    if _cached and _cached[0] is not None and _cached[1] is not None:
-        tree, ctx = _cached
-        print(f"  [parser] AST cache hit -- loaded instantly.")
-    else:
-        tree, ctx = _parse_and_validate(source, filename, verbose=False)
+    # `_parse_and_validate` reuses the cached PARSE (the tree) and always re-runs the verdict, so a
+    # served file is validated by the current compiler, never by a cached verdict.
+    tree, ctx = _parse_and_validate(source, filename, verbose=False)
 
     if ctx.errors:
         print(f"\n  {red('x')} Build failed -- fix errors before serving:\n")
@@ -2900,13 +4485,8 @@ def cmd_serve(args):
             from mohio_enforce import enforce_scans as _enforce_scans
             _enforce_scans(ctx, program)
         except Exception as _scan_err:
-            # A crashing scanner must not kill an otherwise-valid command, but it must not be
-            # silent: enforcement for this run is INCOMPLETE and the program proceeds anyway.
-            import sys as _sys
-            print(f"  [enforce] WARNING: a Layer 3 scanner failed "
-                  f"({type(_scan_err).__name__}: {_scan_err}). Enforcement is INCOMPLETE -- "
-                  f"some checks did not execute. Run `mio check` for the full result.",
-                  file=_sys.stderr)
+            # FAILS LOUD (ruled by Ron, 2026-10-03) -- see _scan_incomplete_warn.
+            _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
         if ctx.errors:
             print(f"\n  {red('x')} Build failed -- fix errors before serving:\n")
             for e in ctx.errors:
@@ -2922,7 +4502,7 @@ def cmd_serve(args):
         if args.ai:
             try:
                 from mohio_ai import AnthropicAiRuntime
-                ai = _construct_ai_runtime(args.api_key, verbose)
+                ai = _construct_ai_runtime(args.api_key, verbose, path=filename)
                 print(f"  {dim('AI runtime:')} Anthropic API ({ai._model})")
             except ImportError:
                 _die("Anthropic SDK not installed. Run: pip install anthropic")
@@ -2932,30 +4512,19 @@ def cmd_serve(args):
             ai = MockAiRuntime()
             print(f"  {dim('AI runtime:')} mock {dim('(use --ai for real Anthropic API)')}")
 
-        interp = MohioInterpreter(ai=ai, verbose=verbose,
-                                  db_path=_resolve_sqlite_db_path(filename, args))
+        interp = _cli_interpreter(ai, verbose, filename, args)
 
-        # Seed data
-        seed_data = None
-        if args.seed:
-            seed_path = Path(args.seed)
-            if not seed_path.exists():
-                _die(f"Seed file not found: {args.seed}", exit_code=3)
-            seed_data = json.loads(seed_path.read_text(encoding="utf-8"))
-            rows = sum(len(v) for v in seed_data.values() if isinstance(v, list))
-            print(f"  {dim('Seed data:')} {rows} rows across {list(seed_data.keys())}")
-
-        # Run declarations first to establish real db connection
+        # Run declarations first to establish the real db connection, THEN load authored data.
         interp.run_declarations(program)
-        if not interp._db:
-            # See the identical guard + rationale in cmd_run (T0-2): no `connect` declared
-            # means database-free, unconditionally -- DATABASE_URL must not change that.
-            if seed_data:
-                _die("--seed was given, but this program declares no `connect` -- there is "
-                     "no database to seed into. Add `connect db as sqlite` (or postgres / "
-                     "mysql / mongodb) to the program, or drop --seed.")
-        elif seed_data:
-            interp.seed_db(seed_data)
+        # AUTHORED-DATA SEED CONVENTION for a single-file app: `_seed.json` beside the file is picked up
+        # with no flag, the same convention `mio serve <dir>` uses; an explicit --seed overrides it,
+        # absent does nothing, malformed fails loud. The application root of a single file is its own
+        # directory. (See `_load_authored_seed` for the authored-vs-accumulated rationale.)
+        _load_authored_seed(Path(filename).resolve().parent, args, {filename: interp})
+
+        # Under a regulated sector, refuse to start on an expired/unrecorded webhook secret, and
+        # record each rotation to the audit chain once. Runs at startup only, never mid-request.
+        _webhook_startup_rotation_gate(program, interp)
 
     except Exception as e:
         _die(f"Interpreter setup failed: {e}")
@@ -2969,25 +4538,40 @@ def cmd_serve(args):
     # Static files are served from the APP's directory, never the compiler's.
     server = MohioServer(program, interp, verbose=verbose,
                          app_dir=Path(filename).resolve().parent)
+    # `map route as redirect` in a single served file: collect the redirects (and declared status
+    # responses) the same way directory mode does, and hand them to the server, so a moved URL
+    # actually redirects. Without this the single-file path registered no redirects and every one
+    # answered 404 while `mio check` reported clean.
+    from mohio_framework import resolve_map, resolve_map_responses, MapError
+    try:
+        _s_mounts, _s_redirects = resolve_map(program)
+        server.redirects = _s_redirects
+        server.status_responses = resolve_map_responses(program)
+        for _src, (_dst, _code) in sorted(_s_redirects.items()):
+            print(f"  {green('v')}  {_src} {dim(f'(map: -> {_dst}, {_code})')}")
+    except MapError as _map_e:
+        _die(f"map: {_map_e}")
     app    = create_app(server)
 
     # -- Start -------------------------------------------------
     print(f"\n  {green('v')}  Server ready")
     print(f"  {bold('Listening on')}  http://{host}:{port}")
-    print(f"  {bold('API docs')}      http://{host}:{port}/mio/docs")
+    # No `API docs` line: the banner advertised /mio/docs, a route the server has never had, so
+    # every start promised a page that answered 404 (found 2026-10-09). Only real routes are listed.
     print(f"  {bold('Health')}        http://{host}:{port}/mio/health")
     print(f"\n  {dim('Press Ctrl+C to stop')}\n")
 
     try:
         import uvicorn
-        # timeout_graceful_shutdown=0 ensures Railway health checks pass quickly
+        from mohio_server import install_log_timestamps
+        install_log_timestamps()     # every log line from here starts with its UTC time (unit D)
         uvicorn.run(app, host=host, port=port, log_level="warning")
     except ImportError:
         _die("uvicorn not installed. Run: pip install uvicorn")
     except KeyboardInterrupt:
         print(f"\n\n  {dim('Server stopped.')}\n")
 
-def _run_security_report(source, filename, ctx):
+def _run_security_report(source, filename, ctx, program=None):
     """
     Full security and compliance report for mio check --security.
     Covers: hardcoded credentials, sector floors, agent limits,
@@ -3150,7 +4734,9 @@ def _run_security_report(source, filename, ctx):
         schema_path = find_schema_file(filename)
         if schema_path:
             schema = read_schema(schema_path)
-            schema_errors = validate_field_references(source, schema, filename)
+            # The program check already built is passed in, so a manifest beside the file costs no
+            # second parse (it re-parsed the whole file, uncached, on every `check --security`).
+            schema_errors = validate_field_references(source, schema, filename, program=program)
             for code, msg, lineno in schema_errors:
                 ctx.error(f"{code}: {msg}", lineno, hint="Check your shape declaration and field names.")
             checks_run.append(("Schema field references",
@@ -3204,19 +4790,36 @@ def _run_security_report(source, filename, ctx):
     print()
 
 
-def _scan_incomplete_warn(scan_name, err):
-    """An advisory Layer-3 scan or compile-time guard crashed during `mio check`.
+def _scan_incomplete_warn(ctx, scan_name, err):
+    """A Layer-3 scan or compile-time guard crashed during `mio check`.
 
-    Design: a scanner hiccup must never break `mio check` (these passes stay
-    advisory) -- but it must never be SILENT either. A swallowed crash reports a
-    clean result for a program nobody finished checking, which is the exact
-    silent-wrongness the language is built to refuse. Warn on stderr, name the
-    scan that died, and let check continue so the rest of the report still runs.
+    FAILS LOUD (ruled by Ron, 2026-10-03; was previously "warn on stderr and keep going", which
+    reported a program CLEAN when a scanner died before finishing it -- the exact silent-wrongness
+    this language exists to refuse, generalized from a specific keyword to the enforcement
+    MACHINERY itself. The rest of `mio check`'s other scanners still run (this does not raise),
+    so the report is not cut short -- but the file now reports as failed, never clean, when any
+    scan or check module did not finish.
     """
-    print(f"  [enforce] WARNING: {scan_name} did not finish "
+    from mohio_transformer_ast import MohioCompileError as _ScanCrashErr
+    # A scanner reaching into mohio_sector_loader can raise a DELIBERATE, expected refusal --
+    # a sector profile declaring a rule nothing enforces (SectorUnenforceableRuleError), or a
+    # certified profile failing signature verification (SectorVerificationError) -- neither is
+    # "the compiler crashed"; both are the program's own content being refused on purpose. Report
+    # them as the plain refusal they are, not as a bug to file.
+    from mohio_sector_loader import SectorUnenforceableRuleError, SectorVerificationError
+    if isinstance(err, (SectorUnenforceableRuleError, SectorVerificationError)):
+        ctx.errors.append(_ScanCrashErr(str(err), 0))
+        return
+    ctx.errors.append(_ScanCrashErr(
+        f"{scan_name} crashed ({type(err).__name__}: {err}) and did not finish -- this is a "
+        f"compiler bug, not a mistake in your program. Enforcement cannot be trusted when a "
+        f"scan dies partway through, so this reports as failed rather than an unknown amount of "
+        f"checking passing as clean. Report this bug, naming {scan_name!r}.", 0))
+    print(f"  [enforce] {scan_name} did not finish "
           f"({type(err).__name__}: {err}). Enforcement for this check is "
           f"INCOMPLETE -- some rules did not execute. This is a compiler bug; "
           f"please report it.", file=sys.stderr)
+
 
 
 def _check_never_store(program):
@@ -3300,8 +4903,7 @@ def cmd_walk(args):
     program = _transform(tree, source)
 
     from mohio_interpreter import MohioInterpreter, MockAiRuntime
-    interp = MohioInterpreter(ai=MockAiRuntime(), verbose=False,
-                              db_path=_resolve_sqlite_db_path(str(path), args))
+    interp = _cli_interpreter(MockAiRuntime(), False, str(path), args)
     interp.run_declarations(program)
     interp.shown = []
 
@@ -3349,6 +4951,177 @@ def cmd_walk(args):
         sys.exit(1)
     print()
 
+_CHECK_NOTES = [
+    "Checking your code... this is thorough, not fast. Go grab a coffee. :-)",
+    "mio check is doing real work here. Earley parsers don't rush.",
+    "Analyzing {n} lines of Mohio... might be a good time to stretch.",
+    "Running full compliance and security analysis. Back in a moment.",
+    "The compiler is reading every word. Give it a second.",
+]
+
+# A journey's own check, run once per process and reused by every page that inherits it.
+_SHARED_FINDINGS = {}
+
+
+def _finding_key(f):
+    return (str(getattr(f, 'message', '') or f), getattr(f, 'line', 0) or 0)
+
+
+def _inherited_journey_files(page_path):
+    """The journey files a page inherits, root first -- the same cascade `_apply_journey` merges."""
+    page_path = os.path.abspath(page_path)
+    page_dir = os.path.dirname(page_path)
+    out = []
+    for d in _journey_chain_dirs(page_dir, _app_root_for_file(page_dir)):
+        jp = os.path.join(d, 'journey.mho')
+        if os.path.isfile(jp) and os.path.realpath(jp) != os.path.realpath(page_path):
+            # Shown relative to where the command runs, unless it is on another drive (Windows),
+            # where no relative path exists and the absolute one is the honest name.
+            if os.path.splitdrive(jp)[0].lower() == os.path.splitdrive(os.getcwd())[0].lower():
+                jp = os.path.relpath(jp)
+            out.append(jp)
+    return out
+
+
+def _shared_findings(journey_path, args):
+    """The findings of a journey checked on its own, once per process. Its output is swallowed: a
+    problem that stops the journey stops the page that merges it too, and is reported there."""
+    key = os.path.realpath(journey_path)
+    if key in _SHARED_FINDINGS:
+        return _SHARED_FINDINGS[key]
+    import io as _io
+    saved = (args.file, getattr(args, '_collect_into', None), getattr(args, 'json', False),
+             getattr(args, 'security', False), sys.stdout)
+    box = {}
+    args.file, args._collect_into, args.json, args.security = journey_path, box, False, False
+    sys.stdout = _io.StringIO()
+    try:
+        cmd_check(args)
+    except SystemExit:
+        # RECORDED IN silent_shape_baseline.txt AS A DELIBERATE ONE. A check always ends in an exit;
+        # the journey's findings are already in `box`, and a journey that stopped before collecting
+        # leaves `box` empty, which is recorded below as "no findings to attribute". The same stop
+        # reaches the page that merges the journey and is reported there, so nothing is lost here.
+        pass
+    finally:
+        args.file, args._collect_into, args.json, args.security, sys.stdout = saved
+    _SHARED_FINDINGS[key] = box.get(journey_path)
+    return _SHARED_FINDINGS[key]
+
+
+def _split_inherited_findings(filename, ctx, args):
+    """Split a page's findings into its OWN and those whose code is in a journey it inherits.
+
+    Returns (own_warnings, own_errors, inherited), where inherited is a list of
+    (journey_path, 'w' or 'e', finding). A finding belongs to the SHALLOWEST journey whose own check
+    produced the same message on the same line: a subfolder journey's check includes its parent's
+    findings, so root-first is what puts each one at the file that declares it."""
+    ws, es = list(ctx.warnings or []), list(ctx.errors or [])
+    if not (ws or es) or not filename:
+        return ws, es, []
+    owners = {}
+    for jp in _inherited_journey_files(filename):
+        info = _shared_findings(jp, args)
+        if not info:
+            continue
+        for kind, lst in (('w', info['warnings']), ('e', info['errors'])):
+            for f in lst:
+                owners.setdefault((kind,) + _finding_key(f), jp)
+    own_w, own_e, inherited = [], [], []
+    for kind, lst, own in (('w', ws, own_w), ('e', es, own_e)):
+        for f in lst:
+            jp = owners.get((kind,) + _finding_key(f))
+            if jp is None:
+                own.append(f)
+            else:
+                inherited.append((jp, kind, f))
+    return own_w, own_e, inherited
+
+
+def _check_many(files, args, rel):
+    """Check many files in one run and report each finding ONCE, at the file its code is in.
+
+    Shared by `mio check <folder>` and `mio check --all`. One note at the start, then one progress
+    line per file, so a long cold run shows where it is instead of a rotating note per file. Journeys
+    are checked first, so every page that inherits one reuses its result. Findings print after the
+    last file: each journey's own findings once, under the journey, then each page's own.
+
+    Returns (collected, failed, n_warn, n_err, n_shared)."""
+    import random
+    print(f"  [mio check] {random.choice([m for m in _CHECK_NOTES if '{n}' not in m])}")
+    def _depth(f):
+        return os.path.abspath(f).replace('\\', '/').count('/')
+    journeys = sorted((f for f in files if os.path.basename(f) == 'journey.mho'), key=lambda f: (_depth(f), f))
+    ordered = journeys + sorted(f for f in files if os.path.basename(f) != 'journey.mho')
+    collected, failed = {}, []
+    saved_all = getattr(args, 'all', False)
+    args.all = False
+    for i, f in enumerate(ordered, 1):
+        print(f"  [{i}/{len(ordered)}] {rel(f).replace(chr(92), '/')}", flush=True)
+        memo = _SHARED_FINDINGS.get(os.path.realpath(f))
+        if memo:
+            collected[f] = memo
+            continue
+        args.file = f
+        args._collect_into = collected
+        try:
+            cmd_check(args)
+        except SystemExit as e:
+            if e.code not in (0, None):
+                failed.append(f)
+        if f in collected and os.path.basename(f) == 'journey.mho':
+            _SHARED_FINDINGS[os.path.realpath(f)] = collected[f]
+    args._collect_into = None
+    args.all = saved_all
+
+    n_warn = n_err = n_shared = 0
+    # 1) Shared code: each journey's own findings, once, under the journey, with its own excerpts. A
+    #    journey above the checked folder that a page inherits is reported here too.
+    shared = list(journeys)
+    for info in collected.values():
+        for (jp, _k, _f) in info.get('inherited', ()):
+            if not any(os.path.realpath(jp) == os.path.realpath(s) for s in shared):
+                shared.append(jp)
+    for jf in shared:
+        info = collected.get(jf) or _SHARED_FINDINGS.get(os.path.realpath(jf))
+        if not info or not (info['own_warnings'] or info['own_errors']):
+            continue
+        print(f"\n  {bold(dim(rel(jf)))}  "
+              f"{dim('(shared: the code is here, and every page under it inherits it)')}\n")
+        for w in info['own_warnings']:
+            _print_compile_warning(w, info['source'], jf)
+        for e in info['own_errors']:
+            _print_compile_error(e, info['source'], jf)
+        n_warn += len(info['own_warnings'])
+        n_err += len(info['own_errors'])
+        n_shared += len(info['own_warnings']) + len(info['own_errors'])
+    # 2) Each page's own findings, with that page's excerpt.
+    for f in ordered:
+        info = collected.get(f)
+        if not info:
+            continue
+        if os.path.basename(f) != 'journey.mho' and (info['own_warnings'] or info['own_errors']):
+            print(f"\n  {bold(dim(rel(f)))}  {yellow('Warnings')}\n"
+                  if not info['own_errors'] else f"\n  {bold(dim(rel(f)))}\n")
+            for w in info['own_warnings']:
+                _print_compile_warning(w, info['source'], f)
+                n_warn += 1
+            for e in info['own_errors']:
+                _print_compile_error(e, info['source'], f)
+                n_err += 1
+        if info['errors']:
+            failed.append(f)
+    # A FILE THAT FAILED IS AT LEAST ONE ERROR (HC-121). A file that could not be read at all, a
+    # syntax error or a load failure, stops before any finding is collected, so it was listed as
+    # failed while the summary beside it said "0 errors" and the exit status said 1. It printed its
+    # own message already; here it is counted.
+    for f in set(failed):
+        info = collected.get(f)
+        if not info or not (info.get('own_errors') or info.get('errors')):
+            n_err += 1
+    return collected, sorted(set(failed)), n_warn, n_err, n_shared
+
+
 def cmd_check(args):
     """
     Parse and validate -- no execution.
@@ -3365,28 +5138,47 @@ def cmd_check(args):
     if getattr(args, 'all', False):
         import glob
         files = sorted(glob.glob('**/*.mho', recursive=True))
+        # Sector PROFILES now carry the `.mho` extension for a community profile (Batch 14), but they
+        # are profile DATA parsed by mohio_sector_loader, not app programs -- checking one as an app
+        # fails on its `field types` / `meta` blocks. A profile is a `sector-*.mho` file inside a
+        # `sectors/` directory; skip those, keep every real app.
+        def _is_sector_profile(path):
+            u = path.replace('\\', '/')
+            return '/sectors/' in ('/' + u) and os.path.basename(u).startswith('sector-')
+        files = [f for f in files if not _is_sector_profile(f)]
         if not files:
             print("  No .mho files found.")
             return
         fast = getattr(args, 'fast', False)
         mode = "--fast" if fast else "full"
         print(f"  [mio check] Checking {len(files)} .mho file(s) [{mode}]...")
-        failed = []
-        # `args.all` MUST be cleared before recursing. Leaving it set meant every recursive
-        # call re-entered this same branch, re-globbed all the files and looped again -- so
-        # `mio check --all` never checked anything: it recursed until the stack ran out and
-        # printed "Internal error ... maximum recursion depth exceeded". Found 2026-09-01 by
-        # running the flag CLAUDE.md documents ("--all checks every file"); it had never
-        # worked. A one-file check is what each iteration was always meant to be.
-        args.all = False
-        for f in files:
-            args.file = f
-            try:
-                cmd_check(args)
-            except SystemExit as e:
-                if e.code != 0:
-                    failed.append(f)
-        args.all = True
+        if fast:
+            failed = []
+            # `args.all` MUST be cleared before recursing. Leaving it set meant every recursive
+            # call re-entered this same branch, re-globbed all the files and looped again -- so
+            # `mio check --all` never checked anything: it recursed until the stack ran out and
+            # printed "Internal error ... maximum recursion depth exceeded". Found 2026-09-01 by
+            # running the flag CLAUDE.md documents ("--all checks every file"); it had never
+            # worked. A one-file check is what each iteration was always meant to be.
+            args.all = False
+            for f in files:
+                args.file = f
+                try:
+                    cmd_check(args)
+                except SystemExit as e:
+                    if e.code != 0:
+                        failed.append(f)
+            args.all = True
+        else:
+            # The same aggregation as a folder check (`_check_many` clears `args.all` while it
+            # recurses, for the reason above): one progress line per file, and a finding in a
+            # shared journey reported once, at the journey, not under every page.
+            _c, failed, n_w, n_e, n_sh = _check_many(files, args, lambda f: f)
+            print(f"\n  {bold('Summary')}  {dim(str(len(files)) + ' file(s) checked')} . "
+                  f"{yellow(str(n_w) + ' warning(s)')} . "
+                  f"{red(str(n_e) + ' error(s)') if n_e else dim('0 errors')}")
+            if n_sh:
+                print(f"  {dim(f'{n_sh} finding(s) in shared code are shown once, at the file the code is in.')}")
         if failed:
             print(f"  x {len(failed)} file(s) failed:")
             for f in failed:
@@ -3430,20 +5222,30 @@ def cmd_check(args):
             for f in _fnames:
                 if f.endswith('.mho') and f.startswith('_'):
                     private.append(_os.path.join(_root, f))
-        if not mho and not private:
+        # A FRAGMENT A RENDER INCLUDES IS PAGE TEXT, NOT MOHIO (RULED by Ron, 2026-10-06). A file
+        # reached only through `{{ include "_head.mho" }}` inside a render is emitted as markup,
+        # so literal text in it may hold any character: a middle dot in a title, Arabic, an emoji.
+        # Parsing it as Mohio stopped the whole folder check at the first such character, before
+        # the app was analysed at all. Character rules apply to Mohio keywords and identifiers; a
+        # file that is also `include`d as a statement is still Mohio and is still parsed.
+        _markup = _render_only_fragments(mho + private)
+        markup_fragments = [p for p in private if _os.path.abspath(p) in _markup]
+        private = [p for p in private if _os.path.abspath(p) not in _markup]
+        if not mho and not private and not markup_fragments:
             _die(f"No .mho files found in {filename}", exit_code=3)
         if not mho:
             _die(f"Only include targets (_name.mho) found in {filename}. "
                  f"Nothing here can be served.", exit_code=3)
         print(f"  [mio check] Checking {len(mho)} .mho file(s) in {bold(str(path))}...")
-        failed = []
-        for f in sorted(mho):
-            args.file = f
+        def _rel(fp):
             try:
-                cmd_check(args)
-            except SystemExit as e:
-                if e.code not in (0, None):
-                    failed.append(f)
+                return _os.path.relpath(fp, str(path))
+            except Exception:
+                return fp
+        # AGGREGATE (`_check_many`): a finding whose code is in a journey is reported ONCE, at the
+        # journey, with its real excerpt; each page shows only its OWN findings, with its own excerpt.
+        _c, failed, n_distinct_warn, n_distinct_err, _decl = _check_many(sorted(mho), args, _rel)
+
         private_failed = []
         for f in sorted(private):
             # Only a genuine parse failure counts. A bare `except Exception` here
@@ -3464,18 +5266,32 @@ def cmd_check(args):
                     private_failed.append(f)
                 else:
                     raise
+        # A summary, because 59 files with a handful of distinct findings should say so once, not
+        # leave the reader to count. `n_distinct_*` counts each finding once (a journey-declared one
+        # counted at the journey, not per page).
+        n_distinct_err += len(private_failed)   # an include target that will not parse is an error too
+        print(f"\n  {bold('Summary')}  {dim(str(len(mho)) + ' file(s) checked')} . "
+              f"{yellow(str(n_distinct_warn) + ' warning(s)')} . "
+              f"{red(str(n_distinct_err) + ' error(s)') if n_distinct_err else dim('0 errors')}")
+        if _decl:
+            print(f"  {dim(f'{_decl} finding(s) declared in a journey and inherited by every page '
+                          f'are shown once, at the journey.')}")
         if failed or private_failed:
             _n = len(failed) + len(private_failed)
             print(f"  {red('x')} {_n} file(s) failed:")
             for f in failed:
-                print(f"    {f}")
+                print(f"    {_rel(f)}")
             for f in private_failed:
-                print(f"    {f}  (include target -- syntax)")
+                print(f"    {_rel(f)}  (include target -- syntax)")
             sys.exit(1)
-        print(f"  {green('v')} All {len(mho)} files passed.")
+        print(f"  {green('v')} All {len(mho)} files passed"
+              + (f" ({n_distinct_warn} warning(s) to review)" if n_distinct_warn else "") + ".")
         if private:
             print(f"  {dim(f'  plus {len(private)} include target(s) parsed. They are '
                           f'checked in full through the files that include them.')}")
+        if markup_fragments:
+            print(f"  {dim(f'  plus {len(markup_fragments)} fragment(s) a render includes, read as '
+                          f'page text rather than Mohio.')}")
         return
 
     source = _read_source(path)
@@ -3483,18 +5299,13 @@ def cmd_check(args):
 
     # Fun message for large files -- mio check is thorough, not fast
     import random
-    check_messages = [
-        "Checking your code... this is thorough, not fast. Go grab a coffee. :-)",
-        "mio check is doing real work here. Earley parsers don't rush.",
-        "Analyzing {n} lines of Mohio... might be a good time to stretch.",
-        "Running full compliance and security analysis. Back in a moment.",
-        "The compiler is reading every word. Give it a second.",
-    ]
-    msg = random.choice(check_messages)
+    msg = random.choice(_CHECK_NOTES)
+    _in_collect = isinstance(getattr(args, "_collect_into", None), dict)
     if '{n}' in msg:
         n_lines = len(source.splitlines())
         msg = msg.replace('{n}', str(n_lines))
-    print(f"  [mio check] {msg}")
+    if not _in_collect:
+        print(f"  [mio check] {msg}")
 
     # Load .mioconfig if present -- args override config
     security_mode = getattr(args, 'security', False)
@@ -3527,14 +5338,11 @@ def cmd_check(args):
         print(f"    Run without --fast for full parse and compliance check.")
         return
 
-    # Check AST cache first -- if file unchanged, skip the full parse
-    # First check is slow. Every subsequent check on unchanged file is instant.
-    _cached = _load_ast_cache(filename, source)
-    if _cached and _cached[0] is not None and _cached[1] is not None:
-        tree, ctx = _cached
-        print(f"  [mio check] Cache hit -- loaded instantly.")
-    else:
-        tree, ctx = _parse_and_validate(source, filename, verbose=False)
+    # `_parse_and_validate` reuses the cached PARSE (the tree, keyed on the parse-affecting files)
+    # and re-runs the verdict every time, so a scanner change is picked up on a warm check while the
+    # 87s parse is still skipped. The whole point of splitting the cache: the parse survives, the
+    # verdict never does.
+    tree, ctx = _parse_and_validate(source, filename, verbose=False)
 
     # Unreachable-code check -- needs the AST (clean statement lists), so it runs
     # here rather than in the Lark-tree validator. Appended after parse/validate so
@@ -3567,8 +5375,21 @@ def cmd_check(args):
             ctx.errors = []
         _msg = getattr(_e, 'message', None) or str(_e).strip()
         _ln = getattr(_e, 'line', 0) or getattr(_e, 'close_line', 0) or 0
-        _err = MohioCompileError(_msg, _ln)
+        _err = MohioCompileError(_msg, _ln, getattr(_e, 'code', '') or '')
         _err.hint = ""
+        ctx.errors.append(_err)
+        _program = None
+    except FileNotFoundError as _e:
+        # A missing include/journey file is a mistake in the PROGRAM, not a compiler bug --
+        # it used to fall into the generic backstop below, which frames every failure as
+        # "report this bug", with no line number (_resolve_includes raises a plain
+        # FileNotFoundError, not a MohioError). Reported here as a real check error instead,
+        # at the include statement's own line (threaded through via `.mohio_line`, set where
+        # _resolve_includes raises, in mio.py).
+        if getattr(ctx, 'errors', None) is None:
+            ctx.errors = []
+        _err = MohioCompileError(str(_e), getattr(_e, 'mohio_line', 0) or 0, '')
+        _err.hint = "Check the path and spelling; it is resolved relative to the including file, then the current directory."
         ctx.errors.append(_err)
         _program = None
     except Exception as _e:
@@ -3581,7 +5402,7 @@ def cmd_check(args):
         # upload-size lint, handler-closer lint) with `mio check`'s summary still reporting
         # clean. Still never breaks `mio check` itself (advisory, unchanged) -- just no
         # longer invisible.
-        _scan_incomplete_warn("Layer 2 AST construction", _e)
+        _scan_incomplete_warn(ctx, "Layer 2 AST construction", _e)
         _program = None
     if _program is not None:
         try:
@@ -3593,7 +5414,7 @@ def cmd_check(args):
             _enforce_scans(ctx, _program)
 
         except Exception as _scan_err:
-            _scan_incomplete_warn("Layer 3 whole-program scanners", _scan_err)
+            _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
 
         # PCI/PII compile-time guard: a save must never persist a `never store`
         # field (e.g. a card CVV). Surface as errors before the program runs.
@@ -3604,7 +5425,7 @@ def cmd_check(args):
                 _e.hint = _hint
                 ctx.errors.append(_e)
         except Exception as _scan_err:
-            _scan_incomplete_warn("never-store (PCI/PII) guard", _scan_err)
+            _scan_incomplete_warn(ctx, "never-store (PCI/PII) guard", _scan_err)
 
         # Lint: file-upload fields must declare both accepted types and a max
         # size (no defaults). Missing either is an error; an unusually large
@@ -3663,7 +5484,32 @@ def cmd_check(args):
                             _walk_uploads(it)
             _walk_uploads(_program)
         except Exception as _scan_err:
-            _scan_incomplete_warn("upload-size lint", _scan_err)
+            _scan_incomplete_warn(ctx, "upload-size lint", _scan_err)
+
+        # MioScript compile-time validation (T1-MIOSCRIPT-CHECK-RUN-PARITY): `compile_listeners`
+        # already refuses an unrecognized client value (a typo'd `put <name> into ...`), a
+        # `stop <name>` naming no declared `every`, and two `every` blocks sharing one name --
+        # but until now it only ran the first time a program was actually run or served, never
+        # at `mio check`. A program with one of these mistakes checked clean and only failed on
+        # its first real request, which is exactly the "check and run must agree" gap this
+        # project names and refuses to ship twice. Any FUTURE refusal added to
+        # `compile_listeners` (e.g. an unknown `share ... on <destination>`) gets this same
+        # check-time coverage for free, since this call site runs every listener through it.
+        # The walk lives in mohio_mioscript beside the compiler it feeds, so `mio check` reads it
+        # without loading the interpreter.
+        try:
+            from mohio_mioscript import compile_listeners as _compile_listeners
+            from mohio_mioscript import collect_client_listeners as _collect_client_listeners
+            from mohio_transformer_ast import MohioCompileError as _MsErr
+            _listeners = _collect_client_listeners(_program)
+            if _listeners:
+                _compile_listeners(_listeners)
+        except ValueError as _ms_err:
+            _e = _MsErr(str(_ms_err), 0)
+            _e.hint = ""
+            ctx.errors.append(_e)
+        except Exception as _scan_err:
+            _scan_incomplete_warn(ctx, "MioScript compile-time validation", _scan_err)
 
     # Lint: handler clauses (on.success / on.failure / on.error) are NOT block
     # verbs -- 'on' is not a verb, so they take no closer. A stray 'on.x: done'
@@ -3683,7 +5529,7 @@ def cmd_check(args):
                           "the housing block's own closer (e.g. 'find: done')."),
                     code="HANDLER_CLOSER"))
     except Exception as _scan_err:
-        _scan_incomplete_warn("handler-closer lint", _scan_err)
+        _scan_incomplete_warn(ctx, "handler-closer lint", _scan_err)
 
     # Security report
     if security_mode:
@@ -3692,11 +5538,19 @@ def cmd_check(args):
             _saved = sys.stdout
             sys.stdout = _io.StringIO()
             try:
-                _run_security_report(source, filename, ctx)
+                _run_security_report(source, filename, ctx, program=_program)
             finally:
                 sys.stdout = _saved
         else:
-            _run_security_report(source, filename, ctx)
+            _run_security_report(source, filename, ctx, program=_program)
+
+    # A FINDING NAMES THE FILE ITS CODE IS IN. A page is checked with its journeys merged in, so a
+    # finding on a journey's line arrives here carrying the journey's line number and was printed
+    # against THIS file, with this file's unrelated excerpt (the banking app showed "Line 344" under
+    # all 95 pages, and 344 is a line of the root journey). Each finding the page inherited is
+    # matched, by message and line, against the journey's own check (run once per process) and
+    # reported at the journey instead.
+    own_w, own_e, inherited = _split_inherited_findings(filename, ctx, args)
 
     # JSON output mode -- for AI coding agents
     if json_mode:
@@ -3719,7 +5573,7 @@ def cmd_check(args):
             lm = _re.search(r'[Ll]ine ([0-9]+)', text)
             cm = _re.search(r'([A-Z][A-Z_]{2,}):', text)
             msg = _re.sub('Line [0-9]+ . ', '', text).strip()
-            code = cm.group(1) if cm else "ERROR"
+            code = getattr(e, 'code', '') or (cm.group(1) if cm else "ERROR")
             from mohio_transformer import HINT_TABLE
             return {
                 "code":    code,
@@ -3727,23 +5581,47 @@ def cmd_check(args):
                 "message": msg,
                 "hint":    HINT_TABLE.get(code, ""),
             }
+        # Each finding names the file its code is in: this file, or the journey it came from.
+        _from = {id(f): jp for (jp, _kind, f) in inherited}
         for e in (ctx.errors or []):
-            output["errors"].append(_err_to_dict(e))
+            output["errors"].append(dict(_err_to_dict(e), file=_finding_file(e) or _from.get(id(e), filename)))
         for w in (ctx.warnings or []):
-            output["warnings"].append(_err_to_dict(w))
+            output["warnings"].append(dict(_err_to_dict(w), file=_finding_file(w) or _from.get(id(w), filename)))
         print(_json.dumps(output, indent=2))
         sys.exit(0 if output["passed"] else 1)
 
+    # FOLDER AND --all COLLECT: hand this file's findings back to the aggregator instead of printing
+    # them per file. The aggregator reports a finding in shared code ONCE, at the file it is in,
+    # rather than once per page that inherits it -- otherwise 95 pages re-print every inherited
+    # finding with an unrelated excerpt, and a real per-page finding drowns in the repetition.
+    _collect = getattr(args, '_collect_into', None)
+    if isinstance(_collect, dict):
+        _collect[filename] = {
+            'source': source, 'n_lines': n_lines,
+            'warnings': list(ctx.warnings or []),
+            'errors': list(ctx.errors or []),
+            'own_warnings': own_w, 'own_errors': own_e, 'inherited': inherited,
+        }
+        return
+
+    # Findings in a journey this page inherits: printed under that journey, with its own excerpt.
+    for jp in dict.fromkeys(jp for (jp, _k, _f) in inherited):
+        j_src = _SHARED_FINDINGS[os.path.realpath(jp)]['source']
+        print(f"\n  {bold(dim(jp))}  {dim('(a journey this page inherits; the code is here)')}\n")
+        for (jp2, kind, f) in inherited:
+            if jp2 == jp:
+                (_print_compile_warning if kind == 'w' else _print_compile_error)(f, j_src, jp)
+
     # Print warnings
-    if ctx.warnings:
+    if own_w:
         print(f"\n  {bold(dim(filename))}  {yellow('Warnings')}\n")
-        for w in ctx.warnings:
+        for w in own_w:
             _print_compile_warning(w, source, filename)
 
     # Print errors
-    if ctx.errors:
+    if own_e:
         print(f"\n  {bold(filename)}  {red('Errors')}\n")
-        for e in ctx.errors:
+        for e in own_e:
             _print_compile_error(e, source, filename)
 
     # Summary line
@@ -3843,6 +5721,7 @@ exit 0
 """
 
     pre_push_path = hooks_dir / "pre-push"
+    # EGRESS-EXEMPT: git hook and config files the developer asked for; no program value
     pre_push_path.write_text(pre_push_content, encoding="utf-8")
     pre_push_path.chmod(pre_push_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     print(f"\n  {green('v')}  Installed: {bold('.git/hooks/pre-push')}")
@@ -3888,6 +5767,7 @@ echo ""
 exit 0
 """
         pre_commit_path = hooks_dir / "pre-commit"
+        # EGRESS-EXEMPT: git hook and config files the developer asked for; no program value
         pre_commit_path.write_text(pre_commit_content, encoding="utf-8")
         pre_commit_path.chmod(pre_commit_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
         print(f"  {green('v')}  Installed: {bold('.git/hooks/pre-commit')}")
@@ -3909,9 +5789,47 @@ exit 0
     }
     config_path = Path(".mioconfig")
     import json as _json
+    # EGRESS-EXEMPT: git hook and config files the developer asked for; no program value
     config_path.write_text(_json.dumps(mio_config, indent=2), encoding="utf-8")
     print(f"  {green('v')}  Config written: {bold('.mioconfig')}")
     print(f"  {dim('Edit to customize check behavior')}\n")
+
+
+def _schema_pages(path):
+    """The files `mio schema` reads: the one file named, or every page of an app folder, found the
+    way `mio check` finds them (a `_name.mho` include target is not a page; it reaches the schema
+    through the pages that include it, as the journey does)."""
+    import os as _os
+    if not path.is_dir():
+        return [path]
+    pages = []
+    for _root, _dnames, _fnames in _os.walk(str(path)):
+        _dnames[:] = sorted(d for d in _dnames if not d.startswith('.'))
+        for f in sorted(_fnames):
+            if f.endswith('.mho') and not f.startswith('_'):
+                pages.append(Path(_root) / f)
+    if not pages:
+        _die(f"No .mho pages found in {path}. A folder for mio schema is an app folder: "
+             f"its pages, with their includes and journey.mho.", exit_code=3)
+    return pages
+
+
+def _schema_program(page):
+    """(source, program) for one page, built EXACTLY as `mio check` builds it: the cached parse,
+    the same gates, then the page's includes and its journey merged in. One path, so the schema
+    reads the program check and run read, and a warm parse cache makes it seconds, not minutes."""
+    from mohio_enforce import enforce as _enforce
+    source = _read_source(page)
+    tree, ctx = _parse_and_validate(source, str(page), verbose=False)
+    _l12_ctx, program = _enforce(tree, source=source, filename=str(page), scan=False)
+    if program is None:
+        _errs = list(ctx.errors or []) + list(_l12_ctx.errors or [])
+        _first = str(_errs[0]) if _errs else "its declarations could not be read"
+        _die(f"Could not read the shapes in {page}: {_first}. Run: mio check {page}",
+             exit_code=1)
+    program = _resolve_includes(program, str(page), verbose=False)
+    program = _apply_journey(program, str(page), verbose=False)
+    return source, program
 
 
 def cmd_schema(args):
@@ -3930,48 +5848,47 @@ def cmd_schema(args):
     if not path.exists():
         _die(f"File not found: {filename}", exit_code=3)
 
-    # FIX-B9-5 (T1-SILENT-SWEEP-BATCH9): this used to call `_cmd_serve_directory(args, path,
-    # verbose)` -- `verbose` was never defined anywhere in this function (no local assignment,
-    # `schema`'s own subparser has no --verbose flag), a guaranteed NameError -- and even a
-    # defined `verbose` wouldn't have helped, because `_cmd_serve_directory` is the HTTP
-    # SERVER's directory-mode route scanner, copy-pasted in from cmd_serve/cmd_check without
-    # adapting the call target. Directory-mode schema generation is a genuine, non-trivial
-    # design decision (one manifest per file? one merged manifest for the whole app? how are
-    # outputs named?) that hasn't been made, not a typo to patch -- fail loud as not-yet-built
-    # instead of routing into an unrelated command. Single-file `mio schema <action> file.mho`
-    # is unaffected; it never reaches this branch.
-    if path.is_dir():
-        _die(f"mio schema {action} does not support a directory yet ({filename}) -- "
-             f"run it against one .mho file at a time. Left silent it would have crashed "
-             f"with an internal NameError, or routed into the http server's directory "
-             f"scanner and started serving instead of generating a schema. Tracked for a "
-             f"future release.")
+    # AN APP FOLDER IS THE WHOLE APP (RULED by Ron, 2026-10-05, Part B 18b), the same way `mio
+    # check` and `mio serve` take one: every page, each with its includes and its journey merged in,
+    # so the schema describes and checks the app rather than one file of it. Its one manifest is
+    # `<folder>/.mhoschema`, the name `find_schema_file` already looks for beside every page, so a
+    # later `mio check --security` on any page of the app finds it. A single file is unchanged:
+    # `<file>.mhoschema` beside it.
+    is_app = path.is_dir()
+    pages = _schema_pages(path)
 
-    source = _read_source(path)
-
-    from mohio_schema import (generate_schema, write_schema, read_schema,
+    from mohio_schema import (generate_schema, write_schema, read_schema, merge_schemas,
                                find_schema_file, validate_field_references)
 
     if action == 'generate':
         print(f"\n  {bold('mio schema generate')}  {dim(filename)}\n")
-        schema = generate_schema(source, filename)
-        # T1-SILENT-SWEEP-BATCH7 (2026-08-15): generate_schema() already carries a real
-        # parse/transform/extraction failure in the returned dict's 'error' key (its own
-        # design, a deliberate graceful-degrade shape) -- but this call site never checked
-        # it, so a genuine failure (e.g. normalize_type's new fail-loud on an unrecognized
-        # field type) silently produced an empty schema, "Schema generated" with 0 tables,
-        # and a written .mhoschema file, exit 0. Surfaced here instead of writing a broken
-        # manifest and claiming success.
-        if schema.get('error'):
-            _die(f"Could not generate a schema for {filename}: {schema['error']}",
-                 exit_code=1)
+        per_page = []
+        for page in pages:
+            source, program = _schema_program(page)
+            schema = generate_schema(source, str(page), program=program)
+            # T1-SILENT-SWEEP-BATCH7 (2026-08-15): generate_schema() carries a real extraction
+            # failure (an unrecognized field type, say) in the returned dict's 'error' key. It is
+            # surfaced here instead of writing a broken manifest and claiming success.
+            if schema.get('error'):
+                _die(f"Could not generate a schema for {page}: {schema['error']}", exit_code=1)
+            per_page.append((str(page), schema))
+        if is_app:
+            try:
+                schema = merge_schemas(per_page, filename)
+            except ValueError as e:
+                _die(f"Could not generate a schema for {filename}: {e}", exit_code=1)
+            schema_path = path / '.mhoschema'
+        else:
+            schema = per_page[0][1]
+            schema_path = path.with_suffix('.mhoschema')
         n_tables = len(schema.get('tables', {}))
         n_fields = sum(len(t['fields']) for t in schema.get('tables', {}).values())
 
-        schema_path = path.with_suffix('.mhoschema')
         write_schema(schema, schema_path)
 
         print(f"  {green('v')}  Schema generated: {bold(str(schema_path))}")
+        if is_app:
+            print(f"  {dim(f'{len(pages)} page(s) read, each with its includes and journey')}")
         print(f"  {dim(f'{n_tables} table(s), {n_fields} field(s) total')}\n")
 
         for tname, tdata in schema.get('tables', {}).items():
@@ -3984,26 +5901,70 @@ def cmd_schema(args):
 
     elif action == 'check':
         print(f"\n  {bold('mio schema check')}  {dim(filename)}\n")
-        schema_path = find_schema_file(filename)
+        if is_app:
+            schema_path = path / '.mhoschema'
+            schema_path = schema_path if schema_path.exists() else None
+        else:
+            schema_path = find_schema_file(filename)
         if not schema_path:
             print(f"  {yellow('!')}  No .mhoschema found. Run: mio schema generate {filename}")
             sys.exit(1)
 
         schema = read_schema(schema_path)
-        errors = validate_field_references(source, schema, filename)
+        unchecked = {}
+        errors = []
+        for page in pages:
+            source, program = _schema_program(page)
+            for code, msg, lineno in validate_field_references(
+                    source, schema, str(page), unchecked=unchecked, program=program):
+                errors.append((page, code, msg, lineno))
+
+        # RULED by Ron, 2026-10-03 (Order item 8): names what it checked and what it does not
+        # cover, every run, pass or fail -- a check that stays silent about its own
+        # scope reads as covering everything, which is exactly how a narrow tool earns
+        # unwarranted trust. SCHEMA_CHECK_COVERAGE is the one place this list lives.
+        from mohio_schema import SCHEMA_CHECK_COVERAGE
 
         if errors:
-            for code, msg, lineno in errors:
-                print(f"  {red('x')}  line {lineno}: {red(code)}")
+            for page, code, msg, lineno in errors:
+                _where = f"{page.name} line {lineno}" if is_app else f"line {lineno}"
+                print(f"  {red('x')}  {_where}: {red(code)}")
                 print(f"     {msg}\n")
             print(f"  {red('x')}  {len(errors)} schema error(s) found\n")
-            sys.exit(1)
         else:
             print(f"  {green('v')}  All field references valid")
+            if is_app:
+                print(f"  {dim(f'{len(pages)} page(s) checked, each with its includes and journey')}")
             print(f"  {dim(f'Schema: {schema_path}')}\n")
 
+        # NAMED, every run: what could not be checked, and why. A shape with no declared table
+        # is skipped (a table name is never guessed from a shape name); a table the program uses
+        # with no backing shape has no schema to check against.
+        _no_table = (schema or {}).get('loose') or []
+        if _no_table:
+            print(f"  {dim('Shapes with no declared table (skipped; add `<name> as table` to check one):')}")
+            for _sn in _no_table:
+                print(f"    {dim('-')} {dim(_sn)}")
+        if unchecked:
+            print(f"  {dim('Tables used with no backing shape (not checked, not an error):')}")
+            for _tn, _ln in sorted(unchecked.items(), key=lambda kv: kv[1]):
+                print(f"    {dim('-')} {dim(f'db.{_tn} (first used at line {_ln})')}")
+        print(f"  {dim('Checked:')}")
+        for item in SCHEMA_CHECK_COVERAGE['checked']:
+            print(f"    {dim('-')} {dim(item)}")
+        print(f"  {dim('Not covered (not an error if your program uses one of these):')}")
+        for item in SCHEMA_CHECK_COVERAGE['not_covered']:
+            print(f"    {dim('-')} {dim(item)}")
+        print()
+
+        if errors:
+            sys.exit(1)
+
     elif action == 'show':
-        schema_path = find_schema_file(filename)
+        if is_app:
+            schema_path = (path / '.mhoschema') if (path / '.mhoschema').exists() else None
+        else:
+            schema_path = find_schema_file(filename)
         if not schema_path:
             print(f"No .mhoschema found for {filename}")
             sys.exit(1)
@@ -4104,6 +6065,7 @@ def cmd_harvest(args):
         print(out)
         return
     path = Path(getattr(args, "output", None) or "mohio_words.json")
+    # EGRESS-EXEMPT: a generated example file; no runtime value
     path.write_text(out + "\n", encoding="utf-8")
     from collections import Counter
     cats    = Counter(e["category"] for e in entries)
@@ -4145,6 +6107,18 @@ def cmd_writes(args):
     from mohio_write_intent import lower_program, classify_program, program_activates_sector
     program = ast_transform(tree, source)
 
+    # Resolve includes and apply the journey cascade FIRST, with the SAME two resolvers `mio run`
+    # uses (single-file run semantics: the file's own-directory-and-up journey, no wider cascade).
+    # Without this the command reported only the writes written literally in THIS file, reading as a
+    # whole-program answer while an included file's writes and a journey task's writes were invisible
+    # -- and a journey can hold write-capable tasks. A missing include fails loud here, the same as
+    # it would at run, rather than silently planning an incomplete program.
+    try:
+        program = _resolve_includes(program, filename, verbose=False)
+        program = _apply_journey(program, filename, verbose=False)
+    except FileNotFoundError as e:
+        _die(str(e), exit_code=1)
+
     classifier = classify_program(program)
     intents = lower_program(program, classifier)
 
@@ -4178,6 +6152,12 @@ def cmd_writes(args):
               + (f" bound to `{w.result_bound_to}`" if w.result_bound_to else ""))
         print(f"            ordering {w.ordering}   failure {w.failure}   "
               f"transaction {w.transaction}")
+        # A conditional write may never run. Say so, because a flat list reads a `check`-guarded
+        # write as identical to one that always runs -- exactly the distinction a compliance
+        # reviewer would most want to trust.
+        if w.conditional:
+            print(f"            {red('CONDITIONAL')}  "
+                  f"{dim('runs only when its check / unless / on.failure branch is taken')}")
         _c = w.compliance
         _mark = red("REGULATED") if _c.regulated == "yes" else dim("regulated: unknown")
         print(f"            {_mark}   {dim(_c.why[:78])}")
@@ -4185,6 +6165,251 @@ def cmd_writes(args):
     print(f"  {dim('Every dependency question reads unknown: no def-use analysis exists yet,')}")
     print(f"  {dim('and unknown forbids, which is the conservative rule the roadmap specifies.')}")
     print()
+
+
+def _sector_licence_position(name, paid, entitled):
+    """The licence line for one sector: free sectors need no entitlement; a certified sector reads
+    against MOHIO_ENFORCE_LICENSE and MOHIO_OWNER / MOHIO_LICENSE."""
+    if not paid:
+        return "free sector, no entitlement required"
+    if not os.environ.get("MOHIO_ENFORCE_LICENSE"):
+        return ("certified sector; licence enforcement is off "
+                "(MOHIO_ENFORCE_LICENSE not set), so it is allowed here")
+    if entitled:
+        return "certified sector; entitled via MOHIO_OWNER or MOHIO_LICENSE"
+    return ("certified sector; licence enforcement is ON and no entitlement was found "
+            "-- set MOHIO_OWNER or MOHIO_LICENSE")
+
+
+def _sector_facts(name):
+    """The full, read-only position of ONE named sector, as a plain dict. Text and JSON both render
+    from this same dict, so the two forms cannot report different facts (Ron's condition). Every
+    branch fills the same keys: case, resolved_path, tier, version, signature, licence, status,
+    explanation."""
+    import mohio_sector_loader as _SL
+    from mohio_sector_sign import SectorVerificationError as _SVE
+    path = _SL.find_sector_profile(name)
+    paid = _SL.sector_requires_license(name)
+    entitled = _SL.sector_entitled(name)
+    f = {"name": name, "resolved_path": path, "paid_base": paid,
+         "tier": None, "version": None, "signature": "n/a",
+         "licence": _sector_licence_position(name, paid, entitled),
+         "status": "not_in_force", "explanation": ""}
+    if path is None:
+        if paid:
+            # A known certified sector whose signed profile is simply not on this machine. This is NOT
+            # the absent-sector mistake: the name is real, the profile ships separately.
+            f["case"] = "known_certified_no_local_profile"
+            f["explanation"] = (
+                f"`{name}` is a known certified sector, but no local profile is present on this "
+                f"search path. It resolves only once its signed .sector is placed on the search path "
+                f"or in MOHIO_CERTIFIED_SECTORS_DIR.")
+        else:
+            # The item-2 refusal message, reused verbatim so `mio sector` and `mio check` cannot diverge.
+            f["case"] = "absent"
+            f["explanation"] = _SL.sector_not_found_message(name)
+        return f
+    ext = os.path.splitext(path)[1]
+    if ext == ".sector":
+        try:
+            prof = _SL.load_sector_profile(name)
+            f["case"] = "certified_verified"
+            f["tier"] = "certified"
+            f["version"] = (prof.version or None) if prof else None
+            f["signature"] = "verified against a trusted key"
+            f["status"] = "would_apply"
+        except _SVE as e:
+            # A .sector always wins over a same-named .mho, so a failing signature is a hard stop, not
+            # a downgrade. Report it refused, with the fail-closed reason.
+            f["case"] = "certified_refused"
+            f["tier"] = "certified"
+            f["signature"] = "REFUSED"
+            f["explanation"] = str(e)
+    else:
+        prof = _SL.load_sector_profile(name)
+        f["case"] = "community"
+        f["tier"] = "community"
+        f["version"] = (prof.version or None) if prof else None
+        f["signature"] = "n/a (community profiles are unsigned)"
+        f["status"] = "would_apply"
+    return f
+
+
+def _journey_spines_in_tree(filepath):
+    """Any journey.mho sitting in this file's folder or an ancestor (up to a few levels). Cheap
+    existence check only -- `mio sector` does NOT resolve the cascade, so a spine here is reported
+    as a heads-up, never applied. (`mio writes` DOES resolve includes and apply the journey, via
+    _resolve_includes / _apply_journey; this heads-up is specific to the sector reader.)"""
+    found = []
+    d = os.path.dirname(os.path.abspath(filepath))
+    self_abs = os.path.abspath(filepath)
+    for _ in range(6):
+        jp = os.path.join(d, "journey.mho")
+        if os.path.isfile(jp) and os.path.abspath(jp) != self_abs:
+            found.append(os.path.relpath(jp))
+        nd = os.path.dirname(d)
+        if nd == d:
+            break
+        d = nd
+    return found
+
+
+def _sector_inventory():
+    """The deployment-wide, read-only picture: profiles present, known certified sectors with no
+    local profile, the search path, and the deployment trust settings. A plain dict, so text and
+    JSON render from the same facts."""
+    import mohio_sector_loader as _SL
+    from mohio_sector_sign import trusted_public_keys as _tpk
+    names = _SL.available_sector_names()
+    profiles = [_sector_facts(n) for n in names]
+    present_bases = {n.split(".")[0].lower() for n in names}
+    known_no_profile = sorted(
+        b for b in _SL.PAID_SECTORS
+        if b not in present_bases and _SL.find_sector_profile(b) is None)
+    trusted = len(_tpk())
+    return {
+        "profiles": profiles,
+        "known_certified_no_local_profile": known_no_profile,
+        "search_paths": _SL._default_search_paths(),
+        "certified_sectors_dir": os.environ.get("MOHIO_CERTIFIED_SECTORS_DIR", "") or None,
+        "trusted_signing_keys": trusted,
+        "require_certified": os.environ.get(_SL.REQUIRE_CERTIFIED_ENV, "") or None,
+        "enforce_licence": bool(os.environ.get("MOHIO_ENFORCE_LICENSE")),
+        # A deployment that means to run certified profiles and trusts no keys refuses every one of
+        # them. That is correct fail-closed behaviour and almost always a misconfiguration, so it is
+        # a warning, not a quiet line.
+        "trust_warning": (trusted == 0),
+    }
+
+
+_SECTOR_CASE_LABEL = {
+    "community": ("COMMUNITY", green),
+    "certified_verified": ("CERTIFIED", green),
+    "certified_refused": ("CERTIFIED but REFUSED", red),
+    "known_certified_no_local_profile": ("KNOWN CERTIFIED, no local profile", yellow),
+    "absent": ("NOT FOUND", red),
+}
+
+
+def cmd_sector(args):
+    """mio sector [FILE.mho] [--json] -- report what sector rules are in force, read-only.
+
+    Runs nothing and changes nothing. With no file it reports the deployment: which profiles are on
+    the search path, which known certified sectors have no local profile here, and what this
+    deployment trusts (signing keys, required-certified, licence enforcement). With a file it reports
+    each sector the program NAMES and where each one stands: community or certified, its version, its
+    signature result, its licence position, and -- for a name that does not resolve -- the same
+    explanation `mio check` gives.
+
+    It reports what WOULD APPLY from the file's own `sector:` line. It does not resolve a journey
+    spine in a parent folder, which can tighten the sector under the cascade; where one exists it says
+    so rather than pretending to have applied it.
+    """
+    import json as _json
+    want_json = getattr(args, "json", False)
+    filename = getattr(args, "file", None)
+    if filename and os.path.isfile(str(filename)):
+        # The program's own `sectors/` folder is on the search path for its report too.
+        import mohio_sector_loader as _SLf
+        _SLf.set_program_folder(os.path.dirname(os.path.abspath(str(filename))))
+
+    if not filename:
+        inv = _sector_inventory()
+        if want_json:
+            print(_json.dumps(inv, indent=2))
+            return
+        print()
+        print(f"  {bold('Sector profiles on the search path')}")
+        if inv["profiles"]:
+            for p in inv["profiles"]:
+                label, colour = _SECTOR_CASE_LABEL.get(p["case"], (p["case"], dim))
+                ver = p["version"] if p["version"] else "-"
+                loc = os.path.relpath(p["resolved_path"]) if p["resolved_path"] else "-"
+                print(f"    {p['name']:<18} {colour(label.split()[0].lower()):<20} "
+                      f"v{ver:<6} {dim(loc)}")
+            print(f"    {dim('(' + str(len(inv['profiles'])) + ' found)')}")
+        else:
+            print(f"    {dim('none found')}")
+        print()
+        if inv["known_certified_no_local_profile"]:
+            print(f"  {bold('Known certified sectors with no local profile here')}")
+            print(f"    {', '.join(inv['known_certified_no_local_profile'])}")
+            print(f"    {dim('name one and it resolves only if its signed .sector is on the search path')}")
+            print()
+        print(f"  {bold('Search path')} {dim('(first match wins)')}")
+        print(f"    {dim('  •  '.join(inv['search_paths']))}")
+        print(f"    MOHIO_CERTIFIED_SECTORS_DIR: {inv['certified_sectors_dir'] or dim('(not set)')}")
+        print()
+        print(f"  {bold('Deployment trust settings')}")
+        keyline = f"Trusted signing keys (MOHIO_SECTOR_TRUSTED_KEYS): {inv['trusted_signing_keys']} loaded"
+        if inv["trust_warning"]:
+            print(f"    {yellow(bold('WARNING'))}  {yellow(keyline + ' -- every .sector fails closed')}")
+            print(f"             {dim('add a public key path to trust a certified profile, or this deployment can run none')}")
+        else:
+            print(f"    {keyline}")
+        print(f"    Require certified (MOHIO_REQUIRE_CERTIFIED_SECTORS): "
+              f"{inv['require_certified'] or dim('(not set)')}")
+        print(f"    Enforce licence (MOHIO_ENFORCE_LICENSE): "
+              f"{'on' if inv['enforce_licence'] else dim('off')}")
+        print()
+        return
+
+    # File form -- report each sector the program names.
+    path = Path(filename)
+    if not path.exists():
+        _die(f"File not found: {filename}", exit_code=3)
+    source = _read_source(path)
+    # Parse and AST-transform WITHOUT the validate layer, so a file that names an absent sector is
+    # EXPLAINED here rather than dying on the item-2 refusal -- explaining that is this command's job.
+    try:
+        from mohio_transformer_ast import transform as _ast_transform
+        from mohio_ast import SectorDecl as _SectorDecl
+        parser = _make_parser_cached(_load_grammar())
+        program = _ast_transform(parser.parse(source), source)
+    except Exception as e:
+        from lark.exceptions import UnexpectedInput
+        if isinstance(e, UnexpectedInput):
+            _print_parse_error(e, source, filename)
+            sys.exit(1)
+        _die(f"Parse failed: {e}", exit_code=1)
+
+    names = [n.sector for n in (getattr(program, "statements", None) or [])
+             if isinstance(n, _SectorDecl)]
+    facts = [_sector_facts(n) for n in names]
+    spines = _journey_spines_in_tree(filename)
+
+    if want_json:
+        print(_json.dumps({"file": str(filename), "sectors": facts,
+                           "journey_spines_not_resolved": spines}, indent=2))
+        return
+
+    print()
+    if not names:
+        print(f"  {dim(str(filename) + ' names no sector. No compliance profile would apply.')}\n")
+        return
+    print(f"  {bold(str(filename))} names: {', '.join(names)}")
+    print()
+    for f in facts:
+        label, colour = _SECTOR_CASE_LABEL.get(f["case"], (f["case"], dim))
+        print(f"  {bold(f['name'])}")
+        print(f"    Resolved:   {os.path.relpath(f['resolved_path']) if f['resolved_path'] else dim('no profile file found')}")
+        print(f"    Tier:       {colour(label)}")
+        print(f"    Version:    {f['version'] or dim('-')}")
+        print(f"    Signature:  {f['signature']}")
+        print(f"    Licence:    {f['licence']}")
+        status = {"would_apply": green("WOULD APPLY"),
+                  "not_in_force": red("NOT IN FORCE")}.get(f["status"], f["status"])
+        print(f"    Status:     {status}")
+        if f["explanation"]:
+            print(f"    {dim(f['explanation'])}")
+        print()
+    if spines:
+        print(f"  {yellow('note')}  a journey spine ({', '.join(spines)}) sits in this folder tree.")
+        print(f"        {dim('It may tighten the sector under the cascade; this command does not resolve that.')}")
+        print()
+
+
+AUDIT_ENVELOPE_LABEL = "mohio_audit_envelope + ack"
 
 
 def cmd_audit(args):
@@ -4225,35 +6450,155 @@ def cmd_audit(args):
     # url and answered `unable to open database file`, which reads as a missing file and is
     # really a refusal to look at the database that was named. A url carries its own driver, so
     # it is read either way now, and a plain path still means sqlite exactly as before.
+    shown_target = _display_target(target)   # every message names the store without its password
     driver = _sniff_driver(target) if '://' in str(target) else (
         'sqlite' if explicit_file else _sniff_driver(target))
     try:
         sink = _make_db_runtime(driver, target,
                                 url=target if '://' in str(target) else None)
     except Exception as e:
-        _die(f"Could not open the audit store at {target}: {e}", exit_code=3)
+        _die(f"Could not open the audit store at {shown_target}: {e}", exit_code=3)
 
     it = MohioInterpreter()
+
+    if action == "relay" and getattr(args, "program", None):
+        # THE RELAY DELIVERS ONLY TO LOGS THE PROGRAM DECLARES (the relay-identifier blocker): given
+        # the program, its own `ai.audit to NAME` logs and `<name>_limits_log` join the runtime's
+        # fixed names. It is read, never run.
+        _pp = args.program
+        if not os.path.isfile(_pp):
+            _die(f"--program {_pp}: no such file. Give the .mho program whose audit logs the relay "
+                 f"may deliver to.", exit_code=2)
+        from mohio_transformer_ast import transform as _t
+        _src = open(_pp, encoding="utf-8-sig").read()
+        _tree, _ctx = _parse_and_validate(_src, _pp, False)
+        _prog = _t(_tree, _src)
+        _apply_journey(_prog, _pp)
+        it._index_log_names(_prog)
+        it.app_id = _app_identity(_pp)
+    elif action == "relay":
+        it.app_id = _app_identity(None)        # MOHIO_APP_ID, or None: only unattributed envelopes
 
     if action == "relay":
         # BEFORE THE LOG CHECK, DELIBERATELY. A process killed between committing a regulated
         # write and delivering its record may have left no audit log at all -- if it was the
         # first write, the log was never created. Refusing to relay because there is no log is
         # refusing exactly when the relay is most needed.
+        # The relay is a drain, so it takes the same claim the automatic first-use drain does, to
+        # the same end: two drains must not deliver one owed record twice. Oracle is the only engine
+        # that claims per drain (and so must release here); the session-lock engines hold their claim
+        # for the connection's life, so claiming in this short-lived CLI process would make the relay
+        # refuse whenever an app is running -- hence the Oracle-only guard. If another process holds
+        # it, the owed records are being delivered right now, so there is nothing for this run to do.
+        _oracle = type(sink).__name__ == 'OracleRuntime'
+        if _oracle and not it._claim_relay(sink):
+            print(f"\n  {dim('Another process is draining the trail right now; nothing to do.')}\n")
+            return
         try:
             delivered, already = it.audit_relay_drain(sink)
         except Exception as e:
             _die(f"Could not deliver the owed audit records: {e}", exit_code=3)
+        finally:
+            if _oracle:
+                it._release_relay(sink)
+        _other = getattr(it, '_relay_other_app', 0)
+        _owed = getattr(it, '_relay_still_owed', 0)
         if delivered or already:
             print(f"\n  delivered {delivered} record(s) that were owed; "
                   f"{already} were already in the trail.\n")
-        else:
-            print(f"\n  {dim('Nothing owed: every regulated write in ' + str(target) + ' has its record.')}\n")
+        elif not _other and not _owed:
+            # ONLY WHEN NOTHING IS LEFT OWED (relay honesty, RULED 2026-10-17): this line used to print
+            # after a delivery that failed, while the envelope stayed owed.
+            print(f"\n  {dim('Nothing owed: every regulated write in ' + str(shown_target) + ' has its record.')}\n")
+        if _other and getattr(it, 'app_id', None) is None:
+            # NO IDENTITY, SO NOTHING HERE IS THIS RELAY'S TO DELIVER, and exiting 0 would tell a
+            # scheduled relay job the trail is caught up while every app's records stay owed. The
+            # relay delivers only its own app's records (the relay-identifier blocker), so it has
+            # to be told which app it is.
+            _die(f"{_other} owed audit record(s) in {shown_target} belong to an app, and this relay was "
+                 f"not told which app it is, so it delivered none of them.\n"
+                 f"  Run it as the app that wrote them: `mio audit relay {shown_target} --program app.mho` "
+                 f"(the app's own program, or any page in it), or set MOHIO_APP_ID to that app's id.",
+                 exit_code=1)
+        if _other:
+            # Said, not drained: another app's records are its own relay's to deliver.
+            print(f"  {_other} owed record(s) belong to another app and were left for it. Run the "
+                  f"relay with that app's program (`--program app.mho`) or its MOHIO_APP_ID.\n")
+        if _owed:
+            # LAST, after the other-app note above, so both are said. STILL OWED IS A FAILURE, said and
+            # exited as one, so a scheduled relay never reads it as a caught-up trail. The records stay
+            # owed and unacknowledged; the next relay retries them.
+            _why = '; '.join(dict.fromkeys(getattr(it, '_relay_owed_reasons', []) or ['unknown']))
+            _die(f"{_owed} owed, delivery failed: {_why}\n"
+                 f"  {_owed} audit record(s) in {shown_target} are still owed: their evidence is kept and "
+                 f"nothing is lost, but the trail is behind until they land.\n"
+                 f"  Fix the cause above (the audit store is reachable and this role may write to it), "
+                 f"then run `mio audit relay {shown_target}` again.",
+                 exit_code=1)
         return
 
     logs = it.audit_logs(sink)
-    if not logs:
-        print(f"\n  {dim('No audit logs found in ' + str(target) + '.')}\n")
+    # verify-anchors goes on with no logs at all: a published anchor for a log that is gone is the
+    # wholesale deletion anchoring exists to catch, never "nothing to do".
+    # THE ENVELOPE AND ACK RELATIONS VOUCH FOR THE TRAIL (audit append-only, step 4): an
+    # acknowledgement names the record that delivered its envelope, so a record removed from the end
+    # of a log, or a whole log removed, is visible here even when every remaining chain is intact.
+    _env = it.verify_audit_envelopes(sink) if action == "verify" else None
+    if not logs and action != "verify-anchors":
+        if _env and _env['problems']:
+            # No log is left, and acknowledgements say records were delivered into one: the trail
+            # was removed. This used to print "No audit logs found" and exit 0.
+            print(f"\n  {red('x')}  No audit logs found in {shown_target}, and "
+                  f"{AUDIT_ENVELOPE_LABEL} says records were delivered:")
+            for _p in _env['problems']:
+                print(f"     {_p}")
+            print()
+            sys.exit(1)
+        print(f"\n  {dim('No audit logs found in ' + str(shown_target) + '.')}\n")
+        return
+
+    if action == "read":
+        # THE AUTHORIZED READ (OR-3, RULED by Ron 2026-10-12). Who acted is sealed in the trail under
+        # a key per subject; this opens it with the database's encryption key, and once a person has
+        # been erased their records read "erased". Records written before identities were sealed are
+        # counted and shown as they are: historical records are never rewritten.
+        import json as _json
+        it._db = sink
+        plain = 0
+        for log in logs:
+            rows = sink.find_many(log) or []
+            print(f"\n  {bold(log)}  {dim(str(len(rows)) + ' record(s)')}")
+            for r in rows:
+                r = {str(k).lower(): v for k, v in dict(r).items()}
+                raw_detail = r.get('detail')
+                d = {}
+                if raw_detail:
+                    try:
+                        d = _json.loads(raw_detail)
+                    except (TypeError, ValueError):
+                        # Said, not skipped: a record whose detail does not parse is shown as such.
+                        print(f"    (record {r.get('audit_id')}: its detail is not readable JSON)")
+                shown = []
+                for field in ('person', 'for_person', 'member_id'):
+                    v = d.get(field) if d.get(field) not in (None, '') else r.get(field)
+                    if v in (None, '') or (field == 'member_id' and r.get('session_id') == 'system'):
+                        continue
+                    try:
+                        text, state = it.open_identity(v, sink)
+                    except Exception as e:
+                        _die(f"Could not open an identity in {log}: {e}", exit_code=3)
+                    if state == 'plain':
+                        plain += 1
+                        text = text + "  (plain: written before identities were sealed)"
+                    shown.append(f"{field}={text}")
+                event = r.get('event') if r.get('event') else d.get('event', '(no event)')
+                subject = d.get('table') if d.get('table') else d.get('action', '')
+                print(f"    {event:<14} {subject:<24} {' '.join(shown)}")
+        if plain:
+            print(f"\n  {plain} identity field(s) in this trail were written before identities were "
+                  f"sealed and are readable as they stand. They are not rewritten (historical records "
+                  f"never are).")
+        print()
         return
 
     if action == "verify-anchors":
@@ -4270,12 +6615,26 @@ def cmd_audit(args):
         if not isinstance(anchor_map, dict):
             _die("Anchors file must be a JSON object mapping log name to a list of "
                  "{head, length} anchors.", exit_code=3)
+        # EVERY LOG'S ANCHORS ARE A LIST (HC-134). Only the top level was checked, so a log mapped to
+        # a bare head, a number or anything else reached the verifier and stopped it on an internal
+        # AttributeError or TypeError. A malformed file is refused whole, naming the log.
+        for _log, _val in anchor_map.items():
+            if not isinstance(_val, list):
+                _kind = ("text" if isinstance(_val, str) else "a number"
+                         if isinstance(_val, (int, float)) and not isinstance(_val, bool)
+                         else "null" if _val is None else type(_val).__name__)
+                _die(f"Anchors for `{_log}` in {anchors_path} must be a list of {{head, length}} "
+                     f"anchors, and this one is {_kind}. Write it as:\n"
+                     f'    "{_log}": [{{"head": "<64 hex characters>", "length": <records>}}]',
+                     exit_code=3)
         print()
         failed = False
         checked_any = False
+        uncovered = []
         for log in logs:
             entries = anchor_map.get(log)
             if not entries:
+                uncovered.append(log)
                 continue
             checked_any = True
             r = it.verify_audit_chain_against_anchors(sink, log, entries)
@@ -4286,15 +6645,35 @@ def cmd_audit(args):
                 failed = True
                 print(f"  {red('x')}  {log}  {r['reason']}")
                 for f in r['failures']:
-                    print(f"     {red(f['kind'])} at length {f['length']}: {f['detail']}")
-        if not checked_any:
-            print(f"  {dim('No anchors in ' + anchors_path + ' matched any log in ' + str(target) + '.')}")
+                    _at = f" at length {f['length']}" if f.get('length') is not None else ""
+                    print(f"     {red(f['kind'])}{_at}: {f['detail']}")
+        # AN ANCHORED LOG THAT IS GONE IS A FAILURE (HC-135). Its anchors were published, so the log
+        # existed; a database with no log by that name lost all of it.
+        missing = sorted(l for l, v in anchor_map.items() if v and l not in logs)
+        for log in missing:
+            failed = True
+            print(f"  {red('x')}  {log}  MISSING: {anchors_path} holds anchors for this log and "
+                  f"{shown_target} has no log by that name. Either the whole log was removed, or these "
+                  f"anchors were published for another database; find out which before trusting it.")
+        # A log no anchor covers was not verified, and is said so by name.
+        for log in uncovered:
+            print(f"  {yellow('!')}  {log}  NOT VERIFIED: {anchors_path} holds no anchor for it.")
         print()
         print(f"  {dim('This compares heads and trusts the anchors as authentic. Verify each')}")
         print(f"  {dim('anchor signature upstream; this check does not verify signatures.')}")
         print()
         if failed:
             sys.exit(1)
+        # NOTHING CHECKED IS NOT A PASS (HC-135). An empty file, an empty list or anchors for logs
+        # this database does not hold matched nothing; exit 0 there told release automation the
+        # trail was verified when not one record was compared. Exit 2 is "no coverage".
+        if not checked_any:
+            _have = ", ".join(logs) if logs else "none"
+            _die(f"Nothing was verified: no anchor in {anchors_path} names a log in {shown_target} "
+                 f"(its logs: {_have}).\n"
+                 f"  Point --anchors at the file published for this database, or publish anchors "
+                 f"from its current heads with `mio audit head {shown_target}`. Exit status 2 means no "
+                 f"coverage.", exit_code=2)
         return
 
     print()
@@ -4308,26 +6687,43 @@ def cmd_audit(args):
         elif info['intact']:
             print(f"  {green('v')}  {log}  {info['entries']} entries . chain intact")
             print(f"     {dim('head ' + info['head'])}")
+            # The known duplicate-delivery signature (RULED 2026-10-12): the same record delivered
+            # twice before the fix, identical content, each copy linked. Named, never rewritten.
+            for _dup in info.get('duplicates') or []:
+                print(f"     {yellow('!')} known duplicate delivery: audit_id {_dup} appears twice with "
+                      f"identical content (delivered twice before the fix; the chain is intact)")
         else:
             failed = True
             print(f"  {red('x')}  {log}  chain BROKEN")
             print(f"     {info['reason']}")
             if info['broken_at']:
                 print(f"     {dim('at audit_id ' + str(info['broken_at']))}")
+    if _env and _env['present']:
+        if _env['problems']:
+            failed = True
+            print(f"  {red('x')}  {AUDIT_ENVELOPE_LABEL}  INCONSISTENT with the trail")
+            for _p in _env['problems']:
+                print(f"     {_p}")
+        else:
+            print(f"  {green('v')}  {AUDIT_ENVELOPE_LABEL}  {_env['envelopes']} envelope(s) . "
+                  f"{_env['acked']} delivered . {_env['owed']} owed . consistent with the trail")
     if action != "head":
         print()
         print(f"  {dim('An intact chain still cannot prove nothing was removed from the END of')}")
-        print(f"  {dim('the log. Comparing the head above against a previously published anchor')}")
-        print(f"  {dim('is what detects that.')}")
+        print(f"  {dim('the log. A removed DELIVERED record is caught by the envelope check above;')}")
+        print(f"  {dim('for the rest, compare the head against a previously published anchor.')}")
     print()
     if failed:
         sys.exit(1)
 
 
 def cmd_version(args):
+    # THE PRODUCT VERSION AND THE BUILD (unit 5h, RULED 2026-10-12). This printed a separate
+    # language line, `v3.8 -- Phase 1`, beside the 6.0.0 release, so the one command a reader asks
+    # "what is this" answered with two versions; and it never said which commit it was. The build
+    # stamp is the same one /ping and /mio/health report (mohio_version.BUILD_SHA).
     print(f"\n  {bold('mio')}  Mohio Language CLI")
-    print(f"  CLI version:      {VERSION}")
-    print(f"  Language:         {LANGUAGE_VERSION}")
+    print(f"  Mohio:            {VERSION} (build {BUILD_SHA})")
     print(f"  Grammar:          {GRAMMAR_FILE}")
     print()
 
@@ -4354,22 +6750,32 @@ def cmd_version(args):
 # so this starter carries its own Procfile and its own README, both pointing at THIS
 # project's index.mho, and neither one mentioning --ai.
 
-_STARTER_JOURNEY = 'lock site_name "{}"\n'
+_STARTER_JOURNEY = (
+    "framework: {framework}\n"
+    "\n"
+    'lock site_name "{name}"\n'
+    "\n"
+    "// journey.mho is this app's spine: every page in this folder inherits what it declares,\n"
+    "// so shared things -- the framework, a database connection, shapes, page mappings -- belong\n"
+    "// here, declared once and reached everywhere (best practice, not required). `framework:\n"
+    "// {framework}` names how this app is served; the default, `web`, serves HTML pages by\n"
+    "// convention. More in the manual. Delete this comment when you start.\n"
+)
 
+# BARE render, nothing else. `render` builds HTML and, with no routing around it, serves itself
+# at / by convention -- so a single render block is a whole running page, with no database, no
+# shape and no listen-for. The old starter opened with `connect db as sqlite` a heading page
+# never touched, which created a real SQLite file and printed a disk-ephemerality warning for a
+# static page, and taught -- before a word of comment -- that a page needs a database to exist.
 _STARTER_INDEX = (
-    "connect db as sqlite from env.DATABASE_URL\n"
-    "\n"
-    "shape Home\n"
-    "shape: done\n"
-    "\n"
-    "listen for\n"
-    "    request for sh.Home at /\n"
-    "        render\n"
-    "            <h1>{{site_name}}</h1>\n"
-    "            <p>Your new project is running.</p>\n"
-    "        render: done\n"
-    "    request: done\n"
-    "listen: done\n"
+    "// This is the home page. `render` writes HTML, and on its own it serves at / with no\n"
+    "// routing code -- that is why one render block is a running page. {{site_name}} comes from\n"
+    "// journey.mho. Edit the HTML below; more patterns are in the cookbook. Delete this comment\n"
+    "// when you start.\n"
+    "render\n"
+    "    <h1>{{site_name}}</h1>\n"
+    "    <p>Your new project is running.</p>\n"
+    "render: done\n"
 )
 
 # The same file Mohio Home writes beside a project's repository. .mohio/ is Mohio's own
@@ -4458,19 +6864,24 @@ def _starter_folder_for(display_name):
     return slug
 
 
-def _write_starter(project_dir, display_name, description=""):
+def _write_starter(project_dir, display_name, description="", framework="web"):
     """Writes the starter into an existing, empty-enough directory. Returns the list of
-    files written, in the order written, so the caller can show the pioneer what it did."""
+    files written, in the order written, so the caller can show the pioneer what it did.
+
+    `framework` is written into journey.mho explicitly, even for the `web` default, because the
+    scaffold's own spine should show a pioneer the declaration rather than leave it implicit."""
     written = []
 
     def put(name, content):
+        # EGRESS-EXEMPT: a scaffold file `mio new` writes; no runtime value
         (project_dir / name).write_text(content, encoding="utf-8")
         written.append(name)
 
     # A display name with a double quote in it would close the string on the `lock` line and
     # hand the pioneer a parse error in a file they never typed. Mohio Home settles this the
     # same way: the quote becomes an apostrophe rather than an escape nobody asked for.
-    put("journey.mho", _STARTER_JOURNEY.format(display_name.replace('"', "'")))
+    put("journey.mho", _STARTER_JOURNEY.format(
+        framework=framework, name=display_name.replace('"', "'")))
     put("index.mho", _STARTER_INDEX)
     put("_project.json", json.dumps(
         {"display_name": display_name, "description": description, "hidden": False},
@@ -4510,6 +6921,22 @@ def _report_starter(project_dir, display_name, written, cd_hint):
     print()
 
 
+def _new_repurpose_notice():
+    """Printed after every `mio new <name>`. `mio new` still makes a project today, but the word
+    is being repurposed: `new` is already a Mohio keyword (`new sh.Member at /signup` makes a new
+    instance of a shape), and `mio new` at the CLI collides with that one-word-one-job rule. The
+    notice says the split out loud, and names the release after which `mio new <name>` stops
+    making a project, because a silent repurpose is what makes ignoring it risky."""
+    print()
+    print(f"  {yellow('Heads up:')} `mio new` is being repurposed.")
+    print( "  Your project was created above -- `mio new` still makes one today. But `mio create`")
+    print( "  is the verb for making a project now. `mio new` is moving to making things INSIDE a")
+    print( "  project (a page, a shape). Inside Mohio, `new` is reserved for a condition on")
+    print( "  arriving data (handlers are `listen for sh.X`). Those are not built yet.")
+    print(f"  {dim('From v5.3, `mio new <name>` will stop creating a project -- use `mio create <name>`.')}")
+    print()
+
+
 def cmd_new(args):
     """Create a folder and put the starter in it."""
     display_name = args.name
@@ -4532,6 +6959,7 @@ def cmd_new(args):
 
     written = _write_starter(project_dir, display_name, args.description or "")
     _report_starter(project_dir, display_name, written, folder)
+    _new_repurpose_notice()
 
 
 def cmd_init(args):
@@ -4548,40 +6976,244 @@ def cmd_init(args):
     _report_starter(project_dir, display_name, written, None)
 
 
+def cmd_create(args):
+    """The generative verb: create a project, optionally naming its framework.
+
+        mio create <name>              framework defaults to web
+        mio create <framework> <name>  explicit framework
+
+    A word beyond the framework and the name is the SCAFFOLD -- the page structure a framework
+    is filled with -- which is a real, designed layer (T1-SCAFFOLD-DECLARATION) that is not
+    built yet. It is refused by name rather than accepted-and-ignored, so a half-built argument
+    is never shipped and never has to be built twice."""
+    import mohio_framework as _fw
+    positionals = list(getattr(args, "args", None) or [])
+
+    if not positionals:
+        _die("mio create needs a project name. Try `mio create my-site`, or "
+             f"`mio create <framework> my-site` to name a framework "
+             f"({', '.join('`' + v + '`' for v in sorted(_fw.BUILT))}).", exit_code=3)
+
+    if len(positionals) == 1:
+        framework, display_name = _fw.DEFAULT, positionals[0]
+    elif len(positionals) == 2:
+        framework, display_name = positionals[0], positionals[1]
+        if not _fw.is_known(framework):
+            _die(_fw.unknown_value_message(framework), exit_code=3)
+        if _fw.canonical_base(framework) in _fw.DECLARED_NOT_BUILT:
+            _die(_fw.not_built_message(framework), exit_code=3)
+    else:
+        _die(f"`mio create` takes a framework and a name, not a third word "
+             f"({positionals[2]!r}). A scaffold -- the page structure a framework is filled "
+             f"with -- is a real layer that is not built yet (it has no grammar and no CLI "
+             f"argument), so it is refused rather than quietly ignored. Today: "
+             f"`mio create {positionals[0]} {positionals[1]}`.", exit_code=3)
+
+    framework = _fw.canonical_base(framework)
+    # A built framework whose STARTER is not built yet refuses here, distinct from a
+    # declared-but-unbuilt framework above: the framework serves, but the only project a starter can
+    # write is the `web` page, and writing that for `api` or `game` is the wrong shape.
+    if framework not in _fw.STARTER_BUILT:
+        _die(_fw.starter_not_built_message(framework), exit_code=3)
+    folder = args.folder if args.folder else _starter_folder_for(display_name)
+    project_dir = Path(folder).resolve()
+
+    if project_dir.exists():
+        occupied = _starter_occupied(project_dir) if project_dir.is_dir() else ["(a file)"]
+        if not project_dir.is_dir():
+            _die(f"{project_dir} is a file, not a folder. Pick another name.", exit_code=3)
+        if occupied:
+            _die(f"{project_dir} already has {', '.join(occupied)} in it. "
+                 f"A starter never overwrites a file that is already there. "
+                 f"Pick another name, or run `mio init` in an empty folder.", exit_code=3)
+    else:
+        try:
+            project_dir.mkdir(parents=True)
+        except OSError as e:
+            _die(f"Could not create {project_dir}: {e}", exit_code=3)
+
+    written = _write_starter(project_dir, display_name, args.description or "",
+                             framework=framework)
+    _report_starter(project_dir, display_name, written, folder)
+
+
+# ── mio help: a GENERATED command list inside HAND-WRITTEN groups ────────────────────────────────
+#
+# The command LIST is generated from the parser (`_subparsers_action`), so a registered command can
+# never be omitted -- there is no second list to fall out of step with (that omission is what hid
+# `mio test` from two lanes, who wrote their suites in Python). The GROUPS and the WORDING stay
+# hand-written, because a flat alphabetical dump reads worse than a list grouped by what a person is
+# trying to do. A command placed in no group appears under "other" rather than vanishing, so wording
+# stays human and completeness stays automatic. `tests/test_cli_help_complete.py` gates both halves:
+# every registered command is grouped (or "other") AND carries a description worth reading.
+#
+# Each description says three things, because a complete list of terse strings satisfies a gate and
+# fails the reader: WHAT it does in a newcomer's sentence, WHETHER it changes anything (writes / reads),
+# and a WORKING EXAMPLE where the shape is not obvious from the name.
+_COMMAND_GROUPS = [
+    ("Start a project",        ["create", "new", "init"]),
+    ("Run it",                 ["run", "serve"]),
+    ("Check it before you ship", ["check", "test", "fmt", "walk", "writes", "sector", "ai-check"]),
+    ("The audit trail",        ["audit"]),
+    ("Scheduled work",         ["schedule"]),
+    ("Language tooling",       ["generate", "translate", "schema", "harvest"]),
+    ("Housekeeping",           ["warmup", "install-hooks", "version", "help"]),
+]
+
+# changes: True if the command can change something (files, a database, the audit store, git, a cache);
+# False if it only reads and prints. `what`: a newcomer sentence. `example`: shown when the shape is not
+# obvious from the name (None otherwise).
+_COMMAND_HELP = {
+    "create":  (True,  "Create a new project folder, optionally naming the framework (web, api, game). Writes new files.",
+                "mio create my-site   (or: mio create api my-service)"),
+    "new":     (True,  "Create a new project folder with a starter page. Writes new files.",
+                "mio new my-site"),
+    "init":    (True,  "Put that same starter into the folder you are already in. Writes new files.",
+                "mio init"),
+    "run":     (True,  "Run a program once and print what it produces. It changes data only if the program itself writes.",
+                "mio run index.mho"),
+    "serve":   (True,  "Start an HTTP server. Give it ONE FILE to serve that file, or a DIRECTORY to serve a whole "
+                       "project (each file answers at its own URL). Your source is read-only; the app may write to its database.",
+                "mio serve .        serves the project in this folder\n"
+                "mio serve index.mho    serves just that one page"),
+    "check":   (False, "Read a whole program and report every error and warning, without running it. Read-only, about a second.",
+                "mio check index.mho     (or: mio check --all for the whole tree)"),
+    "test":    (False, "Run the file's `it` cases and fail if any case fails, or if the file has none. Read-only (a scratch database).",
+                "mio test orders.mho"),
+    "fmt":     (True,  "Rewrite a file toward canonical Mohio. Prints the result by default; changes the file only with --write.",
+                "mio fmt index.mho --write"),
+    "walk":    (False, "Trace a program's data maps stage by stage, to see where a value comes from. Read-only.",
+                "mio walk pipeline.mho"),
+    "writes":  (False, "Show what each write in a program means, normalized, without running it. Read-only.",
+                "mio writes orders.mho"),
+    "sector":  (False, "Report which sector (compliance) rules are in force: for one file, or across the whole deployment. Read-only.",
+                "mio sector index.mho     (or bare `mio sector` for the deployment inventory)"),
+    "ai-check": (False, "Ask a real AI provider to review a program for problems. Read-only to your files, but it makes a billed API call.",
+                "mio ai-check index.mho"),
+    "audit":   (True,  "Inspect and complete the audit trail. `relay` CHANGES the audit store -- it writes the records a crash "
+                       "left owed. `verify`, `head` and `verify-anchors` only read.",
+                "mio audit verify app.db      reads and checks the chain\n"
+                "mio audit relay app.db       WRITES owed records to the store"),
+    "migrate": (True, "Convert the text columns of tables created before typed storage into the types their shapes "
+                      "declare. CHANGES the database; --dry-run only reads and lists every value that will not convert.",
+                "mio migrate typed-storage app.mho --dry-run"),
+    "schedule": (True, "Fire the scheduled tasks that are due (`run-due`), or `list` them, or `watch` and fire on a timer. "
+                       "run-due and watch CHANGE data by running tasks; list only reads.",
+                "mio schedule run-due jobs.mho"),
+    "generate": (True, "Generate an artifact, such as training data, and write it out.",
+                "mio generate training-data"),
+    "translate": (False, "Translate a program's natural-language layer into another language and print it. Read-only.",
+                "mio translate index.mho --to es"),
+    "schema":  (True,  "Work with .mhoschema files: `generate` writes one, `check` and `show` only read.",
+                "mio schema show orders.mhoschema"),
+    "harvest": (False, "Extract the current word inventory from the grammar, for building langmaps. Read-only (unless you write it out).",
+                "mio harvest --output words.json"),
+    "warmup":  (True,  "Pre-warm the parser cache so the next command starts fast. Changes only a local cache file.",
+                None),
+    "install-hooks": (True, "Install this repo's git pre-commit hooks. Changes your .git/hooks.",
+                None),
+    "version": (False, "Print version information. Read-only.", None),
+    "help":    (False, "Print this overview. Read-only.", None),
+}
+
+
+def _subparsers_action(parser):
+    for a in parser._actions:                         # noqa: SLF001 -- argparse has no public accessor
+        if a.__class__.__name__ == '_SubParsersAction':
+            return a
+    return None
+
+
+def _registered_commands(parser=None):
+    """Every subcommand the parser knows, from the parser itself -- never a hand-kept list."""
+    sub = _subparsers_action(parser or build_arg_parser())
+    return sorted(sub.choices.keys()) if sub else []
+
+
+def _command_options(parser, name):
+    """The options and positionals a subcommand accepts, read from its own subparser."""
+    sub = _subparsers_action(parser)
+    sp = sub.choices.get(name) if sub else None
+    if sp is None:
+        return []
+    out = []
+    for act in sp._actions:                           # noqa: SLF001
+        flags = list(act.option_strings) or [f"<{act.dest}>"]
+        label = "/".join(flags)
+        if act.option_strings and act.nargs != 0 and act.__class__.__name__ not in (
+                '_StoreTrueAction', '_StoreFalseAction', '_HelpAction'):
+            label += " " + (act.metavar or act.dest.upper())
+        out.append((label, (act.help or "").strip()))
+    return out
+
+
+def _render_command_overview():
+    """The grouped, generated command list. A command in no hand-written group lands in `other`, so
+    nothing a developer could type is ever missing from this list."""
+    parser = build_arg_parser()
+    known = set(_registered_commands(parser))
+    grouped = set()
+    lines = []
+    groups = list(_COMMAND_GROUPS)
+    # Any registered command not placed in a group is surfaced under "other" -- completeness is
+    # automatic even when the hand-written groups fall behind.
+    placed = {c for _, cmds in groups for c in cmds}
+    leftover = sorted(known - placed)
+    if leftover:
+        groups = groups + [("Other", leftover)]
+    for title, cmds in groups:
+        shown = [c for c in cmds if c in known]
+        if not shown:
+            continue
+        lines.append(f"  {bold(title)}")
+        for c in shown:
+            grouped.add(c)
+            changes, what, _ex = _COMMAND_HELP.get(c, (False, "", None))
+            tag = red("writes") if changes else dim("reads")
+            lines.append(f"    {bold('mio ' + c):<22}  {dim('[' + '')}{tag}{dim(']')}  {what}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _print_command_help(name):
+    """`mio <cmd> --help` / `mio help <cmd>`: that one command's description, options and example --
+    the per-command help argparse cannot give here, because every subparser is add_help=False."""
+    parser = build_arg_parser()
+    if name not in _registered_commands(parser):
+        print(f"\n  {red('x')} There is no `mio {name}` command. Run `mio help` for the list.\n")
+        return
+    changes, what, example = _COMMAND_HELP.get(name, (False, "", None))
+    tag = red("writes") if changes else dim("reads only")
+    print(f"\n  {bold('mio ' + name)}  {dim('[')}{tag}{dim(']')}\n")
+    if what:
+        print(f"    {what}\n")
+    opts = _command_options(parser, name)
+    real = [(lbl, h) for lbl, h in opts if not lbl.startswith("<")] + \
+           [(lbl, h) for lbl, h in opts if lbl.startswith("<")]
+    if real:
+        print(f"  {bold('OPTIONS')}")
+        for label, helptext in real:
+            print(f"    {label:<26}  {dim(helptext)}" if helptext else f"    {label}")
+        print()
+    if example:
+        print(f"  {bold('EXAMPLE')}")
+        for ln in example.split("\n"):
+            print(f"    {ln}")
+        print()
+
+
 def cmd_help(args):
+    # A specific command's own help: `mio <cmd> --help` (or `mio help <cmd>`).
+    _topic = getattr(args, "help_topic", None)
+    if _topic:
+        _print_command_help(_topic)
+        return
     print(f"""
   {bold('mio')} -- Mohio Language CLI  {dim(f'v{VERSION}')}
 
-  {bold('USAGE')}
+  {bold('COMMANDS')}  {dim('(mio <command> --help for a command`s options)')}
 
-    mio new <name>                      Create a new project folder with a starter page
-    mio init                            Put that same starter in the folder you are in
-    mio run <file.mho>                  Execute a Mohio program
-    mio run <file.mho> --verbose        Execute with trace output
-    mio run <file.mho> --ai             Use real Anthropic API for ai.decide
-    mio serve <file.mho>                Start HTTP server on port 8080
-    mio serve <file.mho> --port 9000    Start on custom port
-    mio serve <file.mho> --ai           Serve with real Anthropic API
-    mio check <file.mho>                Validate -- all errors and warnings, no run
-    mio check --all                     Validate every .mho file in the tree
-    mio fmt <file.mho> [--write]        Normalize toward canonical Mohio
-    mio generate <artifact>             Generate artifacts (e.g. training data)
-    mio translate <file.mho> --to <lang>  Translate a program's natural-language layer
-    mio schema <generate|check|show>    Work with .mhoschema files
-    mio harvest [--output f.json]       Extract the current word inventory from the grammar (langmaps)
-    mio schedule <file.mho>             Run any scheduled tasks that are due
-    mio audit verify <db>               Check each audit log's hash chain is intact
-    mio audit head <db>                 Print each log's chain head (the value you anchor)
-    mio audit verify-anchors <db> --anchors f.json   Check the chain against published anchors
-    mio audit relay <db>                Deliver audit records a crash left owed
-    mio writes <file.mho>               Show what each write means, normalized
-    mio warmup                          Pre-warm the parser cache
-    mio install-hooks                   Install git pre-commit hooks
-    mio version                         Print version information
-    mio help                            Print this message
-
-  {dim('(more tooling commands are on the roadmap)')}
-
+{_render_command_overview()}
   {bold('PASSING A REQUEST')}
 
     {bold('--request-file')} (all platforms, recommended):
@@ -4651,6 +7283,8 @@ def build_arg_parser():
     s.add_argument("--ai", action="store_true", default=False)
     s.add_argument("--api-key", default=None, dest="api_key")
     s.add_argument("--seed", default=None, metavar="seed.json")
+    s.add_argument("--dev", action="store_true", default=False,
+                   help="development: serve the files that load; a file that does not answers 503")
 
     # run
     r = sub.add_parser("run", add_help=False)
@@ -4699,7 +7333,13 @@ def build_arg_parser():
     fp.add_argument("--write", "-w", action="store_true", help="Apply changes in place")
     fp.add_argument("--stdout", action="store_true", help="Print formatted source to stdout")
 
-    # new / init -- the starter project
+    # create / new / init -- the starter project
+    cr = sub.add_parser("create", add_help=False)
+    cr.add_argument("args", nargs="*",
+                    help="<name>, or <framework> <name> (framework: web api game)")
+    cr.add_argument("--in", dest="folder", default=None,
+                    metavar="FOLDER", help="Folder to create (default: the name, lowercased)")
+    cr.add_argument("--description", default=None)
     nw = sub.add_parser("new", add_help=False)
     nw.add_argument("name")
     nw.add_argument("--in", dest="folder", default=None,
@@ -4737,14 +7377,26 @@ def build_arg_parser():
     sc.add_argument("schema_action", nargs="?", default="generate",
                     choices=["generate", "check", "show"])
     sc.add_argument("file", nargs="?", default=None)
+    mig = sub.add_parser("migrate", add_help=False)
+    mig.add_argument("migrate_action", nargs="?", default=None, choices=["typed-storage", "protect"])
+    mig.add_argument("file", nargs="?", default=None)
+    mig.add_argument("--dry-run", dest="dry_run", action="store_true",
+                     help="List the plan and every value that will not convert; change nothing")
     wr = sub.add_parser("writes", add_help=False)
     wr.add_argument("file", nargs="?", default=None)
     aud = sub.add_parser("audit", add_help=False)
     aud.add_argument("audit_action", nargs="?", default="verify",
-                     choices=["verify", "head", "verify-anchors", "relay"])
+                     choices=["verify", "head", "verify-anchors", "relay", "read"])
     aud.add_argument("file", nargs="?", default=None)
     aud.add_argument("--anchors", default=None,
                      help="Path to a JSON file of published anchors (for verify-anchors)")
+    aud.add_argument("--program", default=None,
+                     help="The .mho program whose own audit logs the relay may deliver to (for relay)")
+    sec = sub.add_parser("sector", add_help=False)
+    sec.add_argument("file", nargs="?", default=None,
+                     help="A .mho file whose sectors to report (omit for the deployment inventory)")
+    sec.add_argument("--json", action="store_true",
+                     help="Output structured JSON (same facts as the text form)")
     sched = sub.add_parser("schedule", add_help=False)
     sched.add_argument("schedule_action", nargs="?", default="run-due",
                        choices=["run-due", "list", "watch"])
@@ -4795,9 +7447,8 @@ def cmd_test(args):
             from mohio_enforce import enforce_scans as _enforce_scans
             _enforce_scans(ctx, program)
         except Exception as _scan_err:
-            print(f"  [enforce] WARNING: a Layer 3 scanner failed "
-                  f"({type(_scan_err).__name__}: {_scan_err}). Enforcement is INCOMPLETE.",
-                  file=sys.stderr)
+            # FAILS LOUD (ruled by Ron, 2026-10-03) -- see _scan_incomplete_warn.
+            _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
         if ctx.errors:
             for e in ctx.errors:
                 _print_compile_error(e, source, filename)
@@ -4806,8 +7457,7 @@ def cmd_test(args):
     from mohio_interpreter import MohioInterpreter, MockAiRuntime
     ai = _construct_ai_runtime(getattr(args, "api_key", None), verbose) \
         if getattr(args, "ai", False) else MockAiRuntime()
-    interp = MohioInterpreter(ai=ai, verbose=verbose,
-                              db_path=_resolve_sqlite_db_path(filename, args))
+    interp = _cli_interpreter(ai, verbose, filename, args)
     print(f"\n  mio test  {dim(filename)}\n")
     try:
         interp.run(program)
@@ -4847,6 +7497,303 @@ def cmd_test(args):
     print(f"  {green(bold(str(total) + ' case(s) passed'))}\n")
 
 
+
+# ── mio migrate typed-storage ────────────────────────────────────────────────────────────────
+# T1-DB-TYPED-STORAGE (RULED by Ron, 2026-10-05). A table created before typed storage keeps its
+# declared int, boolean, decimal and currency fields in TEXT columns; a new table gets real types.
+# This converts an existing table's columns to the types its shape declares, through the SAME
+# encoder a write uses (`_encode_typed_value`), so a migrated value is stored exactly as a new
+# write of it would be: SQLite's scaled integer for a currency, an exact NUMERIC/DECIMAL/NUMBER
+# elsewhere, never a rounded one. NOTHING MOVES UNLESS EVERY VALUE CONVERTS: a value that will
+# not convert is listed (table, column, row id, the value, why) and the column is left as it is.
+# --dry-run lists the plan and every such value and changes nothing. Each converted column leaves
+# one audit record naming the table, the column, the two types and the row count.
+
+_MIGRATE_TEXT_TYPES = ('TEXT', 'VARCHAR', 'VARCHAR2', 'CHARACTER VARYING', 'CHAR', 'NVARCHAR2',
+                       'LONGTEXT', 'MEDIUMTEXT', 'TINYTEXT', 'CLOB', 'NCLOB', '')
+_MIGRATE_TYPED_ROOTS = ('int', 'integer', 'boolean', 'bool', 'dec', 'decimal')
+
+
+def _migrate_engine(db):
+    name = type(db).__name__
+    if name == 'PostgresRuntime':
+        return 'postgres'
+    if name == 'MySQLRuntime':
+        return 'mysql'
+    if name == 'OracleRuntime':
+        return 'oracle'
+    if name == 'DbRuntime':
+        return 'sqlite'
+    return None
+
+
+def _migrate_q(engine, ident):
+    if engine == 'mysql':
+        return f'`{ident}`'
+    if engine == 'oracle':
+        return str(ident)
+    return f'"{ident}"'
+
+
+def _migrate_sql(engine, sql):
+    """Write SQL with `?` placeholders; renumber for the connected engine."""
+    if engine in ('postgres', 'mysql'):
+        return sql.replace('?', '%s')
+    if engine == 'oracle':
+        n = [0]
+
+        def _r(_m):
+            n[0] += 1
+            return f':{n[0]}'
+        import re as _re
+        return _re.sub(r'\?', _r, sql)
+    return sql
+
+
+def _migrate_current_type(engine, cur, table, col):
+    """The column's stored type from the engine's own catalogue, upper case, or None when the
+    table or column does not exist."""
+    if engine == 'sqlite':
+        cur.execute(f'PRAGMA table_info("{table}")')
+        for r in cur.fetchall():
+            if str(r[1]) == col:
+                return str(r[2] or '').upper()
+        return None
+    if engine == 'postgres':
+        cur.execute("SELECT data_type AS dt FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+                    (table, col))
+    elif engine == 'mysql':
+        cur.execute("SELECT data_type AS dt FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = %s",
+                    (table, col))
+    else:
+        cur.execute("SELECT data_type FROM user_tab_columns WHERE table_name = :1 AND column_name = :2",
+                    [table.upper(), col.upper()])
+    row = cur.fetchone()
+    if not row:
+        return None
+    v = (row.get('dt') or row.get('DT')) if isinstance(row, dict) else row[0]
+    return str(v or '').upper()
+
+
+def _migrate_convert(db, value, declared):
+    """(converted, None) or (None, reason). The same rules a write applies."""
+    from decimal import Decimal, InvalidOperation
+    if value is None:
+        return None, None
+    s = str(value).strip()
+    if s == '':
+        return None, None
+    root = declared.split('.')[0]
+    if root in ('boolean', 'bool'):
+        if s.lower() in ('true', '1'):
+            return True, None
+        if s.lower() in ('false', '0'):
+            return False, None
+        return None, 'not a boolean (true, false, 1 or 0)'
+    try:
+        d = Decimal(s)
+    except InvalidOperation:
+        return None, 'not a number'
+    if root in ('int', 'integer'):
+        if d != d.to_integral_value():
+            return None, 'has a fractional part, and the field is an int'
+        return int(d), None
+    try:
+        enc = getattr(db, '_encode_typed_value', None)
+        from mohio_interpreter import _encode_typed_value as _base_enc
+        return (enc or _base_enc)(d, declared), None
+    except Exception as e:  # noqa: BLE001 -- the encoder's own refusal IS the reason reported
+        return None, str(e).split('\n')[0]
+
+
+def cmd_migrate_protect(path, dry):
+    """mio migrate protect: encrypt in place the stored values of every field the program declares
+    protected that were written unprotected, and build their search index (RULED by Ron 2026-10-12).
+    The program's own declarations say which fields are protected; one table at a time, in a
+    transaction where the engine has one, with the counts reported."""
+    if path.is_dir():
+        _die(f"mio migrate protect takes one .mho file, not a folder ({path}). Use the program in "
+             f"that folder that declares the protected fields, for example "
+             f"`mio migrate protect {path}/app.mho`.", exit_code=3)
+    filename = str(path)
+    source = _read_source(path, exit_code=3)
+    tree, pctx = _parse_and_validate(source, filename, False)
+    if pctx.errors:
+        for e in pctx.errors:
+            _print_compile_error(e, source, filename)
+        sys.exit(1)
+    from mohio_transformer_ast import transform as ast_transform
+    program = ast_transform(tree, source)
+    program = _resolve_includes(program, filename, verbose=False)
+    program = _apply_journey(program, filename, verbose=False)
+    from mohio_interpreter import MohioInterpreter
+    it = MohioInterpreter(verbose=False)
+    # This command IS the sealing the field register asks for, so the register lets it raise a
+    # column's protection over plain values (OR-2); everything else still refuses that.
+    it._migrating_protection = True
+    it.run_declarations(program)
+    title = 'mio migrate protect' + (' --dry-run' if dry else '')
+    print(f"\n  {bold(title)}  {dim(filename)}\n")
+    try:
+        report = it.migrate_protect(dry_run=dry)
+    except Exception as e:
+        _die(f"mio migrate protect stopped, and the table it was working on was left as it was: {e}\n"
+             f"  To fix it, correct what the line above names, then use the same command again; "
+             f"tables already protected are skipped.", exit_code=1)
+    if not report:
+        print(f"  {dim('This program declares no protected field, so there is nothing to protect.')}\n")
+        return
+    verb = "would encrypt" if dry else "encrypted"
+    index_words = {'present': 'search index {} in place', 'built': 'search index {} built',
+                   'would build': 'would build search index {}'}
+    failed = []
+    for row in report:
+        where = f"db.{row['table']}.{row['field']}"
+        if row['problem']:
+            failed.append(row)
+            print(f"  {red('x')}  {where}: {row['problem']}")
+        elif row['note']:
+            print(f"  {where}: {row['note']}")
+        else:
+            bidx = f"`{row['field']}__bidx`"
+            print(f"  {where}: {verb} {row['sealed']} value(s), indexed {row['indexed']} already "
+                  f"encrypted value(s), {index_words[row['index']].format(bidx)}")
+    print()
+    if failed:
+        # BS-003: a migration reports success only when every protected field it covers has its
+        # search index, read back from the database; anything else exits non-zero.
+        first = failed[0]
+        print(red(f"  mio migrate protect did not finish: {len(failed)} protected field(s) are not "
+                  f"fully protected, first db.{first['table']}.{first['field']}.") + "\n"
+              f"  Until it finishes, a program that declares `{first['field']}` protected refuses "
+              f"to read or write db.{first['table']}.\n"
+              f"  Fix what each line above names, then run it again:\n"
+              f"      mio migrate protect {filename}\n")
+        sys.exit(1)
+
+
+def cmd_migrate(args):
+    action = getattr(args, 'migrate_action', None)
+    filename = getattr(args, 'file', None)
+    dry = bool(getattr(args, 'dry_run', False))
+    if action == 'protect' and filename:
+        return cmd_migrate_protect(Path(filename), dry)
+    if action != 'typed-storage' or not filename:
+        _die("Usage: mio migrate typed-storage <file.mho> [--dry-run]\n"
+             "  Converts the text columns of tables created before typed storage into the types\n"
+             "  their shapes declare. --dry-run lists the plan and every value that will not\n"
+             "  convert, and changes nothing.\n"
+             "       mio migrate protect <file.mho> [--dry-run]\n"
+             "  Encrypts, in place, the stored values of every field the program declares\n"
+             "  protected ([pii], [phi], [pci], sec.encrypt) that another program wrote\n"
+             "  unprotected, and builds their search index. --dry-run counts and changes nothing.",
+             exit_code=3)
+    path = Path(filename)
+    if path.is_dir():
+        _die(f"mio migrate typed-storage takes one .mho file, not a folder ({filename}).", exit_code=3)
+    source = _read_source(path, exit_code=3)
+    tree, pctx = _parse_and_validate(source, filename, False)
+    if pctx.errors:
+        for e in pctx.errors:
+            _print_compile_error(e, source, filename)
+        sys.exit(1)
+    from mohio_transformer_ast import transform as ast_transform
+    program = ast_transform(tree, source)
+    program = _resolve_includes(program, filename, verbose=False)
+    program = _apply_journey(program, filename, verbose=False)
+    from mohio_interpreter import MohioInterpreter, Context
+    it = MohioInterpreter(verbose=False)
+    it.run_declarations(program)
+    db = it._db
+    engine = _migrate_engine(db) if db is not None else None
+    if engine is None:
+        _die(f"{filename} connects to no SQL database Mohio can migrate (sqlite, postgres, mysql "
+             f"or oracle). Declare one with `connect db as <engine> from env.YOUR_VAR`.", exit_code=1)
+    title = 'mio migrate typed-storage' + (' --dry-run' if dry else '')
+    print(f"\n  {bold(title)}  {dim(filename)}  ({engine})\n")
+    col_types = getattr(db, '_shaped_col_types', None) or getattr(it, '_shaped_col_types', {}) or {}
+    plan, refusals = [], []
+    cur = db.conn.cursor()
+    # An audit relation is append-only (Ron, 2026-10-13): this command would UPDATE its rows and
+    # drop and rename a column, so a shape that declares one is refused before anything changes.
+    from mohio_audit_grades import audit_append_only_refusal, AUDIT_APPEND_ONLY_FIX
+    _audit_tables = [t for t in sorted(col_types)
+                     if audit_append_only_refusal(t, 'mio migrate typed-storage')]
+    if _audit_tables:
+        for _t in _audit_tables:
+            print(f"  {red('x')}  " + audit_append_only_refusal(_t, 'mio migrate typed-storage'))
+        print(f"     {AUDIT_APPEND_ONLY_FIX}\n")
+        sys.exit(1)
+    for table in sorted(col_types):
+        for col, declared in sorted(col_types[table].items()):
+            declared = str(declared or '').lower()
+            is_money = it._is_currency(declared)
+            if declared.split('.')[0] not in _MIGRATE_TYPED_ROOTS and not is_money:
+                continue
+            current = _migrate_current_type(engine, cur, table, col)
+            if current is None:
+                continue                    # no table or column yet: it is created typed
+            base = current.split('(')[0].strip()
+            if base not in _MIGRATE_TEXT_TYPES:
+                continue                    # already typed
+            target = db._declared_column_sql_type(declared)
+            if str(target).split('(')[0].strip().upper() in _MIGRATE_TEXT_TYPES:
+                continue                    # the declared type is stored as text on this engine
+            cur.execute(_migrate_sql(engine, f'SELECT id, {_migrate_q(engine, col)} FROM '
+                                             f'{_migrate_q(engine, table)}'))
+            rows = cur.fetchall()
+            converted, bad = [], []
+            for r in rows:
+                rid = r['id'] if isinstance(r, dict) else r[0]
+                val = (r.get(col) if isinstance(r, dict) else r[1])
+                if isinstance(r, dict) and val is None and col.upper() in r:
+                    val = r[col.upper()]
+                new, why = _migrate_convert(db, val, declared)
+                if why:
+                    bad.append((rid, val, why))
+                else:
+                    converted.append((rid, new))
+            plan.append((table, col, declared, current, target, converted, bad))
+            refusals.extend((table, col, rid, val, why) for rid, val, why in bad)
+    if not plan:
+        print(f"  {green('v')}  Nothing to migrate: every declared typed column is already typed.\n")
+        return
+    for table, col, declared, current, target, converted, bad in plan:
+        mark = red('x') if bad else green('v')
+        print(f"  {mark}  {table}.{col}  {dim(current)} -> {target}  "
+              f"({len(converted)} value(s) convert" + (f", {len(bad)} do not" if bad else "") + ")")
+    if refusals:
+        print(f"\n  {red('These values will not convert. Nothing was changed.')}\n")
+        for table, col, rid, val, why in refusals:
+            print(f"    {table}.{col}  id {rid}: {val!r} -- {why}")
+        print(f"\n  Fix or clear these values, then run it again.\n")
+        sys.exit(0 if dry else 1)
+    if dry:
+        print(f"\n  {dim('Dry run: every value converts. Run without --dry-run to migrate.')}\n")
+        return
+    ctx = Context()
+    ctx.set_connection('db', db)
+    for table, col, declared, current, target, converted, bad in plan:
+        tmp = f'{col}_mtyp'
+        qt, qc, qtmp = _migrate_q(engine, table), _migrate_q(engine, col), _migrate_q(engine, tmp)
+        add = (f'ALTER TABLE {qt} ADD ({qtmp} {target})' if engine == 'oracle'
+               else f'ALTER TABLE {qt} ADD COLUMN {qtmp} {target}')
+        cur.execute(add)
+        for rid, new in converted:
+            cur.execute(_migrate_sql(engine, f'UPDATE {qt} SET {qtmp} = ? WHERE id = ?'), [new, rid])
+        cur.execute(f'ALTER TABLE {qt} DROP COLUMN {qc}')
+        cur.execute(f'ALTER TABLE {qt} RENAME COLUMN {qtmp} TO {qc}')
+        db.conn.commit()
+        it._audit_event('security_audit_log', {
+            'event': 'typed_storage_migrated', 'table': table, 'field': col,
+            'detail': f'{table}.{col}: {current} -> {target}, {len(converted)} value(s), declared {declared}',
+        }, ctx)
+        print(f"  {green('v')}  migrated {table}.{col} to {target}")
+    print()
+
+
 def cmd_schedule(args):
     """`mio schedule run-due <file>` — fire schedules that are due (call this
     from an external cron/worker; see the deploy note). `mio schedule list
@@ -4877,13 +7824,8 @@ def cmd_schedule(args):
             from mohio_enforce import enforce_scans as _enforce_scans
             _enforce_scans(ctx, program)
         except Exception as _scan_err:
-            # A crashing scanner must not kill an otherwise-valid command, but it must not be
-            # silent: enforcement for this run is INCOMPLETE and the program proceeds anyway.
-            import sys as _sys
-            print(f"  [enforce] WARNING: a Layer 3 scanner failed "
-                  f"({type(_scan_err).__name__}: {_scan_err}). Enforcement is INCOMPLETE -- "
-                  f"some checks did not execute. Run `mio check` for the full result.",
-                  file=_sys.stderr)
+            # FAILS LOUD (ruled by Ron, 2026-10-03) -- see _scan_incomplete_warn.
+            _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
         if ctx.errors:
             for e in ctx.errors:
                 _print_compile_error(e, source, filename)
@@ -4892,6 +7834,8 @@ def cmd_schedule(args):
 
     from mohio_interpreter import MohioInterpreter, Context
     it = MohioInterpreter(verbose=verbose)
+    # A scheduled job writes as its app, so its owed audit records are its own app's to deliver.
+    it.app_id = _app_identity(filename)
     it.run_declarations(program)                 # db/connect/audit setup
     exec_ctx = Context()
     it._exec_declarations(program, exec_ctx)     # register tasks + schedules for firing
@@ -4918,19 +7862,24 @@ def cmd_schedule(args):
                 if fired:
                     print(f"  [{_time.strftime('%H:%M:%S')}] fired: {', '.join(fired)}")
                     for line in it.shown:
-                        print(f"    {line}")
+                        _print_program_output(f"    {line}")
                 _time.sleep(interval)
         except KeyboardInterrupt:
             print("\n  Stopped.")
         return
 
     fired = it.run_due_schedules(exec_ctx)
+    failed = getattr(it, 'schedule_failures', None) or []
     if fired:
         print(f"  Fired {len(fired)} schedule(s): {', '.join(fired)}")
-    else:
+    elif not failed:
         print("  No schedules due.")
     for line in it.shown:
-        print(f"    {line}")
+        _print_program_output(f"    {line}")
+    if failed:
+        # A driver (cron, a worker) reads the exit code; a run where a job failed is not a success.
+        print(f"  x {len(failed)} schedule(s) failed: {', '.join(n for n, _ in failed)}")
+        sys.exit(1)
 
 
 def cmd_fmt(args):
@@ -4942,47 +7891,203 @@ def cmd_fmt(args):
     from pathlib import Path
     path = Path(args.file)
     src = _read_source(path)
+    _original_src = src   # kept verbatim so the reported count reflects lines actually changed,
+                          # not edits applied -- a single wrapper removal dedents its whole body
     grammar = _load_grammar()
     parser  = _make_parser_cached(grammar)
     from mohio_fmt import dequote_paths, format_source
     # Fix a mistaken quoted path (`at "/x"` -> `at /x`) before transforming, so a
     # file the compiler would reject for a quoted path still formats and gets fixed
     # here rather than dying on the fail-loud.
-    src, _path_fixes = dequote_paths(src, parser)
+    src, _path_fixes = dequote_paths(src, parser, parse=lambda text: _fmt_parse(parser, text, None))
+    # Strip the retired bare `listen for` wrapper BEFORE transforming, for the same reason as the
+    # quoted path above: the compiler now rejects the wrapper (Batch 16), so remove it here -- a
+    # line-based edit that needs no parse -- rather than dying on the fail-loud. Everything
+    # downstream (pretokenize, transform, format_source) then sees the wrapper-free source, so the
+    # AST line numbers the Assignment edits use line up with the lines format_source rewrites.
+    from mohio_fmt import _remove_listen_wrappers, new_to_listen
+    _wrap_lines, _wrap_changes = _remove_listen_wrappers(src.split("\n"))
+    # `new sh.X` is not a handler (ruled 2026-10-07): the compiler refuses it before the parse, so
+    # the swap to `listen for sh.X` happens here, line by line, like the wrapper removal above.
+    _wrap_lines, _new_changes = new_to_listen(_wrap_lines)
+    _wrap_changes = _wrap_changes + _new_changes
+    # A handler's request data is read by the shape's name exactly as declared (RULED 2026-10-09);
+    # check refuses the retired lowercase-first name, so the rewrite happens here, before the parse.
+    from mohio_fmt import shape_binding_names
+    _wrap_lines, _bind_changes = shape_binding_names(_wrap_lines)
+    _wrap_changes = _wrap_changes + _bind_changes
+    # An inline `{{ each }}` view loop never ran and check refuses it; it splits into the
+    # line-anchored form here, line by line, before the parse (RULED 2026-10-09).
+    from mohio_fmt import inline_each_to_lines
+    _wrap_lines, _each_changes = inline_each_to_lines(_wrap_lines)
+    _wrap_changes = _wrap_changes + _each_changes
+    # The ai.decide gate is `confidence above N` only (RULED 2026-10-10); check refuses the `check`
+    # and `is` spellings, so they are rewritten here, before the parse.
+    from mohio_fmt import confidence_gate_form
+    _wrap_lines, _gate_changes = confidence_gate_form(_wrap_lines)
+    _wrap_changes = _wrap_changes + _gate_changes
+    # `+` beside text is `&` (RULED by Ron); check refuses the `+` spelling, so it is rewritten here.
+    from mohio_fmt import plus_on_text
+    _wrap_lines, _plus_changes = plus_on_text(_wrap_lines)
+    _wrap_changes = _wrap_changes + _plus_changes
+    src = "\n".join(_wrap_lines)
     from mohio_transformer_ast import transform
     # Pretokenize dotted user-var accesses (same as _parse_and_validate) so a file
     # using a type-word field like `x.text` formats instead of failing to parse.
     try:
-        from mohio_symbol_table import extract_symbols
-        from mohio_transformer import MOHIO_RESERVED_EXACT
-        from mohio_pretokenizer import pretokenize
-        _fmt_symbols = extract_symbols(src)
-        _fmt_parse_src = pretokenize(src, _fmt_symbols.all_user_names(), MOHIO_RESERVED_EXACT)
-    except Exception:
-        _fmt_parse_src = src
-    try:
-        ast = transform(parser.parse(_fmt_parse_src), src)
+        ast = transform(_fmt_parse(parser, src, path, pretokenized=True), src)
     except Exception as e:
         _die(f"Cannot format -- file does not parse:\n{e}", exit_code=1)
     out, changes = format_source(src, ast)
+    changes = _wrap_changes + changes
     if _path_fixes:
         changes.append((0, "quoted path", f"{_path_fixes} unquoted (at \"/x\" -> at /x)"))
 
     if getattr(args, "stdout", False):
+        # EGRESS-EXEMPT: program SOURCE text the developer asked to write; no runtime value
         sys.stdout.write(out)
         return
 
+    # FMT NEVER CALLS A FILE CANONICAL WHILE CHECK REFUSES IT (RULED by Ron 2026-10-09). The formatted
+    # text is checked the way `mio check` checks it, and what fmt could not convert is named.
+    _refusals = _fmt_remaining_refusals(path, out)
+
     if not changes:
+        if _refusals:
+            print(f"mio fmt: {path} -- nothing fmt can convert, and mio check refuses it; these need a "
+                  f"change by hand:")
+            for _r in _refusals:
+                print(f"  {_r}")
+            sys.exit(1)
         print(f"mio fmt: {path} -- already canonical")
         return
 
+    # THE HONEST COUNT is lines actually changed, not the number of edit-rules applied. One edit
+    # like "remove the retired `listen for` wrapper" dedents every handler under it, so counting
+    # edits reported "1 line normalized" against a whole-file rewrite -- the exact number a
+    # developer reads to decide whether to review the diff. Compute it from the real before/after.
+    import difflib as _difflib
+    _before = _original_src.split("\n")
+    _after = out.split("\n")
+    _added = _removed = 0
+    for _d in _difflib.unified_diff(_before, _after, lineterm=""):
+        if _d.startswith('+') and not _d.startswith('+++'):
+            _added += 1
+        elif _d.startswith('-') and not _d.startswith('---'):
+            _removed += 1
+    _touched = _added + _removed
+    _summary = (f"{_touched} line(s) changed ({_added} added, {_removed} removed), "
+                f"{len(changes)} normalization(s)")
+
     if getattr(args, "write", False):
-        path.write_text(out, encoding="utf-8")
-        print(f"mio fmt: {path} -- {len(changes)} line(s) normalized to canonical")
+        # EGRESS-EXEMPT: program SOURCE text the developer asked to write; no runtime value
+        path.write_text(out, encoding="utf-8", newline="\n")   # keep LF; write_text would CRLF on Windows
+        print(f"mio fmt: {path} -- {_summary}")
     else:
-        print(f"mio fmt: {path} -- {len(changes)} line(s) would change (run with --write to apply):")
+        print(f"mio fmt: {path} -- {_summary} (run with --write to apply):")
     for ln, old, new in changes:
         print(f"  line {ln}: {old}  ->  {new}")
+    if _refusals:
+        print(f"mio fmt: mio check still refuses {path} after formatting; these need a change by hand:")
+        for _r in _refusals:
+            print(f"  {_r}")
+        sys.exit(1)
+
+
+def _fmt_parse(parser, text, path, pretokenized=False):
+    """The parse tree fmt formats from, built the way `mio check` builds its own: marked against
+    the whole app's declarations, and parsed in segments (mohio_segment) with check's own segment
+    cache when the file has one, so a large app formats in about the time check takes rather than
+    in three whole-file parses (Dispatch: about 1,120 seconds). Anything that does not parse in
+    segments parses whole, as before, so an error reads exactly as it always has.
+
+    `pretokenized` marks dotted user-variable reads first, as check does (a type-word field like
+    `x.text` then parses). Without it the text parses as written, which a caller that splices the
+    source by token position needs, since marking moves every position after it."""
+    from mohio_segment import parse_segmented
+    parse_src = text
+    if pretokenized:
+        try:
+            from mohio_symbol_table import extract_symbols, app_mark_names
+            from mohio_transformer import MOHIO_RESERVED_EXACT
+            from mohio_pretokenizer import pretokenize
+        except ImportError:
+            pretokenize = None    # the same graceful degradation check has
+        if pretokenize is not None:
+            _names = extract_symbols(text).all_user_names()
+            if path is not None:
+                _names = _names | app_mark_names(str(path))
+            parse_src = pretokenize(text, _names, MOHIO_RESERVED_EXACT)
+    tree = parse_segmented(parser, parse_src, str(path) if path is not None else None,
+                           _parse_fingerprint())
+    return tree if tree is not None else parser.parse(parse_src)
+
+
+def _fmt_remaining_refusals(path, text):
+    """What `mio check` refuses in `text`, the formatted source of `path`, as one line per refusal.
+
+    Checked exactly as a user's `mio check` would check it: the text is written beside the original,
+    so a folder's journey still applies, under a hidden name that is removed afterwards, and `mio
+    check` runs on it as its own process. Only the refusal lines (the `x` lines) are kept."""
+    import shutil as _shutil
+    import subprocess as _sp
+    import uuid as _uuid
+    _tag = _uuid.uuid4().hex[:8]
+    probe_dir = None
+    if path.name == "journey.mho":
+        # A JOURNEY'S COPY MUST NOT SIT UNDER THE JOURNEY: beside it, the copy inherits the original
+        # and every declaration loads twice. In a hidden folder beside the journey's own folder, named
+        # journey.mho, it inherits exactly what the original inherits from the folders above.
+        probe_dir = path.resolve().parent.parent / f".mio-fmt-check-{_tag}"
+        probe_dir.mkdir()
+        probe = probe_dir / "journey.mho"
+    else:
+        probe = path.parent / f".mio-fmt-check-{_tag}.mho"
+    try:
+        # EGRESS-EXEMPT: program SOURCE text, written beside itself for `mio check` and removed after
+        probe.write_text(text, encoding="utf-8", newline="\n")
+        # The original's segment cache goes with it: every segment fmt left alone is already parsed,
+        # so the check of the formatted copy re-parses only what fmt changed. A segment is cached by
+        # its own text, so a changed one is never mistaken for the old.
+        from mohio_segment import _cache_path as _seg_cache
+        _seg_src = Path(_seg_cache(str(path)))
+        if _seg_src.exists():
+            # EGRESS-EXEMPT: the parse cache, copied beside the check copy and removed after
+            _shutil.copyfile(str(_seg_src), _seg_cache(str(probe)))
+        # The probe by its ABSOLUTE path: run from its own folder, a relative path given on the command
+        # line (`mio fmt examples/contact.mho`) named a file that is not there ("File not found").
+        r = _sp.run([sys.executable, os.path.abspath(__file__), "check", str(probe.resolve())],
+                    cwd=str(probe.parent),
+                    capture_output=True, text=True, timeout=1800)
+    finally:
+        if probe_dir is not None:
+            _shutil.rmtree(probe_dir, ignore_errors=True)
+        # Check caches its parse beside the file, whole and in segments (mohio_segment).
+        from mohio_segment import _cache_path as _segment_cache_path
+        for _left in (probe, probe.with_name(probe.name + ".cache"), Path(_segment_cache_path(str(probe)))):
+            if not _left.exists():
+                continue
+            try:
+                _left.unlink()
+            except OSError as _e:
+                print(f"  [mio fmt] WARNING: could not remove the check copy {_left} ({_e}); "
+                      f"delete it by hand.", file=sys.stderr)
+    if r.returncode == 0:
+        return []
+    ansi = re.compile(r'\x1b\[[0-9;]*m')
+    found, at = [], None
+    for line in ((r.stdout or "") + "\n" + (r.stderr or "")).split("\n"):
+        s = ansi.sub('', line).strip()
+        _ln = re.match(r'^(\d+) \|', s)
+        if _ln:
+            at = _ln.group(1)           # check prints the source line above each finding
+            continue
+        if s.startswith("x ") and probe.name not in s:
+            msg = s[2:].strip()
+            found.append(msg if msg.startswith("Line ") or not at else f"Line {at}: {msg}")
+        elif s.startswith(("Syntax error", "Error ")) and not found:
+            found.append(s.replace(str(probe), path.name).replace(probe.name, path.name))
+    return found or [f"mio check exits {r.returncode} on this file; run `mio check {path}` for the detail."]
 
 
 def cmd_ai_check(args):
@@ -5054,12 +8159,17 @@ def _use_utf8_console():
     alone. A stream that is not a real text file (a test harness swapping in StringIO,
     a closed stream) has no reconfigure and is left as it is.
     """
+    # LINE-BUFFERED, for the same reason, decided once here: a served 500 tells the client only its
+    # reference, so the cause has to be in the log, under that reference, by the time the response
+    # leaves. Written to a file or a pipe, Python buffers output in blocks, so the cause sat in
+    # memory while the 500 went out and was lost when the process stopped (measured 2026-10-10: an
+    # Oracle upsert failure and a runaway task each answered a reference the log never showed).
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
-            reconfigure(encoding="utf-8", errors="replace")
+            reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (ValueError, OSError):
             # RECORDED IN silent_shape_baseline.txt AS A DELIBERATE ONE. Both exceptions mean
             # the stream is detached, closed, or refuses reconfiguration -- which is to say the
@@ -5076,6 +8186,22 @@ def main():
     # Before the parser, because argparse prints usage and --help through these streams too.
     _use_utf8_console()
 
+    # HELP IS INTERCEPTED HERE, because every parser is add_help=False (so argparse would otherwise
+    # answer `--help` with "unrecognized arguments: --help"). `mio --help` / `mio -h` -> the overview;
+    # `mio <cmd> --help` / `mio help <cmd>` -> that command's own options and example.
+    _argv = sys.argv[1:]
+    _known = set(_registered_commands())
+    if "--help" in _argv or "-h" in _argv:
+        _cmd = next((a for a in _argv if a in _known), None)
+        if _cmd and _cmd != "help":
+            _print_command_help(_cmd)
+        else:
+            cmd_help(argparse.Namespace(help_topic=None))
+        return
+    if len(_argv) >= 2 and _argv[0] == "help" and _argv[1] in _known:
+        _print_command_help(_argv[1])
+        return
+
     p    = build_arg_parser()
     args = p.parse_args()
 
@@ -5089,6 +8215,7 @@ def main():
 
     dispatch = {
         "run":     cmd_run,
+        "create":  cmd_create,
         "new":     cmd_new,
         "init":    cmd_init,
         "serve":   cmd_serve,
@@ -5098,8 +8225,10 @@ def main():
         "translate": cmd_translate,
         "generate":  cmd_generate,
         "schema":        cmd_schema,
+        "migrate":       cmd_migrate,
         "schedule":      cmd_schedule,
         "audit":         cmd_audit,
+        "sector":        cmd_sector,
         "writes":        cmd_writes,
         "install-hooks": cmd_install_hooks,
         "harvest":       cmd_harvest,

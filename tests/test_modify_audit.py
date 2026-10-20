@@ -142,7 +142,7 @@ check("the record did not reach the trail", after_records == before_records,
 check("durable evidence for the change exists anyway", len(owed) >= 1, owed)
 check("it says the record is OWED rather than passing in silence",
       "OWED" in out or "owed" in out, out[-700:])
-rc, out = run(["audit", "relay", DB])
+rc, out = run(["audit", "relay", DB, "--program", PATH])
 check("the relay delivers what was owed",
       len(rows("select 1 from data_audit_log")) > after_records,
       "rc=%s out=%s" % (rc, out[-400:]))

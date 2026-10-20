@@ -263,7 +263,9 @@ check("a fork in a log without the index is still DETECTED", not _v_dup['ok'], s
 # version marker, verification fails and tampering becomes indistinguishable from a formatting
 # change -- which destroys the evidentiary value of the whole log.
 check("the chain declares its canonical encoding version",
-      getattr(MohioInterpreter, 'AUDIT_ENCODING_VERSION', None) == 'mohio-audit-1')
+      getattr(MohioInterpreter, 'AUDIT_ENCODING_VERSION', None) == 'mohio-audit-2')
+check("the verifier still accepts every prior encoding version",
+      MohioInterpreter._AUDIT_PRIOR_VERSIONS == ('mohio-audit-1',))
 _h_same_a = MohioInterpreter._audit_chain_hash('p', {'a': '1'})
 _h_same_b = MohioInterpreter._audit_chain_hash('p', {'a': '1'})
 check("identical input hashes identically", _h_same_a == _h_same_b)
@@ -275,6 +277,79 @@ finally:
     MohioInterpreter.AUDIT_ENCODING_VERSION = _orig_ver
 check("an encoding change produces a DIFFERENT hash (detectable, not silently compatible)",
       _h_same_a != _h_other)
+
+# ── v2 canonicalises empty-string and missing value; v1 kept them distinct ────────────
+# An engine that stores "" as NULL (Oracle) reads a written "" back as None. Under v1 the two
+# hashed differently, so the record falsely reported as TAMPERED. v2 collapses both to one
+# canonical empty, and the verifier still accepts a v1 record under the v1 rule so nothing
+# already written stops verifying.
+_pv1_empty = MohioInterpreter._chain_payload({'agent': ''}, 'mohio-audit-1')
+_pv1_none = MohioInterpreter._chain_payload({'agent': None}, 'mohio-audit-1')
+check("v1 keeps empty-string and missing distinct (the behaviour that broke on Oracle)",
+      _pv1_empty['agent'] == '' and _pv1_none['agent'] is None)
+_pv2_empty = MohioInterpreter._chain_payload({'agent': ''})
+_pv2_none = MohioInterpreter._chain_payload({'agent': None})
+check("v2 collapses empty-string and missing to one canonical empty",
+      _pv2_empty['agent'] is None and _pv2_none['agent'] is None)
+
+# ── SAFEGUARD: a chain written under v1 still verifies after the change ────────────────
+# Reconstruct a record exactly as the pre-change code wrote it (v1 tag, v1 empty rule), then
+# verify through the current reader. The v1 hashes below are the real pre-change outputs,
+# captured from the shipped v1 code before this change and pinned here.
+_V1_EMPTY = '2f2c90c94bd3951af6bd8cfcba383f88c69ad5aab586f16a3ac4d0f6b05f8017'
+_V1_NONE = '5176e12b1995760b9aee397060186008f7bdcd6acd70b095275ea066ebfd159f'
+from mohio_audit_grades import canonical_audit_columns as _cac
+_cols_nl = [c for c in _cac() if c not in MohioInterpreter._CHAIN_LINK_COLUMNS]
+_victim = _cols_nl[0]                                    # audit_id -- the first content column
+
+def _mkrow(**over):
+    r = {c: None for c in _cac()}
+    r.update(over)
+    return r
+
+_pin_empty = MohioInterpreter._audit_chain_hash(
+    MohioInterpreter.AUDIT_GENESIS,
+    MohioInterpreter._chain_payload(_mkrow(**{_victim: ''}), 'mohio-audit-1'), 'mohio-audit-1')
+_pin_none = MohioInterpreter._audit_chain_hash(
+    MohioInterpreter.AUDIT_GENESIS,
+    MohioInterpreter._chain_payload(_mkrow(**{_victim: None}), 'mohio-audit-1'), 'mohio-audit-1')
+check("the preserved v1 branch reproduces the pre-change hash for an empty-string cell",
+      _pin_empty == _V1_EMPTY, _pin_empty)
+check("the preserved v1 branch reproduces the pre-change hash for a missing cell",
+      _pin_none == _V1_NONE, _pin_none)
+
+# A real cross-process-style chain: write 3 records to a file db under the v1 rule (mimicking
+# the old code), reopen with a fresh interpreter, and verify through the current reader.
+_v1path = tempfile.mktemp(suffix='.db')
+_db_v1 = DbRuntime(_v1path)
+_db_v1.ensure_table('legacy_audit_log', {c: 'TEXT' for c in _cac()})
+_prev = MohioInterpreter.AUDIT_GENESIS
+for _i in range(3):
+    _r = _mkrow(audit_id=('a%015d' % _i), ts='t%d' % _i, event='e%d' % _i,
+                agent=('' if _i == 1 else 'actor'))      # record 1 stores an empty agent
+    _r['prev_hash'] = _prev
+    _r['entry_hash'] = MohioInterpreter._audit_chain_hash(
+        _prev, MohioInterpreter._chain_payload(_r, 'mohio-audit-1'), 'mohio-audit-1')
+    _cc = ','.join('"%s"' % k for k in _r)
+    _pp = ','.join('?' for _ in _r)
+    _db_v1.conn.execute('INSERT INTO legacy_audit_log (%s) VALUES (%s)' % (_cc, _pp),
+                        list(_r.values()))
+    _prev = _r['entry_hash']
+_db_v1.conn.commit()
+_it_v1b = MohioInterpreter()                             # fresh reader, as after a redeploy
+_v_legacy = _it_v1b.verify_audit_chain(DbRuntime(_v1path), 'legacy_audit_log')
+check("a v1 chain (incl. an empty-string cell) still verifies under the current code",
+      _v_legacy['ok'] and _v_legacy['checked'] == 3, str(_v_legacy))
+# and tampering with that legacy chain is still caught
+# The tamper comes from OUTSIDE Mohio: Mohio's own connection refuses to change an audit row
+# (audit append-only, step 3), which is exactly why detection matters for every other client.
+import sqlite3 as _sq3
+_outside = _sq3.connect(_v1path)
+_outside.execute("UPDATE legacy_audit_log SET event='X' WHERE audit_id='a000000000000002'")
+_outside.commit()
+_outside.close()
+check("tampering with a v1 record is still detected under the current code",
+      not MohioInterpreter().verify_audit_chain(DbRuntime(_v1path), 'legacy_audit_log')['ok'])
 
 # ── the truncated audit_id is never a chain link ──────────────────────────────────────
 # audit_id is 64 bits, which is fine for an identifier and not fine for a tamper-evidence
@@ -373,7 +448,9 @@ for _col, _sql in (('result',     "UPDATE phi_audit_log SET result='False'"),
                    ('confidence', "UPDATE phi_audit_log SET confidence='0.01'"),
                    ('sector',     "UPDATE phi_audit_log SET sector='forged'"),
                    ('inputs',     "UPDATE phi_audit_log SET inputs='{}'")):
-    _i, _d = _run_ai(); _d.conn.execute(_sql); _d.conn.commit()
+    # The tamper acts as an OUTSIDE party: Mohio's connection refuses to change an audit row
+    # (append-only, step 3), so the test lifts that refusal first, as direct database access would.
+    _i, _d = _run_ai(); _d.conn.set_authorizer(None); _d.conn.execute(_sql); _d.conn.commit()
     check(f"tampering with `{_col}` on the decision record is detected",
           not _i.verify_audit_chain(_d, 'phi_audit_log')['ok'])
 
@@ -555,6 +632,7 @@ check("the chain verifies on a cursor-only connection",
       _v_co['ok'] and _v_co['checked'] == 4, str(_v_co))
 check("the head is computable on a cursor-only connection",
       len(str(_it_co.audit_chain_head(_sink_co, 'co_audit_log')['head'])) == 64)
+_sink_co._inner.conn.set_authorizer(None)     # the tamper acts as an outside party (see above)
 _sink_co._inner.conn.execute("UPDATE co_audit_log SET event='X' WHERE rowid=2")
 _sink_co._inner.conn.commit()
 check("tampering is detected on a cursor-only connection",

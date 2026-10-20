@@ -14,24 +14,22 @@ shape Contact
     message as text required error "Tell us what you need"
 shape: done
 
-listen for
-    request for sh.Contact at /contact
-        render
-            <h1>Get in touch</h1>
-            <p>We read every message.</p>
-            {{ form sh.Contact }}
-        render: done
-    request: done
+request for sh.Contact at /contact
+    render
+        <h1>Get in touch</h1>
+        <p>We read every message.</p>
+        {{ form sh.Contact }}
+    render: done
+request: done
 
-    new sh.Contact at /contact
-        save to db.messages
-            name    contact.name
-            email   contact.email
-            message contact.message
-        save: done
-        render
-            <h1>Thanks, {{ contact.name }}</h1>
-            <p>Your message is in. We'll be in touch at {{ contact.email }}.</p>
-        render: done
-    new: done
+listen for sh.Contact at /contact
+    save to db.messages
+        name    Contact.name
+        email   Contact.email
+        message Contact.message
+    save: done
+    render
+        <h1>Thanks, {{ Contact.name }}</h1>
+        <p>Your message is in. We'll be in touch at {{ Contact.email }}.</p>
+    render: done
 listen: done

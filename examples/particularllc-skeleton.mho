@@ -15,7 +15,7 @@
 // never `at "/software"`. A quoted path does not register and the route will
 // not serve; `mio fmt --write` unquotes it for you.
 
-connect db as sqlite from env.DATABASE_URL
+connect db as sqlite from env.DATABASE_URL default "app.db"
 
 shape Visit
     referrer as text
@@ -32,39 +32,31 @@ give back [200] "<h1>Particular LLC</h1>
 </ul>"
 
 // ── Static section pages ─────────────────────────────────────────────────────
-listen for
-    request for sh.Visit at /software
-        give back [200] "<h1>Software</h1><p>Led by Mohio, an AI-native language.</p>"
-    request: done
-listen: done
+request for sh.Visit at /software
+    give back [200] "<h1>Software</h1><p>Led by Mohio, an AI-native language.</p>"
+request: done
 
-listen for
-    request for sh.Visit at /publishing
-        give back [200] "<h1>Publishing</h1><p>Particular Reads.</p>"
-    request: done
-listen: done
+request for sh.Visit at /publishing
+    give back [200] "<h1>Publishing</h1><p>Particular Reads.</p>"
+request: done
 
-listen for
-    request for sh.Visit at /consulting
-        give back [200] "<h1>Consulting</h1><p>ExecutiveKT. Reach us at hello@particularllc.com.</p>"
-    request: done
-listen: done
+request for sh.Visit at /consulting
+    give back [200] "<h1>Consulting</h1><p>ExecutiveKT. Reach us at hello@particularllc.com.</p>"
+request: done
 
 // ── News: the one dynamic piece (replaces articles.php) ──────────────────────
 // Find published articles newest-first, build the list, serve it. This is the
 // GATHER -> ACT arc with no AI in the middle.
-listen for
-    request for sh.Visit at /news
-        find posts in db.articles
-            where published is true
-            order.down by id
-        find: done
+request for sh.Visit at /news
+    find posts in db.articles
+        where published is true
+        order.down by id
+    find: done
 
-        hold html "<h1>News</h1>"
-        repeat each p in posts
-            html (html & "<article><h2>" & p.title & "</h2><p>" & p.summary & "</p></article>")
-        repeat: done
+    html "<h1>News</h1>"
+    repeat each p in posts
+        html (html & "<article><h2>" & p.title & "</h2><p>" & p.summary & "</p></article>")
+    repeat: done
 
-        give back 200 html
-    request: done
-listen: done
+    give back 200 html
+request: done

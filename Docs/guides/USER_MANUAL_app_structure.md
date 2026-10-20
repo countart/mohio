@@ -15,7 +15,7 @@ each one to the right piece of logic. It does NOT hold all the logic itself.
 
 ```mohio
 sector: game                              // your compliance profile
-connect db as postgres from env.DATABASE_URL
+connect db from env.DATABASE_URL
 
 include "greetings.mho"                    // pull in a logic page (see below)
 include "billing.mho"                      // and another
@@ -24,20 +24,18 @@ shape Request
     action as text required
 shape: done
 
-listen for
-    new sh.Request
-        require role "user"
-        action request.action
-        check action
-            when "hello"
-                call greet with "friend"
-            when "invoice"
-                call make_invoice
-                call: done
-            otherwise
-                give back [200] "Unknown action."
-        check: done
-    new: done
+listen for sh.Request
+    require role "user"
+    action Request.action
+    check action
+        when "hello"
+            call greet with "friend"
+        when "invoice"
+            call make_invoice
+            call: done
+        otherwise
+            give back [200] "Unknown action."
+    check: done
 listen: done
 ```
 

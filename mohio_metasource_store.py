@@ -150,6 +150,13 @@ class ObjectStore:
     def list(self, prefix: str = "") -> List[str]:
         raise NotImplementedError
 
+    def public_access_status(self) -> Tuple[str, str]:
+        """(status, reason) where status is 'public' | 'private' | 'unknown' | 'local'.
+
+        Best-effort by nature: a store may not be able to say, and 'unknown' is a real answer, not a
+        failure. The base cannot check anything, so it says so."""
+        return ("unknown", "this store cannot report a bucket public-access status")
+
 
 class S3ObjectStore(ObjectStore):
     """Any S3-compatible store: Tigris, AWS S3, R2, MinIO, Ceph. Standard library only.
@@ -235,6 +242,7 @@ class S3ObjectStore(ObjectStore):
             if name.lower() != "host":
                 request.add_header(name, value)
         try:
+            # EGRESS-EXEMPT: upload object store transport; uploads are governed by the upload path (tagged content sealed at rest, read only through a checking handler)
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 return response.status, response.read(), dict(response.headers)
         except urllib.error.HTTPError as e:
@@ -308,6 +316,45 @@ class S3ObjectStore(ObjectStore):
                              hashlib.sha256).hexdigest()
         return (self.endpoint + canonical_uri + "?" + canonical_query
                 + "&X-Amz-Signature=" + signature)
+
+    def object_url(self, key: str) -> str:
+        """The plain, unsigned address of an object: endpoint, bucket, key, path-style, the same
+        address `presign` signs. It reads only where the bucket itself allows anonymous reads, so
+        it is handed out only for the PUBLIC bucket; a private object is reached by `presign`."""
+        return self.endpoint + urllib.parse.quote("/" + self.bucket + "/" + key.lstrip("/"),
+                                                  safe="/~")
+
+    def public_access_status(self) -> Tuple[str, str]:
+        """(status, reason), status one of 'public' | 'private' | 'unknown', from S3
+        GetBucketPolicyStatus. THIS IS BEST-EFFORT, and 'unknown' is the common, honest answer:
+          - a write-scoped upload credential usually lacks s3:GetBucketPolicyStatus -> 403 -> unknown;
+          - a non-AWS S3 endpoint (R2, Tigris, MinIO) may not implement the query -> unknown;
+          - no bucket policy -> 404 -> public access cannot be confirmed either way -> unknown.
+        Only a 200 with an explicit IsPublic is turned into public/private. A caller must NEVER read
+        'unknown' as 'private' -- that would make a write-only deployment refuse to boot for no
+        reason. The point of returning the reason is so the caller's message can say WHY it could not
+        tell, which is what a regulated operator needs to decide whether to fix the credential."""
+        try:
+            code, body, _ = self._request("GET", "", query="policyStatus=")
+        except Exception as e:   # a transport error is not a verdict; the app should still boot
+            return ("unknown", "could not reach the bucket to check its policy status: %s" % e)
+        text = (body.decode("utf-8", "replace")
+                if isinstance(body, (bytes, bytearray)) else str(body or "")).lower()
+        if code == 200:
+            if "<ispublic>true</ispublic>" in text:
+                return ("public", "the bucket policy status reports IsPublic=true")
+            if "<ispublic>false</ispublic>" in text:
+                return ("private", "the bucket policy status reports IsPublic=false")
+            return ("unknown", "the bucket returned a policy status this cannot read")
+        if code in (401, 403):
+            return ("unknown", "the credential cannot read the bucket policy "
+                               "(it needs s3:GetBucketPolicyStatus); public access is undetermined")
+        if code == 404:
+            return ("unknown", "the bucket has no policy, so public access cannot be confirmed "
+                               "from the policy status alone")
+        if code == 501:
+            return ("unknown", "this storage endpoint does not implement a public-access check")
+        return ("unknown", "the bucket policy query returned an unexpected status %d" % code)
 
     # ── the verbs ────────────────────────────────────────────────────────────────────────────
     def get(self, key: str) -> Tuple[Optional[bytes], Optional[str]]:
@@ -425,6 +472,7 @@ class LocalObjectStore(ObjectStore):
         # processes on one machine and needs it to be true here too.
         path = self._path(key)
         tmp = f"{path}.tmp{os.getpid()}.{threading.get_ident()}"
+        # EGRESS-EXEMPT: upload object store transport; uploads are governed by the upload path (tagged content sealed at rest, read only through a checking handler)
         with open(tmp, "wb") as f:
             f.write(body)
         os.replace(tmp, path)
@@ -441,6 +489,7 @@ class LocalObjectStore(ObjectStore):
             fd = os.open(self._path(key), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             return None
+        # EGRESS-EXEMPT: upload object store transport; uploads are governed by the upload path (tagged content sealed at rest, read only through a checking handler)
         with os.fdopen(fd, "wb") as f:
             f.write(body)
         return self._etag(body)
@@ -462,6 +511,7 @@ class LocalObjectStore(ObjectStore):
             current, current_etag = self.get(key)
             if current is None or current_etag != etag:
                 return None
+            # EGRESS-EXEMPT: upload object store transport; uploads are governed by the upload path (tagged content sealed at rest, read only through a checking handler)
             with open(path, "wb") as f:
                 f.write(body)
             return self._etag(body)
@@ -493,6 +543,11 @@ class LocalObjectStore(ObjectStore):
                 if rel.startswith(prefix) and not rel.endswith(".swap"):
                     found.append(rel)
         return sorted(found)
+
+    def public_access_status(self) -> Tuple[str, str]:
+        # Local disk is not a bucket: the files sit outside the served tree and no storage URL
+        # reaches them, so there is no public-bucket exposure to check for.
+        return ("local", "files are on local disk, not a bucket, so there is no bucket policy")
 
 
 # ── the lock ─────────────────────────────────────────────────────────────────────────────────

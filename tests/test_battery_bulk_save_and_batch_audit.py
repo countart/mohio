@@ -46,6 +46,8 @@ import urllib.parse as _up
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+from _aad_assert import bound_reason  # noqa: E402
 
 _p = _f = 0
 _failures = []
@@ -71,9 +73,21 @@ def skip(label, why):
 TMP = tempfile.mkdtemp(prefix="mohio_bulk_")
 _n = [0]
 
-PG = os.environ.get("MOHIO_TEST_PG", "postgresql://postgres:postgres@localhost:5432/postgres")
+PG = os.environ.get("MOHIO_TEST_PG", "postgresql://nobody:none@127.0.0.1:1/none")
+import sys as _sys_guard
+_sys_guard.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+# OUR TEST CONTAINERS ONLY. _engine_isolation refuses any server that is not this project's own test
+# container; it is not shipped. A licensee runs this test against their own engine through the env
+# var above (a throwaway database: the test drops and creates its own tables), or it skips.
+try:
+    import _engine_isolation as _iso_guard
+except ImportError:
+    _iso_guard = None
+if _iso_guard is not None:
+    _iso_guard.require_live_url(PG, "postgres")
+
 MY = os.environ.get("MOHIO_TEST_MYSQL",
-                    "mysql://mohio:mohio_test_pw@127.0.0.1:3307/mohio_meta_test")
+                    "mysql://nobody:none@127.0.0.1:1/none")
 SQ = os.path.join(TMP, "bulk.db")
 
 
@@ -252,11 +266,11 @@ for label, eng, url, rd in ENGINES:
     wipe(label, rd)
     out = run(BATCH.format(eng=eng), url)
     check("%s: the batch runs" % label, "batched" in out, out[-300:])
-    rows = rd("select chart from patients")
+    rows = rd("select chart, id from patients")
     check("%s: ...and every row landed" % label,
           isinstance(rows, list) and len(rows) == 5, rows)
     sealed = (isinstance(rows, list) and rows
-              and all(str(r[0]).startswith("enc:v1:") for r in rows))
+              and all(not bound_reason(str(r[0]), "patients", "chart", r[1]) for r in rows))
     check("%s: ...with the tagged field sealed, which per-row preparation still does" % label,
           sealed, rows[:1] if isinstance(rows, list) else rows)
 
@@ -335,7 +349,19 @@ else:
     victim = pg("select audit_id from data_audit_log where detail like '%save_all%' "
                 "order by audit_id limit 1 offset 2")
     if isinstance(victim, list) and victim:
-        pg("update data_audit_log set event = 'TAMPERED' where audit_id = '%s'" % victim[0][0])
+        # The log is append-only now: a plain UPDATE is refused by the database itself. A tamper
+        # has to go round that, as an operator with superuser could (session_replication_role
+        # skips the trigger, as in test_audit_chain_postgres), and the chain must still catch it.
+        _plain = pg("update data_audit_log set event = 'TAMPERED' where audit_id = '%s'" % victim[0][0])
+        check("...a plain UPDATE of a batched audit record is refused by the database",
+              isinstance(_plain, str) and "append-only" in _plain, _plain)
+        _forced = pg("SET session_replication_role = replica; "
+                     "update data_audit_log set event = 'TAMPERED' where audit_id = '%s'; "
+                     "SET session_replication_role = origin" % victim[0][0])
+        check("...the forced alteration landed (the case below is not empty)",
+              not isinstance(_forced, str)
+              and pg("select event from data_audit_log where audit_id = '%s'" % victim[0][0])
+              == [("TAMPERED",)], _forced)
         out2 = _verify()
         check("...and altering ONE record inside that batch is still caught",
               "BROKEN" in out2, out2[-300:])
@@ -372,6 +398,9 @@ else:
     try:
         _rows = [{"audit_id": "a%d" % i, "ts": "t", "event": "E", "agent": "",
                   "detail": "{}"} for i in range(4)]
+        # the table first, as every real caller does (_write_one): seeding a chain on a table that
+        # does not exist leaves a Postgres transaction aborted, which no real path ever reaches
+        _MI._ensure_audit_table(_sink, "batch_audit_probe")
         _written = _MI()._audit_chained_save_many(_sink, "batch_audit_probe", _rows)
         check("four records reach the sink in ONE call, not four", _calls["save_many"] == 1,
               _calls)

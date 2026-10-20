@@ -1,0 +1,13 @@
+{
+  "_license": "Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.",
+  "_comment": "Built-in AI provider routing table. name -> {api_format, base_url, env_key}. NO model: models change too often to pin one here, so a provider named with no model fails loud asking for an explicit model string. A coder overrides any row with their own `address`/`key` in an ai.connect block, and the coder's values win. This file is the one the out-of-band refresh mechanism (T1-SHIPPED-DATA-OUT-OF-BAND-REFRESH) will update, which is why it carries only endpoints and env-key names, never volatile model strings.",
+  "openai":     {"api_format": "openai",         "base_url": "https://api.openai.com/v1",                              "env_key": "OPENAI_API_KEY"},
+  "groq":       {"api_format": "openai",         "base_url": "https://api.groq.com/openai/v1",                         "env_key": "GROQ_API_KEY"},
+  "kimi":       {"api_format": "openai",         "base_url": "https://api.moonshot.ai/v1",                             "env_key": "MOONSHOT_API_KEY"},
+  "qwen":       {"api_format": "openai",         "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "env_key": "DASHSCOPE_API_KEY"},
+  "deepseek":   {"api_format": "openai",         "base_url": "https://api.deepseek.com",                               "env_key": "DEEPSEEK_API_KEY"},
+  "perplexity": {"api_format": "openai",         "base_url": "https://api.perplexity.ai",                              "env_key": "PERPLEXITY_API_KEY"},
+  "grok":       {"api_format": "openai",         "base_url": "https://api.x.ai/v1",                                    "env_key": "XAI_API_KEY"},
+  "anthropic":  {"api_format": "anthropic_sdk",  "base_url": null,                                                     "env_key": "ANTHROPIC_API_KEY"},
+  "gemini":     {"api_format": "gemini_native",  "base_url": "https://generativelanguage.googleapis.com/v1beta",       "env_key": "GEMINI_API_KEY"}
+}

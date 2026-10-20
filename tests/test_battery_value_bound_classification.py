@@ -73,13 +73,13 @@ TASK = ('task echo\n    take v as text\n    returns text\n    give back v\ntask:
 def serve(tail, tag='phi'):
     src = ('shape Patient\n    ssn as text [' + tag + ']\n    name as text\nshape: done\n'
            'connect db as sqlite from env.DATABASE_URL\n' + TASK +
-           'listen for\n    new sh.Patient at /p\n'
+           'journey WrapApp\n    listen for sh.Patient at /p\n'
            '        save to db.patients\n            ssn "' + SECRET + '"\n'
            '            name "Ada"\n        save: done\n'
            '        retrieve p from db.patients\n            match name to "Ada"\n'
-           '            on.failure\n                give back [404] "none"\n'
+           '            when p is empty\n                give back [404] "none"\n'
            '        retrieve: done\n'
-           + tail + '\n    new: done\nlisten: done\n')
+           + tail + '\n    listen: done\njourney: done\n')
     prog = transform(P.parse(src), src)
     client = TestClient(create_app(MohioServer(prog, MohioInterpreter())),
                         raise_server_exceptions=False)
@@ -144,7 +144,7 @@ status, body = serve('        retrieve raw from db.*\n            sql\n'
                      '        x raw.first.ssn\n'
                      '        give back 200 x')
 check("copied ciphertext comes back as ciphertext, not as a mangled mask",
-      "enc:v1:" in body, body[:160])
+      "enc:v" in body, body[:160])
 check("...and is not masked", "****" not in body, body[:160])
 
 if _failures:

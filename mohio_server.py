@@ -34,6 +34,8 @@ REQUEST LIMITS: body and upload sizes are capped and requests are bounded by a w
 
 from __future__ import annotations
 import collections, json, os, sys, datetime, threading, time as _pooltime
+from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
+from decimal import Decimal as _Decimal
 from pathlib import Path
 
 _HERE = Path(__file__).parent.resolve()
@@ -57,6 +59,10 @@ _DENY_STATIC_EXT = {
     ".sqlite-wal", ".sqlite-shm", ".sqlite-journal",
     ".old", ".save", ".tmp", ".temp", ".dump", ".core",   # leftovers and dumps
     ".mho", ".py", ".pyc", ".lark",                       # source
+    ".mhoschema",                                         # a generated schema manifest: it names every
+    #                                                       table and field of the app, structure a
+    #                                                       browser has no business reading. Source-
+    #                                                       derived, so it is source, like `.cache`.
     ".env", ".ini", ".cfg", ".conf", ".toml", ".yaml", ".yml",   # config
     ".db", ".sqlite", ".sqlite3", ".sql",                 # data
     ".pem", ".key", ".crt", ".p12", ".pfx",               # credentials
@@ -71,6 +77,14 @@ _DENY_STATIC_EXT = {
 _DENY_STATIC_NAMES = {
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "authorized_keys", "known_hosts",
     "htpasswd", "passwd", "shadow", "credentials", "core",
+    # The OLD authored-data name. The loader now reads `_seed.json` (leading underscore, never
+    # served), so a file left at the old `seed.json` name is DEAD -- it seeds nothing -- but it
+    # was still SERVED (200), which is the exact authority-config leak the rename closed for the
+    # loaded name. The exposure half and the dead half are separate problems, and denying costs
+    # nothing here: `seed.json` is a name this convention reserves, so it is refused wherever it
+    # sits. A serve-time warning (mio.py `_load_authored_seed`) closes the dead half by naming
+    # the rename.
+    "seed.json",
 }
 
 
@@ -96,6 +110,73 @@ def _is_denied_static_name(name: str) -> bool:
             if ("." + ".".join(segs[i:])) in _DENY_STATIC_EXT:
                 return True
     return False
+
+
+def _norm_route_path(p):
+    """Normalize a request/route path for classification: drop the query string and a
+    trailing slash, and guarantee a single leading slash. `/admin/`, `/admin` and
+    `/admin?x=1` all normalize to `/admin`, so a folder gate matches however the URL is
+    spelled. Mirrors the interpreter's `_norm_path` (the route gate) so a static file and a
+    route under the same folder are judged by the same rule."""
+    if not p:
+        return "/"
+    p = str(p).split("?", 1)[0]
+    if not p.startswith("/"):
+        p = "/" + p
+    return p[:-1] if len(p) > 1 and p.endswith("/") else p
+
+
+def _path_under(entry, norm_req_path):
+    """True when a normalized request path IS a classification entry or sits under it, at a
+    SEGMENT boundary. `/admin` covers `/admin` and `/admin/users/logo.png`, but never
+    `/administration` -- the same segment-prefix rule the journey route gate uses
+    (`_journey_path_matches`), so one folder declaration governs every file beneath it
+    without listing each one. A `/` entry covers the whole tree."""
+    e = _norm_route_path(entry)
+    if not e:
+        return False
+    if e == "/":
+        return True
+    return norm_req_path == e or norm_req_path.startswith(e + "/")
+
+
+def _collect_path_classes(program):
+    """Enumerate a program's journey path classifications ONCE, at app setup.
+
+    Walks every journey's `public:` / `hidden:` / `authorize:` declarations into three path
+    lists, held on the server and never re-derived per request. So a static request costs at
+    most a prefix check against these lists, and nothing at all when a program declares no
+    classifications. The same enumerable table is what a future robots / sitemap generator
+    reads -- one declaration, every consumer.
+
+    `private:` is deliberately NOT collected: its locked meaning is served-but-unlisted with
+    no runtime gate (see JourneyMeta), so it must never block a static file. Only the two
+    tiers that actually gate a request -- hidden: (404) and authorize: (login) -- plus
+    public: (the explicit override) are collected here.
+    """
+    from mohio_ast import JourneyDecl, JourneyMeta
+    classes = {"public": [], "hidden": [], "authorize": []}
+    for stmt in (getattr(program, "statements", None) or []):
+        if not isinstance(stmt, JourneyDecl):
+            continue
+        for b in (getattr(stmt, "body", None) or []):
+            if isinstance(b, JourneyMeta) and b.kind in classes:
+                for path in (b.value or []):
+                    classes[b.kind].append(path)
+    return classes
+
+
+def _parse_cookie_header(cookie_header):
+    """Parse a raw Cookie header into a {name: value} dict. Extracted so the static folder
+    gate and the GET dispatcher parse cookies exactly one way."""
+    out = {}
+    if cookie_header:
+        for part in cookie_header.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                out[k.strip()] = v.strip()
+    return out
 
 
 def _xml_body(body):
@@ -146,6 +227,16 @@ def _static_roots():
 
 # Set by create_app from the server's app_dir; a module-level cell so the closure can read it.
 _APP_DIR = [None]
+
+
+def _inside_file_area(candidate):
+    """Is this resolved path inside miofile's file area? The same root the interpreter resolves
+    every miofile path against (mohio_interpreter `_exec_MiofileStmt`)."""
+    area = Path(os.environ.get("MIOFILE_ROOT", os.path.join(os.getcwd(), "mio_files"))).resolve()
+    try:
+        return candidate == area or candidate.is_relative_to(area)
+    except AttributeError:                                   # Python < 3.9
+        return os.path.commonpath([str(candidate), str(area)]) == str(area)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -218,8 +309,28 @@ def _declared_status_response(server, status):
         interp.shown = previous
 
 
-def _convention_body(server, url_path):
+def _page_session(req, session_id):
+    """The session a convention page runs in: the one dispatch settled on for this request.
+
+    Dispatch mints a session for a first visit, and replaces an expired or invalidated one, before
+    the page runs, and records the id it settled on in the request it was given. The cookie the
+    request arrived with names neither, so a page looked up by it ran with no `session` and no
+    `request` for every first-time visitor (the banking page context). Falls back to the cookie only
+    when dispatch recorded no session at all."""
+    settled = req.get("__settled_session_id__") if isinstance(req, dict) else None
+    return settled if settled else session_id
+
+
+def _convention_body(server, url_path, session_id=None, http_request=None, allow=None):
     """Run a convention-mapped file and serve whatever it produced, or None to keep the 404.
+
+    `session_id` / `http_request` (2026-09-26): a convention-served page has no
+    handler, so it never went through the session-aware dispatch -- it was run with a bare context,
+    and `require role` on one always refused even for a logged-in caller with the role, because no
+    session was in scope. It now runs inside the request's session context (the same store the
+    handlers share), so a role granted at login is seen exactly as a handler sees it, and the
+    response carries the session cookie the same way. Called without a session (the root probe, a
+    first-time visitor) it runs bare, and `require role` correctly finds nothing.
 
     T1-FRAMEWORK-FOUNDATION Phase 2. This is the whole no-boilerplate promise: a file in a
     served folder answers at its convention URL with no `page` block and no route registration.
@@ -261,15 +372,74 @@ def _convention_body(server, url_path):
     offenders = unsafe_on_get(server.program)
     if offenders:
         src = getattr(server.program, "source_path", None) or url_path
-        return Response(status_code=500,
-                        content=read_only_violation_message(src, url_path, offenders),
-                        media_type="text/plain", headers=CORS_HEADERS)
+        _ro = client_failure_response(500, read_only_violation_message(src, url_path, offenders),
+                                      interp=getattr(server, 'interp', None))
+        # A DELIBERATE refusal, not a convention-path failure: mark it answered so the ROOT
+        # handler SURFACES it instead of swallowing the 500 into the neutral "no home page yet"
+        # placeholder. A top-level seed/upsert on a served page used to read as "no home page",
+        # which sent developers to add an empty route shape as a workaround; the real message
+        # ("this page is read-only; move the write into a handler or seed with `mio run`") names
+        # the actual fix. Non-root convention paths already surfaced it; the root now agrees.
+        _ro.mohio_answered = True
+        return _ro
 
     interp = server.interp
     previous = list(getattr(interp, "shown", []) or [])
+
+    # The request's session context, fetched from the store the handlers share (Batch 37). dispatch()
+    # has already established, expiry-checked and stored it for this request before we get here, so a
+    # plain get() returns the role-bearing context; running the page as its child is what lets
+    # `require role` see the login-granted role. No session (root probe / first visit) -> bare run.
+    _store = getattr(server, "_session_store", None)
+    # A store error here is a REAL failure, not "no session": let it raise so dispatch's caller turns
+    # it into a loud 500, rather than silently degrading a logged-in caller to an anonymous run. A
+    # session that simply does not exist yet returns None from get() with no exception, and that runs
+    # the page bare, which is correct -- `require role` then refuses.
+    _session_ctx = (_store.get(session_id, interp._base_ctx)
+                    if (session_id and _store is not None
+                        and getattr(interp, "_base_ctx", None) is not None)
+                    else None)
+
+    def _apply_session_cookie(resp):
+        """Emit the session cookie on a convention answer, the same way the handler path does, so a
+        convention page reached through the session context also refreshes the cookie (the 403 used
+        to carry none because it never returned through a session-aware path at all). A page's own
+        `miocookie.set` is NOT rendered here on purpose: it is a state change, refused on a convention
+        GET by the read-only guard (mohio_framework.unsafe_on_get lists MioCookieSet), so it never
+        reaches this point -- a convention page that wants to set a cookie moves it into a handler."""
+        if not (session_id and _store is not None and _session_ctx is not None):
+            return resp
+        import time as _t
+        _now = _t.time()
+        _idle, _abs = interp._session_timeout_ceilings(interp._base_ctx)
+        _created = getattr(_session_ctx, "_created_at", _now) or _now
+        _opts = interp._session_cookie_opts(session_id, _idle, _abs, _created, _now)
+        _parts = [f"{_SESSION_COOKIE}={_opts.get('value', '')}"]
+        _exp = _opts.get("expires")
+        if _exp is not None:
+            _parts.append("Max-Age=0" if int(_exp) < 0 else f"Max-Age={int(_exp)}")
+        _parts.append("Path=/")
+        if _opts.get("http_only", True):
+            _parts.append("HttpOnly")
+        if _opts.get("secure", _secure_default(http_request) if http_request is not None else False):
+            _parts.append("Secure")
+        _parts.append(f"SameSite={_opts.get('same_site', 'Lax')}")
+        # EGRESS-EXEMPT: cookies a program set were gated at miocookie.set (_egress('cookie')); the session cookie is the runtime's own id
+        resp.headers["Set-Cookie"] = "; ".join(_parts)
+        return resp
+
     try:
         interp.shown = []
-        _ran = interp.run(server.program)
+        # session_ctx (not request): a convention page runs its TOP-LEVEL to produce its page, so it
+        # must NOT route. Passing `request` here would send a file that also declares a journey/handler
+        # back through the router (request + listeners = route), which is the dispatch that already ran
+        # and returned no-route. The session context alone is what `require role` needs.
+        _ran = interp.run(server.program, session_ctx=_session_ctx)
+        if isinstance(_ran, dict) and _ran.get('_no_route'):
+            # A journey in the file routed itself off the request now in scope and found nothing
+            # for this address: the page has no answer here, the same as producing nothing, which
+            # is what it reported before the page ran in the request's context.
+            _ran = None
         produced = [str(x) for x in (interp.shown or []) if str(x).strip()]
         # A top-level `give back` IS the page's answer -- the file producing output, which is
         # exactly what convention serving serves. `run()` catches the give-back internally and
@@ -281,6 +451,24 @@ def _convention_body(server, url_path):
         # other than to give a `give back` somewhere to live.
         if isinstance(_ran, dict) and 'status' in _ran and not produced:
             interp.shown = previous
+            # A redirect from a top-level `jump to` on a convention-served page: set
+            # Location, bodyless. Sibling of the same drop fixed on the root-route and
+            # handler-dispatch paths -- this one never checked `redirect_to` either, so a
+            # convention page's jump reached the browser as an empty 303 with nowhere to go.
+            _redirect = _ran.get('redirect_to')
+            if _redirect:
+                _resp = Response(status_code=int(_ran.get('status') or 303),
+                                 # EGRESS-EXEMPT: a program's redirect was gated at jump to (_egress('redirect'))
+                                 headers={**CORS_HEADERS, "Location": str(_redirect)})
+                _resp.mohio_answered = True
+                return _apply_session_cookie(_resp)
+            if _ran.get('_mohio_runtime_error') and int(_ran.get('status') or 0) >= 500:
+                # The runtime failed while the page ran: the client gets the reference, the log
+                # the detail (see CLIENT_FAILURE_MESSAGE).
+                _resp = client_failure_response(_ran.get('status'), _ran.get('body'), interp=interp,
+                                                hint=_ran.get('hint') or "")
+                _resp.mohio_answered = True
+                return _apply_session_cookie(_resp)
             _body = _ran.get('body')
             _text = '' if _body is None else str(_body)
             _html = _text.lstrip()[:1] == '<'
@@ -288,7 +476,7 @@ def _convention_body(server, url_path):
                              media_type="text/html" if _html else "text/plain",
                              headers=CORS_HEADERS)
             _resp.mohio_answered = True
-            return _resp
+            return _apply_session_cookie(_resp)
     except _GiveBack as gb:
         # A top-level `give back` IS the page's answer -- it is the file producing output, which
         # is exactly what convention serving serves. Before this it escaped as an exception, the
@@ -307,17 +495,28 @@ def _convention_body(server, url_path):
                          media_type="text/html" if _html else "text/plain",
                          headers=CORS_HEADERS)
         _resp.mohio_answered = True
-        return _resp
+        return _apply_session_cookie(_resp)
     except Exception as exc:
         # Running the page is the response here, so a failure IS the response -- surface it
         # rather than letting it read as "no such page".
         interp.shown = previous
-        return Response(status_code=500,
-                        content=f"{url_path} failed while running: {exc}",
-                        media_type="text/plain",
-                        headers=CORS_HEADERS)
+        _failed = client_failure_response(500, f"{url_path} failed while running: {exc}", interp=interp)
+        # THE PAGE FAILING IS THE ANSWER. Unmarked, the root handler read this 500 as "no home page
+        # yet" and served the placeholder at 200 over a page that had just failed (the banking page
+        # context: a signed-in GET / whose page refused answered 200, and the failure was invisible).
+        _failed.mohio_answered = True
+        return _apply_session_cookie(_failed)
     finally:
         pass
+
+    if not produced and allow:
+        # THE PATH ANSWERS OTHER METHODS AND RENDERS NOTHING for this one: 405 with the methods it
+        # accepts (the sweep, 2026-10-12). It was a 500 "rendered nothing" for a POST-only endpoint.
+        interp.shown = previous
+        return _apply_session_cookie(Response(
+            status_code=405, media_type="application/json",
+            content=json.dumps({"message": f"{url_path} does not answer GET. It accepts {allow}."}),
+            headers={**CORS_HEADERS, "Allow": str(allow)}))
 
     if not produced:
         # FAIL LOUD. A convention-mapped file that answers a direct GET with nothing is a real
@@ -329,8 +528,8 @@ def _convention_body(server, url_path):
         # with NO routes at all simply forgot to render. A file that DOES declare routes
         # answers other requests fine and just has nothing for this GET -- telling its author
         # to "add a listen for route" would send them looking for something already there.
-        from mohio_ast import ListenBlock as _Listen
-        _has_routes = any(isinstance(st, _Listen)
+        from mohio_ast import ListenBlock as _Listen, JourneyDecl as _Journey, TOP_HANDLER_TYPES
+        _has_routes = any(isinstance(st, (_Listen, _Journey) + TOP_HANDLER_TYPES)
                           for st in (getattr(server.program, "statements", None) or []))
         if _has_routes:
             hint = (f"{source} declares routes but none of them answered GET {url_path}, and "
@@ -343,15 +542,14 @@ def _convention_body(server, url_path):
                     f"convention answers with whatever it renders or shows, and this one "
                     f"emitted nothing. Add a `render` block (or a `show`), or give it a "
                     f"`listen for` route if it was never meant to answer a GET.")
-        return Response(status_code=500, content=hint, media_type="text/plain",
-                        headers=CORS_HEADERS)
+        return client_failure_response(500, hint, interp=interp)
 
     body = "\n".join(produced)
     interp.shown = previous
     looks_html = body.lstrip()[:1] == "<"
-    return Response(status_code=200, content=body,
+    return _apply_session_cookie(Response(status_code=200, content=body,
                     media_type="text/html" if looks_html else "text/plain",
-                    headers=CORS_HEADERS)
+                    headers=CORS_HEADERS))
 
 
 # ── how much the server says ──────────────────────────────────────────────────────────
@@ -391,10 +589,139 @@ def log_level():
     return LEVEL_NORMAL
 
 
+def content_disposition(kind, name, fallback):
+    """The Content-Disposition for a file response, safe for any name (OR-7, RULED 2026-10-12).
+
+    THE GUARD IS UNCHANGED: only the last path segment is kept, and quotes, CR, LF and anything
+    unprintable are dropped, so a name cannot break out of the header or point at a path. ADDED: the
+    quoted `filename=` carries an ASCII-only form (anything else, and a `;` or a backslash, becomes
+    `_`), because a header carries no raw non-ASCII and some clients split on a `;`; and RFC 6266's
+    `filename*=UTF-8''...` carries the real name percent-encoded, so `résumé.pdf` saves as itself."""
+    from urllib.parse import quote as _quote
+    base = str(name).replace("\\", "/").rsplit("/", 1)[-1]
+    base = "".join(ch for ch in base if ch.isprintable() and ch not in '"\r\n')
+    if not base:
+        return f'{kind}; filename="{fallback}"'
+    ascii_name = "".join(ch if (32 <= ord(ch) < 127 and ch not in ';\\') else "_" for ch in base)
+    encoded = _quote(base, safe="!#$&+-.^_`|~")
+    if ascii_name == base and encoded == base:
+        return f'{kind}; filename="{base}"'
+    return f'{kind}; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
+
+
+def log_timestamp():
+    """Now, in the audit trail's format (ISO-8601 UTC with a `Z`), to the millisecond."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z")
+
+
+class _StampedStream:
+    """A stream whose every line starts with the time it was written (unit D, RULED 2026-10-12).
+
+    `mio serve` logs request lines, `[mohio.error]` lines and the runtime's other notices through
+    many prints; stamping each print site would leave the next new one unstamped. Wrapping the two
+    streams once stamps every line, whoever prints it. A line written in pieces is stamped once,
+    at its start; concurrent writers are serialized so a stamp never lands mid-line."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._at_start = True
+        self._lock = threading.Lock()
+
+    def write(self, text):
+        if not text:
+            return 0
+        with self._lock:
+            out = []
+            for piece in str(text).splitlines(keepends=True):
+                if self._at_start and piece.strip():
+                    out.append(log_timestamp() + " ")
+                out.append(piece)
+                self._at_start = piece.endswith("\n")
+            self._inner.write("".join(out))
+        return len(text)
+
+    def flush(self):
+        self._inner.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def install_log_timestamps():
+    """Stamp every line `mio serve` writes from here on. Called once the server is about to listen."""
+    if not isinstance(sys.stdout, _StampedStream):
+        sys.stdout = _StampedStream(sys.stdout)
+    if not isinstance(sys.stderr, _StampedStream):
+        sys.stderr = _StampedStream(sys.stderr)
+
+
 def _log_line(text):
     """One line, to stderr, unbuffered enough to survive a crash right after it."""
     import sys as _sys
     print("  " + text, file=_sys.stderr, flush=True)
+
+
+# A FAILURE ON OUR SIDE TELLS THE CLIENT ONLY THAT IT HAPPENED (RULED by Ron 2026-10-08). A 500 used to
+# carry whatever the failure said: database text ("db_error: ... current transaction is aborted"),
+# table and column names, a file path, an exception's own words. That is a map of the server for
+# anyone who can make a request fail. The client now gets one plain sentence and a reference; the
+# full detail goes to the server log under the same reference, so a report quoting it finds it. A
+# 4xx is unchanged: it says what the CALLER did wrong, which is theirs to know. A program's own
+# `give back [500] "..."` is unchanged too: that is the program answering, not the runtime failing.
+CLIENT_FAILURE_MESSAGE = "Something went wrong on our side, and it has been recorded."
+
+
+def _failure_reference(interp=None):
+    ref = getattr(interp, '_request_id', None) if interp is not None else None
+    if not ref:
+        from mohio_interpreter import _mohio_trace_id
+        ref = _mohio_trace_id()
+    return str(ref)
+
+
+# The detail of the last few failures, by reference, held in this process only so the people running
+# it can look one up (`failure_detail`); it never reaches a client. Bounded, oldest dropped first.
+_RECENT_FAILURES = {}
+_RECENT_FAILURES_MAX = 500
+
+
+def _log_failure(reference, status, detail, hint=""):
+    print(f"  [mohio.error] reference={reference} status={status} :: {detail}", flush=True)
+    # The fix travels with the cause: the client gets only the reference, so the log is the one place
+    # the person running the app can read how to correct the failure.
+    hint = str(hint or "").strip()      # a blank hint printed an empty `hint:` line
+    if hint:
+        print(f"    hint: {hint}", flush=True)
+    _RECENT_FAILURES[str(reference)] = str(detail) + (f"\n    hint: {hint}" if hint else "")
+    while len(_RECENT_FAILURES) > _RECENT_FAILURES_MAX:
+        _RECENT_FAILURES.pop(next(iter(_RECENT_FAILURES)))
+
+
+def failure_detail(reference):
+    """The logged detail of a recent failure in this process, by the reference its client was given."""
+    return _RECENT_FAILURES.get(str(reference), '')
+
+
+def client_failure_body(reference):
+    """The JSON body a client gets for a failure on our side."""
+    return {"message": CLIENT_FAILURE_MESSAGE, "reference": reference}
+
+
+def client_refusal_body(info):
+    """The JSON body a client gets for a runtime refusal (a 4xx): what was refused and a reference,
+    never the developer's hint or the program's line number, which are logged under the same
+    reference (log_runtime_error). T1-REFUSAL-LEAKS-DEV-GUIDANCE."""
+    return {"code": info.get("code"), "message": info.get("message"), "reference": info.get("trace")}
+
+
+def client_failure_response(status, detail, interp=None, hint=""):
+    """A plain-text 5xx for the convention-page paths: logs the detail, answers the reference."""
+    from starlette.responses import Response
+    ref = _failure_reference(interp)
+    _log_failure(ref, status, detail, hint)
+    return Response(status_code=int(status), content=f"{CLIENT_FAILURE_MESSAGE} Reference: {ref}\n",
+                    media_type="text/plain", headers=CORS_HEADERS)
 
 
 class MohioServer:
@@ -427,6 +754,13 @@ class MohioServer:
         # A bad value raises here, at startup, rather than on the first request.
         from mohio_framework import resolve as _resolve_framework
         self.framework = _resolve_framework(self.program, where="this app")
+
+        # FOLDER DECLARATION (T0-STATIC-FOLDER-DECLARATION). A journey's hidden:/authorize:
+        # now governs the STATIC FILES under a path, not only its routes -- so a folder is
+        # protected by DECLARATION, the same word that protects a page. Enumerated ONCE here
+        # (never per request) so an ordinary asset pays nothing and the same table is what a
+        # future robots/sitemap generator reads.
+        self._path_classes = _collect_path_classes(self.program)
 
     def _build_session_store(self):
         """Choose the session store: an explicitly registered provider always wins (same
@@ -474,10 +808,50 @@ class MohioServer:
             "sessions":       self._session_store.count(),
         }
 
+    def classify_static_path(self, req_path):
+        """Which access tier a static request falls under: 'hidden', 'authorize', or None (serve).
+
+        public: wins over everything -- an explicit public: subpath overrides a broader hidden:/
+        authorize: above it. Then hidden: (the stronger gate, a 404 with no session) before
+        authorize: (a login gate). None means no journey gates this path and it serves exactly as
+        before. Cheap by construction: returns at once when the program declared no gating
+        classification, so an ordinary app pays nothing per asset. The deny-list, dotfile and
+        leading-underscore FILE rules run separately inside _static_file_response and are
+        unaffected by this -- they protect by NAME at any depth; this protects by DECLARED FOLDER.
+        """
+        classes = getattr(self, "_path_classes", None)
+        if not classes or not (classes["hidden"] or classes["authorize"]):
+            return None
+        norm = _norm_route_path(req_path)
+        if any(_path_under(p, norm) for p in classes["public"]):
+            return None
+        if any(_path_under(p, norm) for p in classes["hidden"]):
+            return "hidden"
+        if any(_path_under(p, norm) for p in classes["authorize"]):
+            return "authorize"
+        return None
+
+    def session_has_verified_role(self, session_id):
+        """True when this session carries a SERVER-VERIFIED role -- the same check authorize:
+        uses for a dynamic route (Context.has_any_roles + roles_verified). No session id -> False,
+        so an anonymous request to an authorize: asset is refused with no store lookup at all. A
+        real store error raises (loud), matching _convention_body: a store fault must not silently
+        downgrade a logged-in caller to anonymous."""
+        if not session_id:
+            return False
+        store = getattr(self, "_session_store", None)
+        base = getattr(self.interp, "_base_ctx", None)
+        if store is None or base is None:
+            return False
+        ctx = store.get(session_id, base)
+        if ctx is None:
+            return False
+        return bool(ctx.has_any_roles() and ctx.roles_verified())
+
     def clear_session(self, session_id):
         self._session_store.delete(session_id)
 
-    def dispatch(self, payload, session_id=None):
+    def dispatch(self, payload, session_id=None, raw_request=None):
         self.request_count += 1
         # MINT a session when the request does not carry one. Without this, a first-time
         # visitor took the plain run() path, which never sets `session` in ctx -- so
@@ -489,12 +863,26 @@ class MohioServer:
         if not session_id:
             import uuid as _uuid
             session_id = _uuid.uuid4().hex
+        # ROW IDENTITY positional marker. A keyless row sends its position under the loop variable
+        # plus a `__mio_positional__<field>` marker. Strip the markers so they are not stray request
+        # fields, and record which identity fields are positions, readable by a handler as
+        # request.positional (the field names). A keyed row sends no marker, so request.positional
+        # stays absent.
+        if isinstance(payload, dict):
+            _marker = '__mio_positional__'
+            _posfields = sorted(k[len(_marker):] for k in payload
+                                if isinstance(k, str) and k.startswith(_marker))
+            if _posfields:
+                for _k in [k for k in payload if isinstance(k, str) and k.startswith(_marker)]:
+                    payload.pop(_k, None)
+                payload['positional'] = _posfields
         try:
             result = self.interp.run_with_session(
                 self.program,
                 request=payload,
                 session_id=session_id,
                 store=self._session_store,
+                raw_request=raw_request,
             )
         except Exception as e:
             if self.verbose:
@@ -506,11 +894,38 @@ class MohioServer:
             # -- not with the audit row written moments earlier in the same request.
             info = format_runtime_error(e, trace_id=getattr(self.interp, '_request_id', None))
             log_runtime_error(info, verbose=self.verbose)
-            return {"status": info["status"], "body": info}
+            if int(info["status"]) >= 500:
+                _RECENT_FAILURES[str(info["trace"])] = f"{info.get('code')}: {info.get('message')}"
+                return {"status": info["status"], "body": client_failure_body(info["trace"])}
+            return {"status": info["status"], "body": client_refusal_body(info)}
 
         if result is None:
+            # A None result means NOTHING answered this request -- no route matched and no page
+            # rendered. For a MUTATION (POST/PUT/DELETE/PATCH) that is a 404, never a 204. Returning
+            # 204 here was a SILENT ACCEPT (Batch 37 item 1, measured on a payments path under
+            # `mio serve .`): a caller posting to a wrong or nonexistent path got a success-shaped
+            # 204 and no row was written, and every "post and check for non-error" test passed. An
+            # unmatched mutation must be as loud as an unmatched GET, which already 404s. A handler
+            # that means an empty success returns `give back [204]` -- a dict here, never None -- so
+            # this only ever fires for a genuinely unmatched request, not for a deliberate 204.
+            _m = str((payload or {}).get('_method', 'GET')).upper()
+            if _m in ('POST', 'PUT', 'DELETE', 'PATCH'):
+                _pth = (payload or {}).get('_path', '')
+                return {"status": 404, "body": {"error": "not_found",
+                        "message": f"No route matches {_m} {_pth}"}}
             return {"status": 204, "body": None}
         if isinstance(result, dict):
+            if result.get('_mohio_runtime_error') and int(result.get('status') or 0) >= 500:
+                _ref = _failure_reference(self.interp)
+                _log_failure(_ref, result.get('status'), result.get('body'), result.get('hint') or "")
+                return {**result, "body": client_failure_body(_ref), "hint": ""}
+            if result.get('_mohio_runtime_error') and 400 <= int(result.get('status') or 0) < 500:
+                # A REFUSAL TELLS THE CALLER WHAT WAS REFUSED, NEVER HOW TO FIX THE PROGRAM
+                # (T1-REFUSAL-LEAKS-DEV-GUIDANCE). The fix is for the person running the app: it
+                # goes to the log under this request's reference, and leaves the response.
+                _ref = _failure_reference(self.interp)
+                _log_failure(_ref, result.get('status'), result.get('body'), result.get('hint') or "")
+                return {**result, "hint": ""}
             return result
         # A bare (non-dict) result is a give-back value, not a {status, body}
         # envelope. Unwrap any MohioValue so the body is the clean value rather
@@ -547,6 +962,11 @@ def _unwrap_mohio(v):
     instead of the clean value the client should see. Duck-typed to avoid a hard
     import cycle with the interpreter.
     """
+    if type(v).__name__ == "MohioValue" and getattr(v, "mohio_type", None) == "datetime":
+        # a datetime is sent as RFC 3339 with its offset (RULED 2026-10-15); stored UTC, sent as UTC
+        import datetime as _dt
+        from mohio_interpreter import _datetime_in_zone
+        return _datetime_in_zone(v.value, _dt.timezone.utc)
     if type(v).__name__ == "MohioValue" and hasattr(v, "value"):
         return _unwrap_mohio(v.value)
     if isinstance(v, dict):
@@ -565,11 +985,11 @@ def _safe_json_bytes(content) -> bytes:
     raising. Module-level so it's importable and unit-testable without pulling in
     starlette.
     """
-    return json.dumps(
+    from mohio_interpreter import _json_dumps_exact
+    return _json_dumps_exact(
         _unwrap_mohio(content),
         ensure_ascii=False,
         allow_nan=False,
-        default=str,
     ).encode("utf-8")
 
 
@@ -683,6 +1103,43 @@ def _with_all_cookies(response, parts):
     for extra in parts[1:]:
         response.raw_headers.append((b"set-cookie", extra.encode("latin-1")))
     return response
+
+
+def _pending_cookie_parts(result, request):
+    """Every Set-Cookie value a dispatch result asks for, built ONE way for every route.
+
+    The POST and non-root GET paths each carried their own copy of this loop, and the ROOT route
+    had none, so `GET /` dropped every cookie the program set, including the session cookie:
+    a form rendered at `/` and posted back came from no session at all, and a `miocookie.set` on
+    the home page silently set nothing (measured 2026-10-06). The GET redirect path also returned
+    before its copy ran, so a `jump to` after a `grant role` lost the rotated session."""
+    pending = result.get("__pending_cookies__") if isinstance(result, dict) else None
+    out = []
+    if not isinstance(pending, dict):
+        return out
+    for cookie_name, cookie_opts in pending.items():
+        parts = [f"{cookie_name}={cookie_opts.get('value', '')}"]
+        if cookie_opts.get('expires') is not None:
+            expires_s = int(cookie_opts['expires'])
+            parts.append("Max-Age=0" if expires_s < 0 else f"Max-Age={expires_s}")
+        parts.append(f"Path={cookie_opts.get('path', '/')}")
+        if cookie_opts.get('domain'):
+            parts.append(f"Domain={cookie_opts['domain']}")
+        if cookie_opts.get('secure', _secure_default(request)):
+            parts.append("Secure")
+        if cookie_opts.get('http_only', True):
+            parts.append("HttpOnly")
+        parts.append(f"SameSite={cookie_opts.get('same_site', 'Lax')}")
+        out.append("; ".join(parts))
+    return out
+
+
+def _cookied(response, parts):
+    """`response` carrying every Set-Cookie in `parts`."""
+    if parts:
+        # EGRESS-EXEMPT: cookies a program set were gated at miocookie.set (_egress('cookie')); the session cookie is the runtime's own id
+        response.headers["Set-Cookie"] = parts[0]
+    return _with_all_cookies(response, parts)
 
 
 
@@ -811,7 +1268,14 @@ def _walk_nodes(node, _seen=None):
     _seen.add(id(node))
     yield node
     for attr in ('statements', 'body', 'journey_body'):
-        for child in (getattr(node, attr, None) or []):
+        # ONLY A STATEMENT LIST is walked. `body` is not always one: on `miomail.send` it is the
+        # message body, an expression, and iterating a ConcatExpr crashed `mio serve` at startup
+        # for any app that mails a built-up body (the session-timeout cookbook recipe, measured).
+        # The other generic walkers in the tree already make this same list check.
+        kids = getattr(node, attr, None)
+        if not isinstance(kids, (list, tuple)):
+            continue
+        for child in kids:
             if hasattr(child, '__dict__'):
                 for sub in _walk_nodes(child, _seen):
                     yield sub
@@ -992,10 +1456,67 @@ class _RequestLineMiddleware:
                       % (scope.get("method", "?"), path[:28], _shown, ms, rid))
 
 
+def _start_owed_drain_loop(interp):
+    """Deliver owed audit records on an interval while the app serves, with nobody asking.
+
+    RULED by Ron, 2026-10-06 (day 2, item 2). The drain after writes covers a busy app; this covers
+    a quiet one, and a restart after a crash, where the records an earlier process left owed would
+    otherwise wait for the next regulated write or an operator. It runs only once the app has the
+    envelope tables (a regulated write made them, now or in an earlier run), so an app with no
+    regulated data never gains them. A pass that fails says so and the next interval tries again;
+    the evidence is durable, so nothing is lost by waiting. MOHIO_AUDIT_RELAY_INTERVAL_SECONDS=0
+    turns it off. Returns the stop event, or None when no loop was started."""
+    if interp is None or not hasattr(interp, '_drain_owed'):
+        return None
+    interval = interp._audit_relay_interval()
+    if not interval:
+        return None
+    import threading
+    stop = threading.Event()
+
+    def _loop():
+        while not stop.wait(interval):
+            db = getattr(interp, '_db', None)
+            if db is None:
+                continue
+            try:
+                if not getattr(db, '_mohio_envelope_ready', False):
+                    _lt = getattr(db, 'list_tables', None)
+                    if _lt is None or interp.AUDIT_ENVELOPE_TABLE not in (_lt() or []):
+                        continue
+                    db._mohio_envelope_ready = True
+                interp._drain_owed(db, None)
+            except Exception as e:
+                # One alert per outage, however many intervals it lasts (item 5).
+                interp._audit_alert(
+                    'background drain',
+                    f"the background delivery of owed audit records failed "
+                    f"({type(e).__name__}: {e}). They remain recoverable with `mio audit relay`, "
+                    f"and later intervals keep trying, backing off.")
+                interp._relay_failed()
+            finally:
+                # Return this thread's lease after every pass. It was never returned, so on MySQL
+                # (REPEATABLE READ) every later pass read through the first pass's snapshot:
+                # `list_tables` could go on not seeing the envelope table a request created after
+                # it, and owed records were never drained on the interval (found 2026-10-06 with
+                # the same stale-snapshot cause as a served read, see Interpreter.run).
+                _rel = getattr(interp, 'release_db_connections', None)
+                if _rel is not None:
+                    try:
+                        _rel()
+                    except Exception:   # nothing leased: the next pass starts clean regardless
+                        pass
+
+    threading.Thread(target=_loop, name="mohio-audit-relay", daemon=True).start()
+    return stop
+
+
 def create_app(server: MohioServer):
     # Root static serving at THIS app's directory (see _static_roots).
     if getattr(server, 'app_dir', None) is not None:
         _APP_DIR[0] = server.app_dir
+    # Owed audit records drain on an interval while the app serves (day 2, item 2).
+    server._owed_drain_stop = _start_owed_drain_loop(getattr(server, 'interp', None))
     try:
         from starlette.applications import Starlette
         from starlette.requests import Request
@@ -1023,6 +1544,13 @@ def create_app(server: MohioServer):
     async def _dispatch_post(request: Request) -> Response:
         ctype = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
         is_form = False
+        # The EXACT received bytes, for webhook signature verification (`verify signature`). Captured
+        # here because this is the one place they exist -- json.loads/parse_qs below turn them into a
+        # dict, and a re-serialized dict would not match a provider's HMAC. Carried to the interpreter
+        # OUT of the request payload (see the `raw_request` arg to dispatch, below), so Mohio code can
+        # never read them. Stays None for multipart and for any path that reads no body; a handler
+        # that declares `verify signature` and gets None fails closed rather than skipping the check.
+        raw_bytes = None
         try:
             if ctype == "application/x-www-form-urlencoded":
                 # A real browser <form> submit. Parse with the standard library so
@@ -1033,6 +1561,7 @@ def create_app(server: MohioServer):
                 raw = await request.body()
                 if len(raw) > _MAX_BODY_BYTES:
                     raise _TooLarge("Request body", _MAX_BODY_BYTES)
+                raw_bytes = raw
                 parsed = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
                 payload = {k: (v[-1] if len(v) == 1 else v) for k, v in parsed.items()}
                 is_form = True
@@ -1067,7 +1596,8 @@ def create_app(server: MohioServer):
                 raw = await request.body()
                 if len(raw) > _MAX_BODY_BYTES:
                     raise _TooLarge("Request body", _MAX_BODY_BYTES)
-                payload = json.loads(raw) if raw else {}
+                raw_bytes = raw
+                payload = json.loads(raw, parse_float=_Decimal) if raw else {}   # exact numbers
         except _TooLarge as _tl:
             return _oversize_response(_tl)
         except Exception:
@@ -1116,6 +1646,11 @@ def create_app(server: MohioServer):
                 req[gk] = payload[gk]
         if is_form:
             req["_form_post"] = True
+        # The client's content preference, so a failed shape-validation on a FORM post can return the
+        # structured field errors (JSON) when the caller wants them -- an API client, or a MioScript
+        # submit, which sends Accept: application/json -- and the re-rendered HTML page (values kept)
+        # only for a plain browser form. Underscore-prefixed, so Mohio code never sees it.
+        req["_accept"] = request.headers.get("accept", "")
         if session_id:
             req["_session"] = session_id
 
@@ -1127,7 +1662,14 @@ def create_app(server: MohioServer):
             print(f"  [POST] {path}  shape={req.get('_shape')}  "
                   f"session={session_id or 'none'}")
 
-        result = server.dispatch(req, session_id=session_id)
+        # Carry the raw bytes and headers on a channel SEPARATE from `req` (the payload that becomes
+        # the Mohio-visible request shape), so signature verification can reach them but Mohio code
+        # cannot. Headers are lowercased for case-insensitive lookup of the signature/timestamp header.
+        raw_request = {
+            "body": raw_bytes,
+            "headers": {k.lower(): v for k, v in request.headers.items()},
+        }
+        result = server.dispatch(req, session_id=session_id, raw_request=raw_request)
 
         status = result.get("status", 200)
         body   = result.get("body")
@@ -1140,39 +1682,33 @@ def create_app(server: MohioServer):
             return Response(status_code=204, headers=CORS_HEADERS)
 
         response_headers = dict(CORS_HEADERS)
-        pending_cookies = result.get("__pending_cookies__") or {}
-        if not isinstance(pending_cookies, dict):
-            pending_cookies = {}
-        set_cookie_parts = []
-        for cookie_name, cookie_opts in pending_cookies.items():
-            parts = [f"{cookie_name}={cookie_opts.get('value', '')}"]
-            if cookie_opts.get('expires') is not None:
-                expires_s = int(cookie_opts['expires'])
-                if expires_s < 0:
-                    parts.append("Max-Age=0")
-                else:
-                    parts.append(f"Max-Age={expires_s}")
-            parts.append(f"Path={cookie_opts.get('path', '/')}")
-            if cookie_opts.get('domain'):
-                parts.append(f"Domain={cookie_opts['domain']}")
-            if cookie_opts.get('secure', _secure_default(request)):
-                parts.append("Secure")
-            if cookie_opts.get('http_only', True):
-                parts.append("HttpOnly")
-            same_site = cookie_opts.get('same_site', 'Lax')
-            parts.append(f"SameSite={same_site}")
-            set_cookie_parts.append("; ".join(parts))
+        if isinstance(result, dict) and result.get("allow"):
+            # A 405 names the methods the path does accept (RFC 9110 requires Allow on a 405).
+            response_headers["Allow"] = str(result["allow"])
+        # `render fragment` marks its response so the client can tell a Mohio-rendered fragment --
+        # which has been through render's escaping and classification -- from any other string, which
+        # has not (Batch 30). MioScript's `inject` places markup only when this header is present; a
+        # raw `give back` string never carries it and is never trusted as markup. Exposed so the
+        # client fetch can read it even cross-origin.
+        if result.get("__mohio_fragment__"):
+            response_headers["X-Mohio-Rendered"] = "fragment"
+            _expose = response_headers.get("Access-Control-Expose-Headers")
+            response_headers["Access-Control-Expose-Headers"] = (
+                (_expose + ", " if _expose else "") + "X-Mohio-Rendered")
+        set_cookie_parts = _pending_cookie_parts(result, request)
 
         # Every cookie must go out. A plain dict cannot hold duplicate Set-Cookie headers, so
         # the first one used to win and the rest were silently dropped -- an app setting a
         # session cookie plus a preference cookie lost one of them with no error.
         if set_cookie_parts:
+            # EGRESS-EXEMPT: cookies a program set were gated at miocookie.set (_egress('cookie')); the session cookie is the runtime's own id
             response_headers["Set-Cookie"] = set_cookie_parts[0]
 
         # A redirect (e.g. `jump to "/path"`): set Location and return a bodyless
         # redirect response so the browser actually navigates.
         redirect_to = result.get("redirect_to")
         if redirect_to:
+            # EGRESS-EXEMPT: a program's redirect was gated at jump to (_egress('redirect'))
             response_headers["Location"] = str(redirect_to)
             return _with_all_cookies(Response(status_code=status, headers=response_headers), set_cookie_parts)
 
@@ -1180,12 +1716,21 @@ def create_app(server: MohioServer):
         # file inline runs it inside this site's own origin, which is how an uploaded
         # page or PDF gets to read the viewer's session. The filename is quoted and
         # stripped of anything that could break out of the header.
+        # `give ... as download` (save) and `give ... as image` (display inline) are the two file
+        # responses. They differ only in the Content-Disposition -- attachment vs inline -- so they
+        # share one binary-serving block: raw bytes, never a JSON envelope. `as download` is served
+        # attachment because serving an uploaded page or PDF inline would run it inside this site's
+        # own origin and let it read the viewer's session; `as image` is display, its type set by the
+        # executor to a checked image/* content type.
         _download = result.get("download")
-        if _download:
-            _safe = str(_download).replace("\\", "/").rsplit("/", 1)[-1]
-            _safe = "".join(ch for ch in _safe if ch.isprintable() and ch not in '"\r\n')
-            _safe = _safe or "download"
-            response_headers["Content-Disposition"] = f'attachment; filename="{_safe}"'
+        _inline = result.get("inline")
+        if _download or _inline is not None:
+            if _download:
+                response_headers["Content-Disposition"] = content_disposition("attachment", _download, "download")
+            elif _inline:
+                response_headers["Content-Disposition"] = content_disposition("inline", _inline, "image")
+            else:
+                response_headers["Content-Disposition"] = "inline"
             _body = body
             if _body is None:
                 _body = b""
@@ -1278,10 +1823,23 @@ def create_app(server: MohioServer):
             info = format_runtime_error(e)
             log_runtime_error(info, verbose=server.verbose)
             print(f"  [serve /] root route raised: {e}")
-            return JSONResponse(info, status_code=info["status"])
+            if int(info["status"]) >= 500:
+                _RECENT_FAILURES[str(info["trace"])] = f"{info.get('code')}: {info.get('message')}"
+                return JSONResponse(client_failure_body(info["trace"]), status_code=info["status"])
+            return JSONResponse(client_refusal_body(info), status_code=info["status"])
         if isinstance(result, dict):
             status = result.get("status", 200)
             body = result.get("body")
+            # A redirect from the root handler (`jump to "/path"`): set Location, bodyless.
+            # Same fix as the non-root GET path below, just for `/` -- a root `request for
+            # sh.X at /` that jumped used to fall into the plain HTMLResponse below, which
+            # has no Location header, so the browser never navigated; the 303 reached the
+            # client with an empty body and nowhere to go.
+            if result.get("redirect_to"):
+                return _cookied(Response(status_code=status,
+                                         # EGRESS-EXEMPT: a program's redirect was gated at jump to (_egress('redirect'))
+                                         headers={**CORS_HEADERS, "Location": str(result["redirect_to"])}),
+                                _pending_cookie_parts(result, request))
             # Fall through to index.html / the neutral placeholder ONLY for a genuine
             # "no root route" (the interpreter marks it `_no_route`) or a bodyless 204.
             # An EXPLICIT give-back -- give back 404, give back 500, give back ok,
@@ -1290,8 +1848,8 @@ def create_app(server: MohioServer):
             # test swallowed every empty-body and 404 give-back into the placeholder at
             # 200, silently dropping the status.
             if not result.get("_no_route") and status != 204:
-                return HTMLResponse("" if body is None else str(body),
-                                    status_code=status)
+                return _cookied(HTMLResponse("" if body is None else str(body), status_code=status),
+                                _pending_cookie_parts(result, request))
         # T1-FRAMEWORK-FOUNDATION Phase 2 -- serve by default at the ROOT too.
         # `/` has its own handler (declared home page, then index.html, then the neutral
         # placeholder), so the seam further down never saw it. A render-only index.mho
@@ -1306,7 +1864,8 @@ def create_app(server: MohioServer):
         # so the two kinds of 500 must be told apart by WHO produced them, never by the number:
         # `mohio_answered` marks a give-back the program made on purpose, while an unmarked 500
         # is the convention path reporting its own failure and still falls through.
-        _conv_root = _convention_body(server, "/")
+        _conv_root = _convention_body(server, "/", session_id=_page_session(req, session_id),
+                                      http_request=request)
         if _conv_root is not None and (getattr(_conv_root, "mohio_answered", False)
                                        or _conv_root.status_code != 500):
             return _conv_root
@@ -1318,6 +1877,12 @@ def create_app(server: MohioServer):
             idx = _static_file_response(_name)
             if idx is not None:
                 return idx
+        # `/` HAS HANDLERS, JUST NOT FOR GET, and nothing above rendered: 405 naming what it accepts,
+        # not the "no home page yet" placeholder at 200 (the sweep, 2026-10-12).
+        if isinstance(result, dict) and result.get("status") == 405 and result.get("allow"):
+            return JSONResponse(status_code=405, headers={**CORS_HEADERS, "Allow": str(result["allow"])},
+                                content=(result.get("body") if isinstance(result.get("body"), dict)
+                                         else {"message": str(result.get("body"))}))
         # Nothing to show: the general runtime makes NO assumption (no bundled demo front end).
         # The app is expected to provide a root route, an index.mho, or an index.html.
         return HTMLResponse(_NEUTRAL_INDEX, status_code=200)
@@ -1376,6 +1941,14 @@ def create_app(server: MohioServer):
                     inside = os.path.commonpath([str(candidate), str(root)]) == str(root)
                 if not inside:
                     continue
+                # THE FILE AREA IS NEVER A STATIC FOLDER. miofile keeps its files under one root
+                # (MIOFILE_ROOT, else ./mio_files), and that root sat inside the app directory
+                # static serving reads, so a file written with `miofile.write "secret.txt"` was
+                # served to anyone at /mio_files/secret.txt (measured 2026-10-06: 200 with the
+                # contents, no session). The file area is reached through the program's own
+                # handlers, which is where its access rules live, never directly.
+                if _inside_file_area(candidate):
+                    return None
                 if candidate.exists() and candidate.is_file():
                     suffix = candidate.suffix.lower()
                     mime_types = {
@@ -1424,8 +1997,17 @@ def create_app(server: MohioServer):
                     # seconds, and returning visitors kept the old file for a day. Revalidate
                     # cheaply instead: a repeat request becomes a 304, and a redeploy changes
                     # the tag so the new file is picked up at once.
+                    #
+                    # PRIVATE, NOT PUBLIC, by default. A file served from a tenant's application root is
+                    # served in that tenant's context, and `public` invites a shared cache -- a CDN or a
+                    # reverse proxy -- to store and re-serve it, which the server cannot rule safe per
+                    # file (the seed leak was `public, max-age=60`, so a proxy in front held the
+                    # authority config even after the file stopped being served). `private` still lets
+                    # the BROWSER cache and revalidate (the returning-visitor case above, via the ETag
+                    # 304), but does not hand a tenant's file to a shared cache. Public CDN caching of a
+                    # genuinely public asset is then a deliberate choice at the edge, not a default.
                     headers = {**CORS_HEADERS,
-                               "Cache-Control": "public, max-age=60, must-revalidate"}
+                               "Cache-Control": "private, max-age=60, must-revalidate"}
                     etag = _etag_for(candidate)
                     if etag:
                         headers["ETag"] = etag
@@ -1444,22 +2026,48 @@ def create_app(server: MohioServer):
         falls through to a final static 404 -- never a silent blank page."""
         raw_path = request.path_params.get("path", "")
 
+        # 0. `map route as redirect` -- a declared redirect answers INSTEAD of any file or route,
+        # matching the directory-mode router (create_multi_app). Checked before static/page serving
+        # so a moved URL redirects rather than 404ing. Single-file serve collects these onto the
+        # server in cmd_serve; before this fix only directory mode wired them, so `mio serve one.mho`
+        # let every redirect fall through to a silent 404.
+        _redir = getattr(server, "redirects", None) or {}
+        if _redir:
+            _rkey = "/" + raw_path.lstrip("/")
+            _rkey = _rkey if _rkey == "/" else _rkey.rstrip("/")
+            _hit = _redir.get(_rkey)
+            if _hit is not None:
+                _dst, _code = _hit
+                return Response(status_code=int(_code),
+                                # EGRESS-EXEMPT: a static-file trailing-slash redirect; no program value
+                                headers={"Location": str(_dst), **CORS_HEADERS})
+
         # 1. Real static file first.
         static_resp = _static_file_response(
             raw_path, request.headers.get("If-None-Match", ""))
         if static_resp is not None:
+            # FOLDER DECLARATION GATE. A journey's hidden:/authorize: governs the static files
+            # under a path, so a folder is protected by DECLARATION. classify_static_path returns
+            # None at once for an app with no gating classification, so an ordinary asset serves
+            # with no extra work; hidden: costs one in-memory prefix check; only an authorize:
+            # asset does a session-store lookup. So a page loading twenty ungated assets pays
+            # nothing here, and twenty assets under an authorize: folder pay one session lookup
+            # each (an in-memory dict get, or one row read on a Postgres session store).
+            _cls = server.classify_static_path("/" + raw_path.lstrip("/"))
+            if _cls == "hidden":
+                # Not served, no session needed -- the same 404 a hidden: route returns.
+                return Response(status_code=404, headers=CORS_HEADERS)
+            if _cls == "authorize":
+                _sid = (_session_header(request)
+                        or _parse_cookie_header(
+                            request.headers.get("Cookie", "")).get(_SESSION_COOKIE))
+                if not server.session_has_verified_role(_sid):
+                    return Response(status_code=403, headers=CORS_HEADERS)
             return static_resp
 
         # 2. Forward to the interpreter as a GET request.
         full_path = request.url.path or "/"
-        cookie_header = request.headers.get("Cookie", "")
-        request_cookies = {}
-        if cookie_header:
-            for part in cookie_header.split(";"):
-                part = part.strip()
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    request_cookies[k.strip()] = v.strip()
+        request_cookies = _parse_cookie_header(request.headers.get("Cookie", ""))
         session_id = (_session_header(request)
                       or request_cookies.get(_SESSION_COOKIE))
 
@@ -1476,20 +2084,38 @@ def create_app(server: MohioServer):
         if server.verbose:
             print(f"  [GET] {full_path}  session={session_id or 'none'}")
 
-        result = server.dispatch(req, session_id=session_id)
+        # Same raw channel the POST path builds (see _dispatch_post), so `verify signature` on a
+        # `request for sh.X` handler has real bytes to check against -- a GET body is unusual but
+        # legal HTTP, and some providers sign a GET callback over an (often empty) body. Without
+        # this every GET handler declaring `verify signature` got the SAME "no raw request bytes"
+        # 500 refusal regardless of whether the signature was valid, because this call never
+        # passed one: `_exec_request_listener` had real verification wired in, but the server
+        # layer never gave it anything to verify.
+        raw_body = await request.body()
+        raw_request = {
+            "body": raw_body,
+            "headers": {k.lower(): v for k, v in request.headers.items()},
+        }
+        result = server.dispatch(req, session_id=session_id, raw_request=raw_request)
         status = result.get("status") if isinstance(result, dict) else 200
         body   = result.get("body") if isinstance(result, dict) else result
 
-        # A redirect from a GET handler (`jump to "/path"`): set Location, return bodyless.
+        # A redirect from a GET handler (`jump to "/path"`): set Location, return bodyless, with
+        # the cookies the request set (a rotated session after `grant role` must reach the browser).
         if isinstance(result, dict) and result.get("redirect_to"):
-            return Response(status_code=status,
-                            headers={**CORS_HEADERS, "Location": str(result["redirect_to"])})
+            return _cookied(Response(status_code=status,
+                                     # EGRESS-EXEMPT: a program's redirect was gated at jump to (_egress('redirect'))
+                                     headers={**CORS_HEADERS, "Location": str(result["redirect_to"])}),
+                            _pending_cookie_parts(result, request))
 
         # Fall through to a static 404 only for a genuine no-route 404 (marked by the
         # interpreter) or an empty 204/None. An intentional `give back 404 "..." [as xml]`
         # from a handler carries a body/content-type and is served normally below.
         _no_route = isinstance(result, dict) and result.get('_no_route')
-        if status in (204, None) or (status == 404 and (_no_route or not body)):
+        # A 405 from dispatch is marked no-route too: a page that renders answers its own GET, and
+        # only a path that renders nothing answers 405 (a form page posts to itself).
+        _allow = result.get('allow') if (isinstance(result, dict) and status == 405) else None
+        if status in (204, None) or (status in (404, 405) and (_no_route or not body)):
             # T1-FRAMEWORK-FOUNDATION Phase 2 -- SERVE BY DEFAULT.
             #
             # A file that only renders has no route to match, so dispatch marks `_no_route`
@@ -1502,33 +2128,30 @@ def create_app(server: MohioServer):
             # 404 on purpose: answering endpoint calls with no page routing is the entire
             # point of that value, so inventing a page for it would be wrong. A declared but
             # not-yet-built framework fails LOUD rather than quietly serving a web page.
-            _conv = _convention_body(server, full_path)
+            _conv = _convention_body(server, full_path, session_id=_page_session(req, session_id),
+                                     http_request=request, allow=_allow)
             if _conv is not None:
                 return _conv
+            if _allow:
+                from starlette.responses import JSONResponse
+                return JSONResponse(status_code=405, headers={**CORS_HEADERS, "Allow": str(_allow)},
+                                    content=(body if isinstance(body, dict) else {"message": str(body)}))
             _declared = _declared_status_response(server, 404)
             if _declared is not None:
                 return _declared
             return Response(status_code=404, headers=CORS_HEADERS)
 
         response_headers = dict(CORS_HEADERS)
+        # `render fragment` marks its response so the client can tell a Mohio-rendered fragment --
+        # which has been through render's escaping and classification -- from any other string (Batch
+        # 30). The POST dispatcher sets the same header; a fragment can be the answer to either method.
+        if isinstance(result, dict) and result.get("__mohio_fragment__"):
+            response_headers["X-Mohio-Rendered"] = "fragment"
+            _expose = response_headers.get("Access-Control-Expose-Headers")
+            response_headers["Access-Control-Expose-Headers"] = (
+                (_expose + ", " if _expose else "") + "X-Mohio-Rendered")
         # Honor any cookies the page set (e.g. a session cookie).
-        get_cookie_parts = []
-        pending_cookies = result.get("__pending_cookies__") if isinstance(result, dict) else None
-        if isinstance(pending_cookies, dict):
-            for cookie_name, cookie_opts in pending_cookies.items():
-                parts = [f"{cookie_name}={cookie_opts.get('value', '')}"]
-                if cookie_opts.get('expires') is not None:
-                    expires_s = int(cookie_opts['expires'])
-                    parts.append("Max-Age=0" if expires_s < 0 else f"Max-Age={expires_s}")
-                parts.append(f"Path={cookie_opts.get('path', '/')}")
-                if cookie_opts.get('domain'):
-                    parts.append(f"Domain={cookie_opts['domain']}")
-                if cookie_opts.get('secure', _secure_default(request)):
-                    parts.append("Secure")
-                if cookie_opts.get('http_only', True):
-                    parts.append("HttpOnly")
-                parts.append(f"SameSite={cookie_opts.get('same_site', 'Lax')}")
-                get_cookie_parts.append("; ".join(parts))
+        get_cookie_parts = _pending_cookie_parts(result, request)
         # EVERY cookie, not the first one. This loop used to assign the header and then `break`,
         # so a page setting two cookies delivered one and dropped the other with no error --
         # measured over real HTTP: `miocookie.set "alpha"` + `miocookie.set "beta"` on a GET
@@ -1537,18 +2160,25 @@ def create_app(server: MohioServer):
         # because a plain dict cannot hold two headers of the same name; this path never called
         # it. Same bug, same building, one path fixed and one not.
         if get_cookie_parts:
+            # EGRESS-EXEMPT: cookies a program set were gated at miocookie.set (_egress('cookie')); the session cookie is the runtime's own id
             response_headers["Set-Cookie"] = get_cookie_parts[0]
 
         content_type = result.get("content_type") if isinstance(result, dict) else None
         # `give ... as download`: the browser saves the file instead of displaying it.
         # This is the GET path; _dispatch_post carries the same branch. Both are needed,
         # since a download can be the answer to either.
+        # `give ... as download` (attachment/save) and `give ... as image` (inline/display) share one
+        # binary-serving block, differing only in the Content-Disposition (the GET path; the POST
+        # builder above carries the same branch, since either can answer either method).
         _download = result.get("download") if isinstance(result, dict) else None
-        if _download:
-            _safe = str(_download).replace("\\", "/").rsplit("/", 1)[-1]
-            _safe = "".join(ch for ch in _safe if ch.isprintable() and ch not in '"\r\n')
-            _safe = _safe or "download"
-            response_headers["Content-Disposition"] = f'attachment; filename="{_safe}"'
+        _inline = result.get("inline") if isinstance(result, dict) else None
+        if _download or _inline is not None:
+            if _download:
+                response_headers["Content-Disposition"] = content_disposition("attachment", _download, "download")
+            elif _inline:
+                response_headers["Content-Disposition"] = content_disposition("inline", _inline, "image")
+            else:
+                response_headers["Content-Disposition"] = "inline"
             _b = body
             if _b is None:
                 _b = b""
@@ -1645,8 +2275,24 @@ def create_app(server: MohioServer):
 # DIRECTORY MODE  --  one .mho file per page, each at its own URL
 # ══════════════════════════════════════════════════════════════
 
+def _dev_refused_page(url, info):
+    """The 503 a route answers in `mio serve --dev` when its file did not load: the file, the lines
+    and the reason, never the source. Escaped, because a compiler message can carry `<`."""
+    import html as _html
+    lines = ", ".join(str(n) for n in info.get("lines") or [])
+    where = f"{info.get('file', '?')}" + (f", line {lines}" if lines else "")
+    body = ("<!doctype html><meta charset=\"utf-8\"><title>503 -- this page did not load</title>"
+            "<h1>This page did not load</h1>"
+            f"<p><code>{_html.escape(str(url))}</code> is served by <code>{_html.escape(where)}</code>, "
+            f"which did not load: {_html.escape(str(info.get('reason', '')))}.</p>"
+            "<p>Development mode serves the rest of the app. Run <code>mio check</code> on the file, "
+            "fix what it reports and restart <code>mio serve</code>. This server is DEGRADED and NOT "
+            "DEPLOYABLE.</p>")
+    return body.encode("utf-8")
+
+
 def create_multi_app(programs, interps, verbose=False, app_dir=None, redirects=None,
-                     status_responses=None):
+                     status_responses=None, refused_routes=None):
     """Serve a folder of .mho files (mio serve myapp/). Each file was mapped to a
     URL by the CLI (index.mho -> /, contact.mho -> /contact). Here we build a full
     single-file app per program (reusing create_app, so form parsing, guard verify,
@@ -1658,9 +2304,20 @@ def create_multi_app(programs, interps, verbose=False, app_dir=None, redirects=N
     every per-file MohioServer had app_dir=None and static resolved against the
     process cwd, so `GET /style.css` returned empty in directory mode."""
     apps = {}
+    # ONE SESSION STORE FOR THE WHOLE APPLICATION (Batch 37 item 3). Each per-URL MohioServer builds
+    # its OWN session store in __init__, so in directory mode a role granted at login on one page was
+    # written to that page's store and was invisible to the next page -- which returned 403 "no
+    # server-verified role is present for this session", for both the maker and the checker. A
+    # directory is one application; its pages share one session. The stores are otherwise identical
+    # (same backend, same env), so the first server's store is adopted by every page here.
+    _shared_store = None
     for url, program in programs.items():
         _srv = MohioServer(program, interps[url], verbose=verbose,
                            app_dir=app_dir, route_path=url)
+        if _shared_store is None:
+            _shared_store = _srv._session_store
+        else:
+            _srv._session_store = _shared_store
         # Every app carries the declared responses AND the means to render one: a `[404] /page`
         # answer is a real page, rendered per request the way any other page is, not a string
         # captured once at boot.
@@ -1692,6 +2349,8 @@ def create_multi_app(programs, interps, verbose=False, app_dir=None, redirects=N
     # before route matching. A redirect that fell through to the route table would be shadowed
     # by whatever happened to be mounted there, which is the opposite of what it says.
     _redirects = dict(redirects or {})
+    # `mio serve --dev` only: the routes of files that did not load, each answering 503 by name.
+    _refused = {(u if u == "/" else u.rstrip("/")): info for u, info in (refused_routes or {}).items()}
 
     async def _router(scope, receive, send):
         if scope.get("type") != "http":
@@ -1700,6 +2359,16 @@ def create_multi_app(programs, interps, verbose=False, app_dir=None, redirects=N
             return
         _path = scope.get("path", "/")
         _key = _path if _path == "/" else _path.rstrip("/")
+        _dead = _refused.get(_key)
+        if _dead is not None:
+            print(f"  {scope.get('method', 'GET'):<6} {_path:<28} 503  (development: "
+                  f"{_dead.get('file', '?')} did not load)", flush=True)
+            _page = _dev_refused_page(_path, _dead)
+            await send({"type": "http.response.start", "status": 503,
+                        "headers": [(b"content-type", b"text/html; charset=utf-8"),
+                                    (b"content-length", str(len(_page)).encode())]})
+            await send({"type": "http.response.body", "body": _page})
+            return
         _hit = _redirects.get(_key)
         if _hit is not None:
             _dst, _code = _hit

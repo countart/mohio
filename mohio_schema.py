@@ -61,6 +61,22 @@ TYPE_MAP = {
 }
 
 
+# Grammar type words beyond TYPE_MAP (TYPE_NAME in mohio.lark): each is a real declared type.
+_GRAMMAR_EXTRA_TYPES = {
+    "email": "text", "url": "text", "base64": "text", "map": "json", "any": "text",
+    "image": "file", "audio": "file", "video": "file", "pdf": "file", "file": "file",
+}
+
+
+def _is_currency_code(t):
+    """A currency type (USD, BHD, ...) -- the interpreter's own currency table is the one list."""
+    try:
+        from mohio_interpreter import MohioInterpreter
+        return str(t).upper() in MohioInterpreter._CURRENCIES
+    except Exception:  # noqa: BLE001 -- an import failure must not turn a type into a typo
+        return str(t).isupper() and len(str(t)) == 3
+
+
 def normalize_type(t):
     # T1-SILENT-SWEEP-BATCH7 (2026-08-15): an unrecognized scalar type name (a typo, e.g.
     # `age as itn`) used to be indistinguishable from "no type declared at all" -- both
@@ -76,6 +92,19 @@ def normalize_type(t):
     key = t.lower()
     if key in TYPE_MAP:
         return TYPE_MAP[key]
+    # THE GRAMMAR'S OWN TYPE WORDS, so a canonical type is never refused as a typo. The map above
+    # predates `dec`, the scaled and padded decimals, `text.long`, the currency codes and the media
+    # types, and refused every one ("Unrecognized field type 'dec'") -- a false refusal of the
+    # canonical decimal spelling on any real program. A dotted form is judged by its root.
+    root = key.split('.')[0]
+    if root in ('dec', 'decimal'):
+        return "number"
+    if root == 'text':
+        return "text"
+    if key in _GRAMMAR_EXTRA_TYPES:
+        return _GRAMMAR_EXTRA_TYPES[key]
+    if _is_currency_code(t):
+        return "number"
     if '.' in t:
         return "text"
     raise ValueError(
@@ -95,15 +124,17 @@ def extract_schema_from_program(program, source_file=""):
     from mohio_ast import ShapeDecl, ShapeField, ShapeFieldModifier
 
     tables = {}
+    # A shape that names no table. RULED by Ron, 2026-10-05: a table name is never DERIVED from a
+    # shape name. The old convention pluralized one (`Delivery` became `deliverys`, a table that
+    # exists nowhere), and the check then compared a real program against an invented table. Such a
+    # shape is recorded here by name, and `mio schema check` says plainly that it was skipped.
+    shapes_without_table = []
 
     for stmt in (program.statements or []):
         if not isinstance(stmt, ShapeDecl):
             continue
 
         shape_name = stmt.name
-        # Convention: ShapeName -> table name is snake_case plural
-        # e.g. Member -> members, PaymentData -> payment_data
-        table_name = _shape_to_table(shape_name)
 
         def _describe(field_list):
             out = {}
@@ -140,37 +171,23 @@ def extract_schema_from_program(program, source_file=""):
                 "fields": _describe(getattr(_tbl, 'fields', None)),
             }
 
-        loose = _describe(stmt.fields)
-        # An all-table shape contributes no conventional table at all. Emitting an empty one
-        # would put a table nobody declared into the manifest, and a manifest is read back by
-        # `validate_field_references` -- a fabricated table there becomes a fabricated fact.
-        if loose or not (getattr(stmt, 'tables', None) or {}):
-            tables[table_name] = {
-                "shape":  shape_name,
-                "fields": loose,
-            }
+        # A shape with loose fields and no `<name> as table` binding names no table, so it
+        # contributes none: emitting one under a guessed name would put a table nobody declared
+        # into the manifest, and the manifest is read back by `validate_field_references` -- a
+        # fabricated table there becomes a fabricated fact.
+        # Its field types are still validated: a typo'd type fails loud whether or not the shape
+        # names a table (T1-SILENT-SWEEP-BATCH7's fail-loud must not depend on the binding).
+        _describe(stmt.fields)
+        if not (getattr(stmt, 'tables', None) or {}):
+            shapes_without_table.append(shape_name)
 
     return {
         "version":   "1.0",
         "generated": datetime.datetime.utcnow().isoformat() + "Z",
         "source":    str(source_file),
         "tables":    tables,
+        "loose": shapes_without_table,   # shapes that name no table (a coder-facing key: one word)
     }
-
-
-def _shape_to_table(shape_name):
-    """
-    Convert PascalCase shape name to snake_case plural table name.
-    Member → members
-    PaymentData → payment_data
-    TransactionRecord → transaction_records
-    """
-    # Insert underscore before uppercase letters
-    s = re.sub(r"(?<!^)(?=[A-Z])", "_", shape_name).lower()
-    # Pluralize simply — add s unless ends in s already
-    if not s.endswith("s"):
-        s += "s"
-    return s
 
 
 # ── Schema manifest I/O ────────────────────────────────────────────────────────
@@ -178,6 +195,7 @@ def _shape_to_table(shape_name):
 def write_schema(schema, output_path):
     """Write schema manifest to .mhoschema file."""
     path = Path(output_path)
+    # EGRESS-EXEMPT: a schema file of field names and types; no value
     path.write_text(json.dumps(schema, indent=2), encoding="utf-8")
     return path
 
@@ -209,108 +227,240 @@ def find_schema_file(source_file):
 
 # ── Field reference validation ─────────────────────────────────────────────────
 
-def validate_field_references(source, schema, filename=""):
-    """
-    Validate all db.* field references in source against schema manifest.
+# T1-SCHEMA-CHECK-AST-REWRITE (ruled by Ron, 2026-10-03, Order item 8): the regex-over-text
+# version above (git history) scanned raw source LINES for patterns like `find X in db.TABLE`
+# and `where FIELD `, guessing at structure the real parser already knows exactly. A guess is
+# wrong whenever the actual program does not look like the guess -- measured directly: a real
+# app reported 107 false SCHEMA_FIELD_UNKNOWN errors, because the regex could not tell a real
+# field assignment from any other "word value"-shaped line (a `show`, a nested clause, a
+# continuation), and had no entry in its ad-hoc keyword-exclusion list for every verb this
+# language has grown. An incomplete exclusion list turning a working program into false
+# refusals is exactly the standing-rule failure CLAUDE.md names: "an incomplete list turns
+# working features into FALSE REFUSALS... harder to catch because it looks like caution."
+#
+# This version walks the REAL parsed AST instead -- the same parser/transformer every other
+# compiler check uses -- so a field reference is read from a real `FieldValue`/`MatchClause`/
+# `WhereClause`/`AndClause` node, never guessed from text. WHAT THIS CHECKS: `save`/`update`/
+# `save or update` field assignments, and `find`/`retrieve`/`grab`'s own `match`/`where`/`and`
+# clauses, against a table that IS declared in the schema manifest. WHAT THIS DOES NOT COVER,
+# named rather than silently skipped (see SCHEMA_CHECK_COVERAGE below, printed by `mio schema
+# check` itself): a table with no backing shape (no schema to check against, the same
+# philosophy MongoRuntime's own `supports_field_validation = False` already states for a
+# document store); a native `with`/`with.required`/`with.all` join's own CHILD-side fields; a
+# computed or dynamically-built field name (only a literal name is checkable); `match any` /
+# `no.match` composite blocks' own pairs (parsed, not yet walked); views (Mohio has none yet).
+# A table present in the manifest with MORE real columns than any one statement happens to
+# reference is never an error -- referencing a subset of a table's fields is always valid.
+SCHEMA_CHECK_COVERAGE = {
+    "checked": [
+        "save / save or update / update -- each field assignment against the target table",
+        "find / retrieve / grab -- match, where, and and clauses against the source table",
+    ],
+    "not_covered": [
+        "a table with no backing shape (no schema exists to check it against) -- listed by name "
+        "in every run",
+        "a shape with no `<name> as table` binding (a table name is never guessed from a shape "
+        "name) -- listed by name in every run",
+        "a native join's (with / with.required / with.all) own child-side fields",
+        "a computed or dynamically-built field name (only a literal name is checkable)",
+        "match any / no.match composite blocks",
+        "views (Mohio has none yet)",
+    ],
+}
 
-    Scans source text for patterns like:
-        find X in db.TABLE where FIELD is ...
-        save to db.TABLE\n    FIELD value
+
+def validate_field_references(source, schema, filename="", unchecked=None, program=None):
+    """
+    Validate all db.* field references in source against schema manifest, by walking the
+    REAL parsed AST (see T1-SCHEMA-CHECK-AST-REWRITE above for why, not a text-pattern guess).
 
     Returns list of (error_code, message, line_number) tuples.
     Raises nothing — caller decides what to do with errors.
+
+    `unchecked`, when a dict is passed, is filled with every table the program references that
+    has no backing shape, mapped to the first line it is used on: there is no schema to check it
+    against, so it is reported as not checked, never as an error.
+
+    `program` is the program `mio check` already built (the cached parse, includes and journey
+    merged); pass it and nothing is parsed again. Without it the source is parsed here, and a source
+    that does not parse is reported as NOT CHECKED rather than as having valid references.
     """
     errors = []
     if not schema:
         return errors
 
     tables = schema.get("tables", {})
-    lines = source.splitlines()
 
-    # Track current db context (which table we're operating on)
-    current_table = None
-    in_save_block = False
-    in_find_block = False
+    from lark import Lark
+    from mohio_transformer_ast import transform as ast_transform
+    import mohio_data
+    from dataclasses import fields as dc_fields, is_dataclass
+    from mohio_ast import FieldValue
 
-    for lineno, line in enumerate(lines, 1):
-        stripped = line.strip()
+    if program is not None:
+        prog = program
+    else:
+        grammar = mohio_data.GRAMMAR_PATH.read_text(encoding="utf-8-sig")
+        grammar_lines = [l for l in grammar.splitlines() if not l.strip().startswith("//")]
+        parser = Lark("\n".join(grammar_lines), parser="earley", ambiguity="resolve",
+                      propagate_positions=True)
+        try:
+            tree = parser.parse(source)
+            prog = ast_transform(tree, source)
+        except Exception as e:
+            # NOT "no errors". Returning nothing here made `mio schema check` print "All field
+            # references valid" for a file that does not parse, a pass about references nobody
+            # read. The real parser error is `mio check`'s to report; this says the check did
+            # not happen and points there.
+            return [("SCHEMA_NOT_CHECKED",
+                     f"{filename or 'this file'} does not parse, so its field references were "
+                     f"not checked ({type(e).__name__}). Run: mio check {filename or '<file>'}",
+                     0)]
 
-        # Detect block entry
-        find_m = re.match(r"find\s+\w+\s+in\s+db\.(\w+)", stripped)
-        if find_m:
-            current_table = find_m.group(1)
-            in_find_block = True
-            in_save_block = False
-            if current_table not in tables:
-                errors.append(("SCHEMA_TABLE_UNKNOWN",
-                    f"db.{current_table} at line {lineno} — "
-                    f"table not declared in any shape. "
-                    f"Declare: shape {_table_to_shape(current_table)}",
-                    lineno))
-            continue
+    if unchecked is None:
+        unchecked = {}
 
-        save_m = re.match(r"(?:save|upsert|update)(?:\s+(?:to|in|or update))?\s+db\.(\w+)", stripped)
-        if save_m:
-            current_table = save_m.group(1)
-            in_save_block = True
-            in_find_block = False
-            if current_table not in tables:
-                errors.append(("SCHEMA_TABLE_UNKNOWN",
-                    f"db.{current_table} at line {lineno} — "
-                    f"table not declared in any shape.",
-                    lineno))
-            continue
+    def _check_field(table, field_name, line):
+        if table not in tables:
+            return   # not backed by a shape -- no schema to check against, not an error
+        table_fields = tables[table]["fields"]
+        if field_name not in table_fields and field_name != "id":
+            errors.append(("SCHEMA_FIELD_UNKNOWN",
+                f"Field \"{field_name}\" at line {line} does not exist "
+                f"in db.{table}. "
+                f"Known fields: {', '.join(table_fields.keys())}",
+                line))
 
-        # Block exit
-        if re.match(r"(?:find|save|upsert|update):\s*done", stripped):
-            current_table = None
-            in_save_block = False
-            in_find_block = False
-            continue
+    def _table_of(ref):
+        # THE SAME ANSWER THE RUNTIME GIVES. The program `mio check` builds names a write's target
+        # as a DottedName (`db.customers`, marked by the pretokenizer), not a node with `.table`;
+        # reading only `.table` found no table for any write in a real program, so every field
+        # reference went unchecked and the check reported them all valid. The interpreter's own
+        # splitter is used, so a reference cannot mean one table here and another at run.
+        from mohio_interpreter import MohioInterpreter
+        from mohio_ast import DottedName
+        if ref is None:
+            return None
+        if isinstance(ref, DottedName):
+            raw = ".".join(str(p) for p in (ref.parts or []))
+        elif isinstance(ref, str):
+            raw = ref
+        else:
+            raw = getattr(ref, "table", None)
+        if raw is None:
+            return None
+        return MohioInterpreter._split_table_ref(raw)[0]
 
-        # Field reference in where clause
-        if in_find_block and current_table and current_table in tables:
-            where_m = re.match(r"where\s+(\w+)\s+", stripped)
-            if where_m:
-                field_name = where_m.group(1)
-                table_fields = tables[current_table]["fields"]
-                if field_name not in table_fields and field_name not in ("id",):
-                    errors.append(("SCHEMA_FIELD_UNKNOWN",
-                        f"Field \"{field_name}\" at line {lineno} does not exist "
-                        f"in db.{current_table}. "
-                        f"Known fields: {', '.join(table_fields.keys())}",
-                        lineno))
+    def _check_table(table, line):
+        # A table no shape declares is NOT an error: a view, a table another system owns, or one
+        # written before shapes declared tables all have no schema here to check against. It is
+        # listed as not checked (RULED by Ron, 2026-10-05), never refused, and its name is never
+        # turned back into a guessed shape name.
+        if table and table not in tables and table not in unchecked:
+            unchecked[table] = line
 
-        # Field assignment in save/update block
-        if in_save_block and current_table and current_table in tables:
-            # Lines like: "    email   form.email" or "    name value"
-            field_m = re.match(r"(\w+)\s+\S", stripped)
-            if field_m and not any(kw in stripped for kw in
-                ("match", "on.", "save:", "upsert:", "update:", "//", "##")):
-                field_name = field_m.group(1)
-                table_fields = tables[current_table]["fields"]
-                if field_name not in table_fields:
-                    errors.append(("SCHEMA_FIELD_UNKNOWN",
-                        f"Field \"{field_name}\" at line {lineno} does not exist "
-                        f"in db.{current_table}. "
-                        f"Known fields: {', '.join(table_fields.keys())}",
-                        lineno))
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        kind = type(node).__name__
+        line = getattr(node, "line", 0) or 0
 
+        if kind == "SaveBlock":
+            table = _table_of(node.target)
+            _check_table(table, line)
+            for fv in (node.fields or []):
+                if isinstance(fv, FieldValue):
+                    _check_field(table, fv.name, getattr(fv, "line", line) or line)
+
+        elif kind in ("UpdateBlock", "SaveOrUpdateBlock"):
+            table = _table_of(getattr(node, "source", None))
+            _check_table(table, line)
+            for b in (getattr(node, "body", None) or getattr(node, "fields", None) or []):
+                bk = type(b).__name__
+                if bk in ("FieldValue", "MatchClause", "WhereClause", "AndClause"):
+                    _check_field(table, b.field if bk != "FieldValue" else b.name,
+                                getattr(b, "line", line) or line)
+            if getattr(node, "match", None) is not None:
+                _check_field(table, node.match.field, getattr(node.match, "line", line) or line)
+
+        elif kind == "RemoveBlock":
+            table = _table_of(getattr(node, "source", None))
+            _check_table(table, line)
+            cond = getattr(node, "match", None) or getattr(node, "condition", None)
+            if cond is not None and hasattr(cond, "field"):
+                _check_field(table, cond.field, getattr(cond, "line", line) or line)
+
+        elif kind in ("FindBlock", "RetrieveBlock", "GrabBlock"):
+            table = _table_of(getattr(node, "source", None))
+            _check_table(table, line)
+            for b in (getattr(node, "body", None) or []):
+                bk = type(b).__name__
+                if bk in ("MatchClause", "WhereClause", "AndClause"):
+                    _check_field(table, b.field, getattr(b, "line", line) or line)
+                # MatchBlock / MatchAnyBlock / NoMatchBlock (.pairs) and JoinBlock's own
+                # child-side fields are NOT walked here -- named in SCHEMA_CHECK_COVERAGE's
+                # own "not_covered" list, not silently skipped.
+
+        for f in dc_fields(node):
+            walk(getattr(node, f.name, None))
+
+    walk(prog)
     return errors
-
-
-def _table_to_shape(table_name):
-    """Convert snake_case table name back to PascalCase shape name."""
-    return "".join(word.capitalize() for word in table_name.split("_")).rstrip("s")
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def generate_schema(source, source_file=""):
+def merge_schemas(schemas, source=""):
+    """One manifest for a whole app, from the manifest of each of its pages.
+
+    Every page of an app is assembled with its includes and its journey, so the same shape
+    usually reaches several pages; the same table from the same shape is one table. Two DIFFERENT
+    definitions of one table name are refused, naming the pages, because a manifest that kept
+    either one would describe a table the other page does not write.
+    """
+    tables, loose, origin = {}, [], {}
+    for page, sch in schemas:
+        for tname, tdef in (sch.get("tables") or {}).items():
+            if tname in tables and tables[tname] != tdef:
+                raise ValueError(
+                    f"table {tname} is declared two different ways: by shape "
+                    f"{tables[tname].get('shape')} as reached from {origin[tname]}, and by shape "
+                    f"{tdef.get('shape')} as reached from {page}. Give one table one shape.")
+            if tname not in tables:
+                tables[tname] = tdef
+                origin[tname] = page
+        for sn in (sch.get("loose") or []):
+            if sn not in loose:
+                loose.append(sn)
+    return {
+        "version":   "1.0",
+        "generated": datetime.datetime.utcnow().isoformat() + "Z",
+        "source":    str(source),
+        "tables":    tables,
+        "loose":     loose,
+    }
+
+
+def generate_schema(source, source_file="", program=None):
     """
     Parse source and generate schema manifest from shape declarations.
     Returns the schema dict. Does not write to disk.
+
+    `program`, when given, is the program `mio schema` built through the same cached parse `mio
+    check` uses, so the source is not parsed a second time (the whole cost on a large app).
     """
+    if program is not None:
+        try:
+            return extract_schema_from_program(program, source_file)
+        except Exception as e:
+            return {"version": "1.0", "generated": datetime.datetime.utcnow().isoformat() + "Z",
+                    "source": str(source_file), "tables": {}, "error": str(e)}
     from lark import Lark
     from mohio_transformer_ast import transform as ast_transform
     import mohio_data

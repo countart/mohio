@@ -13,7 +13,7 @@ Two steps.
 
 **1. Mark the health fields.** Field by field:
 
-```
+```mohio
 shape Patient
     name as text
     diagnosis as text [phi]
@@ -22,7 +22,7 @@ shape: done
 
 Or seal an entire shape as a PHI zone, which marks every field in it:
 
-```
+```mohio
 shape Intake [phi]
     ssn as text
     dob as text

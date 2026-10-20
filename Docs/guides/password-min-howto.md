@@ -56,10 +56,10 @@ The `error` message replaces the default for any failure on that field.
 `min` validates the password the user types. It has nothing to do with storage.
 Always hash before saving:
 
-```
-hash signup.password as hashed using bcrypt
+```mohio
+hash Signup.password as hashed using bcrypt
 save to db.users
-    email    signup.email
+    email    Signup.email
     password hashed
 save: done
 ```

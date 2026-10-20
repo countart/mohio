@@ -220,6 +220,12 @@ class WriteIntent:
     # write that runs once has no iteration-to-iteration question at all.
     in_loop: bool = False
 
+    # A write that sits inside a CONDITION -- a `check` branch (when/otherwise), an `unless`, or a
+    # try branch (on.failure/on.success) -- may never run, and a compliance reviewer reading a flat
+    # list cannot tell it from one that always runs. Set by the walk, which is what knows where the
+    # write SITS (the same reason transaction membership is passed in rather than read from the node).
+    conditional: bool = False
+
     normalized: bool = True
     not_normalized_reason: str = ""
 
@@ -242,9 +248,9 @@ class WriteIntent:
             return "%-16s %-10s NOT NORMALIZED (%s)" % (self.verb, where,
                                                         self.not_normalized_reason)
         return ("%-16s %-9s %-10s rows=%-15s fields=%-28s result=%-15s txn=%-15s "
-                "regulated=%s" % (self.verb, self.operation, where, self.row_source,
+                "regulated=%s conditional=%s" % (self.verb, self.operation, where, self.row_source,
                                   fields, self.result, self.transaction,
-                                  self.compliance.regulated))
+                                  self.compliance.regulated, self.conditional))
 
 
 # ── lowering ────────────────────────────────────────────────────────────────────────────
@@ -561,32 +567,49 @@ def lower_program(program, classifier=None):
     out = []
     state = {"sector": False}
 
-    def walk(node, txn):
+    def walk(node, txn, conditional=False):
         if node is None:
             return
         if isinstance(node, (list, tuple)):
             for n in node:
-                walk(n, txn)
+                walk(n, txn, conditional)
             return
         kind = type(node).__name__
         if kind == "SectorDecl" or (kind.endswith("Sector") and getattr(node, "name", None)):
             state["sector"] = True
         if kind == "TransactionBlock":
-            walk(getattr(node, "body", None), TransactionScope.ENCLOSING_BLOCK)
+            walk(getattr(node, "body", None), TransactionScope.ENCLOSING_BLOCK, conditional)
             return
         if kind in _WRITE_NODES:
             intent = lower_write(node, classifier, state["sector"], txn)
             if intent is not None:
+                intent.conditional = conditional
                 out.append(intent)
             # a write node's own children hold no further writes worth a second visit
             return
+        # A conditional container's branches MAY NOT run, so a write reached through one is
+        # conditional. Once set, it stays set for everything nested deeper -- a write two checks
+        # down is still conditional. `check`/`unless` are the conditions; `on.failure`/`on.success`
+        # are the try branches that run only on that outcome.
+        _cond_here = conditional or kind in _CONDITIONAL_NODES
+        # `always` and `catch`/`on_failure`/`on_success` were absent from this list, so a write in a
+        # try branch was invisible to `mio writes` -- a write a compliance reviewer could never see.
+        # They are walked now. The outcome branches (catch/on.failure/on.success) are conditional via
+        # their node kinds below; `always` runs regardless, so it stays unconditional.
         for attr in ("body", "statements", "when_clauses", "otherwise", "handlers",
-                     "listeners", "body_stmts"):
-            walk(getattr(node, attr, None), txn)
+                     "listeners", "body_stmts", "catch", "on_failure", "on_success", "always"):
+            walk(getattr(node, attr, None), txn, _cond_here)
 
     walk(getattr(program, "statements", None) or getattr(program, "body", None),
          TransactionScope.PER_ROW)
     return out
+
+
+# The branch nodes whose bodies run only when a condition or an outcome is met. A write inside any
+# of them may never run. Loops are deliberately NOT here: iteration is a separate axis, carried by
+# `in_loop`, and a loop that runs is not a condition that may be skipped.
+_CONDITIONAL_NODES = ("CheckBlock", "CheckWhen", "OtherwiseClause", "UnlessGuard",
+                      "OnFailure", "OnSuccess", "CatchClause")
 
 
 # ── the compile-time classifier ─────────────────────────────────────────────────────────

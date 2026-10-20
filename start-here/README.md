@@ -1,113 +1,113 @@
 <!-- Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC. -->
 <!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
-# Start Here
+# Start Here -- the reading path
 
-New to Mohio? This folder is your front door. Everything linked here is current and verified,
-if you copy an example, it compiles. (The wider `Docs/` folder holds internal notes and older
-material, you do not need it to get going.)
+New to Mohio and nobody to ask? This is the map. It is ordered on purpose: read the first list in
+sequence, reach for the second when a task needs it, and do not read the third list front to back. If you
+copy an example from anything linked here, it compiles.
 
 ## What Mohio is
 
-Mohio is an AI-native language where AI reasoning and compliance are compiler-enforced
-primitives, not libraries you bolt on. One line:
+Mohio is an AI-native language where AI reasoning and compliance are compiler-enforced primitives, not
+libraries you bolt on. One line:
 
 > **Write intent. Execute reason. See everything.**
 
-AI-native does not mean AI writes your app. You write Mohio — it has rules, a compiler, and a
-grammar. AI-native means `ai.decide`, `ai.audit`, `ai.agent`, and `ai.explain` are part of the
-language itself, governed and audited by the compiler. **Mohio is a programming language. You
-write it. AI reasons inside it.**
+AI-native does not mean AI writes your app. You write Mohio -- it has rules, a compiler, and a grammar.
+AI-native means `ai.decide`, `ai.audit`, `ai.agent`, and `ai.explain` are part of the language itself,
+governed and audited by the compiler. Files end in `.mho`. The command is `mio`. Every line passes the
+**Walk-By Test**: a non-technical person reads it and gets the intent in about three seconds.
 
-Files end in `.mho`. The command is `mio`. Every line passes the **Walk-By Test**: a
-non-technical person reads it and gets the intent in about three seconds.
+---
 
-## 1. Install and run your first program
+## Read first, in order
 
-Start with **[QUICKSTART.md](QUICKSTART.md)**. You will clone the repo, run
-`pip install -e .` (which also installs the `mio` command), and run your first `.mho` file,
-a program, a web route, an AI decision, and a sector declaration, in about ten minutes.
+This is the whole path from nothing to a working, data-backed, served app. Nine steps, each building on
+the last.
 
-## 2. Learn the language
+**Before the path, read [What every program needs](../Docs/manual/mohio-manual-what-every-program-needs.md).**
+It shows, in one runnable program, the four things almost every example assumes and leaves out to stay short: a
+connection, a shape, a handler, and a role granted at login. Read it once and every short snippet afterward reads
+as the one new line on top of those four, instead of a mystery that refuses.
 
-Short, example-driven guides. Every example in these has been run:
+1. **Install and your first program** -- **[QUICKSTART.md](QUICKSTART.md)**. Install Mohio, run a `.mho`
+   file, a program, a web route, an AI decision, and a sector declaration, in about ten minutes.
+2. **First programs, in book form** -- `../Docs/manual/mohio-manual-part1-ch1-hello-mohio.md` (install,
+   the first program, the five rules, values, text and choices, numbers and casts, and the one shift a
+   reader from another language needs: Mohio has no classes).
+3. **A small app with real data** -- `../Docs/manual/mohio-manual-part1-ch2-small-app-real-data.md` (a
+   shape, a route, a validated form, a database write, a list-back: the smallest complete web app).
+4. **The core constructs** -- values and output
+   (`../Docs/manual/mohio-manual-part2-ch6-variables-and-output.md`), text
+   (`../Docs/manual/mohio-manual-part2-ch8-working-with-text.md`), decisions
+   (`../Docs/manual/mohio-manual-part3-ch11-decisions.md`), loops
+   (`../Docs/manual/mohio-manual-part3-ch12-loops.md`).
+5. **Shapes** -- `../Docs/manual/mohio-manual-part5-ch16-shapes.md`, the data contract at the center of
+   everything, and the no-classes model: `../Docs/guides/mohio-mental-model-no-classes.md`.
+6. **Handlers and data** -- listening for requests
+   (`../Docs/manual/mohio-manual-part8-ch29-listening-for-requests.md`), reading and writing data
+   (`../Docs/manual/mohio-manual-part7-data-and-persistence.md` and the query language,
+   `../Docs/guides/mioql-user-guide.md`).
+7. **Tasks and outcomes** -- reusable logic (`../Docs/manual/mohio-manual-part4-ch14-tasks.md`) and what
+   happens when something fails (`../Docs/manual/mohio-manual-part4-ch15-errors-and-outcomes.md`).
+8. **Structure** -- folders, the spine, and page classification
+   (`../Docs/manual/mohio-manual-part5-ch23-journeys.md`), and route path parameters
+   (`../Docs/manual/mohio-manual-part5-ch20-route-path-parameters.md`).
+9. **When something refuses, and what is not built** -- read these two EARLY, not last. Why Mohio refuses
+   things (`../Docs/manual/mohio-manual-why-mohio-refuses.md`) turns a refusal from friction into a
+   signal, and **What is not built yet** (`../Docs/manual/mohio-manual-what-is-not-built.md`) is the
+   honest boundary: if you meet a word that refuses as "declared, not built," that file lists it. A
+   partner who checks there first loses no time to a feature that was never wired.
 
-- **Decisions (the No-IF way)** — `check / when / otherwise`, `unless`, and reacting to
-  outcomes with `on.failure` / `on.success`. See `../docs/conditionals.md`.
-- **Loops** -- `repeat`, `while`, `each`, `stop`, `skip`. See `../Docs/guides/Mohio-Loops-Explainer.md`.
-- **Tasks and call** — reusable logic with `task`, `give back`, `call`. See
-  `../Docs/guides/Mohio-Tasks-and-Call-Explainer.md`.
-- **Strings and status codes** — text, multi-line prose, and HTTP responses. See
-  `../Docs/guides/Mohio-Strings-and-Status.md`.
-- **Casts and coercion** — `as.int`, `as.decimal.2`, and friends. See
-  `../Docs/guides/Mohio-Casts-and-Coercion.md`.
-- **MioQL (the query language)** — `find`, `retrieve`, `save`, `match`, `where`. See
-  `../Docs/guides/mioql-user-guide.md`.
-- **App structure** — pages, includes, journeys, and serving. See
-  `../Docs/guides/USER_MANUAL_app_structure.md`.
-- **Databases** -- what is supported and how to connect. See `../Docs/guides/databases-supported.md`.
-- **Getting started, from zero** -- every foundational form (values, `hold`/`lock`, text,
-  numbers, `check`/`when`/`otherwise`, `unless`), for someone who has never coded before.
-  See `../Docs/manual/mohio-manual-getting-started.md`.
-- **Serving an app, one-card reference** -- install, run, check, environment variables, and
-  troubleshooting, on one page. See `../Docs/guides/mohio-serve-quickstart.md`.
-- **The no-classes mental model** -- for anyone coming from Java, C#, PHP, or Python:
-  `shape` describes, `task` acts, and the closest thing to a method. See
-  `../Docs/guides/mohio-mental-model-no-classes.md`.
-- **Your first real app** -- a shape, a route, a validated form, a database write, a
-  list-back, and a search box, built step by step. See
-  `../Docs/guides/mohio-first-app-tutorial.md`.
-- **A protected feature, end to end** -- search, validation, and `require role` wired
-  together on one route, the real shape of a gated feature. See
-  `../Docs/guides/mohio-protected-search-tutorial.md`.
+---
 
-The complete, always-current keyword catalog, every word with its status and a verified
-example, is the generated **[LANGUAGE-REFERENCE.md](LANGUAGE-REFERENCE.md)**. When you are
-unsure whether a form exists or is current, that file is the source of truth.
+## Read when you need it
 
-**The Mohio Manual, Part I: First Programs** -- the same ground as this list, in book form, all
-five chapters written and verified, read in order:
-`../Docs/manual/mohio-manual-part1-ch1-hello-mohio.md` (install through the no-classes mental model),
-`../Docs/manual/mohio-manual-part1-ch2-small-app-real-data.md` (a real, served, data-backed app),
-`../Docs/manual/mohio-manual-part1-ch3-setting-up-ai.md` (provider keys, configuring `ai.decide`),
-`../Docs/manual/mohio-manual-part1-ch4-app-that-reasons.md` (a real AI decision and its audit trail),
-`../Docs/manual/mohio-manual-part1-ch5-mohio-as-your-backend.md` (`framework: api`, no page routing).
-Part II onward is not a finished book yet, but a first pass of core-construct chapters is
-written and verified out of order, wherever the manual was thinnest: variables and output
-(`../Docs/manual/mohio-manual-part2-ch6-variables-and-output.md`), case transforms
-(`../Docs/manual/mohio-manual-part2-ch8-working-with-text.md`), decisions
-(`../Docs/manual/mohio-manual-part3-ch11-decisions.md`), loops
-(`../Docs/manual/mohio-manual-part3-ch12-loops.md`), tasks
-(`../Docs/manual/mohio-manual-part4-ch14-tasks.md`), errors and outcomes
-(`../Docs/manual/mohio-manual-part4-ch15-errors-and-outcomes.md`), shapes
-(`../Docs/manual/mohio-manual-part5-ch16-shapes.md`), data and persistence
-(`../Docs/manual/mohio-manual-part7-data-and-persistence.md`), listening for requests
-(`../Docs/manual/mohio-manual-part8-ch29-listening-for-requests.md`), and money
-(`../Docs/manual/mohio-manual-part2-money.md`) -- exact decimal math, the full built currency set with
-its formatting, safe math across money and plain numbers, cross-currency refusal, and a real
-database round trip. Sector governance, `flow`/`walk`, and `map` are deliberately not covered
-yet -- each is still being verified elsewhere in this repo, and gets its own chapter once that
-lands.
+Not part of the first path; reach for the chapter when the task calls for it.
 
-## 3. See it work
+- **Money** -- exact decimal, the currency set, safe math, `no.symbol`:
+  `../Docs/manual/mohio-manual-part2-money.md`.
+- **Files and uploads** -- what is served and what is private
+  (`../Docs/guides/FILES-AND-SERVING.md`), durable uploads and signed links
+  (`../Docs/manual/mohio-manual-part6-ch26-durable-uploads.md`).
+- **Webhooks** -- `../Docs/manual/mohio-manual-part8-ch31-webhook-signatures.md`.
+- **MioScript** (the browser layer) -- `../Docs/manual/mohio-manual-part5-ch24-mioscript.md`.
+- **AI create and agents** -- `../Docs/manual/mohio-manual-part7-ch36-ai-create-and-agent.md`.
+- **Maps, flow, and walk** -- `../Docs/manual/mohio-manual-part7-ch27-maps-flow-and-walk.md`.
+- **Databases, and the compliance floor** -- use whatever database you like; compliance sets a
+  minimum for what can carry a durable audit trail. See `../Docs/guides/databases-supported.md`.
+- **Deploying** -- getmohio.com, your own machine, or a server you run yourself:
+  `../Docs/guides/deploying-a-mohio-project.md`.
+- **Compliance and sectors** -- `../Docs/guides/compliance.md` and the audit trail
+  (`../Docs/guides/audit-trail.md`), when you are in a regulated sector.
 
-Small, standalone examples live in `../examples/`:
+---
 
-- `emoji_hello.mho` -- the smallest program, and a first taste of langmaps (Mohio written
-  in more than one language).
-- `klingon_hello.mho` -- the same idea through another language pack.
-- `contact.mho` -- a web form that saves to a database.
-- `particularllc-skeleton.mho` -- a fuller site skeleton.
+## Reference, not learning (do not read front to back)
 
-Fuller, real-world-shaped demos live in `../tests/`:
+Consult these when you need to look one thing up. They are catalogs, not lessons.
 
-- `fraud_demo_simple.mho` — the smallest AI decision, no database.
-- `fraud_demo.mho` — a full fraud screener with a database and audit trail.
-- `member_dashboard.mho` — a data-driven read endpoint.
-- `patient_intake.mho` — registration and triage in a healthcare sector.
+- **[LANGUAGE-REFERENCE.md](LANGUAGE-REFERENCE.md)** -- the complete, always-current keyword catalog,
+  every word with its status and a verified example. The source of truth when you are unsure a form
+  exists or is current.
+- **Casts and coercion** (`../Docs/guides/Mohio-Casts-and-Coercion.md`), the **punctuation card**
+  (`../Docs/guides/mohio-punctuation-card.md`), **retired forms**
+  (`../Docs/guides/RETIRED-FORMS-REFERENCE.md`), **two-word forms that work today**
+  (`../Docs/guides/two-word-forms-what-works-today.md`).
+- The **loops**, **tasks**, and **strings** explainers under `../Docs/guides/` cover the same ground as
+  the chapters above, in guide form. Prefer the chapters; the explainers are there if you want a second
+  pass on one topic.
 
-Run any of them with `mio run examples/<file>.mho` or `mio run tests/<file>.mho` (add
-`--request-file` and `--seed` as the QUICKSTART shows). The live text adventure is at
-**zork.mohio.io**.
+---
+
+## See it work
+
+Small, standalone examples live in `../examples/`: `emoji_hello.mho` (the smallest program),
+`contact.mho` (a web form that saves to a database), `particularllc-skeleton.mho` (a fuller site).
+Fuller demos live in `../tests/`: `fraud_demo_simple.mho` (the smallest AI decision, no database),
+`fraud_demo.mho` (a full fraud screener with an audit trail), `member_dashboard.mho` (a data-driven read
+endpoint), `patient_intake.mho` (registration in a healthcare sector). Run any with
+`mio run <file>.mho`. The live text adventure is at **zork.mohio.io**.
 
 ## The five rules that never change
 
@@ -122,5 +122,5 @@ Run any of them with `mio run examples/<file>.mho` or `mio run tests/<file>.mho`
 - Discord: https://discord.gg/9tq7tGSNYE
 - GitHub: https://github.com/countart/mohio
 
-Welcome. You are writing in a language almost nobody else has used yet. Break things and tell
-us what confused you, that feedback is what makes Mohio better.
+Welcome. You are writing in a language almost nobody else has used yet. Break things and tell us what
+confused you; that feedback is what makes Mohio better.

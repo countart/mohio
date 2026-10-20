@@ -18,7 +18,7 @@ and the reaction sit right next to the thing they are about.
 The body goes on the next line, indented. `otherwise` is the catch-all. The block closes
 with `check: done`.
 
-```
+```mohio
 score 120
 check score
     when score is more than 100
@@ -51,6 +51,10 @@ These are the canonical forms and they compile with every comparison. (Symbol op
 like `>` exist for inside `( ... )` math, but in a `when` the words read better and are
 preferred.)
 
+A comparison runs only between values of the same kind. A value of one kind against another kind refuses
+at check rather than guessing a shared meaning: `when score is more than true` does not read `true` as
+`1`. The same rule holds in a `where` or `match` filter and in arithmetic.
+
 ## unless: one action, one exception
 
 When there is a single action and a single condition that should suppress it, `unless` is
@@ -70,8 +74,8 @@ decide.
 This is the other half of the No-IF idea. When an operation can fail, you do not run it and
 then `if`-check a result. You attach the reactions to the operation itself:
 
-```
-connect db as sqlite from env.DATABASE_URL
+```mohio
+connect db from env.DATABASE_URL
 
 try
     save to db.orders
@@ -92,29 +96,45 @@ try: done
 - **`always`** runs after either path, for the cleanup or the log that has to happen
   regardless.
 
-The same handlers attach inline to a data read, so the not-found case lives right where the
-read is:
+The same handlers attach inline to a data read, but they react to whether the read itself
+ERRORED, not to whether it found anything:
 
-```
+```mohio
 retrieve member from db.members
     match id to request.member_id
     on.failure
-        give back [404] "Member not found."
+        give back [503] "The member store is unavailable."
 retrieve: done
 ```
 
-You are still making a decision, "what happens if this does not work", but it reads as a
-reaction next to the action, not as a separate `if` three lines later.
+A read that matches no row is NOT a failure. Finding nothing is a normal, empty result, so
+`on.failure` never fires for it. Test the not-found case with `is empty` on the result, right
+next to the read:
 
-> **Scope of the not-found reaction.** `on.failure` on a single-row `retrieve` is the
-> not-found pattern to use (verified: an absent row triggers `on.failure`). Detecting an
-> **empty result from a multi-row `find`** — a `when empty` / `when found` condition on the
-> result — does **not** reliably fire yet; treat that as under review.
+```mohio
+retrieve member from db.members
+    match id to request.member_id
+retrieve: done
+check member
+    when member is empty
+        give back [404] "Member not found."
+    otherwise
+        give back [200] member.name
+check: done
+```
+
+> **Not found is empty, not a failure (verified, VERSIONS.md 4.9.0).** A query that matches no
+> rows returns a normal empty result and runs the ordinary path; `on.failure` means the
+> operation ERRORED (the database was unreachable, a table was missing) and it never fires for a
+> no-match. Put the not-found reaction in a `when ... is empty` branch, or in `otherwise`, and
+> keep `on.failure` for real errors. This holds for both a single-row `retrieve` and a multi-row
+> `find`, verified on SQLite and Postgres.
 
 ## Why it is built this way
 
 Every one of these passes the Walk-By Test: a person with no coding background can read
-`when score is more than 100` or `on.failure give back 404` and know exactly what happens.
+`when score is more than 100` or `when member is empty give back 404` and know exactly what
+happens.
 There are no nested pyramids, no `else if` ladders, and no gap between an operation and the
 handling of its result. The structure of the decision is the structure of the sentence.
 

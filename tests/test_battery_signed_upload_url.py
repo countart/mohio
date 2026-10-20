@@ -103,9 +103,8 @@ miofile: done
 
 hold target "receipts/invoice-001.pdf"
 
-sign %%s for target
+sign %%s for target as link
     expires in %%s
-    named link
 sign: done
 
 show link

@@ -85,7 +85,10 @@ _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ENV = dict(os.environ, PYTHONPATH=_ROOT_DIR, DATABASE_URL=':memory:',
             MOHIO_ENCRYPTION_KEY='testkey')
 
-_PROG = ('amt 100\n'
+# The record needs a store to land in (refused at check without one, 2026-10-09), which is not the
+# destination-name contract under test here.
+_PROG = ('connect db from env.DATABASE_URL\n'
+         'amt 100\n'
          'ai.decide d returns boolean\n'
          '    confidence above 0.85\n'
          '    weigh amt\n'

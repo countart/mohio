@@ -219,7 +219,7 @@ PROG = ('sector: scantest\n'
 
 SECDIR = os.path.join(TMP, "sec")
 os.makedirs(os.path.join(SECDIR, "sectors"), exist_ok=True)
-with open(os.path.join(SECDIR, "sectors", "sector-scantest.sector"), "w", encoding="utf-8") as fh:
+with open(os.path.join(SECDIR, "sectors", "sector-scantest.mho"), "w", encoding="utf-8") as fh:
     fh.write(SECTOR)
 with open(os.path.join(SECDIR, "scan.mho"), "w", encoding="utf-8") as fh:
     fh.write(PROG)

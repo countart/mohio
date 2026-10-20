@@ -71,6 +71,24 @@ ALIASES = {}
 
 DEFAULT = 'web'
 
+# A framework being BUILT (it serves) does not mean `mio create <framework>` can write a project
+# for it. The starter is a fixed set of files -- a rendered index page and a journey spine -- and
+# that shape is a `web` page. An `api` serves no page and a `game` needs its own scaffold plus the
+# MioScript game primitives, so writing the web starter for either hands the developer the wrong
+# shape. Only `web` has a starter today; the rest refuse until a per-framework starter is built
+# (scaffold-catalog work), the same way a declared-but-unbuilt framework refuses.
+STARTER_BUILT = frozenset({DEFAULT})
+
+
+def starter_not_built_message(value: str) -> str:
+    base = canonical_base(value)
+    what = BUILT.get(base, '')
+    return (f"`{base}` is a built framework ({what}), but `mio create {base}` has no starter yet. "
+            f"The only project a starter writes today is the `{DEFAULT}` one -- a rendered index "
+            f"page -- and writing that for `{base}` would hand you the wrong shape. Create a "
+            f"`{DEFAULT}` project with `mio create <name>` for now, or ask for the `{base}` starter "
+            f"to be built (it is scaffold-catalog work, named and not yet designed).")
+
 
 def canonical_base(value: str) -> str:
     """The framework a value names, ignoring any dotted sub-profile.
@@ -214,51 +232,119 @@ _WRITES_ON_GET = {
     'SendStmt':          'send',
 }
 
-# A handler is where a state change belongs, so the scan does not look inside one.
-_HANDLER_NODES = ('ListenBlock', 'RequestInboundBlock', 'ConnectionBlock', 'RequestOutboundBlock')
+# A handler is where a state change belongs, so the scan does not look inside one. Batch 16: the
+# standalone handlers (`new sh.X`, `change`, a `from` connector webhook) are boundaries too -- they
+# used to sit inside a synthetic ListenBlock that stopped the walk; now that each stands alone, the
+# walk must stop at each one directly, or a `save` inside a top-level `new` would be misread as a
+# state change on a convention GET.
+_HANDLER_NODES = ('ListenBlock', 'RequestInboundBlock', 'ConnectionBlock', 'RequestOutboundBlock',
+                  'NewBlock', 'ChangeBlock', 'FromConnectorBlock')
 
 _SAFE_HTTP_METHODS = frozenset({'get', 'head', 'options'})
+
+
+def _tasks_by_name(program):
+    """Every `task` declaration in the assembled program, by name. A journey brings its tasks into
+    scope for every page under it, so a call on any route can resolve here."""
+    tasks = {}
+    seen = set()
+
+    def collect(node, depth=0):
+        if depth > 60 or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                collect(x, depth + 1)
+            return
+        if type(node).__name__ == 'TaskDecl':
+            nm = getattr(node, 'name', None)
+            if nm and nm not in tasks:
+                tasks[nm] = node
+        if not hasattr(node, '__dict__'):
+            return
+        for value in vars(node).values():
+            if isinstance(value, (list, tuple)) or hasattr(value, '__dict__'):
+                collect(value, depth + 1)
+
+    collect(getattr(program, 'statements', None) or [])
+    return tasks
+
+
+def _walk_get_reachable(program, classify, stop_on_match):
+    """Statements that actually RUN on a bare convention GET, classified by `classify` (a node ->
+    label, or None). Reachability is PER ROUTE, not per program (FAC-28): the walk
+
+      * stops at a handler boundary -- a `new sh.X` / `request for` / connector handler runs only for
+        the request it declares, never on a page view;
+      * does NOT enter a `task` DECLARATION -- a declaration defines logic, it does not run; a journey
+        task is in scope for every route but that is not the same as being called; and
+      * FOLLOWS a `call` into the called task's body -- so a write or an AI cost inside a task counts
+        exactly on the routes that call it, and a page that never calls it stays clean.
+
+    A hit found inside a called task is attributed to the OUTERMOST call site (`via`), which is the
+    actionable line on the page the developer is serving. Returns [(label, line), ...] sorted by line.
+    """
+    tasks = _tasks_by_name(program)
+    found = []
+
+    def walk(node, depth, seen, chain, via):
+        if depth > 60 or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                walk(x, depth + 1, seen, chain, via)
+            return
+        name = type(node).__name__
+        if name in _HANDLER_NODES or name == 'TaskDecl':
+            return
+        if name == 'RunBlock':
+            tn = getattr(node, 'task_name', None)
+            if tn and tn in tasks and tn not in chain:
+                # A fresh `seen` so the same task body reached by two different calls is analysed each
+                # time; `chain` guards against mutual recursion between tasks.
+                walk(getattr(tasks[tn], 'body', None) or [], depth + 1, set(),
+                     chain | {tn}, via or (tn, getattr(node, 'line', 0)))
+            return
+        label = classify(node)
+        if label is not None:
+            line = getattr(node, 'line', 0)
+            if via:
+                vn, vline = via
+                found.append((f"{label} (via call {vn})", vline or line))
+            else:
+                found.append((label, line))
+            if stop_on_match:
+                return
+        if not hasattr(node, '__dict__'):
+            return
+        for value in vars(node).values():
+            if isinstance(value, (list, tuple)) or hasattr(value, '__dict__'):
+                walk(value, depth + 1, seen, chain, via)
+
+    walk(getattr(program, 'statements', None) or [], 0, set(), frozenset(), None)
+    found.sort(key=lambda p: (p[1] or 0))
+    return found
 
 
 def unsafe_on_get(program) -> list:
     """Every state-changing statement reachable on a bare convention GET.
 
-    Returns [(verb, line), ...] in source order, empty when the page is read-only. Walks the
-    page body -- including into check/repeat/try, because a `save` inside a `check` still fires
-    on a page view -- and stops at a handler boundary, because a `listen for` body only runs for
-    the request it declares.
+    Returns [(verb, line), ...] in source order, empty when the page is read-only. Walks the page
+    body -- including into check/repeat/try, because a `save` inside a `check` still fires on a page
+    view -- stops at a handler boundary, does not enter a task declaration, and follows a `call` into
+    the task it names (FAC-28: a journey write-task called only from a POST does not make an unrelated
+    GET state-changing, but a GET that CALLS it is still refused). See `_walk_get_reachable`.
     """
-    found = []
-    seen = set()
-
-    def walk(node, depth=0):
-        if depth > 40 or id(node) in seen:
-            return
-        seen.add(id(node))
-        if isinstance(node, (list, tuple)):
-            for x in node:
-                walk(x, depth + 1)
-            return
+    def classify(node):
         name = type(node).__name__
-        if name in _HANDLER_NODES:
-            return                        # explicit handler: a state change is allowed there
         if name == 'MiohttpStmt':
             method = str(getattr(node, 'method', 'get') or 'get').lower()
-            if method not in _SAFE_HTTP_METHODS:
-                found.append((f'miohttp.{method}', getattr(node, 'line', 0)))
-            return
-        if name in _WRITES_ON_GET:
-            found.append((_WRITES_ON_GET[name], getattr(node, 'line', 0)))
-            return
-        if not hasattr(node, '__dict__'):
-            return
-        for value in vars(node).values():
-            if isinstance(value, (list, tuple)) or hasattr(value, '__dict__'):
-                walk(value, depth + 1)
+            return f'miohttp.{method}' if method not in _SAFE_HTTP_METHODS else None
+        return _WRITES_ON_GET.get(name)
 
-    walk(getattr(program, 'statements', None) or [])
-    found.sort(key=lambda p: (p[1] or 0))
-    return found
+    return _walk_get_reachable(program, classify, stop_on_match=True)
 
 
 def read_only_violation_message(source, url_path, offenders) -> str:
@@ -268,8 +354,8 @@ def read_only_violation_message(source, url_path, offenders) -> str:
             f"{verbs}. A GET is safe and repeatable -- a browser, a link preview or a crawler "
             f"may fetch this page any number of times, and each fetch would run that again. "
             f"`render` renders; `listen for` handles a request that changes something. Move "
-            f"the state change into a `listen for ... request: done` handler and leave the "
-            f"page to render what it reads.")
+            f"the state change into a handler, `listen for sh.<Shape> at {url_path}` ... "
+            f"`listen: done`, and leave the page to render what it reads.")
 
 
 # ── AI on a convention-served page: ALLOWED, with a build-time warning ──────────────────────
@@ -308,35 +394,14 @@ _AI_COSTS_PER_VIEW = {
 def ai_cost_on_get(program) -> list:
     """Every billed AI call reachable on a bare convention GET, as [(verb, line), ...].
 
-    Same walk and same handler boundary as `unsafe_on_get`: a call inside a `listen for` handler
-    runs only for the request it declares, so it is not a per-view cost and is not warned about.
+    Same route-aware walk as `unsafe_on_get` (the shared `_walk_get_reachable`): stops at a handler
+    boundary, does not enter a task declaration, and follows a `call` into the task it names -- so an
+    `ai.decide` inside a journey task called only from a POST is not a per-view cost and is not warned
+    about, while an AI call a GET actually reaches (directly or through a call) still is. Unlike the
+    write scan it does not stop on the first match, because an agent block can contain further calls.
     """
-    found = []
-    seen = set()
-
-    def walk(node, depth=0):
-        if depth > 40 or id(node) in seen:
-            return
-        seen.add(id(node))
-        if isinstance(node, (list, tuple)):
-            for x in node:
-                walk(x, depth + 1)
-            return
-        name = type(node).__name__
-        if name in _HANDLER_NODES:
-            return
-        if name in _AI_COSTS_PER_VIEW:
-            found.append((_AI_COSTS_PER_VIEW[name], getattr(node, 'line', 0)))
-            # keep walking: an agent block can legitimately contain further calls
-        if not hasattr(node, '__dict__'):
-            return
-        for value in vars(node).values():
-            if isinstance(value, (list, tuple)) or hasattr(value, '__dict__'):
-                walk(value, depth + 1)
-
-    walk(getattr(program, 'statements', None) or [])
-    found.sort(key=lambda p: (p[1] or 0))
-    return found
+    return _walk_get_reachable(
+        program, lambda n: _AI_COSTS_PER_VIEW.get(type(n).__name__), stop_on_match=False)
 
 
 def ai_cost_warning(url_path, calls) -> str:

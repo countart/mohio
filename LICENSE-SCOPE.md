@@ -1,10 +1,10 @@
 # LICENSE-SCOPE.md
 
-Release: 5.1.0
-Source-control tag: v5.1.0
-First public distribution date: 2026-08-22
+Release: 6.0.0
+Source-control tag: v6.0.0
+First public distribution date: 2026-10-19
 License: Business Source License 1.1
-Change Date: 2030-08-22 (four years from first public distribution)
+Change Date: 2030-10-19
 Change License: AGPL-3.0-or-later — match LICENSE
 
 ---
@@ -21,15 +21,28 @@ Only files listed in this section are part of the Mohio Public Core Licensed Wor
 - `mohio_transformer_ast.py`
 - `mohio_ast.py`
 - `mohio_enforce.py`
+- `mohio_egress.py` -- the one egress gate every outbound boundary calls (added in 6.0.0).
 - `mohio_symbol_table.py`
 - `mohio_schema.py`
 - `mohio_reachability.py`
 - `mohio_version.py`
+- `_build_sha.txt` -- the build stamp `mohio_version.py` reads, so `mio version` names the commit a
+  release was built from; git fills it when the release archive is made (added in 6.0.0).
 - `mohio_framework.py`: the `framework:` declaration registry and resolution point (T1-FRAMEWORK-FOUNDATION). Scaffolds an app's target structure, orthogonal to `sector:`, which enforces rules.
 - `mohio_classification.py`: the qualified-identity classification resolver. One place that answers what a field is classified as, replacing five separate bare-field-name sets with a single resolver that DC-01/DC-02/DC-10/DC-11 depend on.
+- `mohio_timezones.py`: the one source for valid time zone names, read live from the installed
+  time zone database by `mio check` and by the runtime, so a check and its generated reference can
+  never disagree (added in 6.0.0, typed storage).
+- `mohio_runtime_vocab.py`: the runtime's closed vocabularies and the pure helpers over them, in a module
+  light enough for `mio check` to read without loading the interpreter (added in 6.0.0).
+- `mohio_segment.py`: parses a program in segments cut only between closed blocks, and caches each
+  segment, so a cold `mio check` on a large app does not re-parse what did not change (added in 6.0.0).
+- `mohio_treepickle.py`: writes a parse tree to that cache and reads it back whole, every token position
+  included (added in 6.0.0).
 - `mohio_decisions.py`: the deliberate-decision registry. Records why a behaviour that looks like a defect is not one, in a form a verification pass can read, so a settled decision is not re-filed as a bug.
 
 ### Datasource / metasource (mechanism)
+- `mohio_db_drivers.py`: the database engines Mohio knows, in one place. The runtime factory and the check-time refusal both read it, so an unknown engine is refused the same way at check and at run, and adding an engine updates both at once.
 - `mohio_metasource.py`: the metasource contract, a normalized index of what a data source contains.
 - `mohio_metasource_postgres.py`: the Postgres/Supabase source adapter.
 - `mohio_metasource_mongo.py`: the MongoDB source adapter.
@@ -64,6 +77,8 @@ keeps the artifact and this file in agreement.
 - `mohio_server.py`
 - `mohio_html_sanitize.py`
 - `mio_utils.py`
+- `mohio_outbound.py`: what a changing outbound call is known to have done, and the record of every
+  attempt (the outbound unknown-outcome core, added in 6.0.0).
 
 ### Command-line tooling
 - `mio.py`
@@ -85,11 +100,20 @@ keeps the artifact and this file in agreement.
 
 ### Sector profile loader (mechanism, not profiles)
 - `mohio_sector_loader.py`
+- `mohio_sector_sign.py` -- verifies a sector profile's signature before it loads (added in 6.0.0).
+  Mechanism, like the loader: it checks a signature; it contains no profile and no key.
 
 Rationale: consistent with the open-core model, the *loader* is mechanism and is public; *certified/official profiles* are commercial and excluded below.
 
 ### Editor tooling
 - `mohio-vscode/` — VS Code extension (syntax highlighting, snippets, language config). Public, free, adoption tooling. Explicitly separate from the `tools/`/`scripts/` exclusion below; do not treat as internal build tooling.
+
+### Packaged data (mechanism, not content)
+- `mohio_data/providers.json` -- the built-in AI provider routing table (name, API format, base
+  address, key variable), shipped as data so no model or endpoint is hard-coded in the compiler
+  (added in 6.0.0).
+- `mohio_data/share_destinations.json` -- the share destinations MioScript `share` knows, as data
+  (added in 6.0.0).
 
 ### Dependency and packaging manifests
 - `requirements.txt`
@@ -113,25 +137,14 @@ Rationale: consistent with the open-core model, the *loader* is mechanism and is
 ### Demonstration langmaps (novelty/teaching)
 - `mohio_data/maps/en-emoji.langmap`
 - `mohio_data/maps/en-klingon.langmap`
+- `mohio_data/maps/README.md` -- how a language pack works and how to write one.
 
 The Spanish, Portuguese, and Hindi language packs are excluded from this release. Confirmed paid commercial offerings; Spanish/Portuguese may run a limited-time free promotion, Hindi is paid as of this release. These are not part of Mohio Public Core and do not ship with the runtime. (They also do not currently reside in this repository.)
 
-### Demonstration sector profiles (teaching the mechanism)
-- `mohio_data/sectors/sector-demo-low.sector`
-- `mohio_data/sectors/sector-demo-high.sector`
-- `mohio_data/sectors/sector-demo-regulated.sector`
-- `mohio_data/sectors/sector-demo-financial.sector`
-- `mohio_data/sectors/sector-demo-soc2.sector`
-
-The last two were already being packaged and were not named here, which is the one thing this
-file exists to prevent: both are in the source distribution and the wheel, because the package
-data takes the whole sectors folder, so they were shipping unlicensed. Both say in their own
-opening lines that they are SAMPLE, non-certified and public, and both are named `demo_` for the
-same reason the other three are: `financial` is a reserved paid-tier name whose real profile is
-commercial and never ships, and no profile here certifies anything. Naming them is the correct
-fix rather than dropping them from the package, since they teach the same mechanism.
-
-Demo profiles, not certified ones. Included: they teach the mechanism without exposing certified content. Certified/official profiles remain excluded.
+### Demonstration sector profiles
+None in this release. The demonstration profiles stopped shipping on 2026-10-12 (RULED by Ron: demo
+sectors do not ship, and no test may depend on them); the copies the control tests read live under
+`tests/fixtures/`, outside the Licensed Work. Certified/official profiles remain excluded.
 
 ### Control tests
 
@@ -189,6 +202,15 @@ the same controls from the side; a licensee determines compliance from the norma
 - `tests/test_not_found.py`
 - `tests/test_dead_store_warning.py`
 
+**Shipped test helpers** (3 files). Not tests: small, credential-free modules the control tests
+above import, shipped so each of those tests runs on a licensee's own machine.
+
+- `tests/_aad_assert.py` -- checks a stored protected value is sealed AND bound to its table, column
+  and row, not merely labelled as sealed (the at-rest assertions of DC-02 and DC-14).
+- `tests/_guard_token.py` -- issues a form guard token for a test client's own session.
+- `tests/_failure_detail.py` -- reads what a served failure said, from the server log under the
+  reference the client was given.
+
 **Rationale, and this one matters:** the LICENSE defines a Compliance-Reduced Build by reference to
 Normative Control Tests. If a licensee cannot run those tests, they cannot determine whether their
 modified build complies. Withholding them would make the central restriction unverifiable by the
@@ -207,9 +229,13 @@ corrected for `Docs/`: a folder scope is only safe when the folder holds one kin
 this one holds two. Naming the compliance set means a new internal battery cannot become Licensed
 Work by being written in the same directory.
 
-Verified before this list was written: all 41 files exist, none imports another test module, and
-none reads any other file under `tests/`, so each runs standalone against a tree carrying only the
-licensed set. `seed_zork.json` was previously called out as an exclusion here and no longer needs
+Verified before this list was written: all 41 files exist, and the only other files under `tests/`
+they import are the three shipped helpers named above; none reads any other file under `tests/`, so
+each runs against a tree carrying only the licensed set. The live-database legs of
+`test_audit_chain_postgres.py`, `test_battery_audit_separate_connection.py` and
+`test_battery_bulk_save_and_batch_audit.py` run against the licensee's own engine through their
+environment variables (a throwaway database), and skip when none is reachable; the module that
+binds them to this project's own test containers is not part of the Licensed Work. `seed_zork.json` was previously called out as an exclusion here and no longer needs
 its own carve-out, since nothing under `tests/` is covered unless it is named.
 
 ### Documentation
@@ -225,6 +251,10 @@ its own carve-out, since nothing under `tests/` is covered unless it is named.
   cannot become Licensed Work by being written in the wrong directory. Both folders were created
   for this purpose and each file in them was checked individually before the folder was named.
 - `start-here/` — licensed under BSL, same as code.
+- `tools/timezone-names-reference.md` -- the generated list of every time zone name Mohio accepts,
+  written from `mohio_timezones.py` so it can never disagree with `mio check` (added in 6.0.0). Named
+  individually because it is a reference for licensees; the rest of `tools/`, including the script
+  that generates it, stays excluded as internal tooling.
 - `README.md`, `NOTICE`, `LICENSE`, `LICENSE-SCOPE.md`, `VERSIONS.md`, `TRADEMARKS.md`, `RESERVED-COMMERCIAL-OFFERINGS.md`
 
 #### `Docs/archive/` and everything else under `Docs/`
@@ -262,11 +292,8 @@ to the following classes, all currently enforced by `.gitignore`:
 - **Patent-status docs.** `Docs/patent-*` — currently `Docs/patent-implementation-status.md`.
 
 **What DOES ship, named explicitly so the line is not implied:** the demonstration langmaps
-(`mohio_data/maps/en-emoji.langmap`, `mohio_data/maps/en-klingon.langmap`) and demonstration
-sector profiles (`mohio_data/sectors/sector-demo-low.sector`,
-`mohio_data/sectors/sector-demo-high.sector`, `mohio_data/sectors/sector-demo-regulated.sector`),
-listed in full above under "Demonstration langmaps" and "Demonstration sector profiles." Those are
-tracked, public, and Licensed Work. Everything in this section is not.
+(`mohio_data/maps/en-emoji.langmap`, `mohio_data/maps/en-klingon.langmap`) and their README,
+listed in full above under "Demonstration langmaps." Those are tracked, public, and Licensed Work. Everything in this section is not.
 
 ---
 
@@ -281,6 +308,7 @@ Only the following may be redistributed in object-code form as Runtime Component
 - `mohio_transformer_ast.py`
 - `mohio_ast.py`
 - `mohio_enforce.py`
+- `mohio_egress.py` -- the one egress gate every outbound boundary calls (added in 6.0.0).
 - `mohio_symbol_table.py`
 - `mohio_schema.py`
 - `mohio_reachability.py`
@@ -326,7 +354,7 @@ The following are not included unless expressly listed above:
 ### Specifically excluded from this repository
 - `tools/` — internal build and lint tooling (`build_langref.py`, `langref_meta.json`, `silent_noop_lint.py`, `langmap_coverage.py`). Excluded.
 - `scripts/` — internal automation. Excluded.
-- `bucket/`, `playground/`, `dirtest/`, `cookbook/` — scratch and work-in-progress. Excluded.
+- `bucket/`, `playground/`, `dirtest/` -- scratch and work-in-progress. Excluded.
 - `seed_postgres.py`, `walkthrough_test.py` — internal utilities. Excluded.
 - `examples/asseta/` — not shippable yet. Excluded, see above.
 - the local design spine and any pre-filing IP documents (gitignored, never distributed)

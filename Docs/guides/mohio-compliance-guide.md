@@ -11,10 +11,10 @@ tools.
 ## The four free verbs
 
 ```mohio
-connect db as sqlite from env.DATABASE_URL
+connect db from env.DATABASE_URL
 
 cm.retain ssn for 6 years        // keep: this data must be kept for the period
-cm.expire logs after 30 days     // auto-delete: remove after the period
+cm.expire logs after 30 days     // expiry policy: records the rule and audits it, deletes nothing (cm.purge deletes)
 cm.lock records                  // legal hold: this data must not be deleted
 ```
 

@@ -18,7 +18,7 @@ one job. This is the complete set the language actually uses.
 | `//` and `/* ... */` | Comments. (`#` and `##` are no longer comments.) |
 | `:` | Colon — closes blocks (`shape: done`, `block: done`) and opens declarations (`sector:`, `compliance:`, `cm:`). |
 | `.` | Dot — connectors and dotted paths (`player.health`, `transaction.amount`), and decimals (`3.14`). |
-| `=` | Assignment (`age = 15`, `hold total = 0`). |
+| `=` | Optional sugar for a plain variable: `age 15` is the canonical form and `age = 15` reads the same. It is NOT used with `hold` (hold is bare: `hold rate 0.05`), and `lock name = value` is the one place `=` is canonical. |
 | `+ - * / %` | Arithmetic. |
 | `&` | String concatenation. |
 | `> < >= <= == !=` | Comparison operators, in general expressions and sector thresholds (`amount >= 10000`). |

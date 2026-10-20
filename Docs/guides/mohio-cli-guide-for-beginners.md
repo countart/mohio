@@ -55,8 +55,9 @@ mio serve site.mho
 ```
 
 Turns your program into a running website. After you run it, open your web browser and go
-to **http://localhost:8080** to see it. Use this for anything with a `listen for` block, or a
-file meant to serve itself by convention (a single-page file needs no route at all). Press
+to **http://localhost:8080** to see it. Use this for anything with a request handler (`listen for sh.X`,
+`request for sh.X`), or a file meant to serve itself by convention (a single-page file needs no
+route at all). Press
 Ctrl+C in the terminal to stop it.
 
 Want a different address? `mio serve site.mho --port 3000` serves it at
