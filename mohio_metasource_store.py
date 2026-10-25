@@ -129,7 +129,10 @@ class ObjectStore:
         """(body, etag), or (None, None) if it is not there."""
         raise NotImplementedError
 
-    def put(self, key: str, body: bytes, content_type: str = "application/json") -> str:
+    def put(self, key: str, body: bytes, content_type: str = "application/json",
+            cache_control: Optional[str] = None) -> str:
+        """`cache_control` is the Cache-Control the object is served with, where the store serves
+        it over HTTP itself (a bucket); a store that serves nothing ignores it."""
         raise NotImplementedError
 
     def put_if_absent(self, key: str, body: bytes) -> Optional[str]:
@@ -170,7 +173,8 @@ class S3ObjectStore(ObjectStore):
 
     def __init__(self, endpoint: Optional[str] = None, bucket: Optional[str] = None,
                  region: Optional[str] = None, access_key: Optional[str] = None,
-                 secret_key: Optional[str] = None, timeout: float = 30.0):
+                 secret_key: Optional[str] = None, timeout: float = 30.0,
+                 public_url: Optional[str] = None):
         self.endpoint = (endpoint or os.environ.get("MOHIO_STORE_ENDPOINT") or "").rstrip("/")
         self.bucket = bucket or os.environ.get("MOHIO_STORE_BUCKET") or ""
         # THE REGION HAS NO DEFAULT, and that is deliberate rather than strict. It is part of the
@@ -179,6 +183,8 @@ class S3ObjectStore(ObjectStore):
         # it to rotate credentials that were fine. Tigris and R2 want "auto" and AWS wants a real
         # region name, so there is no value that is right for both to guess.
         self.region = region or os.environ.get("MOHIO_STORE_REGION") or ""
+        # The public bucket's read address (virtual-hosted, or a custom domain); see object_url.
+        self.public_url = (public_url or os.environ.get("MOHIO_STORE_PUBLIC_URL") or "").strip()
         self.access_key = access_key or os.environ.get("AWS_ACCESS_KEY_ID") or ""
         self.secret_key = secret_key or os.environ.get("AWS_SECRET_ACCESS_KEY") or ""
         self.timeout = timeout
@@ -253,7 +259,9 @@ class S3ObjectStore(ObjectStore):
         except urllib.error.URLError as e:
             raise StoreError(f"{method} {url} could not reach the store: {e.reason}") from e
 
-    def presign(self, method: str, key: str, expires_seconds: int = 900) -> str:
+    def presign(self, method: str, key: str, expires_seconds: int = 900,
+                response_cache_control: Optional[str] = None,
+                cache_control: Optional[str] = None) -> str:
         """A URL that carries its own authority, for a browser to use directly.
 
         THE POINT IS THAT THE BYTES NEVER TOUCH THE APPLICATION. A file posted through the app
@@ -292,9 +300,16 @@ class S3ObjectStore(ObjectStore):
         datestamp = now.strftime("%Y%m%d")
         scope = f"{datestamp}/{self.region}/s3/aws4_request"
 
-        # Signed headers are host alone: it is the only header a browser is guaranteed to send
-        # unchanged, and anything else in here would make the URL fail in a real client.
-        signed_headers = "host"
+        # Signed headers are host alone by default: it is the only header a browser is guaranteed to
+        # send unchanged. An upload given `cache_control` signs that header too (PUBLIC-PUT-CACHE-
+        # CONTROL, RULED by Ron 2026-10-23), so the object lands with it at upload time, and a PUT
+        # that leaves it out or changes it no longer matches the signature and is refused by the
+        # store. The client is told the exact value to send alongside the URL.
+        headers = {"host": host}
+        if cache_control and method == "PUT":
+            headers["cache-control"] = cache_control
+        signed_headers = ";".join(sorted(headers))
+        canonical_headers = "".join(f"{n}:{headers[n]}\n" for n in sorted(headers))
         params = {
             "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
             "X-Amz-Credential": f"{self.access_key}/{scope}",
@@ -302,6 +317,11 @@ class S3ObjectStore(ObjectStore):
             "X-Amz-Expires": str(int(expires_seconds)),
             "X-Amz-SignedHeaders": signed_headers,
         }
+        if response_cache_control and method == "GET":
+            # S3's response override: the store answers this GET with this Cache-Control whatever the
+            # object was stored with. It is a query parameter, so it is inside the signature and a
+            # holder of the link cannot strip it to make a private object cacheable.
+            params["response-cache-control"] = response_cache_control
         # Sorted, and quoted with nothing left safe: the canonical query string is part of what
         # is signed, so a different ordering or a different escaping is a different signature.
         canonical_query = "&".join(
@@ -309,7 +329,7 @@ class S3ObjectStore(ObjectStore):
                        urllib.parse.quote(params[k], safe="-_.~"))
             for k in sorted(params))
         canonical = (f"{method}\n{canonical_uri}\n{canonical_query}\n"
-                     f"host:{host}\n\n{signed_headers}\nUNSIGNED-PAYLOAD")
+                     f"{canonical_headers}\n{signed_headers}\nUNSIGNED-PAYLOAD")
         to_sign = (f"AWS4-HMAC-SHA256\n{amzdate}\n{scope}\n"
                    f"{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}")
         signature = hmac.new(self._signing_key(datestamp), to_sign.encode("utf-8"),
@@ -318,11 +338,23 @@ class S3ObjectStore(ObjectStore):
                 + "&X-Amz-Signature=" + signature)
 
     def object_url(self, key: str) -> str:
-        """The plain, unsigned address of an object: endpoint, bucket, key, path-style, the same
-        address `presign` signs. It reads only where the bucket itself allows anonymous reads, so
-        it is handed out only for the PUBLIC bucket; a private object is reached by `presign`."""
-        return self.endpoint + urllib.parse.quote("/" + self.bucket + "/" + key.lstrip("/"),
-                                                  safe="/~")
+        """The plain, unsigned address of a PUBLIC object: the deployment's public-read base
+        (MOHIO_STORE_PUBLIC_URL) and the key. A private object is reached by `presign`.
+
+        THE PUBLIC HOST IS NOT ALWAYS THE API HOST (PUBLIC-OBJECT-URL-VIRTUAL-HOSTED, 6.0.1). This
+        built `{endpoint}/{bucket}/{key}`, path-style on the API endpoint, and Tigris answers 403
+        there: its public objects are served virtual-hosted at `<bucket>.t3.tigrisbucket.io`, a
+        different host from its API endpoint `t3.storage.dev`, and new Tigris buckets refuse
+        path-style altogether. Deriving `<bucket>.<endpoint host>` is right for AWS and wrong for
+        Tigris, so the base is configured, never guessed, for the same reason the region is."""
+        base = (self.public_url or "").rstrip("/")
+        if not base:
+            raise StoreError(
+                "MOHIO_STORE_PUBLIC_URL is not set, so no public address can be made. It is the "
+                "public bucket's own read address, which is not the API endpoint on every provider: "
+                "on Tigris https://<bucket>.t3.tigrisbucket.io (or a custom domain), on AWS "
+                "https://<bucket>.s3.<region>.amazonaws.com.")
+        return base + urllib.parse.quote("/" + key.lstrip("/"), safe="/~")
 
     def public_access_status(self) -> Tuple[str, str]:
         """(status, reason), status one of 'public' | 'private' | 'unknown', from S3
@@ -365,9 +397,12 @@ class S3ObjectStore(ObjectStore):
             raise StoreError(f"GET {key} returned {status}: {body[:300]!r}")
         return body, _header(headers, "etag")
 
-    def put(self, key: str, body: bytes, content_type: str = "application/json") -> str:
-        status, response, headers = self._request(
-            "PUT", key, body, {"Content-Type": content_type})
+    def put(self, key: str, body: bytes, content_type: str = "application/json",
+            cache_control: Optional[str] = None) -> str:
+        sent = {"Content-Type": content_type}
+        if cache_control:
+            sent["Cache-Control"] = cache_control   # stored with the object; the bucket serves it back
+        status, response, headers = self._request("PUT", key, body, sent)
         if status not in (200, 201):
             raise StoreError(f"PUT {key} returned {status}: {response[:300]!r}")
         return _header(headers, "etag") or ""
@@ -461,7 +496,9 @@ class LocalObjectStore(ObjectStore):
             body = f.read()
         return body, self._etag(body)
 
-    def put(self, key: str, body: bytes, content_type: str = "application/json") -> str:
+    def put(self, key: str, body: bytes, content_type: str = "application/json",
+            cache_control: Optional[str] = None) -> str:
+        # `cache_control` is not kept: a local file is served by the app, which sets its own headers.
         # WRITTEN ASIDE, THEN MOVED INTO PLACE. Opening the real path "wb" truncates it before a
         # byte is written, so a reader arriving in that window sees an EMPTY object -- and the
         # lock protocol above reads these as JSON, so it got "Expecting value: line 1 column 1"

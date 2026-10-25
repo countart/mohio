@@ -39,6 +39,7 @@ TWO BUGS THAT SHARE A SHAPE: code written for one situation and then assumed for
 Run: PYTHONPATH=$PWD python tests/test_battery_engine_dialects_and_purge_truth.py
 """
 import io
+import json
 import os
 import shutil
 import sqlite3
@@ -96,14 +97,22 @@ def run_mho(src, db, extra_env=None):
 
 
 def check_mho(src):
+    """The text report, then every warning's own message from `--json`: the text report says a class of
+    warning once (T1-CHECK-WARNING-GROUPS-BY-CODE), so a second site of one class is only in the JSON."""
     _n[0] += 1
     path = write("c%d.mho" % _n[0], src)
-    r = subprocess.run([sys.executable, "-m", "mio", "check", path], cwd=ROOT,
-                       env=dict(os.environ, PYTHONPATH=ROOT, DATABASE_URL=":memory:",
-                                MOHIO_ENCRYPTION_KEY="testkey", PYTHONIOENCODING="utf-8"),
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=300)
-    return r.returncode, (r.stdout or "") + (r.stderr or "")
+    env = dict(os.environ, PYTHONPATH=ROOT, DATABASE_URL=":memory:", MOHIO_ENCRYPTION_KEY="testkey",
+               PYTHONIOENCODING="utf-8")
+    r = subprocess.run([sys.executable, "-m", "mio", "check", path], cwd=ROOT, env=env, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=300)
+    j = subprocess.run([sys.executable, "-m", "mio", "check", path, "--json"], cwd=ROOT, env=env,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    try:
+        data = json.loads(j.stdout[j.stdout.index("{"):])
+        every = "\n".join(str(w.get("message", "")) for w in data.get("warnings", []))
+    except ValueError:
+        every = ""
+    return r.returncode, (r.stdout or "") + (r.stderr or "") + "\n" + every
 
 
 # ── 1. raw sql, every engine ───────────────────────────────────────────────────────────────────

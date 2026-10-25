@@ -9,6 +9,23 @@ verified against the current compiler.
 
 ---
 
+## Where the name goes: the two orders of `as`
+
+`as` reads two ways, told apart by what it is doing:
+
+- A DECLARATION names FIRST: a shape field or a `take` is `NAME as TYPE` -- `name as text`,
+  `amount as USD`, `take qty as int`. The name you are declaring comes first, its type second.
+- An ALIAS, CAST or RESULT binds the name LAST: the thing comes first and `as NAME` (or the dotted
+  `as.KIND`) trails it -- a cast `("5") as.int`, a captured result `call total as sum` or
+  `Service.pay as receipt`, a changed record `update ... as changed`, and a produced kind
+  `ai.create image as pic` (the kind first, the name last). Here `as` binds a name to the thing on its
+  left.
+
+Rule of thumb: when you are DECLARING what a value is, the name leads (`name as text`); when you are
+NAMING the result of something, the name trails (`... as result`).
+
+---
+
 ## The cast is dotted: `as.int`, not `as int`
 
 The canonical cast form is the **dotted modifier**:

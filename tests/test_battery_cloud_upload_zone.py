@@ -194,8 +194,14 @@ kind, ep, bk, _r = cfg(store_of('miofile\n    cloud vault\nmiofile: done\nshow "
 check("the environment answers for whatever the declaration left unsaid",
       (ep, bk) == ('https://env.example', 'env-bucket'), (kind, ep, bk))
 
-kind, _e, _b, _r = cfg(store_of('show "x"\n', {}))
-check("a program with no cloud area still stores on disk", kind == 'LocalObjectStore', kind)
+# THE ABSENCE IS CREATED, not assumed (6.0.1): on a machine whose environment configures a platform
+# store, a program with no area writes to that bucket by the 2026-10-05 ruling, so this cell failed
+# there while asserting a program-only fact.
+kind, _e, _b, _r = cfg(store_of('show "x"\n', {n: None for n in (
+    'MOHIO_STORE_ENDPOINT', 'MOHIO_STORE_BUCKET', 'MOHIO_STORE_REGION', 'MOHIO_STORE_PUBLIC_BUCKET',
+    'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY')}))
+check("a program with no cloud area and no store in the environment stores on disk",
+      kind == 'LocalObjectStore', kind)
 
 print("\n-- the env names are a MIX, and that is asserted so it cannot drift silently --")
 import inspect  # noqa: E402

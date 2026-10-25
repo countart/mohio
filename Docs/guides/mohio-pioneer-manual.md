@@ -345,7 +345,8 @@ request for sh.Transactions at /transactions
     find transactions in db.transactions
         where account_id is request.account_id
         order.down by created_at
-        paginate by 25
+        up to 25
+        paginate by request.page default 1
         on.failure
             give back [500] "Could not load transactions."
     find: done

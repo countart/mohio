@@ -160,3 +160,135 @@ class AttemptLog:
         store.update(ATTEMPTS_TABLE, {
             "status": status, "reconcile_required": "true" if status == "unknown" else "false",
             "finished_at": finished_at}, "key", key)
+
+
+# -- INBOUND: the answers an idempotent route has given (T1-ROUTE-IDEMPOTENCY, Ron 2026-10-22) --
+#
+# The sibling of AttemptLog, facing the other way. A `listen for` route declared
+# `idempotent by request.header "Idempotency-Key"` keeps each answer it gives under the caller's key,
+# so a repeated request is answered from the record and the work is not done again.
+#
+# THE KEY AND THE WORK ARE ONE TRANSACTION. The slot is claimed on the app's OWN connection inside the
+# request transaction, before the handler body runs, and its answer is written just before the commit.
+# A refusal or failure rolls back the slot with the work, so a retry runs fresh; a success commits
+# both, so a retry is answered from the record. The slot is a real unique index on every SQL engine,
+# so two requests with one key at once do the work once: the second waits on the first's claim and
+# then replays it, or answers 409 while it is still running. MongoDB has no request transaction, and
+# is refused at check.
+#
+# A slot names the route, the key and the signed-in person (when there is one), so one person's key
+# never replays another person's answer. The request a key names is fingerprinted; the same key with a
+# different request is refused (422) before anything runs.
+INBOUND_TABLE = "mohio_inbound_responses"
+INBOUND_COLUMNS = ["slot", "route", "fingerprint", "answer", "created_at", "expires_at"]
+DEFAULT_KEEP_SECONDS = 86400   # `keep for` when none is written: 24 hours
+
+
+def inbound_slot(route, key, person):
+    import hashlib
+    return hashlib.sha256(("%s\n%s\n%s" % (route, person or "", key)).encode("utf-8")).hexdigest()
+
+
+def request_fingerprint(route, payload):
+    """The request a key names: the route and its payload, framework plumbing already removed."""
+    import hashlib
+    import json
+    body = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256((route + "\n" + body).encode("utf-8")).hexdigest()
+
+
+class AnswerNotKeptError(Exception):
+    """An answer holding a value the record cannot keep exactly. Raised before the commit, so the
+    request rolls back rather than keep a key whose replay would differ from what was sent."""
+
+
+def _tag(v):
+    import base64
+    import datetime as _dt
+    from decimal import Decimal
+    if v is None or isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        return {"$mio": "float", "v": repr(v)}
+    if isinstance(v, Decimal):
+        return {"$mio": "decimal", "v": str(v)}
+    if isinstance(v, _dt.datetime):
+        return {"$mio": "datetime", "v": v.isoformat()}
+    if isinstance(v, _dt.date):
+        return {"$mio": "date", "v": v.isoformat()}
+    if isinstance(v, _dt.time):
+        return {"$mio": "time", "v": v.isoformat()}
+    if isinstance(v, (bytes, bytearray)):
+        return {"$mio": "bytes", "v": base64.b64encode(bytes(v)).decode("ascii")}
+    if isinstance(v, (list, tuple)):
+        return [_tag(x) for x in v]
+    if isinstance(v, dict):
+        if "$mio" in v:
+            raise AnswerNotKeptError("a field named `$mio`")
+        return {str(k): _tag(x) for k, x in v.items()}
+    raise AnswerNotKeptError(type(v).__name__)
+
+
+def _untag(v):
+    import base64
+    import datetime as _dt
+    from decimal import Decimal
+    if isinstance(v, list):
+        return [_untag(x) for x in v]
+    if isinstance(v, dict):
+        kind = v.get("$mio")
+        if kind is None:
+            return {k: _untag(x) for k, x in v.items()}
+        raw = v.get("v")
+        return {"float": float, "decimal": Decimal, "datetime": _dt.datetime.fromisoformat,
+                "date": _dt.date.fromisoformat, "time": _dt.time.fromisoformat,
+                "bytes": base64.b64decode}[kind](raw)
+    return v
+
+
+def encode_answer(answer):
+    import json
+    return json.dumps(_tag(answer), sort_keys=True)
+
+
+def decode_answer(text):
+    import json
+    return _untag(json.loads(text))
+
+
+class InboundAnswers:
+    """The `mohio_inbound_responses` rows for one database: claimed inside the request transaction,
+    finished from the answer the route gave, read back for a repeated request."""
+
+    def __init__(self, db, unique_cols):
+        self._db = db
+        self._unique = unique_cols    # the interpreter's own unique registry, which every engine reads
+
+    def ensure(self):
+        """Create the table with its unique slot. Run OUTSIDE the request transaction: on MySQL a
+        table change commits whatever transaction is open."""
+        cols = self._unique.setdefault(INBOUND_TABLE, [])
+        if "slot" not in cols:
+            cols.append("slot")
+        self._db.ensure_table(INBOUND_TABLE, INBOUND_COLUMNS, allow_new_columns=True)
+
+    def lookup(self, slot):
+        rows = self._db.find_many(INBOUND_TABLE, {"slot": slot}, limit=1) or []
+        return rows[0] if rows else None
+
+    @staticmethod
+    def expired(row, now):
+        return float(row.get("expires_at") or 0) <= now
+
+    def claim(self, slot, route, fp, now, keep_seconds):
+        self._db.save(INBOUND_TABLE, {
+            "slot": slot, "route": route, "fingerprint": fp, "answer": "",
+            "created_at": repr(float(now)), "expires_at": repr(float(now + keep_seconds))})
+
+    def finish(self, slot, answer):
+        """Write the answer the route gave. Only from the outcome: called with the response the client
+        is about to receive, immediately before the commit that keeps it."""
+        self._db.update(INBOUND_TABLE, {"answer": encode_answer(answer)}, "slot", slot)
+
+    def drop(self, slot):
+        self._db.remove(INBOUND_TABLE, "slot", slot)

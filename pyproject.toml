@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mohio"
-version = "6.0.0"
+version = "6.0.1"
 readme = "README.md"
 description = "Mohio, an AI-native language where AI reasoning and compliance are compiler-enforced primitives."
 # The floor is what the suite is ACTUALLY exercised on, and that is 3.12: the development
@@ -42,4 +42,4 @@ packages = ["mohio_data"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-mohio_data = ["*.lark", "*.json", "sectors/*.sector", "maps/*.langmap"]
+mohio_data = ["*.lark", "*.json", "sectors/*.sector", "maps/*.langmap", "_build_sha.txt"]

@@ -19,7 +19,7 @@ from lark import Lark
 from mohio_transformer_ast import transform
 from mohio_interpreter import MohioInterpreter, DbRuntime
 
-_raw = mohio_data.GRAMMAR_PATH.read_text()
+_raw = mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8')   # a shipped control test runs on a pioneer's default code page too
 _g = '\n'.join(l for l in _raw.splitlines() if not l.strip().startswith('//'))
 P = Lark(_g, parser='earley', ambiguity='resolve', propagate_positions=True)
 

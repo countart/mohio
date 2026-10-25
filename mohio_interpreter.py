@@ -405,9 +405,14 @@ def _decode_typed_value(value, declared_type):
         except InvalidOperation:
             return value
     try:
-        # Currency, and a dec.N column created before it moved to text: a scaled integer.
-        return Decimal(int(value)).scaleb(-scale)
-    except (TypeError, ValueError):
+        # Currency, and a dec.N column created before it moved to text: a scaled integer. A stored
+        # value that is NOT a whole number of units (10100.9 written into the column outside Mohio)
+        # is read exactly, never truncated by int(): the read path then refuses it under a regulated
+        # sector and places it at the currency's scale otherwise, as every other engine does (R38).
+        if isinstance(value, int):
+            return Decimal(value).scaleb(-scale)
+        return Decimal(str(value)).scaleb(-scale)
+    except (TypeError, ValueError, InvalidOperation):
         return value
 
 
@@ -1183,6 +1188,20 @@ def _request_never_left(exc):
     return False
 
 
+def _custody_event(outcome, status, failure):
+    """(event, meaning) for a chain-of-custody record, read from what HAPPENED to the request
+    (T1-CONNECTOR-CUSTODY-FROM-OUTCOME). `failure` is the exception, or its text when only that is
+    kept; only an exception can prove the request never left, so text alone is never that proof."""
+    if outcome == 'refused':
+        return 'boundary_refused', 'the request was refused here, so nothing left this app'
+    if (failure is not None and failure != '') or status in (0, '0'):
+        if failure is not None and not isinstance(failure, str) and _request_never_left(failure):
+            return 'boundary_not_sent', 'the destination could not be reached, so nothing left this app'
+        return ('boundary_send_uncertain',
+                'the request may have left this app before it failed; no response arrived')
+    return 'boundary_send', 'data left this app for an outside destination'
+
+
 def _http_open(req, timeout, method, url):
     """Open `req` with Mohio's SSRF-aware redirect policy. Default: refuse to follow 3xx
     (fail loud, naming the target). Opt-in MOHIO_HTTP_FOLLOW_REDIRECTS=1: follow, vetting every
@@ -1261,6 +1280,25 @@ def _mohio_text(x):
         # is unchanged by that. How a list should read is T1-LIST-DISPLAY-FORM, not decided here.
         return str([e.to_python() if isinstance(e, MohioValue) else e for e in x])
     return str(x)
+
+
+def _header_put(headers, name, value):
+    """Set a declared header, replacing any default of the same name in another case, so the
+    request carries it once (HTTP header names are not case-sensitive)."""
+    for k in [k for k in headers if k.lower() == str(name).lower()]:
+        del headers[k]
+    headers[name] = value
+
+
+def _header_default(headers, name, value):
+    """Add a header Mohio supplies (a generated Idempotency-Key, a Content-Type) only when the
+    program declared none of that name, in any case: a declared `idempotency-key` is the key."""
+    if not any(k.lower() == str(name).lower() for k in headers):
+        headers[name] = value
+
+
+def _header_get(headers, name):
+    return next((v for k, v in headers.items() if k.lower() == str(name).lower()), None)
 
 
 def _json_dumps_exact(obj, **kwargs):
@@ -3932,6 +3970,41 @@ class _QueryableRuntime:
         # a range bound on a declared dec.N is placed at its scale, as a plain find's is
         return _canon_compare_value(val, declared)
 
+    # THE ONE BUILDER FOR A JOINED WHERE CONDITION. A joined find's WHERE is written three times over
+    # (the chain's own levels, a `with.required` sibling's EXISTS, the paged root count), and each kept
+    # its own copy of the operator map, so an operator added to one would be missing from the others.
+    # All three call these. `contains` and `is not` mirror the plain find exactly (_filter_where_sql):
+    # `contains` is a case-insensitive LIKE with the needle's `%` and `_` taken literally, and `is not`
+    # keeps a row whose field is empty.
+    _JOIN_RANGES = ('above', 'below', 'not_above', 'not_below')
+    _JOIN_SYM = {'is': '=', 'above': '>', 'below': '<', 'not_above': '<=', 'not_below': '>='}
+
+    def _join_lit_cond(self, table, col, field, op, val, num_kind='decimal'):
+        """(sql, params) for a joined level's own column compared with a literal."""
+        if op == 'contains':
+            # The written value arrives as its token, quotes included; the plain find unwraps it the
+            # same way where it compares (`str(value).strip('"')`), and so does this.
+            needle = str(val).strip('"') if val is not None else ''
+            return (f"LOWER({self._sql_text_cast(col)}) LIKE LOWER(?) {self._like_escape_clause()}",
+                    [f"%{_like_escape(needle)}%"])
+        bound = self._join_bound(table, field, op, val, self._JOIN_RANGES)
+        if op == 'is_not':
+            self._no_empty_text_match({field: val})
+            return (f"({col} IS NULL OR {col} != ?)", [bound])
+        if op in self._JOIN_RANGES:
+            col = self._sql_numeric_cast(col, num_kind)
+        return (f"{col} {self._JOIN_SYM[op]} ?", [bound])
+
+    def _join_col_cond(self, lhs, rhs, op):
+        """SQL for a joined level's column compared with an ancestor level's column. `contains` against
+        a column is refused before it reaches here (T1-JOIN-WHERE-CONTAINS-CROSS-LEVEL)."""
+        if op == 'is_not':
+            return f"({lhs} IS NULL OR {lhs} != {rhs})"
+        if op in self._JOIN_RANGES:
+            lhs = self._sql_numeric_cast(lhs, 'decimal')
+            rhs = self._sql_numeric_cast(rhs, 'decimal')
+        return f"{lhs} {self._JOIN_SYM[op]} {rhs}"
+
     def holds_boolean(self, sql_type):
         """Is a column of this type where this engine keeps Mohio's own boolean?"""
         own = self.boolean_storage_type
@@ -4383,10 +4456,6 @@ class _QueryableRuntime:
                     f"been saved to it. Add a row first (`save to db.{lv['table']}`), or check the "
                     f"table name in the `find` / `with` line.")
 
-        def _sym(op):
-            return {'is': '=', 'above': '>', 'below': '<',
-                    'not_above': '<=', 'not_below': '>='}[op]
-
         def _own_where(i, this_alias):
             """This level's own-column conditions: literal comparisons on t{i}'s own fields.
 
@@ -4400,13 +4469,10 @@ class _QueryableRuntime:
             for field, op, kind in (levels[i].get('where') or []):
                 if kind[0] != 'lit':
                     continue
-                col = f"{this_alias}.{q(field)}"
-                _rng = ('above', 'below', 'not_above', 'not_below')
-                val = self._join_bound(levels[i]['table'], field, op, kind[1], _rng)
-                if op in _rng:
-                    col = self._sql_numeric_cast(col, kind[2] if len(kind) > 2 else 'decimal')
-                cl.append(f"{col} {_sym(op)} ?")
-                params.append(val)
+                sql, ps = self._join_lit_cond(levels[i]['table'], f"{this_alias}.{q(field)}", field, op,
+                                              kind[1], kind[2] if len(kind) > 2 else 'decimal')
+                cl.append(sql)
+                params.extend(ps)
             return cl
 
         def _cross_where(i, prev_alias, this_alias):
@@ -4419,13 +4485,8 @@ class _QueryableRuntime:
                 if kind[0] != 'col':
                     continue
                 _, anc_idx, anc_field = kind
-                lhs = f"{this_alias}.{q(field)}"
-                rhs = f"{prev_alias}.{q(f't{anc_idx}__{anc_field}')}"
-                if op in ('above', 'below', 'not_above', 'not_below'):
-                    kind3 = 'decimal'
-                    lhs = self._sql_numeric_cast(lhs, kind3)
-                    rhs = self._sql_numeric_cast(rhs, kind3)
-                cl.append(f"{lhs} {_sym(op)} {rhs}")
+                cl.append(self._join_col_cond(f"{this_alias}.{q(field)}",
+                                              f"{prev_alias}.{q(f't{anc_idx}__{anc_field}')}", op))
             return cl
 
         ctes = []
@@ -4570,8 +4631,6 @@ class _QueryableRuntime:
         them, so this can be spliced into a WHERE wherever that WHERE's own values come first."""
         q = self.quote_ident
         _tc = self._sql_text_cast
-        sym = {'is': '=', 'above': '>', 'below': '<', 'not_above': '<=', 'not_below': '>='}
-        ranges = ('above', 'below', 'not_above', 'not_below')
         out = []
         for s, top in enumerate(exists_list or []):
             def build(spec, idx, aliases, s=s):
@@ -4587,19 +4646,13 @@ class _QueryableRuntime:
                          for inf, outf in spec['on']]
                 for field, op, kind in (spec.get('where') or []):
                     if kind[0] == 'lit':
-                        col = f"{alias}.{q(field)}"
-                        val = self._join_bound(spec['table'], field, op, kind[1], ranges)
-                        if op in ranges:
-                            col = self._sql_numeric_cast(col, kind[2] if len(kind) > 2 else 'decimal')
-                        conds.append(f"{col} {sym[op]} ?")
-                        params.append(val)
+                        sql, ps = self._join_lit_cond(spec['table'], f"{alias}.{q(field)}", field, op,
+                                                      kind[1], kind[2] if len(kind) > 2 else 'decimal')
+                        conds.append(sql)
+                        params.extend(ps)
                     elif kind[0] == 'col':
                         _, anc, anc_field = kind
-                        lhs, rhs = f"{alias}.{q(field)}", f"{al[anc]}.{q(anc_field)}"
-                        if op in ranges:
-                            lhs = self._sql_numeric_cast(lhs, 'decimal')
-                            rhs = self._sql_numeric_cast(rhs, 'decimal')
-                        conds.append(f"{lhs} {sym[op]} {rhs}")
+                        conds.append(self._join_col_cond(f"{alias}.{q(field)}", f"{al[anc]}.{q(anc_field)}", op))
                 for child in (spec.get('children') or []):
                     if child.get('variant') == 'with.required':
                         conds.append(build(child, idx + 1, al))
@@ -4614,18 +4667,14 @@ class _QueryableRuntime:
         q = self.quote_ident
         params = []
         sql = f'SELECT COUNT(*) FROM {q(spec["table"])} t0'
-        sym = {'is': '=', 'above': '>', 'below': '<', 'not_above': '<=', 'not_below': '>='}
         cl = []
         for field, op, kind in (spec.get('where') or []):
             if kind[0] != 'lit':
                 continue
-            col = f't0.{q(field)}'
-            _rng = ('above', 'below', 'not_above', 'not_below')
-            val = self._join_bound(spec['table'], field, op, kind[1], _rng)
-            if op in _rng:
-                col = self._sql_numeric_cast(col, kind[2] if len(kind) > 2 else 'decimal')
-            cl.append(f"{col} {sym[op]} ?")
-            params.append(val)
+            csql, ps = self._join_lit_cond(spec['table'], f't0.{q(field)}', field, op, kind[1],
+                                           kind[2] if len(kind) > 2 else 'decimal')
+            cl.append(csql)
+            params.extend(ps)
         # The page total counts the same roots the page reads: required siblings included.
         cl += self._join_exists_sql(spec.get('exists'), params)
         if cl:
@@ -9195,7 +9244,15 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except InvalidOperation:
             return value
         scale = _decimal_scale_for_type(declared_type)
-        return d.quantize(Decimal(1).scaleb(-scale)) if scale is not None else d
+        if scale is None:
+            return d
+        q = d.quantize(Decimal(1).scaleb(-scale))
+        # A stored amount more precise than its currency comes back exact, never rounded here: the
+        # shared read path (_retag_money_row) refuses it under a regulated sector and places it at
+        # the currency's scale otherwise, identically on every engine (Summit R38).
+        if q != d and _is_currency_type(declared_type):
+            return d
+        return q
 
     def _limit_offset_sql(self, limit, offset):
         # Oracle 12c+ row-limiting: OFFSET m ROWS FETCH NEXT n ROWS ONLY (either part optional).
@@ -11123,12 +11180,17 @@ class MohioInterpreter:
         import dataclasses as _dc
         from mohio_ast import JourneyDecl as _JD3, JourneyMeta as _JM3
         found = None
+        locked = None
         def walk(n):
-            nonlocal found
+            nonlocal found, locked
             if isinstance(n, _JD3):
                 for m in (getattr(n, 'body', None) or []):
                     if isinstance(m, _JM3) and m.kind == 'timezone':
                         found = m.value  # last one wins -- nearest-to-page registers last
+                        # `[important]` (RULED by Ron 2026-10-22, v1): the journey wins over a page's
+                        # own zone for this line, so the first (outermost) [important] zone holds.
+                        if getattr(m, 'important', False) and locked is None:
+                            locked = m.value
             if _dc.is_dataclass(n):
                 for f in _dc.fields(n):
                     walk(getattr(n, f.name, None))
@@ -11136,6 +11198,8 @@ class MohioInterpreter:
                 for x in n:
                     walk(x)
         walk(program)
+        if locked is not None:
+            found = locked
         self._journey_default_timezone = found
         # ONE APP ZONE (RULED by Ron, 2026-10-15): the journey's declared zone is the app zone, and
         # every calendar word (today, this_month, is.in ...) reads it. MOHIO_APP_TIMEZONE applies only
@@ -11533,16 +11597,7 @@ class MohioInterpreter:
         the static analysis and the runtime can never drift -- the same split
         `_register_loose_unique_targets` already uses for `unique`. A join whose source is
         chosen at runtime is simply not indexed here (undecidable, never guessed)."""
-        from mohio_reachability import resolve_join_fields, resolve_loose_defaults
-        # Keyed by the save block's identity (the block is kept alongside, so the id can never be
-        # reused by another object), and MERGED rather than replaced, so registering a second
-        # program never wipes the first one's writes.
-        _ld = getattr(self, '_loose_defaults', None)
-        if not isinstance(_ld, dict):
-            _ld = {}
-        for _blk, _sname, _flds in resolve_loose_defaults(program):
-            _ld[id(_blk)] = (_blk, _sname, _flds)
-        self._loose_defaults = _ld
+        from mohio_reachability import resolve_join_fields
         for _t, _cols in resolve_join_fields(program).items():
             _existing = self._join_indexed_cols.setdefault(str(_t), [])
             for _c in _cols:
@@ -12457,7 +12512,11 @@ class MohioInterpreter:
         if params:
             p0 = params[0]
             pname = getattr(p0, 'name', None) or str(p0)
-            child.set(pname, value if isinstance(value, MohioValue) else MohioValue(value))
+            # TYPED LIKE A `call` (6.0.1): the take's declared type applies here too, so a task
+            # used as a flow stage does not take "abc" into an int or an unrounded amount into USD.
+            child.set(pname, self._bind_task_param(
+                p0, pname, value if isinstance(value, MohioValue) else MohioValue(value),
+                None, task, ctx))
         try:
             result = self._exec_block(task.body, child)
         except _GiveBack as gb:
@@ -13780,7 +13839,13 @@ class MohioInterpreter:
                 raise _ProtectedNeedsIdKey(table)
             per_row = dict(updates)
             per_row.update(self._seal_values_for(table, plain, rid))
-            n += db.update(table, per_row, 'id', rid) or 0
+            # THE ROW'S WRITE KEEPS THE UPDATE'S OWN CONDITIONS (T1-UPDATE-CAS-SEALED-PATH, Meridian). It
+            # wrote by id alone, so the read above was the only place `match version to expected` was
+            # asked: two requests that overlapped both read the row at that version and both wrote it,
+            # each answering 1 changed (measured on SQLite, Postgres, MySQL and Oracle with two servers on
+            # one database: two 200s in one round, one payment lost). Keyed by id AND the conditions, the
+            # write is the compare-and-swap again, and the count is the rows it really changed.
+            n += db.update_multi(table, per_row, dict(conditions, id=rid)) or 0
         updates.reseal = None      # every matched row now holds values sealed for itself
         return n
 
@@ -14614,8 +14679,12 @@ class MohioInterpreter:
         on the way in and a bare number on the way out. A table no shape describes, or a field the
         shape does not declare as money, is returned untouched.
 
-        The AMOUNT is not recomputed -- it is already exact, stored as its own decimal text. Only
-        the currency is restored, which is the part a column cannot carry.
+        The amount is placed at the currency's places. A STORED AMOUNT MORE PRECISE THAN ITS
+        CURRENCY IS NEVER ROUNDED ON THE WAY IN UNDER A REGULATED SECTOR (Summit R38, 6.0.1): a
+        configured limit of 100.999 read back as 101.00, so a 101.00 payment passed a limit it
+        exceeds. It refuses here instead, the same contract an arriving amount, a typed name, a
+        `take` and a `create` field already keep (A1). Outside a regulated sector it is placed at
+        the currency's places as before.
         """
         if not table or not isinstance(row, dict):
             return row
@@ -14652,7 +14721,40 @@ class MohioInterpreter:
                 raw = raw.to_python()
             if raw is None or raw == '':
                 continue
-            _money = self._money_quantize(raw, self._CURRENCIES[code]['places'])
+            _places = self._CURRENCIES[code]['places']
+            _money = self._money_quantize(raw, _places)
+            _regulated = getattr(self, '_regulated_sector', None)
+            _exact = None
+            if isinstance(_money, Decimal):
+                try:
+                    _exact = Decimal(str(raw))
+                except (InvalidOperation, ValueError, TypeError):
+                    _exact = None             # not a number: the column type check refuses it on its own
+            if _exact is not None and _exact != _money and not _regulated:
+                # OUTSIDE A REGULATED SECTOR IT ROUNDS, NEVER SILENTLY (RULED by Ron 2026-10-21): half
+                # away from zero, as an arriving amount and a typed name round, with a warning naming
+                # the stored value and the method. Said once per table, field and stored value in a
+                # run, so a read of many rows holding one bad value says it once.
+                _warned = self.__dict__.setdefault('_money_read_warned', set())
+                if (str(table), name, str(_exact)) not in _warned:
+                    _warned.add((str(table), name, str(_exact)))
+                    print(f"  [mohio.money] WARNING: reading db.{table}: `{name}` is stored as {_exact} "
+                          f"and {code} holds {_places} decimal place{'s' if _places != 1 else ''}, so it "
+                          f"reads as {_money}, rounded half away from zero. Correct the stored value to "
+                          f"{code}'s precision so the program reads exactly what is stored. (Under a "
+                          f"regulated sector this read refuses.)", file=sys.stderr)
+            if _regulated and _exact is not None:
+                if _exact != _money:
+                    raise _Raise(
+                        error_name='money_precision',
+                        message=(f"reading db.{table}: `{name}` is stored as {_exact}, but {code} "
+                                 f"holds {_places} decimal place{'s' if _places != 1 else ''}. Under "
+                                 f"sector {_regulated} a stored amount is never rounded on the way "
+                                 f"in, because a rounded limit or balance is a changed record ({_exact} "
+                                 f"would have read as {_money}), so nothing was read."),
+                        hint=(f"Correct the stored value to {code}'s precision; which amount is right "
+                              f"is the record owner's decision, so Mohio does not choose it. If "
+                              f"`{name}` is not money, declare it `as dec`."))
             _mv = MohioValue(_money, 'decimal')
             _mv._currency = code
             # `no.symbol` keeps the code and the scale on the value -- a locale service can still
@@ -14910,6 +15012,13 @@ class MohioInterpreter:
                     continue
                 old_type = self._norm_declared_type(before.get('declared_type'))
                 old_prot = {p for p in str(before.get('protection') or '').split(',') if p}
+                if new_type and old_type and new_type != old_type and getattr(self, '_migrating_types', False):
+                    # `mio migrate typed-storage` is the deliberate change this refusal points at
+                    # (BS-008): the new type is HELD, and written by the migration only once this
+                    # column's values have converted; a column it does not convert is named there.
+                    self.__dict__.setdefault('_type_register_pending', {})[(table, col)] = (
+                        new_type, old_prot | new_prot, before, ctx, old_type)
+                    continue
                 if new_type and old_type and new_type != old_type:
                     raise MohioRuntimeError(
                         f"db.{table}.{col} is registered in this database as `{old_type}`, and this "
@@ -15077,31 +15186,13 @@ class MohioInterpreter:
         """
         if not isinstance(fields, dict):
             return fields
-        # A LOOSE SHAPE'S DEFAULTS (the defaults half of T1-UNIQUE-AND-DEFAULTS-ENFORCED): a save
-        # written inside a handler bound to the shape takes the shape's declared defaults for the
-        # fields that whole-row write omits, as a governed table does (`resolve_loose_defaults`).
-        # THE LOOKUP IS THE SAVE ITSELF, NEVER THE TABLE (EE-HC-01): a table-keyed lookup filled one
-        # shape's defaults into every write to that table, including writes from handlers bound to
-        # other shapes, so a save received a field it never asked for.
-        _entry = (getattr(self, '_loose_defaults', None) or {}).get(id(node)) if node is not None else None
-        if _entry is not None and _entry[0] is not node:
-            _entry = None          # an id reused by another object is not this save
-        _bound_shape, _loose = (_entry[1], _entry[2]) if _entry is not None else (None, None)
-        if _loose and verb in self._WHOLE_ROW_WRITES and not (self._shaped_tables or {}).get(str(table or '')):
-            fields = dict(fields)
-            _filled_here = []
-            for f in _loose:
-                props = self._shape_field_props(f)
-                present = fields.get(props['name'])
-                if isinstance(present, MohioValue):
-                    present = present.to_python()
-                if present in (None, '') and props.get('default') is not None:
-                    _filled = self._default_value_for(props.get('default'))
-                    if _filled is not None:
-                        fields[props['name']] = _filled
-                        _filled_here.append((props['name'], getattr(f, 'line', None)))
-            if _filled_here:
-                self._refuse_default_without_column(table, _filled_here, _bound_shape, node, db)
+        # NO SHAPE'S DEFAULT REACHES A TABLE NO SHAPE GOVERNS (A3, RULED by Ron 2026-10-20, option 1,
+        # reversing T1-BOUND-DEFAULT-MISSING-COLUMN). A save in the handler for sh.X, to a table sh.X
+        # does not govern, writes exactly the fields it names. A handler-bound save used to take the
+        # bound shape's defaults, so a request shape's `flow default "legacy"` was injected into a
+        # save to db.events that never wrote it, and the save answered 500 for a column it never
+        # named. A default fills the request bound to its shape and a table its shape governs
+        # via `as table` (below); nothing else.
         # A COLUMN THE FIELD REGISTER TYPES FOR THIS PROGRAM (OR-2): a currency or scaled decimal this
         # program does not declare is encoded exactly as the declaring app's write encodes it, so a
         # shapeless `amount 5.00` into a SQLite USD column stores 500, not 5 (the 100x write).
@@ -15272,7 +15363,7 @@ class MohioInterpreter:
                          f"never rounded on write, because a rounded amount is a changed record."),
                 line=line,
                 hint=(f"Round it yourself first, so the rounding is in the program:  "
-                      f"{fname} (amount round.to {places})"))
+                      f"{fname} ({d} round.to {places})"))
         import sys as _sys
         print(f"  [mohio.money] WARNING: {_lp}{fname} is {d} but {code_u} holds {places} decimal "
               f"place{'s' if places != 1 else ''}, so it was rounded half away from zero and "
@@ -15282,14 +15373,11 @@ class MohioInterpreter:
 
     def _default_filled_names(self, table, node, given_keys, fields):
         """The columns of `fields` that a shape default filled rather than the write itself: a
-        field with a declared default (the table's own shape, or the flat shape this save's
-        handler is bound to) that the write did not name, plus its blind-index companion. Read
-        from the declarations, never inferred from "keys that appeared", because sealing adds a
-        blind index for a field the write DID name, and that one must keep updating."""
+        field with a declared default on the table's own shape that the write did not name, plus
+        its blind-index companion. Read from the declarations, never inferred from "keys that
+        appeared", because sealing adds a blind index for a field the write DID name, and that one
+        must keep updating."""
         declared = list((self._shaped_tables or {}).get(str(table or '')) or [])
-        _entry = (getattr(self, '_loose_defaults', None) or {}).get(id(node)) if node is not None else None
-        if _entry is not None and _entry[0] is node:
-            declared += list(_entry[2])
         out = []
         for f in declared:
             props = self._shape_field_props(f)
@@ -15300,42 +15388,6 @@ class MohioInterpreter:
             if name + _BIDX_SUFFIX in fields:
                 out.append(name + _BIDX_SUFFIX)
         return out
-
-    def _refuse_default_without_column(self, table, filled, shape_name, node, db):
-        """A bound shape's default that the save's table has no column for, refused with a message
-        that names where the field came from.
-
-        The write would be refused anyway, by the schema-drift floor, but that message says "if
-        this is a typo, fix the field name" about a field the developer never typed: it was filled
-        from the default of the shape the handler is bound to. Same refusal, the real cause named.
-        Only asked of a runtime that can report a table's columns, and only for a table that
-        already exists; anything else falls through to the write's own checks unchanged."""
-        _db = db if db is not None else getattr(self, '_db', None)
-        if _db is None or not getattr(_db, 'supports_field_validation', False):
-            return
-        try:
-            cols = _db.table_columns(str(table))
-        except Exception:  # SILENT-OK: no column report here; the write's own drift floor still refuses
-            return
-        if not cols:
-            return       # a table not created yet: the write creates it, defaults included
-        have = {str(c).lower() for c in cols}
-        missing = [(n, ln) for n, ln in filled if str(n).lower() not in have]
-        if not missing:
-            return
-        name = missing[0][0]
-        # T1-BOUND-DEFAULT-MISSING-COLUMN (RULED by Ron 2026-10-15, option 2): the ruled loose-defaults
-        # design stands, and the refusal says what, where, why and the fix in Mohio's voice. The same
-        # message the check-time catch will give (T1-CHECK-COLUMN-VS-METASOURCE), minus the default's
-        # line reference at run.
-        raise _Raise(
-            error_name='missing_column',
-            message=(f"Can't save to db.{table}: it has no column \"{name}\".\n"
-                     f"The value for \"{name}\" came from sh.{shape_name}'s default, which fills into "
-                     f"every save in a handler bound to that shape.\n"
-                     f"Fix one of: add a \"{name}\" column to db.{table}; remove the default from the "
-                     f"shape; or don't write this save under a handler bound to sh.{shape_name}."),
-            line=getattr(node, 'line', None))
 
     def _default_value_for(self, declared):
         """A shape default as the value it stands for.
@@ -15895,11 +15947,38 @@ class MohioInterpreter:
         # ("refusing to store them as plaintext"); the read half used to shrug -- a rotated or
         # wrong MOHIO_ENCRYPTION_KEY silently handed back `enc:v1:...` and the program showed
         # it, compared it, or SAVED IT AGAIN, double-encrypting the field beyond recovery.
-        # A value with no `enc:` prefix is genuinely plaintext (written before encryption was
-        # enabled) and still passes through untouched -- only a field that IS still ciphertext
-        # after the attempt is an error.
+        # PLAINTEXT WHERE CIPHERTEXT BELONGS IS NEVER HANDED OVER EITHER (A2, 6.0.1, Summit R35). A
+        # value with no `enc:` prefix used to pass through untouched as "written before encryption
+        # was enabled", so after a stored ciphertext was replaced with the plain value, a shaped
+        # reader matched it and an unshaped one printed it, and both ran on. The first-touch check
+        # refused such a column on a write and on a match, never on a plain read. Asked per value
+        # and per TABLE (this table's declaration or its field-register entry), never by field name
+        # alone, so a same-named field another table leaves untagged reads as it always did.
         def _still_ciphertext(v):
             return isinstance(v, str) and v.startswith(self._ENC_PREFIXES)
+
+        if table:
+            # Only this table's protected columns are asked about, once, not every key of every row
+            # (the per-row cost this check first added, measured on a 100k-row read).
+            for k in self.classification.protected_fields(table) & row.keys():
+                v = row[k]
+                if isinstance(v, MohioValue):
+                    v = v.to_python()      # a money or date column is already wrapped by the retag above
+                if v is None or v == '' or _still_ciphertext(v):
+                    continue
+                kind = next((c for c in ('phi', 'pci', 'pii')
+                             if self.classification.has(k, c, table)), None)
+                tag = f"[{kind}]" if kind else "encrypted (sec.encrypt)"
+                raise _Raise(
+                    error_name='protected_field_stored_unprotected',
+                    message=(f"`{k}` in db.{table} is protected {tag}, and the value stored in this "
+                             f"row is not encrypted. A protected value is only ever handed to a "
+                             f"program from its sealed form, so it was not read and nothing after "
+                             f"this ran."),
+                    hint=(f"If a program that does not declare `{k}` protected wrote it, encrypt the "
+                          f"stored values in place with `mio migrate protect <the program that "
+                          f"declares it>.mho`. If none did, the stored value was changed outside "
+                          f"Mohio: restore it from the sealed copy."))
 
         for k in list(row.keys()):
             # EITHER the column is declared encrypted, OR the value says it is. The first keeps
@@ -16701,8 +16780,9 @@ class MohioInterpreter:
         # ONE GRANT PER REQUEST (unit 5e, RULED 2026-10-12, T1-GRANT-ROLE-IN-A-LOOP-REPLACES). Every
         # grant replaces the session's roles, so `grant role r.role` inside `repeat each` left only
         # the last role, with nothing said: a login that meant viewer and editor held editor. The
-        # second grant in one served request now refuses and the first stands. Whether a second
-        # grant should ADD instead is the open half of that item, so this refuses rather than guess.
+        # second grant in one served request now refuses, and the refused request keeps no grant at
+        # all (a failed request issues no session, RULED 2026-10-22, see run_with_session). Whether a
+        # second grant should ADD instead is the open half of that item, so this refuses, not guesses.
         if getattr(self, '_grant_role_tracking', False):
             _first = getattr(self, '_grant_role_first_line', None)
             if _first is not None:
@@ -16712,7 +16792,8 @@ class MohioInterpreter:
                     hint=(f"grant role: this request already granted a role ("
                              f"{('line ' + str(_first[0]) + ', ') if _first[0] else ''}"
                              f"{', '.join(_first[1])}), and a second grant would replace it, so the "
-                             f"person would hold only the last one. The first grant stands. Grant "
+                             f"person would hold only the last one. This sign-in fails and grants "
+                             f"nothing, the first role included. Grant "
                              f"every role at once with a list, as in `grant role user.roles`. "
                              f"Whether a second grant should add a role instead is not built yet "
                              f"(T1-GRANT-ROLE-IN-A-LOOP-REPLACES)."),
@@ -17467,10 +17548,7 @@ class MohioInterpreter:
             'name':       node.name,
             'address':    node.address,      # value node, eval at call time
             'source':     node.source,       # `from env.X` shorthand credential
-            'auth_type':  node.auth_type or "",
-            'auth_value': node.auth_value,   # value node, eval at call time
-            'auth_value2': node.auth_value2,         # basic password
-            'auth_header_name': node.auth_header_name,  # custom header name
+            'auth':       list(node.auth),   # every auth line, each its own header; values eval at call time
             'operations': ops,
             'timeout':    node.timeout,
             'retry':      node.retry,        # T1-RUN3: retries on a genuine connectivity
@@ -17748,27 +17826,38 @@ class MohioInterpreter:
 
         req_headers = {"User-Agent": "Mohio/4.0", "Accept": "application/json"}
 
-        # auth — env-resolved at call time; fail loud if the credential is empty
-        if conn.get('auth_value') is not None:
-            av = self._eval(conn['auth_value'], ctx)
+        # auth — env-resolved at call time; fail loud if the credential is empty. EVERY auth line is
+        # its own header on the request (the transform refused one header named twice); this used to
+        # be one slot, so a bearer declared beside an Idempotency-Key was dropped without a word.
+        for atype, hname, aval, aval2, _aline in conn['auth']:
+            av = self._eval(aval, ctx) if aval is not None else None
             cred = str(av.to_python() if isinstance(av, MohioValue) else av)
-            if not cred or cred in ("None", ""):
+            if aval is None or not cred or cred in ("None", ""):
                 raise MohioRuntimeError(
                     f"mioconnect: connector '{node.connector}' credential resolved empty "
-                    f"(check the env var in its `auth` line).")
-            atype = (conn.get('auth_type') or "bearer").lower()
+                    f"(check the env var in its `auth {atype}` line).")
+            # PROTECTED DATA NEVER LEAVES IN A CREDENTIAL (the header-surface ruling 3c, 2026-10-22). A
+            # secret may: a credential is its one declared use (HC-063), so these lines stay outside the
+            # secret gate. Protected data may not, here as in a miohttp `auth`: a [phi] value in a
+            # connector credential reached the provider before this guard.
+            _cred_label = f"its `auth {atype}` line"
+            self._guard_protected_egress(f"{node.connector}.{node.operation}", url,
+                                         [(_cred_label, av), (_cred_label, cred)], node=node)
             if atype == "header":
-                req_headers[conn.get('auth_header_name') or "Authorization"] = cred
+                _header_put(req_headers, hname, cred)
             elif atype == "basic":
                 import base64
                 pw = ""
-                if conn.get('auth_value2') is not None:
-                    pv2 = self._eval(conn['auth_value2'], ctx)
+                if aval2 is not None:
+                    pv2 = self._eval(aval2, ctx)
                     pw = str(pv2.to_python() if isinstance(pv2, MohioValue) else pv2)
+                    self._guard_protected_egress(f"{node.connector}.{node.operation}", url,
+                                                 [(_cred_label, pv2), (_cred_label, pw)], node=node)
                 token = base64.b64encode(f"{cred}:{pw}".encode()).decode()
-                req_headers["Authorization"] = f"Basic {token}"
+                _header_put(req_headers, "Authorization", f"Basic {token}")
             else:  # bearer / key
-                req_headers["Authorization"] = cred if cred.lower().startswith("bearer ") else f"Bearer {cred}"
+                _header_put(req_headers, "Authorization",
+                            cred if cred.lower().startswith("bearer ") else f"Bearer {cred}")
 
         # payload -> JSON body (never on GET/HEAD: those carry no body)
         body_bytes = None
@@ -17779,10 +17868,10 @@ class MohioInterpreter:
                 # THE ONE CONVERTER (RDC-V6-CONNECT-DECIMAL-JSON): plain json.dumps stopped on any
                 # money value ("Object of type Decimal is not JSON serializable").
                 body_bytes = _json_dumps_exact(bp).encode()
-                req_headers.setdefault("Content-Type", "application/json")
+                _header_default(req_headers, "Content-Type", "application/json")
             elif isinstance(bp, str):
                 body_bytes = bp.encode()
-                req_headers.setdefault("Content-Type", "text/plain")
+                _header_default(req_headers, "Content-Type", "text/plain")
             self._egress_refuse('connector', 
                 f"{node.connector}.{node.operation}", url,
                 [('its payload', pv), ('its payload', body_bytes.decode('utf-8', errors='replace')
@@ -17794,11 +17883,11 @@ class MohioInterpreter:
         # is the same request. A read (GET, HEAD) changes nothing and carries none. A key the
         # connector already sets is kept.
         if method not in ("GET", "HEAD", "OPTIONS"):
-            req_headers.setdefault("Idempotency-Key", uuid.uuid4().hex)
+            _header_default(req_headers, "Idempotency-Key", uuid.uuid4().hex)
         # THE ATTEMPT IS RECORDED BEFORE IT LEAVES (mohio_outbound, RULED by Ron 2026-10-10), so a
         # process that dies mid-call leaves a `sending` row to reconcile rather than nothing.
         _changing = method not in ("GET", "HEAD", "OPTIONS")
-        _attempt_key = req_headers.get("Idempotency-Key") if _changing else None
+        _attempt_key = _header_get(req_headers, "Idempotency-Key") if _changing else None
         if _changing:
             from mohio_outbound import fingerprint as _fp
             self._outbound_begin(_attempt_key, _governed_name, node.operation, ctx, node,
@@ -17860,8 +17949,6 @@ class MohioInterpreter:
         except Exception:
             _cc_started = ''
         _cc_evt = {
-            'event':       'boundary_send',
-            'meaning':     'data left this app for an outside destination',
             'connector':   _governed_name,
             **_called_as,
             'operation':   node.operation,
@@ -17876,14 +17963,28 @@ class MohioInterpreter:
         _cc_classes = locals().get('_touched') or None
         if _cc_classes:
             _cc_evt['data_classes'] = sorted(_cc_classes)   # names only, never values
-        try:
-            self._audit_logs.setdefault(_cc_log, []).append(
-                self._audit_event(_cc_log, _cc_evt, ctx))
-        except Exception:
-            pass    # a custody record must never break the call it is recording
 
-        def _cc_response(_status, _error=None):
-            """Record that the destination answered. Not that anything 'came back'."""
+        def _cc_write(_evt):
+            try:
+                self._audit_logs.setdefault(_cc_log, []).append(self._audit_event(_cc_log, _evt, ctx))
+            except Exception:
+                pass    # a custody record must never break the call it is recording
+
+        def _cc_done(_status=None, _error=None, _exc=None, _refused=False):
+            """Record the crossing FROM ITS OUTCOME (T1-CONNECTOR-CUSTODY-FROM-OUTCOME, RULED by Ron
+            2026-10-23 for 6.0.1). The send was recorded before the request went out, so a call the
+            guard refused, or one to a dead port, still read "data left" and "a response arrived".
+            Now an answer (of any status) records the send and then the response; anything else
+            records only what is known: refused here, never sent, or may have left with no answer."""
+            _event, _meaning = _custody_event('refused' if _refused else None,
+                                              _status if _exc is not None or _refused else None, _exc)
+            if _event != 'boundary_send':
+                _evt = {'event': _event, 'meaning': _meaning, **_cc_evt}
+                if _error is not None or _exc is not None:
+                    _evt['error'] = str(_error if _error is not None else _exc)[:200]
+                _cc_write(_evt)
+                return
+            _cc_write({'event': 'boundary_send', 'meaning': _meaning, **_cc_evt})
             _evt = {
                 'event':       'boundary_response',
                 'meaning':     ('a response to this app\'s request arrived from the '
@@ -17897,11 +17998,7 @@ class MohioInterpreter:
             }
             if _error:
                 _evt['error'] = str(_error)[:200]
-            try:
-                self._audit_logs.setdefault(_cc_log, []).append(
-                    self._audit_event(_cc_log, _evt, ctx))
-            except Exception:
-                pass
+            _cc_write(_evt)
 
         # T1-RUN3-CONNECTION-HANDLER (2026-08-19): retry/on.failure/on.success used to parse
         # and be silently discarded (MioconnectDecl had no field for any of them -- confirmed,
@@ -17932,7 +18029,7 @@ class MohioInterpreter:
                     result = {"status": status, "ok": 200 <= status < 300,
                               "body": raw_body, "json": parsed, "headers": dict(resp.headers)}
                     if self.verbose: print(f"  [mioconnect] → {status}")
-                    _cc_response(status)
+                    _cc_done(status)
                 last_exc = None
                 break
             except urllib.error.HTTPError as e:
@@ -17943,13 +18040,13 @@ class MohioInterpreter:
                 try:              _err_json = _json.loads(raw)
                 except Exception: _err_json = raw   # a non-JSON error body is the raw string, not a crash
                 result = {"status": e.code, "ok": False, "body": raw, "json": _err_json, "headers": {}, "error": str(e)}
-                _cc_response(e.code, e)
+                _cc_done(e.code, _error=e)     # an answer arrived: the request left
                 last_exc = None
                 break
             except MohioRuntimeError as e:
                 # A refused redirect (SSRF guard) fails loud -- audit it, then propagate; never
                 # swallow it into a benign-looking result, and never retry a security refusal.
-                _cc_response(0, e)
+                _cc_done(_error=e, _refused=True)
                 if _changing:
                     self._outbound_finish(_attempt_key, 'not_done')   # refused here, never sent
                 raise
@@ -17967,7 +18064,7 @@ class MohioInterpreter:
                     continue
                 if _attempt < attempts:
                     _not_retried = True
-                _cc_response(0, e)
+                _cc_done(0, _exc=e)
                 break
 
         # WHAT THE SERVICE IS KNOWN TO HAVE DONE (mohio_outbound). A changing call that ended in a
@@ -18717,7 +18814,13 @@ class MohioInterpreter:
                 if _ofn not in _data:
                     exec_ctx.set(_ofn, MohioValue(None, 'null'))
 
-        _atomic_db = self._atomic_wrap_db(node, exec_ctx)
+        # AN IDEMPOTENT ROUTE (T1-ROUTE-IDEMPOTENCY): a repeated key is answered here from the record
+        # (or refused), with nothing run. A new key always runs in the request transaction, even
+        # with a single write or none, because the key it claims is a write of its own.
+        _idem = self._idempotency_gate(node, exec_ctx, req)
+        if isinstance(_idem, dict):
+            return _idem
+        _atomic_db = _idem.db if _idem is not None else self._atomic_wrap_db(node, exec_ctx)
         if _atomic_db is None:
             # No multi-write transaction, but the UPLOAD DEFERRAL still applies: a buffered upload
             # was flushed at its referencing write (if any) during the body; here, a SUCCESS flushes
@@ -18766,6 +18869,15 @@ class MohioInterpreter:
         self._transaction_write_failed = False
         self._transaction_write_failure = None
         self._txn_begin(_atomic_db)
+        # AN IDEMPOTENT ROUTE CLAIMS ITS KEY INSIDE THIS TRANSACTION, before the body runs, so the
+        # key and the work commit or roll back together (T1-ROUTE-IDEMPOTENCY). A slot already taken
+        # is another request with this key: nothing here runs, and it is answered from the record.
+        _conflict = self._idempotency_claim(_idem) if _idem is not None else None
+        if _conflict is not None:
+            self._txn_rollback(_atomic_db)
+            self._transaction_write_failed = _prev_wf
+            self._transaction_write_failure = _prev_wfe
+            return self._idempotency_conflict(_idem, _conflict)
         try:
             try:
                 result = self._exec_block(node.body, exec_ctx)
@@ -18775,6 +18887,13 @@ class MohioInterpreter:
                 # redirect, a success outcome, and rolling it back sent the caller on over undone work.
                 if (200 <= _st < 400) and not self._transaction_write_failed:
                     self._flush_pending_uploads(exec_ctx)   # persist any unreferenced upload
+                    if _idem is not None:
+                        # The answer is kept from the response the caller is about to receive,
+                        # in the transaction that keeps the work: never from the attempt.
+                        _resp = self._format_response(gb)
+                        self._idempotency_finish(_idem, _resp)
+                        self._txn_commit(_atomic_db)
+                        return _resp
                     self._txn_commit(_atomic_db)
                 else:
                     # A referenced upload was flushed at its save (inside the txn); the rollback
@@ -18786,7 +18905,7 @@ class MohioInterpreter:
                         # The handler said success; the writes were not kept. Say so (HC-005).
                         return self._rolled_back_response(gb)
                 return self._format_response(gb)
-            except _Jump:
+            except _Jump as _jp:
                 # A REDIRECT IS A SUCCESS OUTCOME: post, redirect, get. `jump` unwinds with its
                 # own exception, not a give-back, so it fell into the failure branch and every
                 # write the handler made was rolled back while the redirect went out as if they
@@ -18796,6 +18915,8 @@ class MohioInterpreter:
                     self._txn_rollback(_atomic_db)
                     self._discard_pending_uploads()
                     return self._rolled_back_response()
+                if _idem is not None:
+                    self._idempotency_finish(_idem, {'$jump': _jp.destination})
                 self._flush_pending_uploads(exec_ctx)
                 self._txn_commit(_atomic_db)
                 raise
@@ -18804,6 +18925,11 @@ class MohioInterpreter:
                 self._discard_pending_uploads()
                 return self._rolled_back_response()
             self._flush_pending_uploads(exec_ctx)
+            if _idem is not None:
+                _resp = self._format_page_result(result, exec_ctx)
+                self._idempotency_finish(_idem, _resp)
+                self._txn_commit(_atomic_db)
+                return _resp
             self._txn_commit(_atomic_db)
             return self._format_page_result(result, exec_ctx)
         except _Jump:
@@ -20412,7 +20538,8 @@ class MohioInterpreter:
                 and_where[f.split('.')[-1]] = v
             or_groups  = [[(f.split('.')[-1], v) for f, v in pairs] for kind, pairs in spec if kind == 'or']
             not_groups = [[(f.split('.')[-1], v) for f, v in pairs] for kind, pairs in spec if kind == 'not']
-            _rows, _w = self._filter_held_list(held_list, and_where, [], 'retrieve', _held_name)
+            _rows, _w = self._filter_held_list(held_list, and_where, [], 'retrieve', _held_name,
+                                                 self._held_list_declared(ctx, _held_name))
             if or_groups:
                 _rows = [r for r in _rows if all(any(str(r.get(f)) == str(v) for f, v in grp) for grp in or_groups)]
             if not_groups:
@@ -20571,7 +20698,9 @@ class MohioInterpreter:
             _result._source_table = table
         return _bind_and_succeed(_result)
 
-    def _write_export(self, rows, spec, ctx, table=None):
+    def _write_export(self, rows, spec, ctx, table=None, flatten=None):
+        # `flatten` is a joined find's `with` chain (_join_name_tree): its CSV is one row per child,
+        # flattened AFTER the masking below, so a child's classified field is masked first.
         # Wire the `export as.FORMAT to PATH` egress. csv and json are wired;
         # pdf and xlsx fail loud until a document library is added.
         import csv as _csv, json as _json, os as _os
@@ -20602,9 +20731,13 @@ class MohioInterpreter:
             with open(target, 'w', encoding='utf-8') as f:
                 _json.dump(data, f, indent=2, default=str)
         elif fmt == 'csv':
-            keys = list(data[0].keys()) if data else []
+            if flatten:
+                data = self._flatten_joined_rows(data, flatten)
+            # Every column any row has, in the order first seen: a childless parent's row lacks the child
+            # columns, and they are written empty for it (restval) rather than dropped from the header.
+            keys = list(dict.fromkeys(k for r in data if isinstance(r, dict) for k in r))
             with open(target, 'w', newline='', encoding='utf-8') as f:
-                w = _csv.DictWriter(f, fieldnames=keys)
+                w = _csv.DictWriter(f, fieldnames=keys, restval="")
                 w.writeheader()
                 for r in data:
                     w.writerow(r)
@@ -20733,6 +20866,8 @@ class MohioInterpreter:
             JoinBlock as _JB
         if any(isinstance(b, (_WC, _AC)) for b in (node.body or [])):
             return True
+        # A plain `return`, `summarize` and `export` route nowhere: every join path shapes its result
+        # the same way (_joined_shape_result), so a MongoDB join takes them too.
 
         def _walk(body):
             for b in (body or []):
@@ -20742,6 +20877,134 @@ class MohioInterpreter:
                     return True   # a nested with/with.required IS itself a Unit 4 feature
             return False
         return _walk(join.body)
+
+    @staticmethod
+    def _plain_join_return(node):
+        """The `return` clause of a joined find when every item is a plain field (BS-010, RULED by
+        Ron 2026-10-21: it trims the OUTER row; each `with` child stays nested), else None. An
+        aggregate or a computed item is not this, and stays refused."""
+        ret = next((c for c in (getattr(node, 'body', None) or []) if isinstance(c, ReturnClause)), None)
+        if ret is None or not getattr(ret, 'fields', None):
+            return None
+        if all(f.get('kind') == 'field' and f.get('field') for f in ret.fields):
+            return ret
+        return None
+
+    @staticmethod
+    def _joined_csv_export(node):
+        """The refusal for an `export as.csv` of a joined find whose records still hold their `with`
+        children, else None. A CSV row is one flat record; with a `summarize` the rows are flat again
+        and the CSV is written. The one wording, shared with the check (scan_executor_branch_deferrals)."""
+        from mohio_reachability import joined_csv_export_refusal
+        return joined_csv_export_refusal(node)
+
+    # SUMMARIZE AND EXPORT CONSUME A JOINED RESULT (T1-JOIN-SUMMARIZE-EXPORT, Ron's overnight .1 order
+    # 2026-10-22), on every join path (the single-level one, which is MongoDB's, and the chain), so a
+    # plain join and a filtered one answer alike.
+    def _joined_summarize(self, node, db, table, nested):
+        """Aggregate the records the join kept (the outer `where` and a `with.required` chose them), by
+        the outer table's fields, checked as a plain find checks them: a child's field refuses rather
+        than count nothing."""
+        summ = next((c for c in (node.body or []) if isinstance(c, SummarizeBlock)), None)
+        if summ is None:
+            return nested
+        _gb = getattr(node, 'group_by', None)
+        _names = [_s for _s in (
+            [(f.arg.get('source') if isinstance(f.arg, dict) else f.arg) for f in summ.fields]
+            + [_gb]) if isinstance(_s, str) and _s]
+        self._joined_fields_exist(db, table, _names)
+        return self._apply_summarize(summ, nested, _gb)
+
+    def _joined_fields_exist(self, db, table, names):
+        """Refuse a field the outer table does not have. A store that checks its own columns does
+        (`_validate_fields`). One that has no fixed columns (MongoDB says it cannot) is checked against
+        the fields the program's shape declares for the table, when a shape declares them."""
+        if getattr(db, 'supports_field_validation', True):
+            db._validate_fields(table, names)
+            return
+        declared = self._shaped_tables.get(str(table))
+        if not declared:
+            return
+        have = {str(getattr(f, 'name', '') or '') for f in declared} | {'id'}
+        bad = next((n for n in names if n not in have), None)
+        if bad is not None:
+            raise MohioRuntimeError(
+                f"Field '{bad}' does not exist in db.{table}. The fields its shape declares are: "
+                f"{', '.join(sorted(have))}. Use one of those, or declare `{bad}` on the shape.")
+
+    def _joined_return(self, node, joins, nested):
+        """A PLAIN `return` TRIMS THE OUTER ROW (BS-010, RULED by Ron 2026-10-21). Each record keeps the
+        fields the return names, under their `as` names, and every top-level `with` child stays nested
+        under its own name. Projecting into a child is a later unit. On every join path, so a MongoDB
+        join (single-level only) projects as a SQL one does."""
+        _ret = self._plain_join_return(node)
+        if _ret is not None:
+            _children = [str(getattr(j, 'name', '') or '') for j in (joins or [])]
+            _projected = []
+            for rec in nested:
+                if not isinstance(rec, dict):
+                    _projected.append(rec)
+                    continue
+                newr = {}
+                for f in _ret.fields:
+                    key = str(f['field']).split('.')[-1]
+                    newr[f.get('alias') or key] = rec.get(key, rec.get(f['field']))
+                for cn in _children:
+                    if cn and cn in rec:
+                        newr[cn] = rec[cn]
+                _projected.append(newr)
+            nested = _projected
+        return nested
+
+    def _joined_shape_result(self, node, ctx, db, table, joins, nested):
+        """A joined result, shaped in the plain find's order: summarize, then a plain return, then
+        export, so the file holds exactly what the return kept."""
+        nested = self._joined_summarize(node, db, table, nested)
+        nested = self._joined_return(node, joins, nested)
+        self._joined_export(node, ctx, table, nested)
+        return nested
+
+    def _joined_export(self, node, ctx, table, nested):
+        """as.json keeps each record with its children; as.csv writes one row per child, the parent's
+        columns repeated (RULED by Ron 2026-10-23, T1-JOIN-EXPORT-CSV-FLATTEN). The export seam masks every
+        classified field at every level BEFORE the rows are flattened (a nested child by every table's
+        classification, which can over-mask and never leak): flattened first, a child's field would be a
+        top-level `items.card` no parent rule names. Two sibling lists were refused before the query ran."""
+        _exp = next((c for c in (node.body or []) if isinstance(c, ExportClause)), None)
+        if _exp is not None:
+            summarized = any(isinstance(c, SummarizeBlock) for c in (node.body or []))
+            self._write_export(nested, _exp, ctx, table=table,
+                               flatten=None if summarized else self._join_name_tree(node.body))
+
+    @staticmethod
+    def _join_name_tree(body):
+        """The `with` lists of a joined find as a chain: [(name, deeper)], one entry per level (two side by
+        side refuse before here)."""
+        joins = [j for j in (body or []) if isinstance(j, JoinBlock)]
+        return [(str(getattr(j, 'name', '') or ''), MohioInterpreter._join_name_tree(getattr(j, 'body', None)))
+                for j in joins]
+
+    @staticmethod
+    def _flatten_joined_rows(rows, tree):
+        """One row per deepest child, every level's columns repeated, a child's named `<list>.<field>`; a
+        record whose list is empty is one row with nothing for that list (its cells empty in the CSV)."""
+        def flat(rec, level, prefix):
+            base = {prefix + k: v for k, v in rec.items() if k not in {n for n, _ in level}}
+            if not level:
+                return [base]
+            name, deeper = level[0]
+            kids = rec.get(name) or []
+            if not kids:
+                return [base]
+            out = []
+            for kid in kids:
+                for sub in flat(kid if isinstance(kid, dict) else {'value': kid}, deeper, prefix + name + '.'):
+                    out.append(dict(base, **sub))
+            return out
+        out = []
+        for r in rows:
+            out.extend(flat(r, tree, '') if isinstance(r, dict) else [r])
+        return out
 
     def _exec_find_joined_chain(self, node, ctx, db, table, joins, where, order_by, order_dir,
                                 limit, skip_offset, page_num, post_filters):
@@ -20762,6 +21025,7 @@ class MohioInterpreter:
         if status == 'fail':
             return a
         nested, page_meta, levels_flat, depth = a, b, c, d
+        nested = self._joined_shape_result(node, ctx, db, table, joins, nested)
         value = self._mark_empty_find(MohioValue(nested, 'list'), node)
         if page_meta is not None:
             ctx.set(f'__page__{node.name}', MohioValue(page_meta, 'shape'))
@@ -20791,7 +21055,9 @@ class MohioInterpreter:
         from mohio_ast import (MatchClause as _MC, DottedName as _DN, LimitClause as _LC,
                                JoinBlock as _JB, WhereClause as _WC, AndClause as _AC,
                                OrderClause as _OC)
-        _SYM_OPS = {'is', 'above', 'below', 'not_above', 'not_below'}
+        # `contains` and `is not` joined these (Ron's overnight .1 order, 2026-10-22), built through
+        # the one condition builder (_join_lit_cond / _join_col_cond) every joined WHERE uses.
+        _SYM_OPS = {'is', 'is_not', 'contains', 'above', 'below', 'not_above', 'not_below'}
 
         def _cond_kind(field, clause_cond, value_node, bound_names):
             """A WHERE/AND clause's value is either a literal (evaluate now) or a DottedName
@@ -20799,13 +21065,21 @@ class MohioInterpreter:
             bound name enclosing this one) -- a cross-level column reference, never evaluated,
             carried as a (level_index, field) pair for join_select_chain to resolve in SQL."""
             if clause_cond not in _SYM_OPS:
-                _defer(f"a chained `with`'s WHERE supports `is` / `is above` / `is below` / "
-                       f"`is not above` / `is not below` so far (got `{clause_cond}` on "
+                _defer(f"a joined find's WHERE supports `is` / `is not` / `contains` / `is above` / "
+                       f"`is below` / `is not above` / `is not below` so far (got `{clause_cond}` on "
                        f"`{field}`).",
-                       "Use one of those forms; between/contains/is.in on a join level are a "
-                       "later unit.")
+                       "Use one of those forms; between, starts.with and is.in on a joined find are "
+                       "not built yet.")
             if isinstance(value_node, _DN) and len(getattr(value_node, 'parts', []) or []) >= 2 \
                     and str(value_node.parts[0]) in bound_names:
+                if clause_cond == 'contains':
+                    # DEFER: T1-JOIN-WHERE-CONTAINS-CROSS-LEVEL. A text match against another level's
+                    # column needs each engine's own string concatenation to build the pattern.
+                    _defer(f"`{field} contains {'.'.join(str(p) for p in value_node.parts)}` compares "
+                           f"with another level's column, which a joined find does not build yet: "
+                           f"`contains` takes a literal here.",
+                           "Match against a written value (`where sku contains \"ab\"`), or use `is` / "
+                           "`is not` against the other level's column.")
                 anc_idx = bound_names[str(value_node.parts[0])]
                 return (field, clause_cond, ('col', anc_idx, str(value_node.parts[-1])))
             val = self._eval_filter_value(value_node, ctx)
@@ -21505,6 +21779,8 @@ class MohioInterpreter:
                     print(f"  [join] consistent read (with.all): {_snap_note}")
             else:
                 matched_records, unmatched_records, page_meta = _run_reads()
+        except (_GiveBack, _Raise, _Stop, _Skip):
+            raise       # a refusal from the read seam is not a failed query (R38, as find and retrieve)
         except Exception as e:
             return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
 
@@ -21552,8 +21828,18 @@ class MohioInterpreter:
         # the find returned the very rows the clause excludes (found in the hc015 sweep). Unit 1's
         # own refusal further down was never reached for that case.
         # DEFER-CHECK-MIRRORED: scan_executor_branch_deferrals refuses the same set at check (find).
+        # `summarize` and `export` consume the joined result (T1-JOIN-SUMMARIZE-EXPORT, Ron's overnight
+        # .1 order 2026-10-22), in the chain executor, so they are no longer refused here.
         _unapplied = _kinds & {'MatchAnyBlock', 'NoMatchBlock', 'TimespanRef', 'SinceClause',
-                               'CalculateBlock', 'SummarizeBlock', 'ReturnClause', 'ExportClause'}
+                               'CalculateBlock', 'ReturnClause'}
+        if self._plain_join_return(node) is not None:
+            _unapplied.discard('ReturnClause')   # a plain field list is projected (BS-010)
+        _csv = self._joined_csv_export(node)
+        if _csv is not None:
+            # DEFER-CHECK-MIRRORED: scan_executor_branch_deferrals refuses the same export at check.
+            # DEFER: T1-JOIN-EXPORT-CSV-FLATTEN. How a nested record becomes CSV rows is a ruling.
+            _defer(_csv, "Export it as.json, which keeps each list with its record, or export each list "
+                         "from a find of its own.")
         if _unapplied:
             _defer(f"a `native join` applies `match` and `where`/`and` on the outer query; "
                    f"{', '.join(sorted(self._clause_word(b) for b in (node.body or []) if type(b).__name__ in _unapplied))} "
@@ -21596,9 +21882,9 @@ class MohioInterpreter:
             _defer("cursor pagination combined with a `native join` is not built yet (cursor "
                    "pagination is not wired on any find yet).",
                    "Use `up to N` with `paginate by` for offset pagination; cursor is a later unit.")
-        if _kinds & {'WhereClause', 'AndClause', 'MatchAnyBlock', 'NoMatchBlock', 'TimespanRef',
-                     'SinceClause', 'CalculateBlock', 'SummarizeBlock', 'ReturnClause',
-                     'ExportClause'}:
+        if (_kinds - ({'ReturnClause'} if self._plain_join_return(node) is not None else set())) & {
+                'WhereClause', 'AndClause', 'MatchAnyBlock', 'NoMatchBlock', 'TimespanRef',
+                'SinceClause', 'CalculateBlock', 'ReturnClause'}:
             # DEFER-CHECK-MIRRORED: scan_executor_branch_deferrals refuses a non-match outer clause with a native join at check.
             _defer("a `native join` supports only equality `match` filters on the outer query so far.",
                    "Filter the outer query with `match field to value`; richer outer filters, "
@@ -21757,6 +22043,7 @@ class MohioInterpreter:
         self._audit_data_access('find', table, nested, ctx, queried=self._predicate_fields(node))
         self._audit_data_access('find', inner_table,
                                 [c for r in nested for c in r.get(join.name, [])], ctx)
+        nested = self._joined_shape_result(node, ctx, db, table, joins, nested)
         value = self._mark_empty_find(MohioValue(nested, 'list'), node)
         if page_meta is not None:
             ctx.set(f'__page__{node.name}', MohioValue(page_meta, 'shape'))
@@ -22176,7 +22463,8 @@ class MohioInterpreter:
             # loud. Reuses the SAME post-fetch machinery the db path uses below (or_groups/
             # not_groups/skip/limit/random_n/calculate/summarize/return-clause all operate on
             # `rows` alone, never on `db`/`table`, so they run unchanged for both paths).
-            rows, _warning = self._filter_held_list(held_list, where, post_filters, 'find', _held_name)
+            rows, _warning = self._filter_held_list(held_list, where, post_filters, 'find', _held_name,
+                                                     self._held_list_declared(ctx, _held_name))
             # A LIST OF PLAIN VALUES is held as `value` records from here to the binding point, so
             # `order.up by value`, `return value.max as top` and the rest read it the way they read
             # a table. Neither ran before: the order was ignored and an aggregate gave empty.
@@ -22495,6 +22783,13 @@ class MohioInterpreter:
                     _row_check_count = len(rows)
                 page_meta = None
 
+          except (_GiveBack, _Raise, _Stop, _Skip):
+            # A REFUSAL IS NOT A FAILED QUERY (Summit R38, as retrieve does). The read seam refuses a
+            # stored over-precise amount or a protected value stored plain with a named `_Raise`;
+            # caught below it became `db_error` with a "check the table name" hint, and under an
+            # `on.failure` it ran the program's fallback and carried on. A driver error still goes
+            # to on.failure exactly as before.
+            raise
           except Exception as e:
             return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
           finally:
@@ -24303,15 +24598,35 @@ class MohioInterpreter:
          r'\b\d{3}-\d{2}-\d{4}\b'),
     )
 
+    # The groupings a card number is printed in besides fours with a shorter last group (4-4-4-4,
+    # 4-4-4-4-3, 4-4-4-1): the American Express and Diners forms (4-6-5, 4-6-4).
+    _CARD_GROUPINGS = ((4, 6, 5), (4, 6, 4))
+
     @staticmethod
     def _looks_like_card_number(text):
-        """A 13-19 digit run that passes the Luhn checksum.
+        """A card number: a 13-19 digit run, unbroken or grouped as cards are printed, standing on its
+        own, that passes the Luhn checksum.
 
-        Luhn is what makes this usable: roughly 90% of arbitrary digit runs fail it, so a
-        timestamp, a row count, or an id does not trip the gate while a real card number does.
+        Luhn is what makes this usable: roughly 90% of arbitrary digit runs fail it, so a timestamp,
+        a row count, or an id does not trip the gate while a real card number does.
+
+        THE RUN MUST BE A CARD'S, NOT ANY DIGITS (AUDIT-IDENTITY-01, 2026-10-23). The pattern used to
+        allow a space or hyphen between ANY two digits, so a UUID's hyphenated digit groups chained
+        into one card-length run (`900621-8549-4175-8` in 4f900621-8549-4175-8b01-43268dc9a3b9, 15
+        digits, Luhn-valid). A security audit record carrying such a UUID was refused, the request
+        answered 500, and an account keyed by one could not authenticate; 44 of 20,000 random UUIDs did
+        it. Now the run is MAXIMAL (no letter or further digit touches it, so a hex token's digits never
+        count) and its separators, if any, group it the way a card is printed, which a UUID's
+        8-4-4-4-12 never is. A card written bare, or with single spaces or hyphens in its printed
+        groups, still refuses.
         """
         import re as _re
-        for run in _re.findall(r'(?<!\d)(?:\d[ -]?){13,19}(?!\d)', text):
+        for run in _re.findall(r'(?<![0-9A-Za-z])\d(?:[ -]?\d){12,18}(?![0-9A-Za-z])', text):
+            groups = [len(g) for g in _re.split(r'[ -]', run)]
+            if len(groups) > 1:
+                fours = all(g == 4 for g in groups[:-1]) and 1 <= groups[-1] <= 4
+                if not (fours or tuple(groups) in MohioInterpreter._CARD_GROUPINGS):
+                    continue
             digits = [int(c) for c in run if c.isdigit()]
             if not 13 <= len(digits) <= 19:
                 continue
@@ -24384,6 +24699,10 @@ class MohioInterpreter:
         # 32+: no sensitive value is 32 contiguous hex characters -- a card is 13-19 decimal
         # digits, an SSN is 9 -- so this removes noise without creating a hiding place.
         haystack = _re.sub(r'\b[0-9a-fA-F]{32,}\b', ' ', haystack)
+        # A UUID too, hyphens and all (AUDIT-IDENTITY-01): its hyphens kept it out of the rule above, and
+        # a record legitimately carries ids. Safe for the same reason: no card is 8-4-4-4-12 hex.
+        haystack = _re.sub(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',
+                           ' ', haystack)
         for label, pattern in self._PRESEAL_PATTERNS:
             if _re.search(pattern, haystack):
                 raise MohioInterpreter.AuditContentRefused(
@@ -25880,8 +26199,14 @@ class MohioInterpreter:
         values. Never blocks the call it's recording (matching mioconnect's own
         try/except-and-continue around its own boundary record)."""
         try:
-            entry = {'event': 'boundary_send',
-                     'meaning': 'data left this app for an outside destination',
+            # FROM THE OUTCOME, NEVER THE ATTEMPT (T1-CONNECTOR-CUSTODY-FROM-OUTCOME, RULED by Ron
+            # 2026-10-23 for 6.0.1). "Data left this app" is written only when it did. A request
+            # refused here, one that could not reach its destination, and one that may have left
+            # before it failed each say so, so the trail never claims a handoff that did not happen.
+            exc = extra.pop('exc', None)
+            event, meaning = _custody_event(extra.get('outcome'), extra.get('status'),
+                                            exc if exc is not None else extra.get('error'))
+            entry = {'event': event, 'meaning': meaning,
                      'channel': channel, 'destination': _sanitized_destination(destination)}
             entry.update(extra)
             self._audit_logs.setdefault('data_audit_log', []).append(
@@ -28285,7 +28610,8 @@ class MohioInterpreter:
             self._refuse_held_kind_clash(held_list, [(mc.field, self._eval(mc.value, ctx))
                                                      for mc in match_clauses], getattr(node, 'line', None))
             _where = {mc.field.split('.')[-1]: self._eval_simple(mc.value, ctx) for mc in match_clauses}
-            _matches, _w = self._filter_held_list(held_list, _where, [], 'grab', _held_name)
+            _matches, _w = self._filter_held_list(held_list, _where, [], 'grab', _held_name,
+                                                    self._held_list_declared(ctx, _held_name))
             row = _matches[0] if _matches else None
         else:
             # T1-GUARD-FAILOPEN (2026-08-19): retrieve_one/retrieve_one_multi no longer
@@ -28346,6 +28672,9 @@ class MohioInterpreter:
         taking in order. `up to N` is a ceiling: a short source returns fewer
         items, never an error. Result binds to the closer's `as` name.
         """
+        # A not-found refusal in `on.failure` never fires (H, 6.0.1): `pull` was outside the lookup
+        # family that rule covers, so a 404 there on an empty table ran past into the write after it.
+        self._refuse_not_found_in_failure(node)
         import random as _random
         from mohio_ast import (DbRef, DottedName, MatchClause, WhereClause, AndClause,
                                MatchBlock, MatchAnyBlock, NoMatchBlock)
@@ -28769,7 +29098,8 @@ class MohioInterpreter:
                 _final.clear()
                 # a table not created yet holds no row to match; the catalog is asked, so a read of a
                 # missing table never aborts the write's transaction (Postgres)
-                _hits = (db.find_many(table, where=self._bidx_dict(db, table, _plain_match, node)) or []
+                _where = self._bidx_dict(db, table, _plain_match, node)
+                _hits = (db.find_many(table, where=_where) or []
                          if self._table_present(db, table) else [])
                 if _hits:
                     for _row in _hits:
@@ -28779,7 +29109,10 @@ class MohioInterpreter:
                         _upd.update(self._seal_values_for(table, {k: v for k, v in _plain.items()
                                                                   if k in _upd}, _rid))
                         if _upd:
-                            db.update(table, _upd, 'id', _rid)
+                            # Keyed by id AND the match, as an update's sealed write is
+                            # (T1-UPDATE-CAS-SEALED-PATH): by id alone a match on a version was
+                            # asked only by the read above, so two overlapping upserts both wrote.
+                            db.update_multi(table, _upd, dict(_where, id=_rid))
                         if not _final:
                             _final.update(dict(fields), id=_rid)
                             _final.update(self._seal_values_for(table, _plain, _rid))
@@ -29345,6 +29678,149 @@ class MohioInterpreter:
         w(getattr(node, 'body', None))
         return n[0], own[0]
 
+    # ── AN IDEMPOTENT ROUTE (T1-ROUTE-IDEMPOTENCY, RULED by Ron 2026-10-22) ──────────────────────
+    # `idempotent by request.header "Idempotency-Key"` on a `listen for`: a repeated request with
+    # the same key is answered with the answer the route already gave, and the work is not done
+    # again. The store and its transaction rule live in mohio_outbound (InboundAnswers). Status
+    # codes follow the HTTP Idempotency-Key header draft: 400 for a missing key, 422 for a key
+    # reused with a different request, 409 while the first request with a key is still running.
+
+    class _IdempotencyTicket:
+        def __init__(self, db, store, slot, route, fp, keep, decl, expired):
+            self.db, self.store, self.slot, self.route = db, store, slot, route
+            self.fp, self.keep, self.decl, self.expired = fp, keep, decl, expired
+
+    _CONTENTION_WORDS = ('unique', 'duplicate', 'ora-00001', 'locked', 'lock wait', 'deadlock',
+                         'already exists')
+
+    @staticmethod
+    def _idempotency_refusal(status, text):
+        return {'status': status, 'body': text, 'content_type': 'text/plain'}
+
+    def _idempotency_gate(self, node, ctx, req):
+        """None for a route that is not idempotent. A response dict when a repeated key is answered
+        (or refused) with nothing run. Otherwise a ticket: a new key, to claim inside the request
+        transaction."""
+        from mohio_ast import IdempotentDecl
+        import time as _time
+        decl = next((b for b in (node.body or []) if isinstance(b, IdempotentDecl)), None)
+        if decl is None:
+            return None
+        ctx._idempotent_decl = decl          # the one declaration this route's body may pass over
+        db = getattr(self, '_db', None)
+        # DEFER-CHECK-MIRRORED: scan_route_idempotency refuses no database, MongoDB and a key that is
+        # no header at check; these are the run-time copies, never the only gate.
+        if db is None:
+            raise MohioRuntimeError(
+                f"line {decl.line}: `idempotent by` keeps each answer in the database, and this program "
+                f"connects none. Add a `connect db as sqlite from env.DATABASE_URL` (or another engine).")
+        if not getattr(db, 'supports_transactions', True):
+            # DEFER-CHECK-MIRRORED: scan_route_idempotency refuses `idempotent by` on MongoDB at check.
+            raise MohioRuntimeError(
+                f"line {decl.line}: `idempotent by` keeps the key and the work in one transaction, and a "
+                f"MongoDB request transaction is not built in this release (T1-MONGO-PROGRAM-TRANSACTION). "
+                f"Nothing in the handler was run. To proceed, run this route on Postgres, MySQL, Oracle or "
+                f"SQLite.")
+        if not decl.header:
+            raise MohioRuntimeError(
+                f"line {decl.line}: `idempotent by` reads its key from a request header. Write it as "
+                f"`idempotent by request.header \"Idempotency-Key\"`.")
+        headers = (getattr(self, '_raw_request', None) or {}).get('headers') or {}
+        key = str(headers.get(decl.header.lower()) or '').strip()
+        if not key:
+            return self._idempotency_refusal(400, (
+                f"This request needs an `{decl.header}` header. This route does its work once per key "
+                f"and answers a repeated key with the answer it already gave: send a new key for each "
+                f"new request, and the same key to retry one."))
+        if len(key) > 255:
+            return self._idempotency_refusal(400, (
+                f"The `{decl.header}` header is longer than 255 characters. Send a shorter key, such as "
+                f"a UUID."))
+        from mohio_outbound import (InboundAnswers, inbound_slot, request_fingerprint,
+                                    DEFAULT_KEEP_SECONDS)
+        route = f"POST {node.path or ''}"
+        person = self._session_person(ctx)
+        person = person.to_python() if isinstance(person, MohioValue) else person
+        slot = inbound_slot(route, key, '' if person is None else str(person))
+        fp = request_fingerprint(route, self._strip_plumbing(req))
+        store = InboundAnswers(db, self._shaped_unique_cols)
+        store.ensure()
+        row = store.lookup(slot)
+        expired = row is not None and store.expired(row, _time.time())
+        if row is not None and not expired:
+            return self._idempotency_answer(row, fp, decl)
+        keep = decl.keep_seconds if decl.keep_seconds else DEFAULT_KEEP_SECONDS
+        return self._IdempotencyTicket(db, store, slot, route, fp, keep, decl, expired)
+
+    def _idempotency_answer(self, row, fp, decl):
+        """The answer for a key already on record: its stored answer, or a refusal."""
+        from mohio_outbound import decode_answer
+        if str(row.get('fingerprint') or '') != fp:
+            return self._idempotency_refusal(422, (
+                f"This `{decl.header}` was already used for a different request to this route. A key "
+                f"names one request: send a new key for a new request."))
+        text = str(row.get('answer') or '')
+        if not text:
+            return self._idempotency_refusal(409, (
+                f"A request with this `{decl.header}` is still being handled. Retry it in a moment with "
+                f"the same key to get its answer."))
+        answer = decode_answer(text)
+        if isinstance(answer, dict) and '$jump' in answer:
+            raise _Jump(answer['$jump'])
+        if isinstance(answer, dict) and '$raw' in answer:
+            return answer['$raw']
+        return answer
+
+    def _idempotency_claim(self, t):
+        """Claim the key's slot inside the open request transaction. None when claimed; the
+        exception when the slot was taken (or could not be claimed), for _idempotency_conflict."""
+        import time as _time
+        try:
+            if t.expired:
+                t.store.drop(t.slot)          # an answer past its `keep for` frees its key
+            t.store.claim(t.slot, t.route, t.fp, _time.time(), t.keep)
+        except Exception as e:  # SILENT-SHAPE-OK: handed to _idempotency_conflict, which answers from the record or re-raises
+            return e
+        return None
+
+    def _idempotency_conflict(self, t, err):
+        """The slot was taken: another request with this key committed, or is still running. Read
+        the record after the rollback. With no record, a contention error answers 409 and anything
+        else is raised as it was: a failed claim is never passed off as a duplicate."""
+        row = t.store.lookup(t.slot)
+        if row is not None:
+            return self._idempotency_answer(row, t.fp, t.decl)
+        if any(w in str(err).lower() for w in self._CONTENTION_WORDS):
+            return self._idempotency_refusal(409, (
+                f"A request with this `{t.decl.header}` is still being handled. Retry it in a moment "
+                f"with the same key to get its answer."))
+        raise err
+
+    def _idempotency_finish(self, t, resp):
+        """Keep the answer the caller is about to receive, before the commit that keeps the work."""
+        from mohio_outbound import AnswerNotKeptError
+        answer = resp if isinstance(resp, dict) else {'$raw': resp}
+        try:
+            t.store.finish(t.slot, answer)
+        except AnswerNotKeptError as e:
+            raise MohioRuntimeError(
+                f"line {t.decl.line}: this idempotent route answered with a value its record cannot "
+                f"keep exactly ({e}), so a repeated request could not get the same answer. Nothing "
+                f"this request wrote was kept. To fix it, give back text, numbers, dates, lists or "
+                f"records.")
+
+    def _exec_IdempotentDecl(self, node, ctx):
+        """Read by the `listen for` submit path before the body runs (_idempotency_gate). Reached in
+        a body any other way, it would promise a guarantee nothing is keeping, so it refuses."""
+        if ctx is not None and scoped_attr(ctx, '_idempotent_decl') is node:
+            return None
+        # DEFER-CHECK-MIRRORED: scan_route_idempotency refuses `idempotent by` anywhere but the top
+        # of a `listen for` body.
+        raise MohioRuntimeError(
+            f"line {node.line}: `idempotent by` describes a whole `listen for` route, so it stands at "
+            f"the top of one. Here nothing would keep its promise. Move it to the first lines of the "
+            f"`listen for` it guards.")
+
     def _atomic_wrap_db(self, node, ctx=None):
         """The db to make a handler atomic over, or None to run the handler exactly as before.
 
@@ -29501,6 +29977,9 @@ class MohioInterpreter:
         # boolean (signup polarity: unique == value not already present). These are
         # non-retrieving -- they answer a question, never return rows. For the row,
         # use find / get.
+        # A not-found refusal in `on.failure` on a `check count` never fires (H, 6.0.1); exists and
+        # unique already refuse any on.failure at transform, so this only ever stops a count.
+        self._refuse_not_found_in_failure(node)
         table, _col = self._resolve_source_parts(node.source, ctx)
         if node.variant == 'unique':
             # T1-OUTCOME-STRUCTURE (ruled 2026-08-11): a missing/broken connection is an
@@ -29671,7 +30150,27 @@ class MohioInterpreter:
                     "db.X match ...`). Without it the count has nowhere to bind -- "
                     "`result` is reserved and there is no magic default.")
             ctx.set(node.name, MohioValue(cnt, 'number'))
-            _run_success()
+            # THE ANSWER BRANCHES (H, 6.0.1), as on exists and unique (T1-OUTCOME-STRUCTURE): a count
+            # ran only `on.success`, so `when empty` / `otherwise` and any `when total is ...` were
+            # dropped and neither branch ran, whatever the count. `when empty` is the zero count;
+            # any other `when` is a condition on the bound number, evaluated with `on.success` by
+            # _handle_success, the same path exists takes for its non-empty forms.
+            when_empty = next(
+                (h for h in handlers
+                 if isinstance(h, CheckWhen)
+                 and type(getattr(h, 'value', None)).__name__ == 'DottedName'
+                 and list(getattr(getattr(h, 'value', None), 'parts', [])) == ['empty']
+                 and not ctx.exists('empty')), None)
+            if when_empty is not None:
+                _run_success()
+                # `as NAME` is the count here, so a branch never overwrites it with its own value
+                if cnt == 0:
+                    return self._run_check_branch_body(when_empty.body, ctx, None)
+                otherwise = next((h for h in handlers if isinstance(h, OtherwiseClause)), None)
+                if otherwise is not None:
+                    return self._run_check_branch_body(otherwise.body, ctx, None)
+                return MohioValue(cnt, 'number')
+            self._handle_success(handlers, ctx)
             return MohioValue(cnt, 'number')
 
         # UNREACHABLE by any program: `node.variant` is set by the transformer to one of the handled
@@ -30135,46 +30634,9 @@ class MohioInterpreter:
         # int param, a missing required param bound to None).
         param_by_name = {p.name: p for p in (task.params or [])}
 
-        def _bind_typed(pname, raw):
-            """A NUMERIC-typed param routes its incoming value through the existing
-            coercion (`_mohio_coerce_number`), which fails loud on a mismatch such as
-            "cat" -> int. Untyped/text/shape params bind the value as-is. -- (b)"""
-            p = param_by_name.get(pname)
-            t = (getattr(p, 'type_name', None) or 'any').lower()
-            _num = {'int': 'int', 'integer': 'int', 'number': 'number',
-                    'num': 'number', 'decimal': 'decimal', 'dec': 'decimal'}
-            if t in _num:
-                raw_py = raw.to_python() if isinstance(raw, MohioValue) else raw
-                num, kind = _mohio_coerce_number(raw_py, _num[t], None, pname)
-                coerced = num if isinstance(num, MohioValue) else MohioValue(num, kind)
-                return _classify_bound(p, coerced)
-            # A non-numeric param has no coercion to run at all: text, shape and untyped
-            # params take the value exactly as it arrived.
-            return _classify_bound(p, raw)
-
-        def _classify_bound(p, bound):
-            """`take ssn as text [phi]` classifies what ARRIVES.
-
-            A tag on a take param is the same rule as a tag on a field, applied where a value
-            enters instead of where it is read: classification is bound to the value, not to
-            the name it came through. Without this the tag would parse, sit on the param, and
-            protect nothing -- the shape of decorative vocabulary this slot exists to prevent.
-
-            COPIED BEFORE CLASSIFYING. The argument can be the caller's own MohioValue, and
-            marking it in place would silently classify the caller's variable as a side effect
-            of passing it. The tag applies to what the task received.
-            """
-            if not isinstance(bound, MohioValue):
-                return bound
-            for m in (getattr(p, 'modifiers', None) or []):
-                if str(getattr(m, 'modifier_type', '')) != 'tag':
-                    continue
-                cls = str(getattr(m, 'value', '') or '').lower()
-                if cls in ('phi', 'pci'):
-                    bound = _copy.copy(bound)
-                    bound.data_class = cls
-                    break
-            return bound
+        def _bind_typed(pname, raw, value_node=None):
+            return self._bind_task_param(param_by_name.get(pname), pname, raw, value_node,
+                                         node, ctx)
 
         # Named args block form
         if node.args:
@@ -30187,24 +30649,27 @@ class MohioInterpreter:
                             f"Check the name, or declare '{fv.name}' with a `take` line in the task.")
                     self._require_defined(fv.value, ctx, f"argument '{fv.name}'")
                     val = self._eval(fv.value, ctx)
-                    child.set(fv.name, _bind_typed(fv.name, val))          # (b) typed coercion
+                    child.set(fv.name, _bind_typed(fv.name, val, fv.value))  # (b) typed coercion
         # Inline with form: call TaskName with value
         elif node.inline_arg is not None:
             self._require_defined(node.inline_arg, ctx, f"argument to task '{node.task_name}'")
             val = self._eval(node.inline_arg, ctx)
             if task.params:
                 pname = task.params[0].name
-                child.set(pname, _bind_typed(pname, val))                  # (b)
+                child.set(pname, _bind_typed(pname, val, node.inline_arg))  # (b)
             else:                                                          # (d) extra arg
                 raise MohioRuntimeError(
                     f"task '{node.task_name}' takes no arguments, but a value was passed. "
                     f"Declare an input with a `take` line, or call it with no argument "
                     f"(`call {node.task_name} / call: done`).")
 
-        # Set defaults for missing params
+        # Set defaults for missing params. A DEFAULT IS TYPED LIKE A PASSED VALUE (6.0.1): it was
+        # bound as written, so `take n as int default "abc"` gave back "abc" and a currency
+        # default was neither rounded nor money.
         for param in task.params:
             if param.name not in child._vars and param.default is not None:
-                child.set(param.name, self._eval(param.default, ctx))
+                child.set(param.name, _bind_typed(param.name, self._eval(param.default, ctx),
+                                                  param.default))
 
         # (a) missing required: a param with NO default that the call didn't supply.
         # (Runs after defaults so only genuinely-required params trip.)
@@ -30544,6 +31009,9 @@ message=(f"Raw sql cannot run on this connection: "
                             # EXACT FROM THE MOMENT IT IS ASSIGNED. Rounding a float and keeping
                             # it a float would leave the value one operation away from drifting.
                             _q = self._money_quantize(fpy, self._CURRENCIES[_cur]['places'])
+                            self._refuse_money_precision_if_regulated(
+                                fname, _cur, fpy, _q,
+                                getattr(field_nodes.get(fname), 'line', None) or getattr(node, 'line', None))
                             # PRECISION WARNING (ruled 2026-09-23). A LITERAL written with more
                             # decimal places than the currency holds is dropped silently: `us 0.0001`
                             # in USD stores $0.00. Warn (and log) so the loss is visible. Only a
@@ -30610,14 +31078,13 @@ message=(f"Raw sql cannot run on this connection: "
             db = None
         table = self._resolve_write_target(node.collection, ctx, 'modify') if is_db else None
         # `modify` filters IN MEMORY (`_eval_condition` per row, below), not in SQL, so its rows
-        # have to be readable before the `where` can mean anything. `_random_collection` returns
-        # them exactly as stored, which for a tagged field is ciphertext -- so
-        # `modify ... where ssn is "1111"` compared "1111" against `enc:v1:...` and matched
-        # nothing, silently. Decrypt here, once, so both the filter and the `apply` body see the
-        # real value. The write path re-encrypts on the way back out.
-        if is_db:
-            # With its table, so a money field keeps its currency through the filter and `apply`.
-            rows = [self._decrypt_row(r, table) if isinstance(r, dict) else r for r in rows]
+        # have to be readable before the `where` can mean anything: `modify ... where ssn is "1111"`
+        # once compared "1111" against `enc:v1:...` and matched nothing, silently. The rows arrive
+        # readable: `_random_collection` decrypts each one by its table (since 2026-10-11), money
+        # back on a money field, and the write path re-encrypts on the way back out. They are NOT
+        # decrypted a second time here: that second pass met a value already opened, and since a
+        # protected column holding plaintext refuses on read (A2, 6.0.1), it refused every modify
+        # of a protected field.
         # A modify naming NO field to change is structurally impossible work, the direct sibling
         # of `update_without_fields` above. Before this the per-row `if not changes: continue`
         # below skipped every row in silence: exit 0, nothing written, nothing printed, and no
@@ -30857,6 +31324,13 @@ message=(f"Raw sql cannot run on this connection: "
             return 'public'
         return 'private'
 
+    # PUBLIC-PUT-CACHE-CONTROL (RULED by Ron 2026-10-23). A public object takes the asset manager's
+    # max-age (a minute, then revalidate), marked public because the public bucket is shared by
+    # declaration. A private or hidden object is never kept by a shared cache and never served stale.
+    _UPLOAD_CACHE_CONTROL = {'public': 'public, max-age=60, must-revalidate',
+                             'private': 'private, no-cache',
+                             'hidden': 'private, no-cache'}
+
     def _public_upload_store(self, node):
         """The public bucket's store, or a refusal naming the variable. A `public/` object never
         falls back to the private bucket: it would be stored where the address handed out for it
@@ -30947,14 +31421,37 @@ message=(f"Raw sql cannot run on this connection: "
                 line=getattr(node, 'line', None),
                 hint=("Read it through the app (`miofile.read`, or a handler that checks who is "
                       "asking), or keep it under a folder whose name does not start with `_`."))
+        if _kind == 'public' and method == 'GET' and not (os.environ.get('MOHIO_STORE_PUBLIC_URL') or '').strip():
+            # A PUBLIC ADDRESS IS THE BUCKET'S OWN READ HOST, NEVER GUESSED (PUBLIC-OBJECT-URL-
+            # VIRTUAL-HOSTED, 6.0.1): the path-style address on the API endpoint 403s on Tigris.
+            raise _Raise(
+                error_name='public_url_not_set',
+                message=(f"'{target}' is under `public/`, so it is read by a plain address, and "
+                         f"MOHIO_STORE_PUBLIC_URL is not set, so no address was made. A public "
+                         f"object is served from the bucket's own read host, which is not the API "
+                         f"endpoint on every provider."),
+                line=getattr(node, 'line', None),
+                hint=("Set MOHIO_STORE_PUBLIC_URL to the public bucket's read address: on Tigris "
+                      "https://<bucket>.t3.tigrisbucket.io (or your custom domain), on AWS "
+                      "https://<bucket>.s3.<region>.amazonaws.com."))
+        # An UPLOAD signs the Cache-Control its object lands with, by its path (PUBLIC-PUT-CACHE-CONTROL,
+        # RULED by Ron 2026-10-23), so the client must send exactly that value or the store refuses the
+        # PUT; it is handed back beside the URL for that reason.
+        cache = self._UPLOAD_CACHE_CONTROL[_kind]
         try:
             if _kind == 'public':
                 store = self._public_upload_store(node)
                 url = (store.object_url(str(target)) if method == 'GET'
-                       else store.presign(method, str(target), seconds))
+                       else store.presign(method, str(target), seconds, cache_control=cache))
+            elif method == 'PUT':
+                store = self._upload_store()
+                url = store.presign(method, str(target), seconds, cache_control=cache)
             else:
                 store = self._upload_store()
-                url = store.presign(method, str(target), seconds)
+                # A private object's link is answered `private, no-cache` whatever the object was
+                # stored with, so a shared cache never keeps it past the link's own authority.
+                url = store.presign(method, str(target), seconds,
+                                    response_cache_control=self._UPLOAD_CACHE_CONTROL['private'])
         except Exception as exc:
             # A missing endpoint or key pair surfaces here, from the store's own check, and it
             # is the commonest real failure: the program is right and the deployment is not
@@ -30972,9 +31469,13 @@ message=(f"Raw sql cannot run on this connection: "
                 hint=("Set the store's endpoint, bucket, region and key pair for this "
                       "deployment, or add an `on.failure` to this block to handle it."))
 
+        # A read is a link and nothing more. An upload is the link AND the headers its PUT must carry
+        # (`upload.url`, `upload.headers`), so `give back upload` hands the client both.
+        result = (MohioValue({'url': url, 'headers': {'Cache-Control': cache}}, 'shape') if method == 'PUT'
+                  else MohioValue(url, 'string'))
         if node.named:
-            ctx.set(node.named, MohioValue(url, 'string'))
-        return MohioValue(url, 'string')
+            ctx.set(node.named, result)
+        return result
     def _exec_ValidateStmt(self, node, ctx):
         """Apply a named rule set to data. Source is either an explicit
         `against <expr>` value or, for `using`, a named variable / the inbound
@@ -33063,6 +33564,91 @@ message=(f"Raw sql cannot run on this connection: "
                 line=line)
         return result
 
+    def _journey_gate(self, node, ctx, req):
+        """A journey's page classes against the request path: `hidden:` (and a `_` segment) answers
+        404, `authorize:` with no verified session 403, `public:` overrides both. Raised before anything
+        is served. Run for EVERY journey in a program before any handler dispatches (_route_program), so
+        a handler written above its journey is gated exactly as one written below (measured over HTTP
+        before: the same file answered 200 and the data in one order, 403 in the other)."""
+        from mohio_ast import JourneyMeta
+        req_path = req.get('_path')
+        metas = [b for b in node.body if isinstance(b, JourneyMeta)]
+
+        def _matches_kind(kind, path):
+            return any(self._journey_path_matches(p, path)
+                       for m in metas if m.kind == kind for p in (m.value or []))
+
+        if req_path is not None:
+            norm_req = self._norm_path(req_path)
+            is_public     = _matches_kind('public', norm_req)
+            is_hidden     = _matches_kind('hidden', norm_req)
+            is_authorize  = _matches_kind('authorize', norm_req)
+            is_underscore = self._path_has_underscore_segment(norm_req)
+
+            if not is_public and (is_hidden or is_underscore):
+                # T1-AUDIT-COVERAGE-GAPS Part B: a hidden: path denial is a security-relevant
+                # event, same shape as require role's denial audit.
+                _evt = self._audit_event('security_audit_log', {
+                    'event': 'access_denied',
+                    'reason': 'hidden_path' if is_hidden else 'hidden_path_underscore',
+                    'path': norm_req,
+                }, ctx)
+                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
+                raise _Raise(
+                    error_name='not_found',
+                    message="Not found.",
+                    hint=(f"hidden: {norm_req} is not served." if is_hidden else
+                          f"{norm_req} is not served -- a path segment starting with "
+                          f"_ is always hidden."))
+
+            if not is_public and is_authorize:
+                if not (ctx.has_any_roles() and ctx.roles_verified()):
+                    _evt = self._audit_event('security_audit_log', {
+                        'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
+                        'path': norm_req,
+                    }, ctx)
+                    self._audit_logs.setdefault('security_audit_log', []).append(_evt)
+                    raise _Raise(
+                        error_name='authorization_error',
+                        message="Please sign in. This page needs someone signed in, and nobody is.",
+                        hint=(f"authorize: {norm_req} requires an authenticated session -- "
+                              f"no server-verified role is present for this session. "
+                              f"Establish one at login with grant role."))
+        else:
+            # No path was pinned on this request at all (e.g. `mio run --request-file` with
+            # no `_path` key). _serve_pages's single-page fallback below serves whatever one
+            # page exists with no path to check against hidden:/authorize: -- so there is no
+            # way to know whether the page about to be served falls under either. Deny by
+            # default for whichever this journey declares, same _Raise shapes as the
+            # path-present check above. A journey with neither hidden: nor authorize: is
+            # unaffected -- this branch is a no-op for it, same as before.
+            if any(m.kind == 'hidden' for m in metas):
+                _evt = self._audit_event('security_audit_log', {
+                    'event': 'access_denied', 'reason': 'hidden_path', 'path': None,
+                }, ctx)
+                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
+                raise _Raise(
+                    error_name='not_found',
+                    message="Not found.",
+                    hint=("this request carried no path, and the journey declares "
+                          "hidden: paths -- refusing by default because there is no "
+                          "path to check against them."))
+            if any(m.kind == 'authorize' for m in metas):
+                if not (ctx.has_any_roles() and ctx.roles_verified()):
+                    _evt = self._audit_event('security_audit_log', {
+                        'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
+                        'path': None,
+                    }, ctx)
+                    self._audit_logs.setdefault('security_audit_log', []).append(_evt)
+                    raise _Raise(
+                        error_name='authorization_error',
+                        message="Please sign in. This page needs someone signed in, and nobody is.",
+                        hint=("this request carried no path, and the journey declares "
+                              "authorize: paths -- refusing by default because there is "
+                              "no path to check against them. No server-verified role is "
+                              "present for this session. Establish one at login with "
+                              "grant role."))
+
     def _exec_JourneyDecl(self, node, ctx):
         # Journey = the app's root scope + routing container. (The doc this
         # comment used to cite, Docs/journey-page-design-2026-06-17.md, has never
@@ -33155,83 +33741,9 @@ message=(f"Raw sql cannot run on this connection: "
         # the static-asset file server's separate `_next/`-style folder allowance
         # (mohio_server.py's _static_file_response, a deliberate, different, unrelated
         # tradeoff for served build-tool asset directories) is untouched by this rule.
-        req_path = req.get('_path')
-        metas = [b for b in node.body if isinstance(b, JourneyMeta)]
-
-        def _matches_kind(kind, path):
-            return any(self._journey_path_matches(p, path)
-                       for m in metas if m.kind == kind for p in (m.value or []))
-
-        if req_path is not None:
-            norm_req = self._norm_path(req_path)
-            is_public     = _matches_kind('public', norm_req)
-            is_hidden     = _matches_kind('hidden', norm_req)
-            is_authorize  = _matches_kind('authorize', norm_req)
-            is_underscore = self._path_has_underscore_segment(norm_req)
-
-            if not is_public and (is_hidden or is_underscore):
-                # T1-AUDIT-COVERAGE-GAPS Part B: a hidden: path denial is a security-relevant
-                # event, same shape as require role's denial audit.
-                _evt = self._audit_event('security_audit_log', {
-                    'event': 'access_denied',
-                    'reason': 'hidden_path' if is_hidden else 'hidden_path_underscore',
-                    'path': norm_req,
-                }, ctx)
-                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
-                raise _Raise(
-                    error_name='not_found',
-                    message="Not found.",
-                    hint=(f"hidden: {norm_req} is not served." if is_hidden else
-                          f"{norm_req} is not served -- a path segment starting with "
-                          f"_ is always hidden."))
-
-            if not is_public and is_authorize:
-                if not (ctx.has_any_roles() and ctx.roles_verified()):
-                    _evt = self._audit_event('security_audit_log', {
-                        'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
-                        'path': norm_req,
-                    }, ctx)
-                    self._audit_logs.setdefault('security_audit_log', []).append(_evt)
-                    raise _Raise(
-                        error_name='authorization_error',
-                        message="Please sign in. This page needs someone signed in, and nobody is.",
-                        hint=(f"authorize: {norm_req} requires an authenticated session -- "
-                              f"no server-verified role is present for this session. "
-                              f"Establish one at login with grant role."))
-        else:
-            # No path was pinned on this request at all (e.g. `mio run --request-file` with
-            # no `_path` key). _serve_pages's single-page fallback below serves whatever one
-            # page exists with no path to check against hidden:/authorize: -- so there is no
-            # way to know whether the page about to be served falls under either. Deny by
-            # default for whichever this journey declares, same _Raise shapes as the
-            # path-present check above. A journey with neither hidden: nor authorize: is
-            # unaffected -- this branch is a no-op for it, same as before.
-            if any(m.kind == 'hidden' for m in metas):
-                _evt = self._audit_event('security_audit_log', {
-                    'event': 'access_denied', 'reason': 'hidden_path', 'path': None,
-                }, ctx)
-                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
-                raise _Raise(
-                    error_name='not_found',
-                    message="Not found.",
-                    hint=("this request carried no path, and the journey declares "
-                          "hidden: paths -- refusing by default because there is no "
-                          "path to check against them."))
-            if any(m.kind == 'authorize' for m in metas):
-                if not (ctx.has_any_roles() and ctx.roles_verified()):
-                    _evt = self._audit_event('security_audit_log', {
-                        'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
-                        'path': None,
-                    }, ctx)
-                    self._audit_logs.setdefault('security_audit_log', []).append(_evt)
-                    raise _Raise(
-                        error_name='authorization_error',
-                        message="Please sign in. This page needs someone signed in, and nobody is.",
-                        hint=("this request carried no path, and the journey declares "
-                              "authorize: paths -- refusing by default because there is "
-                              "no path to check against them. No server-verified role is "
-                              "present for this session. Establish one at login with "
-                              "grant role."))
+        # THE GATE RUNS BEFORE ANY HANDLER IS DISPATCHED (T1-ROUTE-CLASS-PER-JOURNEY): _route_program
+        # gates every journey first, so this is the copy for a journey reached another way.
+        self._journey_gate(node, ctx, req)
 
         served = self._serve_pages(pages, ctx, req)
         if served is not None:
@@ -34645,19 +35157,21 @@ message=(f"Raw sql cannot run on this connection: "
             # fragment, which HAS been through escaping and classification, from any other string,
             # which has not. `inject` (MioScript) places markup only when that marker is present; a
             # raw `give back` string never carries it and is never trusted as markup.
-            if getattr(node, 'kind', 'html') == 'fragment':
-                ctx._response_content_type = 'text/html'
+            # A FRAGMENT COMPOSES LIKE EVERY OTHER RENDER (BS-007, Summit R35). It returned its piece
+            # on its own and never joined `_render_fragments`, so a `render scripts` after it composed
+            # without it and, as the handler's last value, became the response: HTTP 200 carried the
+            # script and silently dropped the HTML (two fragments lost the first the same way). It
+            # joins the composition now, and a response holding a fragment stays unwrapped.
+            _is_fragment = getattr(node, 'kind', 'html') == 'fragment'
+            if _is_fragment:
                 ctx._response_is_fragment = True
-                self.shown.append(html)
-                if self.verbose: print(f"  [render fragment] {len(html)} chars")
-                return MohioValue(html, 'string')
             # `render scripts` is the explicit JS container. The kind was recorded by the
             # transformer and then never used, so script content was emitted as raw body text:
             # the browser printed the JavaScript instead of running it.
             if getattr(node, 'kind', 'html') == 'scripts':
                 html = "<script>\n" + html + "\n</script>"
             low = html.lstrip().lower()
-            if low.startswith('<!doctype') or low.startswith('<html'):
+            if not _is_fragment and (low.startswith('<!doctype') or low.startswith('<html')):
                 # The author wrote a complete document -- it owns the response as-is, and
                 # composing into a shell would nest one document inside another.
                 html = self._inject_mioscript(html)
@@ -34666,7 +35180,8 @@ message=(f"Raw sql cannot run on this connection: "
                 _frags = list(self._ctx_attr(ctx, '_render_fragments') or [])
                 _frags.append(html)
                 ctx._render_fragments = _frags
-                html = self._wrap_html_shell("\n".join(_frags), ctx)
+                html = ("\n".join(_frags) if self._ctx_attr(ctx, '_response_is_fragment')
+                        else self._wrap_html_shell("\n".join(_frags), ctx))
                 # Keep ONE composed page in `shown` rather than one per render, so `mio run`
                 # prints the page once instead of printing it again for every fragment added.
                 _idx = self._ctx_attr(ctx, '_render_shown_index')
@@ -34792,6 +35307,123 @@ message=(f"Raw sql cannot run on this connection: "
             return num
         q = Decimal(1).scaleb(-int(max(0, places)))
         return d.quantize(q, rounding=ROUND_HALF_UP)
+
+    def _bind_task_param(self, p, pname, raw, value_node, node, ctx):
+        """A NUMERIC-typed param routes its incoming value through the existing
+        coercion (`_mohio_coerce_number`), which fails loud on a mismatch such as
+        "cat" -> int. A CURRENCY param becomes that money, by the same contract a typed
+        assignment applies (`_bind_money`). Untyped/text/shape params bind the value
+        as-is. -- (b)"""
+        t = (getattr(p, 'type_name', None) or 'any').lower()
+        _num = {'int': 'int', 'integer': 'int', 'number': 'number',
+                'num': 'number', 'decimal': 'decimal', 'dec': 'decimal'}
+        if t.upper() in self._CURRENCIES:
+            raw_py = raw.to_python() if isinstance(raw, MohioValue) else raw
+            num, _kind = _mohio_coerce_number(raw_py, 'decimal', None, pname)
+            money = self._bind_money(pname, t.upper(), raw, num, value_node,
+                                     value_node if value_node is not None else node, ctx)
+            return self._classify_bound(p, money)
+        if t in _num:
+            raw_py = raw.to_python() if isinstance(raw, MohioValue) else raw
+            num, kind = _mohio_coerce_number(raw_py, _num[t], None, pname)
+            coerced = num if isinstance(num, MohioValue) else MohioValue(num, kind)
+            return self._classify_bound(p, coerced)
+        # A non-numeric param has no coercion to run at all: text, shape and untyped
+        # params take the value exactly as it arrived.
+        return self._classify_bound(p, raw)
+
+    @staticmethod
+    def _classify_bound(p, bound):
+        """`take ssn as text [phi]` classifies what ARRIVES.
+
+        A tag on a take param is the same rule as a tag on a field, applied where a value
+        enters instead of where it is read: classification is bound to the value, not to
+        the name it came through. Without this the tag would parse, sit on the param, and
+        protect nothing -- the shape of decorative vocabulary this slot exists to prevent.
+
+        COPIED BEFORE CLASSIFYING. The argument can be the caller's own MohioValue, and
+        marking it in place would silently classify the caller's variable as a side effect
+        of passing it. The tag applies to what the task received.
+        """
+        if not isinstance(bound, MohioValue):
+            return bound
+        for m in (getattr(p, 'modifiers', None) or []):
+            if str(getattr(m, 'modifier_type', '')) != 'tag':
+                continue
+            cls = str(getattr(m, 'value', '') or '').lower()
+            if cls in ('phi', 'pci'):
+                bound = _copy.copy(bound)
+                bound.data_class = cls
+                break
+        return bound
+
+    def _bind_money(self, name, code, value, value_py, value_node, node, ctx):
+        """A value given to a name declared in a currency, as that money: the one contract a typed
+        assignment and a currency `take` both apply.
+
+        An amount in another currency refuses (value kinds, RULED by Ron 2026-10-13: EUR 5 given to
+        a USD name was relabelled $5.00); the value becomes exact Decimal money at the currency's
+        places; under a regulated sector an over-precise value refuses before it is rounded (A1,
+        6.0.1); outside one, an over-precise LITERAL warns. A `take amount as USD` bound the value
+        as it arrived, with none of this, so `1.001` came back as a plain 1.001.
+        """
+        line = getattr(node, 'line', None)
+        _held = getattr(value, '_currency', None) if isinstance(value, MohioValue) else None
+        if _held and _held != code:
+            raise _Raise(
+                error_name='currency_mismatch',
+                message=(f"Line {line if line else '?'}: `{name}` is declared {code}, and the value "
+                         f"given to it is an amount in {_held}. An amount keeps its currency, so it "
+                         f"is not relabelled {code}."),
+                line=line,
+                hint=(f"Give `{name}` a {code} amount, for example `{name} 100.00`. Mohio does "
+                      f"not convert between currencies yet."))
+        # EXACT FROM ASSIGNMENT. A rounded FLOAT is still a float, so `0.30` written here and
+        # `0.1 + 0.2` computed elsewhere would come out as different numbers that both display as
+        # $0.30 -- the drift this type exists to prevent, arriving at the comparison rather than
+        # the screen.
+        _rounded = self._money_quantize(value_py, self._CURRENCIES[code]['places'])
+        self._refuse_money_precision_if_regulated(name, code, value_py, _rounded, line)
+        # SAME WARNING AS THE create BLOCK (Batch 26): it fires only for a literal that actually
+        # rounds, so a correctly-scaled value and a computed value stay silent.
+        self._maybe_warn_money_precision(name, code, value_py, _rounded, value_node, node, ctx)
+        out = MohioValue(_rounded, 'decimal')
+        out._currency = code
+        if isinstance(value, MohioValue) and getattr(value, 'data_class', None):
+            out.data_class = value.data_class
+        return out
+
+    def _refuse_money_precision_if_regulated(self, fname, code, original, quantized, line):
+        """Under a regulated sector an over-precise amount given to a money name refuses here,
+        before it is rounded (A1, 6.0.1).
+
+        The write chokepoint and the HTTP arrival path already refused under a sector, but a typed
+        name (`usd as USD` / `usd 1.001`) and a `create` field rounded the value first, with only a
+        warning, so the write saw a clean $1.00 and stored it: a changed record under a declared
+        financial sector, while the sector's own notice said the amount is refused. Any value is
+        checked, literal or computed, because the write chokepoint checks any value too; outside a
+        regulated sector nothing changes here.
+        """
+        regulated = getattr(self, '_regulated_sector', None)
+        if not regulated or not isinstance(quantized, Decimal):
+            return
+        try:
+            exact = Decimal(str(original))
+        except (InvalidOperation, ValueError, TypeError):
+            return                        # not a number: the type check refuses it on its own
+        if exact == quantized:
+            return
+        places = self._CURRENCIES[code]['places']
+        _lp = f"Line {line}: " if line else ""
+        raise _Raise(
+            error_name='money_precision',
+            message=(f"{_lp}{fname} is {exact} but {code} holds {places} decimal place"
+                     f"{'s' if places != 1 else ''}. Under sector {regulated} an amount is never "
+                     f"rounded, because a rounded amount is a changed record, so nothing after "
+                     f"this ran."),
+            line=line,
+            hint=(f"Write the amount at {code}'s precision ({fname} {quantized}), or round it "
+                  f"yourself so the rounding is in the program:  {fname} ({exact} round.to {places})"))
 
     def _maybe_warn_money_precision(self, fname, code, original, quantized, value_node, create_node, ctx):
         """Warn (and log) when a currency LITERAL is written with more precision than the currency
@@ -36263,7 +36895,7 @@ message=(f"Raw sql cannot run on this connection: "
                     return MohioValue(r.status in (200, 202), "boolean")
             except Exception as e:
                 if self.verbose: print(f"  [miomail] SendGrid error: {e}")
-                self._audit_egress('miomail', 'sendgrid', ctx, error=str(e)[:200])
+                self._audit_egress('miomail', 'sendgrid', ctx, error=str(e)[:200], exc=e)
                 return MohioValue(False, "boolean")
 
         # Brevo
@@ -36285,7 +36917,7 @@ message=(f"Raw sql cannot run on this connection: "
                     return MohioValue(r.status in (200, 201), "boolean")
             except Exception as e:
                 if self.verbose: print(f"  [miomail] Brevo error: {e}")
-                self._audit_egress('miomail', 'brevo', ctx, error=str(e)[:200])
+                self._audit_egress('miomail', 'brevo', ctx, error=str(e)[:200], exc=e)
                 return MohioValue(False, "boolean")
 
         # SMTP
@@ -36317,7 +36949,7 @@ message=(f"Raw sql cannot run on this connection: "
                 return MohioValue(True, "boolean")
             except Exception as e:
                 if self.verbose: print(f"  [miomail] SMTP error: {e}")
-                self._audit_egress('miomail', f'smtp:{smtp_host}', ctx, error=str(e)[:200])
+                self._audit_egress('miomail', f'smtp:{smtp_host}', ctx, error=str(e)[:200], exc=e)
                 return MohioValue(False, "boolean")
 
         # Mock — dev mode
@@ -36347,12 +36979,13 @@ message=(f"Raw sql cannot run on this connection: "
             if hval_node is not None:
                 hv = self._eval(hval_node, ctx)
                 hv_str = str(hv.to_python() if isinstance(hv, MohioValue) else hv)
-                req_headers[hname] = hv_str
+                _header_put(req_headers, hname, hv_str)
 
         if node.auth is not None:
             av = self._eval(node.auth, ctx)
             auth_str = str(av.to_python() if isinstance(av, MohioValue) else av)
-            req_headers["Authorization"] = auth_str if auth_str.lower().startswith(("bearer ", "basic ")) else f"Bearer {auth_str}"
+            _header_put(req_headers, "Authorization",
+                        auth_str if auth_str.lower().startswith(("bearer ", "basic ")) else f"Bearer {auth_str}")
 
         body_bytes = None
         if node.body is not None:
@@ -36361,34 +36994,34 @@ message=(f"Raw sql cannot run on this connection: "
             if isinstance(bp, (dict, list)):
                 # THE ONE CONVERTER (RDC-V6-CONNECT-DECIMAL-JSON), as the connector body above.
                 body_bytes = _json_dumps_exact(bp).encode()
-                req_headers.setdefault("Content-Type", "application/json")
+                _header_default(req_headers, "Content-Type", "application/json")
             elif isinstance(bp, str):
                 body_bytes = bp.encode()
-                req_headers.setdefault("Content-Type", "text/plain")
+                _header_default(req_headers, "Content-Type", "text/plain")
 
         self._egress_refuse('http',
             f"miohttp.{node.method.lower()}", url,
             [('its address', url), ('its headers', {k: v for k, v in req_headers.items()
-                                                    if k != 'Authorization'}),
+                                                    if k.lower() != 'authorization'}),
              ('its body', bv if node.body is not None else None),
              ('its body', body_bytes.decode('utf-8', errors='replace') if body_bytes else None)],
             node, ctx=ctx)
         # THE AUTHORIZATION IS A CREDENTIAL, and a credential is the one place a secret goes. It is
         # still an outside call, so protected data in it refuses like anywhere else: a [phi] value
         # passed as `auth` used to leave unchecked, the one header the gate never saw.
-        if req_headers.get('Authorization') is not None:
+        if _header_get(req_headers, 'Authorization') is not None:
             self._guard_protected_egress(f"miohttp.{node.method.lower()}", url,
-                                         [('its authorization', req_headers['Authorization'])],
+                                         [('its authorization', _header_get(req_headers, 'Authorization'))],
                                          node=node)
 
         if self.verbose: print(f"  [miohttp] {method} {url[:60]}")
 
         # An idempotency key on every changing call, as on a connector call (_exec_MioconnectCall).
         if method not in ("GET", "HEAD", "OPTIONS"):
-            req_headers.setdefault("Idempotency-Key", uuid.uuid4().hex)
+            _header_default(req_headers, "Idempotency-Key", uuid.uuid4().hex)
         # The same outcome rules as a connector call (mohio_outbound): recorded before it leaves.
         _changing = method not in ("GET", "HEAD", "OPTIONS")
-        _attempt_key = req_headers.get("Idempotency-Key") if _changing else None
+        _attempt_key = _header_get(req_headers, "Idempotency-Key") if _changing else None
         _mh_what = f"miohttp.{node.method.lower()} {url[:80]}"
         if _changing:
             from mohio_outbound import fingerprint as _fp
@@ -36432,7 +37065,7 @@ message=(f"Raw sql cannot run on this connection: "
             result = _NoResponse({"status": 0, "ok": False, "body": "", "json": None, "headers": {},
                                   "error": str(e)})
 
-        self._audit_egress('miohttp', url, ctx, method=method, status=result.get('status'))
+        self._audit_egress('miohttp', url, ctx, method=method, status=result.get('status'), exc=_mh_exc)
         # A miohttp call declares no response shape, so any 2xx is done (RULED by Ron 2026-10-10);
         # a 5xx, or a send that may have arrived before it failed, is unknown and stops safely.
         if _changing:
@@ -37230,6 +37863,9 @@ message=(f"Raw sql cannot run on this connection: "
             tn = (getattr(node, 'type_name', '') or '').lower()
             if tn == 'list' or tn.startswith('list '):
                 empty = MohioValue([], 'list')
+                # the declared kind travels with the empty list: nothing else can say what an empty
+                # list holds when it is filtered by a field (BS-011)
+                empty._list_type = tn
                 if getattr(self, '_session_mode', False):
                     ctx.set_persistent(node.name, empty)
                 else:
@@ -37326,35 +37962,9 @@ message=(f"Raw sql cannot run on this connection: "
             if str(_contract).upper() in self._CURRENCIES:
                 # currency: ROUND half-up to the currency's places (money standard, not truncation)
                 # and tag the value with its currency so it renders formatted on output.
-                _cur = str(_contract).upper()
-                _places = self._CURRENCIES[_cur]['places']
-                # AN AMOUNT KEEPS ITS CURRENCY (value kinds, RULED by Ron 2026-10-13): EUR 5 given
-                # to a USD name was re-tagged $5.00, because the type check reads the bare number.
-                # A plain number takes the declared currency; an amount in another one refuses.
-                _held = getattr(value, '_currency', None) if isinstance(value, MohioValue) else None
-                if _held and _held != _cur:
-                    raise _Raise(
-                        error_name='currency_mismatch',
-                        message=(f"Line {getattr(node, 'line', '?')}: `{node.name}` is declared "
-                                 f"{_cur}, and the value given to it is an amount in {_held}. An "
-                                 f"amount keeps its currency, so it is not relabelled {_cur}."),
-                        line=getattr(node, 'line', None),
-                        hint=(f"Give `{node.name}` a {_cur} amount, for example `{node.name} "
-                              f"100.00`. Mohio does not convert between currencies yet."))
-                # EXACT FROM ASSIGNMENT. A rounded FLOAT is still a float, so `0.30` written
-                # here and `0.1 + 0.2` computed elsewhere would come out as different numbers
-                # that both display as $0.30 -- the drift this type exists to prevent, arriving
-                # at the comparison rather than the screen.
-                _rounded = self._money_quantize(value_py, _places)
-                # SAME WARNING AS THE create BLOCK, so a typed-variable assignment and a shape field
-                # agree (Batch 26): an over-precise LITERAL here loses precision silently too. The
-                # helper fires only for a literal that actually rounds, so a correctly-scaled value
-                # and a computed value stay silent, exactly as on the create path.
-                self._maybe_warn_money_precision(
-                    node.name, _cur, value_py, _rounded, getattr(node, 'value', None), node, ctx)
-                value = MohioValue(_rounded, 'decimal')
-                value._currency = _cur
-                value_py = _rounded
+                value = self._bind_money(node.name, str(_contract).upper(), value, value_py,
+                                         getattr(node, 'value', None), node, ctx)
+                value_py = value.to_python()
             else:
                 _cparts = _contract.split('.')
                 _has_pad = _contract.endswith('.pad')
@@ -39475,7 +40085,8 @@ message=(f"Raw sql cannot run on this connection: "
         info = pend.pop(key)
         store = self._upload_store()
         self._upload_say_once(self._upload_root())
-        store.put(key, info['body'], content_type=info['content_type'])
+        store.put(key, info['body'], content_type=info['content_type'],
+                  cache_control=self._UPLOAD_CACHE_CONTROL[self._store_path_kind(key)])
         # RECORDED AFTER THE WRITE SUCCEEDS -- a record of a store that did not happen is a false
         # statement, the same class as a tombstone for an erasure that did not happen.
         self._audit_file_op('store', key, info['sealed'], ctx)
@@ -39940,11 +40551,14 @@ message=(f"Raw sql cannot run on this connection: "
 
     def _render_guard(self, ctx=None):
         # CSRF token (signed, timestamped, bound to the session) plus a honeypot. The verify side
-        # runs in the submit path for real browser form posts.
+        # runs in the submit path for real browser form posts. The honeypot hides in a clipped 1x1
+        # box with no offset (GUARD-002): a large negative offset widened the scroll area, and under
+        # dir="rtl" it flipped into the scrollable side, so a right-to-left page scrolled sideways.
         token = self._issue_csrf(scoped_attr(ctx, '_session_id') if ctx is not None else None)
         return (f'<input type="hidden" name="_csrf" value="{token}">'
-                f'<input type="text" name="_trap" tabindex="-1" autocomplete="off" '
-                f'aria-hidden="true" style="position:absolute;left:-9999px">')
+                f'<span aria-hidden="true" style="position:absolute;width:1px;height:1px;'
+                f'overflow:hidden;clip-path:inset(50%)">'
+                f'<input type="text" name="_trap" tabindex="-1" autocomplete="off"></span>')
 
     def _render_include_directive(self, expr, ctx, line=None):
         """`{{ include "file" }}` inside a render/output body: load a presentation file and emit it
@@ -40286,11 +40900,19 @@ message=(f"Raw sql cannot run on this connection: "
 
     # ── Helpers ───────────────────────────────────────────────
 
-    def _filter_held_list(self, items, where, post_filters, verb, name):
-        """T1-QUERY-HELD's core ruling (Ronnie's call), built and proven standalone --
-        NOT YET WIRED into _exec_FindBlock/_exec_RetrieveBlock/_exec_GrabBlock. Those three
-        still call `_refuse_held_source_query` below and fail loud unconditionally; wiring
-        this in to replace that call is the remaining step before T1-QUERY-HELD itself lands.
+    @staticmethod
+    def _held_list_declared(ctx, name):
+        """The declared type of a held list (`heads as list json` gives 'list json'), or None."""
+        try:
+            v = ctx.get(name)
+        except Exception:  # SILENT-OK: an unresolvable name has no declaration; the lookup refuses it on its own
+            return None
+        return getattr(v, '_list_type', None) or ctx.typed_of(name)
+
+    def _filter_held_list(self, items, where, post_filters, verb, name, declared=None):
+        """T1-QUERY-HELD's core ruling (Ronnie's call): how `find`, `retrieve` and `grab` filter a
+        held list (all three call this). `declared` is the list's declared type (`list json`), the
+        only thing that says what kind of item an EMPTY list holds (BS-011).
 
         THE RULING: a list built from a shape is type-uniform by definition (the shape is the
         schema, same as a SQL column) -- so it behaves like a db table, not like Mongo's
@@ -40341,6 +40963,28 @@ message=(f"Raw sql cannot run on this connection: "
                 f"same list. A queried list must hold one kind of thing, the way a database "
                 f"table or collection does. Split it into separate lists, one per kind.")
 
+        # AN EMPTY LIST HOLDS NO KIND, SO ITS DECLARATION SAYS WHICH (BS-011, Summit R35). With no
+        # items, "no records" was read as "plain values", so `heads as list json` filtered by a field
+        # refused at run as a scalar list while `mio check` passed it. A list declared to hold records
+        # (json, or a shape) or declared with no element type matches nothing; one declared to hold
+        # plain values refuses a field filter exactly as it would with items in it.
+        if not raw_items:
+            _decl = str(declared or '').strip().lower()
+            _elem = _decl[len('list'):].strip() if _decl.startswith('list') else ''
+            _root = _elem.split('.')[0]
+            _plain = bool(_elem) and (
+                _root in ('text', 'string', 'int', 'integer', 'number', 'num', 'dec', 'decimal', 'bool',
+                          'boolean', 'datetime', 'date', 'time', 'uuid', 'email', 'url', 'timezone')
+                or _elem.upper() in self._CURRENCIES)
+            _fields = set((where or {}).keys()) | {f for (f, _, _, _) in (post_filters or [])}
+            if _plain and _fields and _fields != {'value'}:
+                raise MohioRuntimeError(
+                    f"`{verb}` cannot filter '{name}' by field -- it is declared a list of {_elem}, "
+                    f"plain values, not records, so there is no field to filter on. Use `where value "
+                    f"is ...` to test the value itself, or declare it `{name} as list json` if it is "
+                    f"meant to hold records.")
+            return [], None
+
         if not has_records:
             _fields = set((where or {}).keys()) | {f for (f, _, _, _) in (post_filters or [])}
             if _fields and _fields != {'value'}:
@@ -40351,9 +40995,8 @@ message=(f"Raw sql cannot run on this connection: "
                     f"connect a real database.")
             if not _fields:
                 return list(items), None     # the original items: an amount keeps its currency
-            if not items:
-                # an EMPTY list matches nothing; wrapping it and asking again recursed without end
-                return [], None
+            # (an EMPTY list never reaches here: it answers above, by its declaration, before it
+            # could be wrapped and asked again, which recursed without end)
             # `where value is ...` on a scalar-only list -- 'value' means the scalar itself, not
             # a dict field. NOT `it` -- `it` is already the then-chain pipeline pronoun
             # (mohio.lark:2739, _exec_ThenChain) and reusing it here would be a second,
@@ -41172,6 +41815,37 @@ message=(f"Raw sql cannot run on this connection: "
         # new identity, not the one this line set.
         session_ctx.set("session", self._session_shape(session_ctx, session_id))
 
+        # A SESSION IS A RECEIPT OF SUCCESS (RULED by Ron 2026-10-22, a tag blocker). `grant role`
+        # writes onto the live session as it runs, and the funnel below used to commit the session and
+        # send its cookie on every outcome, so a sign-in that granted and then answered 401, 403 or 500
+        # handed the caller a working session holding the role (verified over HTTP). The session's
+        # security state as this request found it is recorded here; a response that is not a success
+        # (status 400 or above) puts it back and sends no session cookie. A status below 400 is a
+        # success, so a sign-in that grants and then redirects (`jump`, 303) keeps its session.
+        _security_before = (list(getattr(session_ctx, '_roles', None) or []),
+                            bool(getattr(session_ctx, '_roles_verified', False)),
+                            getattr(session_ctx, '_person', None), getattr(session_ctx, '_person_set', False))
+        _session_was_new = _is_new
+        _session_id_before = session_id
+
+        def _discard_failed_grant(final_sid):
+            """The request failed, so nothing it granted stands. A session it created is removed
+            entirely. A session that existed keeps the roles and person it came in with; if a grant
+            rotated it, the rotated id is removed too, and the id the caller presented was already
+            invalidated by that rotation, so the caller is signed out rather than kept on a session
+            whose identity the failed sign-in changed (fail closed)."""
+            with MohioInterpreter._SESSIONS_LOCK:
+                if _session_was_new:
+                    for _sid in {final_sid, _session_id_before} - {None}:
+                        store.delete(_sid)
+                    return
+                (session_ctx._roles, session_ctx._roles_verified, session_ctx._person,
+                 session_ctx._person_set) = (list(_security_before[0]),) + tuple(_security_before[1:])
+                if final_sid and final_sid != _session_id_before:
+                    store.delete(final_sid)
+                else:
+                    store.put(_session_id_before, session_ctx)
+
         def _attach_cookies(result):
             """miocookie.set writes __pending_cookies__ onto ctx for any OTHER app cookie;
             the SERVER reads it off the RESULT. mio_session itself is no longer written
@@ -41195,6 +41869,29 @@ message=(f"Raw sql cannot run on this connection: "
             _cur = session_ctx.get('session')
             _cur = (_cur.to_python() if isinstance(_cur, MohioValue) else _cur) or {}
             _final_sid = _cur.get('id') if isinstance(_cur, dict) else None
+            _status = result.get('status') if isinstance(result, dict) else None
+            if isinstance(_status, int) and _status >= 400 and not getattr(session_ctx, '_session_ended', False):
+                # NOT A SUCCESS: no session cookie goes out. Any other cookie the program set is
+                # unchanged. If the request changed the session's security state (a grant, a person,
+                # a rotation), that change is discarded (_discard_failed_grant above). A request that
+                # changed none of it keeps its session in the store with no cookie, because a page
+                # may still answer after it in the session dispatch settled on (a single-file app's
+                # page, after its handlers answer nothing for this path), and that page sends the
+                # cookie only if it succeeds. Such a session holds no role it did not already hold.
+                _security_now = (list(getattr(session_ctx, '_roles', None) or []),
+                                 bool(getattr(session_ctx, '_roles_verified', False)),
+                                 getattr(session_ctx, '_person', None), getattr(session_ctx, '_person_set', False))
+                if _security_now != _security_before or (_final_sid or session_id) != _session_id_before:
+                    _discard_failed_grant(_final_sid)
+                    if isinstance(result, dict) and pend:
+                        result['__pending_cookies__'] = pend
+                    return result
+                if isinstance(result, dict) and pend:
+                    result['__pending_cookies__'] = pend
+                if isinstance(request, dict):
+                    request['__settled_session_id__'] = (_final_sid or session_id)   # for a page after this
+                store.put(_final_sid or session_id, session_ctx)
+                return result
             if getattr(session_ctx, '_session_ended', False):
                 # `end session` (logout) this request: CLEAR the cookie rather than refresh it. An
                 # empty value with expires < 0 makes the server emit Max-Age=0, so the browser deletes
@@ -41380,6 +42077,15 @@ message=(f"Raw sql cannot run on this connection: "
         pool = top_handlers(program.statements)   # the standalone top-level handlers = route registry
         routable = (ListenBlock, JourneyDecl) + TOP_HANDLER_TYPES
         has_listeners = any(isinstance(s, routable) for s in program.statements)
+        # EVERY JOURNEY'S GATE RUNS BEFORE ANY HANDLER IS DISPATCHED (T1-ROUTE-CLASS-PER-JOURNEY). The
+        # loop below dispatches in source order, and a journey's gate used to run only when its own
+        # statement was reached, so a handler written ABOVE the journey that says `authorize: /z` was
+        # served to anyone (measured over HTTP: 200 with the data in that order, 403 in the other).
+        # Position never decides access: every declaration loads before any handler, and so does this.
+        if req is not None:
+            for stmt in program.statements:
+                if isinstance(stmt, JourneyDecl):
+                    self._journey_gate(stmt, ctx, req)
         final_404 = None
         pool_dispatched = False
         for stmt in program.statements:

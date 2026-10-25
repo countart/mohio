@@ -181,16 +181,19 @@ authorization gate written this way never denied.
 
 ### check count — how many?
 
-Bind the number with `as`:
+Bind the number with `as`, and branch on `when empty` (no rows) and `otherwise`:
 
 ```mohio
 check count as total in db.users
-    on.success
-        show total
+    when empty
+        show "none yet"
+    otherwise
+        show ("have " & total)
 check: done
 ```
 
-Add a `where` or `match` to count a subset.
+`when empty` runs when the count is zero; `otherwise` runs when there is at least one row, with the
+number bound to the name you gave (`total` here). Add a `where` or `match` to count a subset.
 
 ### check unique — is this value free?
 

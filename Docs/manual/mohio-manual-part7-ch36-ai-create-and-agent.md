@@ -191,7 +191,7 @@ the ordinary result, and it is what proves your recovery path works before you e
 #### Granting tools
 
 An agent reaches an outside service only through tools you grant it by name, using the connectors
-from Chapter 28 (`mioconnect`). A call to a tool you did not grant is refused; there is no ambient
+from Chapter 40 (`mioconnect`). A call to a tool you did not grant is refused; there is no ambient
 access.
 
 ```mohio

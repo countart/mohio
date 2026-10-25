@@ -616,6 +616,7 @@ CASE_YES.2: "case.yes"
          | debug_checkpoint
          | applang_decl
          | respond_as_stmt
+         | idempotent_decl
          | title_decl
          | describe_decl
          | image_decl
@@ -657,6 +658,14 @@ then_chain: chain_unit (THEN chain_unit)+
 chain_unit: call_block | action_stmt | retrieve_block | find_block | save_block | update_block | save_or_update_block | hold_decl | assignment | value_expr
 
 respond_as_stmt: _RESPOND _AS STRING    // respond as "text/html"
+
+// An idempotent write route (T1-ROUTE-IDEMPOTENCY, ruled by Ron 2026-10-22): a repeated request with
+// the same key gets the answer the route already gave, and the work is not done again.
+//     idempotent by request.header "Idempotency-Key" keep for 24 hours
+// The key is read with the SAME `request.header "X"` form `verify token from` takes (verify_source),
+// never a second header spelling. `keep for` is optional (24 hours by default) and required under a
+// regulated sector. It stands at the top of a `listen for` body; check refuses it anywhere else.
+idempotent_decl: _IDEMPOTENT BY verify_source (_KEEP _FOR duration_expr)?
 
 // page head metadata for the render view shell
 title_decl: TITLE STRING                // title "Rates"
@@ -735,7 +744,7 @@ declaration: sector_decl
 
 // ── sector ───────────────────────────────────────────────────
 
-sector_decl: SECTOR ":" sector_name
+sector_decl: SECTOR ":" sector_name TAG_REF?
 
 // T1-FRAMEWORK-FOUNDATION (2026-08-24). `framework:` declares the app TARGET type and is
 // deliberately built to the SAME shape as `sector:` above -- verified, not assumed: `sector` is
@@ -1376,14 +1385,20 @@ journey_decl: JOURNEY NAME? journey_body* closer
 // `authorize: /a`) would otherwise reduce to an identical `path_list` tree with no trace of
 // which keyword produced it (found 2026-08-06, same shape as ai_agent_body's max-steps/
 // max-cost collision, same fix; hidden:/authorize: joined the family 2026-08-15).
+// `[important]` (RULED by Ron 2026-10-22): the reserved journey-override label, TAG_REF reused,
+// trailing a journey line, where it makes the journey win over a page's own value for that line.
+// On `timezone` the journey's zone holds. On the four classification lines it is a FLOOR on the
+// shared _CLASS_RANK (mio.py, the cascade's order): a page declaring a class below it for that path
+// refuses at check; at or above it is clean. Not built for `sector:` (it refuses there). Any other label in
+// that slot refuses; only `[important]` has a job there.
 journey_body: _SERVES ":" "single tenant"    -> journey_serves_single
             | _SERVES ":" "multiple tenants" -> journey_serves_multiple
-            | _PUBLIC    ":" path_list -> journey_public
-            | _PRIVATE   ":" path_list -> journey_private
-            | _HIDDEN    ":" path_list -> journey_hidden
-            | _AUTHORIZE ":" path_list -> journey_authorize
+            | _PUBLIC    ":" path_list TAG_REF? -> journey_public
+            | _PRIVATE   ":" path_list TAG_REF? -> journey_private
+            | _HIDDEN    ":" path_list TAG_REF? -> journey_hidden
+            | _AUTHORIZE ":" path_list TAG_REF? -> journey_authorize
             | _FLOW      ":" path_list -> journey_flow
-            | TIMEZONE STRING -> journey_timezone
+            | TIMEZONE STRING TAG_REF? -> journey_timezone
             | languages_block
             | enterprise_block
             | limits_block
@@ -5194,6 +5209,7 @@ _HTTP.2: /http(?![A-Za-z0-9_])/
 _HUMAN.2: /human(?![A-Za-z0-9_])/
 _HUMAN_REVIEW.2: /human_review(?![A-Za-z0-9_])/
 _IDENTITY.2: /identity(?![A-Za-z0-9_])/
+_IDEMPOTENT.2: /idempotent(?![A-Za-z0-9_])/
 _IMAGE.2: /image(?![A-Za-z0-9_])/
 _IMMEDIATELY.2: /immediately(?![A-Za-z0-9_])/
 _IMMUTABLE.2: /immutable(?![A-Za-z0-9_])/
@@ -5208,6 +5224,7 @@ _JAVASCRIPT.2: /javascript(?![A-Za-z0-9_])/
 _JSON.2: /json(?![A-Za-z0-9_])/
 _JURISDICTION.2: /jurisdiction(?![A-Za-z0-9_])/
 _JWT.2: /jwt(?![A-Za-z0-9_])/
+_KEEP.2: /keep(?![A-Za-z0-9_.])/
 _KEY.2: /key(?![A-Za-z0-9_])/
 _KEYS.2: /keys(?![A-Za-z0-9_])/
 _LABEL.2: /label(?![A-Za-z0-9_])/

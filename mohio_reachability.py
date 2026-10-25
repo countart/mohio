@@ -610,6 +610,36 @@ def _bare_list_target(node_val, list_vars):
     return False
 
 
+def joined_csv_export_refusal(node):
+    """The refusal for `export as.csv` on a joined find that has two `with` lists side by side at one level,
+    else None. One wording, read by the check and by the run.
+
+    A joined record flattens into CSV rows one per child, the parent's columns repeated, and a childless
+    parent is one row with its child columns empty (RULED by Ron 2026-10-23, T1-JOIN-EXPORT-CSV-FLATTEN);
+    a chain (`with` inside `with`) flattens one row per deepest child the same way. Two sibling lists have
+    no single child per row: pairing them is a cross product nobody ruled, so that refuses, named. After a
+    `summarize` the rows are flat and nothing is refused."""
+    body = getattr(node, 'body', None) or []
+    exp = next((c for c in body if type(c).__name__ == 'ExportClause'), None)
+    if exp is None or str(getattr(exp, 'format', '') or '').lower() != 'csv' \
+            or any(type(c).__name__ == 'SummarizeBlock' for c in body):
+        return None
+
+    def siblings(level):
+        joins = [j for j in (level or []) if type(j).__name__ == 'JoinBlock']
+        if len(joins) > 1:
+            return joins
+        return next((s for s in (siblings(getattr(j, 'body', None)) for j in joins) if s), None)
+
+    pair = siblings(body)
+    if not pair:
+        return None
+    kids = ' and '.join(f"`{getattr(j, 'name', '')}`" for j in pair)
+    return (f"`export as.csv` writes one row per child, and this joined find has the lists {kids} side by "
+            f"side, so a row has no single child: pairing them would be a cross product, which is not "
+            f"decided (T1-JOIN-EXPORT-CSV-SIBLINGS).")
+
+
 def scan_executor_branch_deferrals(program):
     """Announce at check the executor-branch deferrals that check clean and 500 at run."""
     errors = []
@@ -725,10 +755,22 @@ def scan_executor_branch_deferrals(program):
                             "run. Use `up to N` with `paginate by` for offset pagination.", node)
                     # JOINS UNIT 4: WhereClause/AndClause on the OUTER query is now built (the
                     # chain executor, _exec_find_joined_chain) -- removed from this refused set.
-                    # Everything else here (OR/NOT groups, calculate/summarize, a computed
-                    # return, export) is still genuinely not built for a joined find.
-                    if kinds & {'MatchAnyBlock', 'NoMatchBlock', 'TimespanRef', 'SinceClause',
-                                'CalculateBlock', 'SummarizeBlock', 'ReturnClause', 'ExportClause'}:
+                    # Everything else here (OR/NOT groups, calculate, a computed return) is still
+                    # genuinely not built for a joined find. A `return` of plain fields IS built
+                    # (BS-010, RULED by Ron 2026-10-21): it trims the outer row and leaves each
+                    # `with` child nested. `summarize` and `export` consume the joined result
+                    # (T1-JOIN-SUMMARIZE-EXPORT); only a CSV export of nested records refuses.
+                    _csv = joined_csv_export_refusal(node)
+                    if _csv is not None:
+                        err(_csv + " Export it as.json, which keeps each list with its record, or export "
+                                   "each list from a find of its own.", node)
+                    _refused = {'MatchAnyBlock', 'NoMatchBlock', 'TimespanRef', 'SinceClause',
+                                'CalculateBlock', 'ReturnClause'}
+                    _ret = next((b for b in body if type(b).__name__ == 'ReturnClause'), None)
+                    if _ret is not None and getattr(_ret, 'fields', None) and all(
+                            f.get('kind') == 'field' and f.get('field') for f in _ret.fields):
+                        _refused = _refused - {'ReturnClause'}
+                    if kinds & _refused:
                         err("(T1-EXECUTOR-BRANCH-DEFERRALS) a `native join` supports `match` and `where`/`and` "
                             "filters on the outer query; OR/NOT groups, calculate/summarize, a computed "
                             "return and export are not built for a joined find yet, and 500 at run. Use "
@@ -3505,6 +3547,7 @@ def scan_release_never_held(program):
                 f"first if you meant to protect it.",
                 ln,
                 f"Write `hold {n.name} <value>` where the value is set, or remove this release.",
+                code="release_never_held",
             ))
     return out
 
@@ -5310,12 +5353,12 @@ def scan_render_include_bare(program):
                         f'In the included file "{origin}" (line {i + 1}): `{s}` is emitted as '
                         f"literal text, not run. To load and insert the file here, write it as an "
                         f"evaluation: {{{{ {s} }}}}.",
-                        line=anchor_line or None))
+                        line=anchor_line or None, code="include_line_emitted_as_text"))
                 else:
                     warnings.append(CompileWarning(
                         f"`{s}` inside a render block is emitted as literal text, not run. To load "
                         f"and insert the file here, write it as an evaluation: {{{{ {s} }}}}.",
-                        line=(base_line + i) or None))
+                        line=(base_line + i) or None, code="include_line_emitted_as_text"))
 
     def walk(node):
         if node is None or isinstance(node, (str, int, float, bool)):
@@ -6366,6 +6409,76 @@ def scan_two_statements_one_line(program):
     return errors
 
 
+def scan_paginate_without_page_size(program):
+    """`paginate by` with no `up to` refuses (T1-PAGINATE-WITHOUT-PAGE-SIZE, RULED by Ron 2026-10-23).
+    `paginate by N` names the PAGE; `up to N` is the page's size, and without one the page number was
+    worked out and dropped, so the query returned every row and `found.page.more` then refused at run.
+    The pioneer manual's `paginate by 25` alone read as 25 per page and returned the whole table."""
+    errors = []
+    for n in _all_nodes(getattr(program, 'statements', None) or []):
+        if type(n).__name__ not in ('FindBlock', 'RetrieveBlock', 'GrabBlock'):
+            continue
+        body = getattr(n, 'body', None) or []
+        page = next((b for b in body if type(b).__name__ == 'PaginateClause'), None)
+        if page is None or any(type(b).__name__ == 'LimitClause' for b in body):
+            continue
+        ln = getattr(page, 'line', 0) or getattr(n, 'line', 0) or 0
+        errors.append(CompileError(
+            f"Line {ln}: `paginate by` picks which page to return, and this query never says how big a "
+            f"page is, so it would return every row. Add `up to` with the page size:\n"
+            f"        up to 20\n        paginate by request.page default 1",
+            line=ln, code="paginate_without_page_size"))
+    return errors
+
+
+def scan_connect_name_twice(program):
+    """Two connections of one name that point in different places refuse (T1-CONNECT-DB-LAST-WINS, RULED
+    by Ron 2026-10-23 for 6.0.1). `connect db ... from env.DB1` then `connect db ... from env.DB2` sent
+    every write to the second database without a word. Compared within one statement list (the top
+    level, which includes a folder journey's own lines, or one block body), so a connection chosen in
+    one branch and another in a different branch is not this. The same connection written twice, as a
+    page repeating its journey's line word for word, names one database and is left alone."""
+    errors = []
+
+    def where(n):
+        ln = getattr(n, 'line', 0) or 0
+        f = getattr(ln, 'file', None)
+        return f"line {ln}" + (f" of {str(f).replace(chr(92), '/').rsplit('/', 1)[-1]}" if f else "")
+
+    def what(n):
+        return (str(getattr(n, 'driver', '') or '').lower(), repr(getattr(n, 'source', None)),
+                str(getattr(n, 'access', '') or '').lower())
+
+    def look(stmts):
+        first = {}
+        for n in stmts:
+            if type(n).__name__ != 'ConnectDecl':
+                continue
+            name = str(getattr(n, 'name', '') or '')
+            if name not in first:
+                first[name] = n
+                continue
+            a = first[name]
+            if what(a) == what(n):
+                continue
+            ln = getattr(n, 'line', 0) or 0
+            errors.append(CompileError(
+                f"Line {ln}: `{name}` is connected twice, on {where(a)} and {where(n)}, to different places. A "
+                f"name holds one connection, so every read and write through `{name}` would go to the second "
+                f"one and the first would be ignored without a word. Keep one, or give the second its own "
+                f"name:\n        connect {name} ...\n        connect reports ...",
+                line=ln, code="connect_name_twice"))
+
+    stmts = getattr(program, 'statements', None) or []
+    look(stmts)
+    for n in _all_nodes(stmts):
+        for f in fields(n):
+            v = getattr(n, f.name, None)
+            if f.name in _STATEMENT_LISTS and isinstance(v, list):
+                look(v)
+    return errors
+
+
 def scan_shape_name_start(program):
     """A shape name begins with a letter (RULED by Ron 2026-10-10). `shape _Hidden` declared a shape
     no `sh.` reference could reach. A leading `-` never parses; the syntax-error explainer says the
@@ -7064,7 +7177,11 @@ _AI_CREATE_UNBUILT = {'create_count': 'count', 'create_from_db': 'from db.<table
                       'create_as_shape': 'as sh.<Shape>'}
 
 
-_QUERY_BLOCKS = ('RetrieveBlock', 'FindBlock', 'GrabBlock')
+# Every lookup the grammar has that can carry `on.failure` (enumerated from mohio.lark, H 6.0.1;
+# tests/test_battery_not_found_in_failure_runtime.py fails when a new one is not classified).
+# `check exists` / `check unique` refuse any on.success/on.failure at transform, so of
+# CheckMioqlBlock only `check count` reaches this rule.
+_QUERY_BLOCKS = ('RetrieveBlock', 'FindBlock', 'GrabBlock', 'PullBlock', 'GetBlock', 'CheckMioqlBlock')
 
 
 def _refusal_status(stmts):
@@ -7107,17 +7224,33 @@ def not_found_refusal_in_failure(node):
         if isinstance(h, OnFailure):
             hit = _refusal_status([getattr(h, 'inline', None)] + list(getattr(h, 'body', None) or []))
             if hit:
-                return hit[0], hit[1], h.line, node.name
+                # `pull` keeps its result name in as_name, and may have none
+                return (hit[0], hit[1], h.line,
+                        getattr(node, 'name', None) or getattr(node, 'as_name', None) or '<name>')  # SILENT-OK: placeholder in the refusal's teaching text only; the program refuses either way and the text asks for a name
+
     return None
 
 
 def not_found_refusal_message(node, hit):
     status, gb_line, fail_line, name = hit
-    verb = {'RetrieveBlock': 'retrieve' + ('.' + node.modifier if getattr(node, 'modifier', None) else ''),
-            'FindBlock': 'find', 'GrabBlock': 'grab'}[type(node).__name__]
+    kind = type(node).__name__
     from mohio_ast import OnSuccess
     goes_on = ("its `on.success` runs" if any(isinstance(h, OnSuccess) for h in (node.handlers or []))
                else "the handler carries on past this block")
+    if kind == 'CheckMioqlBlock':
+        # a count answers a number: no matching row is a 0, branched on with `when empty`
+        return (f"this `on.failure` gives back [{status}] (line {gb_line}), but `on.failure` runs only "
+                f"when the lookup itself breaks, such as a lost connection or a missing table. Matching "
+                f"no row is not a failure: `{name}` comes back 0 and {goes_on}, so the refusal never "
+                f"happens and everything after it runs.\n"
+                f"    Refuse on a zero count instead, inside the block:\n"
+                f"        check count as {name} in ...\n"
+                f"            when empty\n"
+                f"                give back [{status}] ...\n"
+                f"        check: done\n"
+                f"    Keep `on.failure` for a broken lookup (for example `give back [503]`).")
+    verb = {'RetrieveBlock': 'retrieve' + ('.' + node.modifier if getattr(node, 'modifier', None) else ''),
+            'FindBlock': 'find', 'GrabBlock': 'grab', 'PullBlock': 'pull', 'GetBlock': 'get'}[kind]
     return (f"this `on.failure` gives back [{status}] (line {gb_line}), but `on.failure` runs only when "
             f"the lookup itself breaks, such as a lost connection or a missing table. Finding no row is "
             f"not a failure: `{name}` comes back empty and {goes_on}, so the refusal never happens "
@@ -7193,7 +7326,7 @@ def scan_success_on_possibly_empty_lookup(program):
                 f"        give back [404] ...\n"
                 f"    otherwise\n"
                 f"        ...the found path...\n"
-                f"Keep `on.success` only for work that is right whether or not a row came back."))
+                f"Keep `on.success` only for work that is right whether or not a row came back.", code="success_on_possibly_empty_lookup"))
         for f in fields(node):
             walk(getattr(node, f.name, None))
 
@@ -7677,6 +7810,67 @@ def scan_save_from_record_undeclared(program):
 _PASSWORD_NAME = re.compile(r'(^|_)(password|passwd|passphrase|passcode|pwd)(_|$)|password', re.I)
 
 
+def _dataclass_nodes(root):
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n is None or isinstance(n, (str, int, float, bool)):
+            continue
+        if isinstance(n, (list, tuple)):
+            stack.extend(n)
+            continue
+        if not is_dataclass(n):
+            continue
+        yield n
+        for f in fields(n):
+            stack.append(getattr(n, f.name, None))
+
+
+def _tasks_and_operations(program):
+    """The program's tasks by name, and each connector's operations with their HTTP method."""
+    tasks, ops = {}, {}
+    for n in _dataclass_nodes(program):
+        k = type(n).__name__
+        if k == 'TaskDecl' and getattr(n, 'name', None):
+            tasks[str(n.name)] = n
+        elif k == 'MioconnectDecl':
+            ops[str(n.name)] = {str(getattr(o, 'name', '')): str(getattr(o, 'method', 'POST')).upper()
+                                for o in (getattr(n, 'operations', None) or [])}
+    return tasks, ops
+
+
+def _outbound_effect(n, ops):
+    """What the node sends to another service, as words a developer would recognise, or None when it
+    only reads. One definition, shared by the transaction rule and the idempotent-route rule."""
+    k = type(n).__name__
+    if k == 'MiohttpStmt' and str(getattr(n, 'method', 'get')).lower() in ('post', 'put', 'patch', 'delete'):
+        return f"miohttp.{str(n.method).lower()}"
+    if k == 'MioconnectCall':
+        _m = ops.get(str(n.connector), {}).get(str(n.operation), 'POST')
+        if _m != 'GET':
+            return f"{n.connector}.{n.operation}"
+    if k == 'MiomailStmt' and str(getattr(n, 'action', 'send')) in ('send', 'queue'):
+        return f"miomail.{n.action}"
+    return None
+
+
+def _first_effect(body, tasks, effect, via=None, seen=frozenset()):
+    """The first node under `body` that `effect` names, followed through `run`/`call` into the tasks
+    it reaches: (what, line, via), where via is (task, line it is called on) or None."""
+    for n in _dataclass_nodes(body):
+        what = effect(n)
+        if what:
+            return what, getattr(n, 'line', 0) or 0, via
+        if type(n).__name__ == 'RunBlock':
+            t = tasks.get(str(getattr(n, 'task_name', '')))
+            if t is not None and t.name not in seen:
+                hit = _first_effect(t.body, tasks, effect, via or (t.name, getattr(n, 'line', 0) or 0),
+                                    seen | {t.name})
+                if hit:
+                    return hit
+    return None
+
+
 def scan_outbound_call_in_transaction(program):
     """A call that changes something on another service refuses inside a `transaction` (RULED by Ron
     2026-10-08, pre-tag). A rollback puts the database back; it cannot take back a payment, an email
@@ -7685,61 +7879,11 @@ def scan_outbound_call_in_transaction(program):
     `run`/`call` into the tasks it reaches. Read-only calls (a `miohttp.get`, a connector GET
     operation, an AI call) are not refused."""
     errors = []
-    tasks, ops = {}, {}
-
-    def nodes(root):
-        stack = [root]
-        while stack:
-            n = stack.pop()
-            if n is None or isinstance(n, (str, int, float, bool)):
-                continue
-            if isinstance(n, (list, tuple)):
-                stack.extend(n)
-                continue
-            if not is_dataclass(n):
-                continue
-            yield n
-            for f in fields(n):
-                stack.append(getattr(n, f.name, None))
-
-    for n in nodes(program):
-        k = type(n).__name__
-        if k == 'TaskDecl' and getattr(n, 'name', None):
-            tasks[str(n.name)] = n
-        elif k == 'MioconnectDecl':
-            ops[str(n.name)] = {str(getattr(o, 'name', '')): str(getattr(o, 'method', 'POST')).upper()
-                                for o in (getattr(n, 'operations', None) or [])}
-
-    def outbound(n):
-        """What the node sends, as words a developer would recognise, or None when it only reads."""
-        k = type(n).__name__
-        if k == 'MiohttpStmt' and str(getattr(n, 'method', 'get')).lower() in ('post', 'put', 'patch', 'delete'):
-            return f"miohttp.{str(n.method).lower()}"
-        if k == 'MioconnectCall':
-            _m = ops.get(str(n.connector), {}).get(str(n.operation), 'POST')
-            if _m != 'GET':
-                return f"{n.connector}.{n.operation}"
-        if k == 'MiomailStmt' and str(getattr(n, 'action', 'send')) in ('send', 'queue'):
-            return f"miomail.{n.action}"
-        return None
-
-    def find(body, via, seen):
-        for n in nodes(body):
-            what = outbound(n)
-            if what:
-                return what, getattr(n, 'line', 0) or 0, via
-            if type(n).__name__ == 'RunBlock':
-                t = tasks.get(str(getattr(n, 'task_name', '')))
-                if t is not None and t.name not in seen:
-                    hit = find(t.body, via or (t.name, getattr(n, 'line', 0) or 0), seen | {t.name})
-                    if hit:
-                        return hit
-        return None
-
-    for n in nodes(program):
+    tasks, ops = _tasks_and_operations(program)
+    for n in _dataclass_nodes(program):
         if type(n).__name__ != 'TransactionBlock':
             continue
-        hit = find(n.body, None, frozenset())
+        hit = _first_effect(n.body, tasks, lambda x: _outbound_effect(x, ops))
         if not hit:
             continue
         what, line, via = hit
@@ -7794,7 +7938,7 @@ def scan_retry_after_send(program):
                     f"have it and a second attempt could deliver it twice.\n"
                     f"    Make the operation safe to repeat on the service's side, or handle the "
                     f"timeout in `on.failure` (look the result up before trying again).",
-                    line=line))
+                    line=line, code="connector_retry_changes"))
         for f in fields(node):
             walk(getattr(node, f.name, None))
 
@@ -7840,7 +7984,7 @@ def scan_password_field_without_format(program):
                     f"so a form that fails validation is sent back with the submitted password "
                     f"filled in.\n"
                     f"    To fix it, declare the format:\n"
-                    f"        {name} as text format \"password\"", line=line))
+                    f"        {name} as text format \"password\"", line=line, code="password_no_format"))
             return
         for f in fields(node):
             walk(getattr(node, f.name, None))
@@ -9785,7 +9929,304 @@ def scan_write_field_outside_table_shape(program):
     return errors
 
 
+def scan_upload_zone_ambiguous(program):
+    """More than one cloud storage area in a program that takes uploads refuses at check
+    (UPLOAD-ZONE-AMBIGUOUS, 6.0.1). There is no way yet to say which area an upload belongs in
+    (`T1-UPLOAD-AREA-CHOICE`), so the runtime refused every upload with a 500 mid-request, after the
+    app was serving; now the program does not start. One cloud area, or none, is unaffected, and so
+    is a program with several areas and no upload field."""
+    clouds, uploads = [], []
+    UPLOAD_TYPES = ('file', 'image', 'audio', 'video', 'pdf')
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        k = type(node).__name__
+        if k == 'MiofileDecl':
+            for z in (getattr(node, 'zones', None) or []):
+                if isinstance(z, dict) and z.get('kind') == 'cloud':
+                    nm = str(z.get('name') or '')
+                    if nm not in [c[0] for c in clouds]:
+                        clouds.append((nm, getattr(node, 'line', 0) or 0))
+        elif k == 'ShapeDecl':
+            for fld in (node.every_field() if hasattr(node, 'every_field')
+                        else (getattr(node, 'fields', None) or [])):
+                if str(getattr(fld, 'type_name', '') or '').lower() in UPLOAD_TYPES:
+                    uploads.append((str(getattr(fld, 'name', '') or ''), getattr(fld, 'line', 0) or 0))
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    walk(getattr(program, 'statements', None) or [])
+    if len(clouds) < 2 or not uploads:
+        return []
+    names = ", ".join(c[0] for c in clouds)
+    fld, fline = uploads[0]
+    return [CompileError(
+        f"This program declares {len(clouds)} cloud storage areas ({names}) and takes uploads "
+        f"(`{fld}`, line {fline}), and choosing which area an upload belongs in "
+        f"(`T1-UPLOAD-AREA-CHOICE`) is not built yet, so every upload would refuse while the app is serving.",
+        line=clouds[1][1],
+        hint=(f"Keep one cloud area for uploads and make the others local, or move them to a "
+              f"program that takes no uploads. Picking one for you would put a file in whichever "
+              f"bucket happened to be declared first."))]
+
+
+# ONE PATH, TWO CLASSES (RULED by Ron 2026-10-22: teach, do not refuse the general coder). `public: /x`
+# and `authorize: /x` in one journey resolve by the locked model (T1-PAGE-CLASSIFICATION-MODEL) at serve
+# time, unchanged here: public: overrides every class, hidden: is applied before authorize:, authorize:
+# gates where private: (inert) does nothing. So one of the two lines does nothing, and when public: wins
+# the sign-in gate the coder wrote is silently not applied. A WARNING without a sector; under a sector
+# (any declared one: the runtime treats every declared sector as regulated, its profile or the built-in
+# defaults in force) a REFUSAL. A classification cannot be guarded by a `when` inside a journey (a
+# syntax error, measured 2026-10-22), so every repeat in one journey is unconditional; if a guarded
+# classification is ever built, it is exempt here. Only the SAME path counts (normalized as the serve
+# layer does): a narrower path under a broader one is the designed carve-out, not a contradiction.
+_CLASS_PRECEDENCE = ('public', 'hidden', 'authorize', 'private')   # who wins at serve time, first wins
+
+
+def _class_conflict_text(path, winner, loser):
+    if winner == 'public' and loser == 'authorize':
+        return (f"`public:` overrides every other class when the page is served, so the sign-in gate "
+                f"written with `authorize:` is never applied: anyone can open `{path}` without signing in.")
+    if winner == 'public' and loser == 'hidden':
+        return (f"`public:` serves the page, so the `hidden:` on the same path never hides it: `{path}` is "
+                f"served to anyone.")
+    if winner == 'public':
+        return (f"`public:` overrides every other class when the page is served, so `private:` has no "
+                f"effect on `{path}`.")
+    if winner == 'hidden' and loser == 'authorize':
+        return ("`hidden:` wins: the page is never served (404), so the `authorize:` sign-in gate is never "
+                "reached.")
+    if winner == 'hidden':
+        return "`hidden:` wins: the page is never served (404), so `private:` has no effect."
+    return ("`authorize:` wins and asks for a sign-in; `private:` has no runtime effect, so it adds "
+            "nothing.")
+
+
+def _same_path_two_classes(program):
+    """[(journey name, path, (kind, line), (kind, line))], one per path declared under two classes in
+    one journey: the first two different classes it was declared under, in source order."""
+    found = []
+    for n in _all_nodes(program):
+        if type(n).__name__ != 'JourneyDecl':
+            continue
+        first = {}                                  # normalized path -> (kind, line) where it first appeared
+        reported = set()
+        for m in (getattr(n, 'body', None) or []):
+            kind = getattr(m, 'kind', '')
+            if type(m).__name__ != 'JourneyMeta' or kind not in _CLASS_PRECEDENCE:
+                continue
+            for written in (getattr(m, 'value', None) or []):
+                p = _class_norm_path(str(written))
+                if p not in first:
+                    first[p] = (kind, getattr(m, 'line', 0) or 0)
+                elif first[p][0] != kind and p not in reported:
+                    reported.add(p)
+                    found.append((getattr(n, 'name', '') or 'App',  # SILENT-SHAPE-OK: the word the message calls an unnamed journey
+                                  p, first[p], (kind, getattr(m, 'line', 0) or 0)))
+    return found
+
+
+def _declared_sector(program):
+    for n in _all_nodes(program):
+        if type(n).__name__ == 'SectorDecl':
+            name = getattr(n, 'name', None) or getattr(n, 'sector', None)
+            if name:
+                return str(name)
+    return None
+
+
+def _same_path_two_classes_findings(program, under_sector):
+    """The findings, as a warning without a sector or as a refusal under one. The runtime asks
+    get_sector_profile(...) is not None (_exec_SectorDecl) to decide a sector's rules are in force;
+    so does this, so the two can never disagree about which programs are regulated."""
+    sector = _declared_sector(program)
+    if sector is not None:
+        from mohio_sector_loader import get_sector_profile
+        if get_sector_profile(sector) is None:
+            sector = None
+    if (sector is not None) != under_sector:
+        return []
+    out = []
+    for jname, path, (k1, l1), (k2, l2) in _same_path_two_classes(program):
+        winner = min((k1, k2), key=_CLASS_PRECEDENCE.index)
+        loser = k2 if winner == k1 else k1
+        keep = 'authorize' if 'authorize' in (k1, k2) else ('hidden' if 'hidden' in (k1, k2) else k1)
+        msg = (f"Line {l2}: journey `{jname}` has `{path}` declared under two classes: `{k1}:` on line {l1} "
+               f"and `{k2}:` on line {l2}. {_class_conflict_text(path, winner, loser)}"
+               + (f" Under sector `{sector}` a page classified two ways is refused."
+                  if under_sector else " (A warning while you build; an error under a regulated sector.)"))
+        hint = (f"Keep only the line you mean, for example `{keep}: {path}`."
+                + (f" To gate `{path}` but open one page beneath it, keep the gate on the folder and add "
+                   f"`public:` on the narrower path: `{keep}: {path}`, then `public: {path}/open`."
+                   if 'public' in (k1, k2) else ""))
+        code = "classification_same_path"
+        out.append(CompileError(msg, line=l2, hint=hint, code=code) if under_sector
+                   else CompileWarning(msg, line=l2, hint=hint, code=code))
+    return out
+
+
+def scan_same_path_two_classes_warning(program):
+    return _same_path_two_classes_findings(program, under_sector=False)
+
+
+def scan_same_path_two_classes_refused(program):
+    return _same_path_two_classes_findings(program, under_sector=True)
+
+
+_KEEP_FOR_NO_FIXED_LENGTH = {'month': 'a month', 'months': 'a month', 'year': 'a year', 'years': 'a year'}
+
+
+def _regulated_sector_as_written(nodes):
+    """The regulated sector the program declares, its levels shown as the coder writes them
+    (`financial, banking`; the parsed form joins them with dots), or None."""
+    from mohio_transformer import REGULATED_SECTORS
+    for n in nodes:
+        if type(n).__name__ != 'SectorDecl':
+            continue
+        levels = [x.strip() for x in str(getattr(n, 'sector', '') or '').replace(',', '.').split('.') if x.strip()]
+        if levels and levels[0].lower() in REGULATED_SECTORS:
+            return ', '.join(levels)
+    return None
+
+
+def scan_route_idempotency(program):
+    """`idempotent by request.header "X" (keep for N)?` (T1-ROUTE-IDEMPOTENCY, RULED by Ron 2026-10-22).
+
+    It describes a whole `listen for` route, so it stands once at the top of one. It reads its key
+    from a request header, with the one `request.header "X"` form. It keeps answers in the database,
+    in the request transaction, so it needs a connection that can run one (MongoDB cannot yet).
+    `keep for` is optional, 24 hours by default, a fixed length when written, and required under a
+    regulated sector. The run-time copies of the first refusals sit in _idempotency_gate."""
+    errors = []
+    nodes = list(_all_nodes(program))
+    decls = [n for n in nodes if type(n).__name__ == 'IdempotentDecl']
+    if not decls:
+        return errors
+    top, under_write, under_read = {}, set(), set()
+    for n in nodes:
+        kind = type(n).__name__
+        if kind not in ('NewBlock', 'RequestInboundBlock'):
+            continue
+        body = getattr(n, 'body', None) or []
+        for d in (x for x in _all_nodes(body) if type(x).__name__ == 'IdempotentDecl'):
+            (under_write if kind == 'NewBlock' else under_read).add(id(d))
+        if kind == 'NewBlock':
+            mine = [b for b in body if type(b).__name__ == 'IdempotentDecl']
+            for d in mine:
+                top[id(d)] = (n, mine)
+    drivers = [str(getattr(n, 'driver', None) or getattr(n, 'connect_type', '') or '').lower()
+               for n in nodes if type(n).__name__ == 'ConnectDecl']
+    regulated = _regulated_sector_as_written(nodes)
+    fix = 'idempotent by request.header "Idempotency-Key"'
+    for d in decls:
+        line = getattr(d, 'line', 0) or 0
+
+        if id(d) in under_read:
+            errors.append(CompileError(f"Line {line}: " "`idempotent by` is for a route that changes something, a `listen for`. A `request for` "
+                "route only reads, and a read is already safe to repeat.", line=line, hint="Remove the line, or move the work that changes something to a `listen for` route.", code="idempotent_route"))
+            continue
+        if id(d) not in top:
+            errors.append(CompileError(f"Line {line}: " "`idempotent by` describes a whole `listen for` route, so it stands at the top of the "
+                "route's body, not inside a branch or anywhere else.", line=line, hint=f"Move it to the first lines of the `listen for` it guards:\n    listen for sh.Pay at /pay\n"
+                f"        {fix}\n        ...\n    listen: done", code="idempotent_route"))
+            continue
+        _route, mine = top[id(d)]
+        if mine[0] is not d:
+            first = getattr(mine[0], 'line', 0) or 0
+            errors.append(CompileError(f"Line {line}: " f"this route already says `idempotent by` at line {first}. A route keeps its answers "
+                f"under one key.", line=line, hint="Remove one of the two lines.", code="idempotent_route"))
+            continue
+        src = getattr(d, 'source', None)
+        parts = [str(p).replace('__USERVAR__', '') for p in (getattr(src, 'parts', None) or [])]
+        if parts != ['request', 'header'] or not getattr(d, 'header', ''):
+            shown = '.'.join(parts) or 'this source'  # SILENT-SHAPE-OK: the words a refusal names a source by
+            errors.append(CompileError(f"Line {line}: " f"`idempotent by` reads its key from a request header, and `{shown}` is not one. A key the "
+                f"caller sends in the body would make the body the thing that names the request.", line=line, hint=f"Read the header the caller sends:\n    {fix}", code="idempotent_route"))
+            continue
+        if not drivers:
+            errors.append(CompileError(f"Line {line}: " "`idempotent by` keeps each answer in the database, and this program connects none, so "
+                "a repeated request would find nothing to answer from.", line=line, hint="Connect one, for example:\n    connect db as sqlite from env.DATABASE_URL", code="idempotent_route"))
+        elif all(dr in ('mongo', 'mongodb') for dr in drivers):
+            # DEFER: T1-MONGO-PROGRAM-TRANSACTION. The key and the work commit in one request
+            # transaction, which MongoDB does not run in this release.
+            errors.append(CompileError(f"Line {line}: " "`idempotent by` keeps the key and the work in one transaction, and a MongoDB request "
+                "transaction is declared but not built in this release (T1-MONGO-PROGRAM-TRANSACTION).", line=line, hint="Run this route on Postgres, MySQL, Oracle or SQLite until the MongoDB transaction lands.", code="idempotent_route"))
+        unit = str(getattr(d, 'keep_unit', '') or '')
+        written = str(getattr(d, 'keep_written', '') or '')
+        if unit:
+            count = getattr(d, 'keep_count', None)
+            if unit in _KEEP_FOR_NO_FIXED_LENGTH:
+                errors.append(CompileError(f"Line {line}: " f"`keep for {written}`: {_KEEP_FOR_NO_FIXED_LENGTH[unit]} has no fixed length, so when "
+                    f"the key frees would depend on the calendar.", line=line, hint="Write it in days or weeks, for example `keep for 30 days`.", code="idempotent_route"))
+            elif getattr(d, 'keep_seconds', None) is None:
+                errors.append(CompileError(f"Line {line}: " f"`keep for {written}` is shorter than a second, too short to answer a retry from.", line=line, hint="Write seconds or longer, for example `keep for 24 hours`.", code="idempotent_route"))
+            elif not isinstance(count, (int, float)) or count <= 0:
+                errors.append(CompileError(f"Line {line}: " f"`keep for {written}` keeps nothing, so every repeat would do the work again.", line=line, hint="Give it a length, for example `keep for 24 hours`.", code="idempotent_route"))
+        elif regulated is not None:
+            errors.append(CompileError(f"Line {line}: " f"under `sector: {regulated}` an idempotent route says how long it keeps each answer, "
+                f"because how long a record is kept is a thing an audit asks.", line=line, hint=f"Add `keep for` to the line:\n    {fix} keep for 24 hours", code="idempotent_route"))
+    return errors
+
+
+def _routes_without_idempotent_line(program):
+    """Each `listen for` that changes something (a write, or a call that changes something on another
+    service) and has no `idempotent by` line (T1-IDEMPOTENT-ROUTE-REQUIRED, RULED by Ron 2026-10-23).
+    Followed through `run`/`call` into the tasks the route reaches."""
+    nodes = list(_dataclass_nodes(program))
+    tasks, ops = _tasks_and_operations(program)
+
+    def changes(n):
+        k = type(n).__name__
+        if k in _WRITE_NODES:
+            return k
+        return _outbound_effect(n, ops)
+
+    out = []
+    for n in nodes:
+        if type(n).__name__ != 'NewBlock':
+            continue
+        body = getattr(n, 'body', None) or []
+        if any(type(x).__name__ == 'IdempotentDecl' for x in _dataclass_nodes(body)):
+            continue                    # a misplaced line is scan_route_idempotency's to refuse
+        if not _first_effect(body, tasks, changes):
+            continue                    # a route that changes nothing is already safe to repeat
+        out.append(n)
+    return out
+
+
+def scan_write_route_no_idempotent(program):
+    """A `listen for` that changes something with no `idempotent by` line is named at check, because a
+    request sent twice does its work twice."""
+    warnings = []
+    for n in _routes_without_idempotent_line(program):
+        shape = str(getattr(n, 'shape', '') or '').split('.')[-1]
+        path = str(getattr(n, 'path', '') or '')
+        line = getattr(n, 'line', 0) or 0
+        warnings.append(CompileWarning(
+            f"Line {line}: the `listen for` route at `{path or 'sh.' + shape}` changes something and has no "
+            f"`idempotent by` line, so a request sent twice (a double click, a network retry) does its work "
+            f"twice.",
+            line,
+            f"Name the header that carries the caller's key, at the top of the route:\n"
+            f"    listen for sh.{shape}{' at ' + path if path else ''}\n"
+            f"        idempotent by request.header \"Idempotency-Key\"\n        ...\n    listen: done",
+            code="write_route_no_idempotent"))
+    return warnings
+
+
 ERROR_SCANS = (
+    scan_route_idempotency,
+    scan_connect_name_twice,
+    scan_paginate_without_page_size,
+    scan_same_path_two_classes_refused,
+    scan_upload_zone_ambiguous,
     scan_write_verb_on_audit_relation,
     scan_other_kinds_known,
     scan_list_type_word_declared,
@@ -9946,7 +10387,8 @@ def scan_audit_grade_requirement(program):
                               "certified profile on the search path (~/.mohio/sectors) or run the "
                               "licensed runtime. To exercise sector rules without one, write your "
                               "own community profile as sectors/sector-<name>.mho and declare "
-                              "`sector: <name>`.")))
+                              "`sector: <name>`."),
+                        code="sector_certified_not_installed"))
                 # A non-licensed sector with no profile (absent or misspelled) WARNS AND RUNS (OR-0,
                 # RULED by Ron 2026-10-12, reversing 2cfaa31): the warning, with the nearest installed
                 # profile, is given once by mohio_transformer's sector check. No second warning here.
@@ -9965,7 +10407,7 @@ def scan_audit_grade_requirement(program):
                         hint=("The compiler enforces the grade; the deployment binds a sink that "
                               "meets it. On an ordinary durable sink every audit write for this "
                               "program will record a degraded-audit incident. Confirm the "
-                              "deployment binds a sink at this grade before going live.")))
+                              "deployment binds a sink at this grade before going live."), code="sector_audit_grade_required"))
                 if unknown:
                     warnings.append(CompileWarning(
                         f"sector `{name}` names framework(s) with no known audit grade: "
@@ -9973,7 +10415,7 @@ def scan_audit_grade_requirement(program):
                         line=getattr(node, 'line', 0),
                         hint=("An unrecognised framework is treated as requiring nothing, which "
                               "is a silent downgrade. Add it to the framework table or correct "
-                              "the spelling.")))
+                              "the spelling."), code="sector_audit_grade_unknown"))
         for f in fields(node):
             walk(getattr(node, f.name, None))
 
@@ -10040,6 +10482,65 @@ def scan_miofile_zone_coverage(program):
                 "miofile_zone_uncovered",
             ))
     return warnings
+
+
+def _class_norm_path(p):
+    """The serve layer's path normalization (MohioInterpreter._norm_path): drop a query string and a
+    trailing slash. Kept identical; test_battery_route_classification_checked asserts they agree."""
+    if not p:
+        return p
+    p = str(p).split('?', 1)[0]
+    return p[:-1] if len(p) > 1 and p.endswith('/') else p
+
+
+def _class_path_matches(entry, norm_req_path):
+    """The serve layer's classification match (MohioInterpreter._journey_path_matches): an entry
+    covers itself and every path under it at a segment boundary, so `authorize: /admin` covers
+    /admin/users."""
+    e = _class_norm_path(entry)
+    if not e:
+        return False
+    return norm_req_path == e or norm_req_path.startswith(e + '/')
+
+
+def _route_classification(program, path):
+    """What the locked page-classification model (mohio.lark journey_body, T1-PAGE-CLASSIFICATION-MODEL)
+    says about a route path, decided exactly as the serve layer decides it (_exec_JourneyDecl):
+    'public' when an explicit `public:` covers it (it overrides the others), 'hidden' when `hidden:`
+    covers it or a segment starts with `_` (not served), 'authorize' when `authorize:` covers it (login
+    required), else None (public by default, or `private:`, which is served with no gate)."""
+    if not path:
+        return None
+    metas = []
+
+    def collect(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                collect(c)
+            return
+        if not is_dataclass(node):
+            return
+        if type(node).__name__ == 'JourneyMeta':
+            metas.append(node)
+            return
+        for f in fields(node):
+            collect(getattr(node, f.name, None))
+
+    collect(getattr(program, 'statements', None) or [])
+    req = _class_norm_path(path)
+
+    def covered(kind):
+        return any(_class_path_matches(p, req) for m in metas if m.kind == kind for p in (m.value or []))
+
+    if covered('public'):
+        return 'public'
+    if covered('hidden') or any(s.startswith('_') for s in req.strip('/').split('/') if s):
+        return 'hidden'
+    if covered('authorize'):
+        return 'authorize'
+    return None
 
 
 def scan_sector_route_unauthenticated(program):
@@ -10150,14 +10651,21 @@ def scan_sector_route_unauthenticated(program):
         # covered the same way, not a bespoke stricter rule.
         # `PageDecl` dropped 2026-08-25 -- the page block is removed, so no tree can hold one.
         if type(node).__name__ in ('NewBlock', 'RequestInboundBlock'):
-            if reads_data(node) and not contains(node, RequireRoleDecl) and not token_gated(node):
+            # THE JOURNEY'S PAGE CLASSIFICATION DECIDES FIRST (checker 3b, Summit): the serve layer
+            # already refuses an `authorize:` path without a session (403), never serves a `hidden:`
+            # one (404), and an explicit `public:` is a declared decision. Only a route public by
+            # default (or `private:`, served with no gate) is the read nobody decided.
+            if (reads_data(node) and not contains(node, RequireRoleDecl) and not token_gated(node)
+                    and _route_classification(program, getattr(node, 'path', None)) is None):
                 where = getattr(node, 'path', None) or getattr(node, 'name', '') or 'a route'
+                _p = where if str(where).startswith('/') else '/path'
                 warnings.append(CompileError(
                     f"`{where}` reads data in the `{sector}` sector with nothing checking "
                     f"who is asking. Anyone who can reach the address gets the data. "
-                    f"If that is intended -- a price list, a status page -- say so in a "
-                    f"comment so the next reader knows it was a decision. Otherwise add "
-                    f"`require role ...`.",
+                    f"If that is intended -- a price list, a status page -- declare it in the "
+                    f"journey with `public: {_p}` so the next reader knows it was a decision. "
+                    f"Otherwise gate it: `authorize: {_p}` in the journey, or `require role ...` "
+                    f"in the handler.",
                     line=getattr(node, 'line', 0) or 0,
                     code="sector_route_unauthenticated"))
                 return
@@ -10208,19 +10716,41 @@ def scan_cookie_samesite_none_insecure(program):
     return warnings
 
 
-def scan_transaction_onfailure_futile(program):
-    """Warn when `on.failure` appears on a write inside a `transaction` block.
+def scan_transaction_onfailure_success(program):
+    """Warn when an `on.failure` inside a `transaction` answers SUCCESS (RULED by Ron 2026-10-22).
 
-    T0-4 / FORK-8 (ruled): a transaction is atomic regardless of a caught failure inside it.
-    A write's own `on.failure` may still run -- the handler fires as written -- but it does NOT
-    rescue the transaction: any failed write still rolls back the WHOLE block, completed writes
-    included. Written this way, `on.failure` reads like local damage control, and it is not one;
-    surfacing that at check time is considerably better than a developer discovering it from a
-    partial-write incident.
+    T0-4 / FORK-8 (ruled): a transaction is atomic regardless of a caught failure inside it, so a
+    failed write rolls back the whole block. An `on.failure` that answers an error (`give back
+    [503]`), or answers nothing, is fail-closed and correct, and this used to warn on it too: on every
+    such guard, which is every one the healthcare app writes (44 sites, all non-2xx). KEYED ON THE
+    RISK NOW: it fires only when the `on.failure` gives back a success (a 2xx, a bare give-back, a
+    3xx, or a `jump to`, the success outcomes of HC-127), a receipt for writes the transaction did not
+    keep. The run already refuses to send it (`_exec_TransactionBlock`), so this says so before the
+    request fails. A warning everywhere; no refusal is minted (Ron).
     """
     from dataclasses import fields, is_dataclass
-    from mohio_ast import TransactionBlock, OnFailure
+    from mohio_ast import TransactionBlock, OnFailure, GiveBackStmt, JumpToStmt
     warnings = []
+
+    def success_answer(body):
+        """The first give-back or jump in an on.failure body that answers success, else None."""
+        stack = [body]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(reversed(n))
+                continue
+            if not is_dataclass(n):
+                continue
+            if isinstance(n, JumpToStmt):
+                return n, "jump to"
+            if isinstance(n, GiveBackStmt):
+                st = getattr(n, 'status', None)
+                if st is None or (isinstance(st, int) and not isinstance(st, bool) and st < 400):
+                    return n, "give back" + ("" if st is None else " [%d]" % st)
+            for f in fields(n):
+                stack.append(getattr(n, f.name, None))
+        return None
 
     def find_onfailure(node, seen):
         if node is None or id(node) in seen:
@@ -10233,17 +10763,20 @@ def scan_transaction_onfailure_futile(program):
         if not is_dataclass(node):
             return
         if isinstance(node, OnFailure):
-            warnings.append(CompileWarning(
-                "on.failure inside a transaction cannot rescue it -- the handler may run, but "
-                "the whole transaction still rolls back if any write inside it fails. This is "
-                "intentional (a transaction is atomic): a caught failure here does not mean "
-                "the transaction survived.",
-                getattr(node, 'line', 0) or 0,
-                "Move failure handling outside the transaction if you need to react to the "
-                "rollback, or remove on.failure -- the transaction's own rollback already "
-                "covers the failure.",
-                'transaction_onfailure_futile',
-            ))
+            hit = success_answer([getattr(node, 'inline', None), getattr(node, 'body', None)])
+            if hit is not None:
+                gb, said = hit
+                line = getattr(gb, 'line', 0) or getattr(node, 'line', 0) or 0
+                warnings.append(CompileWarning(
+                    f"Line {line}: this `on.failure` answers success (`{said}`) inside a transaction, "
+                    f"after a write in it failed. The transaction rolls every write in it back, so the "
+                    f"success would be a receipt for work that was not kept; the run refuses to send it "
+                    f"and the request fails instead.",
+                    line,
+                    "Answer the failure, for example `give back [409] \"not saved\"` or a 5xx, or put "
+                    "the success after `transaction: done`, where it runs only when the writes were kept.",
+                    'transaction_onfailure_success',
+                ))
         for f in fields(node):
             find_onfailure(getattr(node, f.name, None), seen)
 
@@ -10314,12 +10847,12 @@ def scan_decorative_shape_modifiers(program):
     # (scan_shape_unique_governs_no_table). So `unique` is no longer "partially enforced with a
     # caveat" -- it is enforced, refused, or inert-and-named, and the per-field caveat that fired on
     # every correct declaration (twenty-five explanations of a working feature) is gone.
-    PARTIAL = {
-        'default': ('applied when a request is bound to this shape, where a missing field is '
-                    'filled in, on a direct write to a table this shape governs via `as '
-                    'table`, and on a save a handler bound to this shape makes to a named table. '
-                    'It is NOT applied on a write to a table no shape governs'),
-    }
+    # `default` LEFT THIS SET (RULED by Ron 2026-10-22): its note fired on every defaulted field, a
+    # scope explanation on correct code, so it regrew with every program that used a default (40 in
+    # the healthcare app). The scope belongs in the manual; the check now speaks only where the scope
+    # bites, a save that leaves the defaulted field out of a table no shape governs
+    # (scan_default_not_on_ungoverned_save, A3 / PUB600-HC-01).
+    PARTIAL = {}
 
     def walk(node):
         if node is None or isinstance(node, (str, int, float, bool)):
@@ -10345,12 +10878,12 @@ def scan_decorative_shape_modifiers(program):
                             f"guarantee and is not one. Nothing about this program is refused "
                             f"for it -- this says so out loud rather than letting the "
                             f"declaration look like protection it does not provide.",
-                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0, code="modifier_not_enforced"))
                     elif mt in PARTIAL:
                         warnings.append(CompileWarning(
                             f"`{mt}` on field `{getattr(fld, 'name', '?')}` is "
                             f"{PARTIAL[mt]}.",
-                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0, code="modifier_partial"))
         for f in fields(node):
             walk(getattr(node, f.name, None))
 
@@ -10394,6 +10927,7 @@ def scan_unrecognized_field_classifier(program):
     # answers waiting to diverge. `identifier` is gone from it: nothing anywhere reads it, so
     # leaving it recognized made it look like one of the real ones.
     from mohio_classification import RECOGNIZED_CLASSIFIERS as RECOGNIZED
+    from mohio_classification import RESERVED_LABELS
     from mohio_classification import SEC_CLASSIFY_LEVEL_WORDS as LEVEL_WORDS
     # What a developer most plausibly meant, for the ones worth naming outright. Anything not
     # listed still warns; this only sharpens the suggestion where the intent is unmistakable.
@@ -10448,9 +10982,22 @@ def scan_unrecognized_field_classifier(program):
                                 f"(`sec.classify` / `{part} strip.on.output` / `sec.classify: "
                                 f"done`). To protect the field itself, use a classifier that "
                                 f"carries enforcement: [pii], [phi] or [pci].",
-                                line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+                                line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0, code="classifier_is_sec_level"))
                             continue
                         if part in RECOGNIZED:
+                            continue
+                        # A RESERVED LABEL NAMES ITS OWN JOB (`[important]` v1, RULED 2026-10-22).
+                        # The generic text called it an unknown classifier kept as a searchable
+                        # label, which reads like a protection word nobody built.
+                        if part in RESERVED_LABELS:
+                            warnings.append(CompileWarning(
+                                f"[{part}] on field `{getattr(fld, 'name', '?')}` is the journey-override "
+                                f"marker, not a field label: it trails a journey.mho line, as in "
+                                f"`timezone \"Asia/Tokyo\" [important]`, to make the journey's value win "
+                                f"over a page's own. On a field it does nothing and gives the field no "
+                                f"protection. Remove it here; to protect the field, use [pii], [phi] or "
+                                f"[pci].",
+                                line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0, code="classifier_is_override_marker"))
                             continue
                         suggestion = MEANT.get(part)
                         did_you_mean = (f" Did you mean [{suggestion}]?" if suggestion else "")
@@ -10461,7 +11008,7 @@ def scan_unrecognized_field_classifier(program):
                             f"protection: a field tagged only this way is stored in the clear. "
                             f"The classifiers that carry protection are: "
                             f"{', '.join('[' + c + ']' for c in sorted(RECOGNIZED))}.",
-                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+                            line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0, code="classifier_unrecognized"))
         for f in fields(node):
             walk(getattr(node, f.name, None))
 
@@ -10552,9 +11099,14 @@ def scan_ai_decide_never_invoked(program):
     # A journey's declarations are used by the pages under it; their names arrive on the program
     # (mio._apply_journey) so a decision invoked from another file is not reported unused.
     spine = getattr(program, 'spine_names', None) or set()
+    # On a page, only a decision a JOURNEY declares is used by the other pages; one the page declares
+    # itself is judged on the page. A journey's own check has no such set: every name is the journey's.
+    from_journey = getattr(program, 'journey_declared', None)
     warnings = []
     for name, line in sorted(declared.items()):
-        if name in invoked or name in referenced or name in spine:
+        if name in invoked or name in referenced:
+            continue
+        if name in spine and (from_journey is None or name in from_journey):
             continue
         warnings.append(CompileWarning(
             f"`ai.decide {name}` is declared but never invoked, so it will not run: no "
@@ -10562,7 +11114,7 @@ def scan_ai_decide_never_invoked(program):
             f"reads as governed in the source and does nothing at runtime.",
             line=line,
             hint=(f"Invoke it where the decision belongs by putting its name on a line "
-                  f"(`ai.decide {name}`), or remove the block if it is not needed yet.")))
+                  f"(`ai.decide {name}`), or remove the block if it is not needed yet."), code="ai_decide_never_invoked"))
     return warnings
 
 
@@ -10629,7 +11181,7 @@ def scan_upload_storage_durability(program):
                         f"resets on a restart or a redeploy, the row survives and the FILE does "
                         f"not. Point MOHIO_UPLOAD_DIR at a durable volume, or declare cloud "
                         f"storage with `miofile` so uploads go there.",
-                        line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0))
+                        line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0, code="upload_local_disk"))
         for f in fields(node):
             walk(getattr(node, f.name, None))
 
@@ -10665,6 +11217,7 @@ def scan_check_with_no_branches(program):
                 getattr(node, "line", 0),
                 "Add a branch (`when <value>` / `otherwise`), or remove the block. The subject "
                 "is still read, so the block looks active while having no effect.",
+                code="check_without_branches",
             ))
         for f in fields(node):
             val = getattr(node, f.name, None)
@@ -10726,7 +11279,7 @@ def scan_returning_call_without_capture(program):
                     f"    (A `give back` inside a task sets the task's return value; it does "
                     f"not answer for the handler around it, so an uncaptured answer is simply "
                     f"gone.)",
-                    line=getattr(node, 'line', 0) or 0))
+                    line=getattr(node, 'line', 0) or 0, code="task_answer_discarded"))
         for f in fields(node):
             walk(getattr(node, f.name, None))
 
@@ -10854,7 +11407,7 @@ def scan_refuse_after_unwrapped_write(program):
                 hint=(f"Check first, then write: move the test that refuses (line {rline}) above "
                       f"the write. Or wrap the write and the test in one transaction, so the "
                       f"refusal undoes the write:\n"
-                      f"    transaction\n        ...\n    transaction: done")))
+                      f"    transaction\n        ...\n    transaction: done"), code="refuse_after_unwrapped_write"))
             break
     return warnings
 
@@ -10905,11 +11458,13 @@ def scan_financial_multi_write_no_transaction(program):
     warnings = []
     seen_lines = set()
 
-    def check_body(lst):
-        # A body is a list of statements. Direct write children NOT inside a transaction are the
-        # ones this flags; a transaction body never reaches here (walk_node skips it).
+    def check_body(lst, in_txn=False):
+        # A body is a list of statements. Its direct writes are flagged only when no `transaction`
+        # encloses them at ANY depth: a `check` branch, a loop or a `try` inside a transaction runs
+        # inside that transaction. Only the transaction's own direct children used to count as
+        # covered, so two writes in a `when` inside a transaction were warned as unwrapped.
         writes = [c for c in lst if is_dataclass(c) and type(c).__name__ in _WRITE_NODES]
-        if len(writes) >= 2:
+        if len(writes) >= 2 and not in_txn:
             line = getattr(writes[0], 'line', 0) or 0
             if line not in seen_lines:
                 seen_lines.add(line)
@@ -10919,30 +11474,26 @@ def scan_financial_multi_write_no_transaction(program):
                     f"leaves partial state. Do these writes belong together? If so, wrap them in "
                     f"`transaction ... transaction: done` so they commit or roll back as one. If "
                     f"they are unrelated, this is fine as written.",
-                    line=line))
+                    line=line, code="financial_writes_outside_transaction"))
         for c in lst:
-            walk_node(c)
+            walk_node(c, in_txn)
 
-    def walk_node(node):
+    def walk_node(node, in_txn=False):
         if node is None or isinstance(node, (str, int, float, bool)):
             return
         if isinstance(node, (list, tuple)):
             for c in node:
-                walk_node(c)
+                walk_node(c, in_txn)
             return
         if not is_dataclass(node):
             return
-        is_txn = type(node).__name__ == 'TransactionBlock'
+        inside = in_txn or type(node).__name__ == 'TransactionBlock'
         for f in fields(node):
             v = getattr(node, f.name, None)
             if isinstance(v, list):
-                if is_txn:
-                    for c in v:          # a transaction protects its writes; still look deeper
-                        walk_node(c)
-                else:
-                    check_body(v)        # an ordinary body: count its direct writes
+                check_body(v, inside)    # every body below a transaction is covered by it
             else:
-                walk_node(v)
+                walk_node(v, inside)
 
     check_body(getattr(program, 'statements', None) or [])
     return warnings
@@ -11080,72 +11631,6 @@ def resolve_loose_unique(program):
     return enforceable, undecidable, decorative
 
 
-def resolve_loose_defaults(program):
-    """The DEFAULTS half of T1-UNIQUE-AND-DEFAULTS-ENFORCED: where each loose shape's declared
-    defaults apply. A handler bound to a shape (`listen for sh.Plan`) that saves to a NAMED table
-    makes that save the shape's write, the same resolution plain-shape `unique` uses
-    (`resolve_loose_unique`), so a field the save omits takes its declared default there.
-
-    THE DEFAULTS BELONG TO THE WRITE, NEVER TO THE TABLE (EE-HC-01). This used to return
-    {table: fields}, and the runtime filled those defaults into EVERY whole-row write to that
-    table: a handler bound to a different shape, a top-level save, a save in a task. One handler
-    bound to `sh.WithDefault` saving to db.events made `flow "legacy"` appear in a save from a
-    `sh.Write` handler that never asked for it. A shape's defaults apply only to the value that
-    shape describes, so the answer is now keyed by the save block itself.
-
-    Returns [(write block, shape name, [field declarations with a default])], one entry per save
-    written inside a handler bound to a shape with defaults. A write inside a handler nested in
-    that one belongs to the inner handler only. A save to a table chosen at runtime has no named
-    target and is left alone (the check warning about defaults still says so)."""
-    HANDLERS = ('NewBlock', 'RequestInboundBlock', 'ChangeBlock')
-    WRITES = ('SaveBlock', 'SaveOrUpdateBlock', 'SaveAllBlock')
-
-    def walk(n, kinds, out, stop=()):
-        if n is None or isinstance(n, (str, int, float, bool)):
-            return
-        if isinstance(n, (list, tuple)):
-            for c in n:
-                walk(c, kinds, out, stop)
-            return
-        if not is_dataclass(n):
-            return
-        if type(n).__name__ in stop:
-            return                       # a nested handler owns its own writes
-        if type(n).__name__ in kinds:
-            out.append(n)
-        for f in fields(n):
-            walk(getattr(n, f.name, None), kinds, out, stop)
-
-    shapes = []
-    walk(getattr(program, 'statements', None) or [], ('ShapeDecl',), shapes)
-    with_defaults = {}
-    for st in shapes:
-        dflt = [fld for fld in (getattr(st, 'fields', None) or [])
-                if any(getattr(m, 'modifier_type', '') == 'default'
-                       for m in (getattr(fld, 'modifiers', None) or []))]
-        if dflt:
-            with_defaults[str(getattr(st, 'name', '') or '')] = dflt
-    if not with_defaults:
-        return []
-    handlers = []
-    walk(getattr(program, 'statements', None) or [], HANDLERS, handlers)
-    out = []
-    for h in handlers:
-        sname = str(getattr(h, 'shape', '') or '')
-        dflt = with_defaults.get(sname)
-        if not dflt:
-            continue
-        blocks = []
-        walk(getattr(h, 'body', None), WRITES, blocks, stop=HANDLERS)
-        for block in blocks:
-            tname = _static_target_name(getattr(block, 'target', None)
-                                        or getattr(block, 'source', None))
-            if not tname:
-                continue
-            out.append((block, sname, list(dflt)))
-    return out
-
-
 def resolve_join_fields(program):
     """Every field a native join (`with`/`with.required`/`with.all`) actually matches on, so an
     index can be created ALONGSIDE the table rather than discovered as a missing one later --
@@ -11234,7 +11719,7 @@ def scan_shape_unique_governs_no_table(program):
             f"table, so there is nothing for the uniqueness constraint to attach to. Remove `unique` "
             f"if the shape only describes data; or save the shape to a table (a handler that writes "
             f"it, or a `<name> as table` block) to make the constraint real.",
-            line=line))
+            line=line, code="unique_governs_no_table"))
     return warnings
 
 
@@ -11460,8 +11945,84 @@ def scan_journey_without_timezone(program):
     return warnings
 
 
+def scan_page_class_outranked(program):
+    """A page class a folder journey outranks (RULED by Ron 2026-10-22). The comparison is made where the
+    cascade assembles the page with its journeys (mio.py `_apply_journey`), on the one shared class
+    order, and recorded on the program; this hands each finding to the check as a warning. A page below
+    an `[important]` floor never reaches here: the cascade refuses it outright."""
+    return [CompileWarning(msg, line=line, code="page_class_outranked")
+            for line, msg in (getattr(program, 'cascade_warnings', None) or [])]
+
+
+def _save_table_name(target):
+    """`db.events` -> 'events' for a save's target, whichever form it arrived in; '' when not a table."""
+    parts = getattr(target, 'parts', None)
+    if parts:
+        parts = [str(p).replace('__USERVAR__', '') for p in parts]
+        return parts[-1] if len(parts) >= 2 and parts[0] == 'db' else ''
+    text = str(target or '')
+    return text.split('.', 1)[1] if text.startswith('db.') else ''
+
+
+def scan_default_not_on_ungoverned_save(program):
+    """A shape default that a save leaves out of a table no shape governs (RULED by Ron 2026-10-22, the
+    real mis-use site of A3 / PUB600-HC-01). A default is applied when a request is bound to the shape and
+    on a write to a table a shape governs with `as table`, and never on a save to any other table (A3's
+    runtime rule, `8e4b37d`). So a save inside a handler bound to `sh.X` that writes that request to such a
+    table, and leaves out a field X gives a default, writes no value for it, whatever the default says.
+    This replaces the note that fired on EVERY defaulted field, a scope explanation on correct code. A save
+    that writes the field (`flow flow`, the bound value carries the default), a save to a governed table,
+    and a save that writes none of the request's fields (an unrelated record) earn nothing."""
+    nodes = list(_all_nodes(program))
+    shapes = {str(getattr(n, 'name', '') or ''): n for n in nodes if type(n).__name__ == 'ShapeDecl'}
+    governed = {str(t) for n in shapes.values() for t in (getattr(n, 'tables', None) or {})}
+    warnings = []
+    for h in nodes:
+        if type(h).__name__ not in ('NewBlock', 'RequestInboundBlock'):
+            continue
+        sname = str(getattr(h, 'shape', '') or '')
+        sname = sname[3:] if sname.startswith('sh.') else sname
+        sd = shapes.get(sname)
+        if sd is None:
+            continue
+        own = list(getattr(sd, 'fields', None) or [])
+        names = {str(getattr(f, 'name', '') or '') for f in own}
+        defaulted = [str(getattr(f, 'name', '') or '') for f in own
+                     if any(str(getattr(m, 'modifier_type', '') or '') == 'default'
+                            for m in (getattr(f, 'modifiers', None) or []))]
+        if not defaulted:
+            continue
+        for s in _all_nodes(getattr(h, 'body', None) or []):
+            if type(s).__name__ != 'SaveBlock':
+                continue
+            table = _save_table_name(getattr(s, 'target', None))
+            if not table or table in governed:
+                continue
+            written = {str(getattr(fv, 'name', '') or '') for fv in (getattr(s, 'fields', None) or [])}
+            if not (written & names):
+                continue
+            for d in defaulted:
+                if d in written:
+                    continue
+                line = getattr(s, 'line', 0) or getattr(h, 'line', 0) or 0
+                warnings.append(CompileWarning(
+                    f"Line {line}: this save writes a `{sname}` request to db.{table}, a table no shape "
+                    f"governs, and leaves out `{d}`, which `{sname}` gives a default. A default is applied "
+                    f"when the request is bound and on a write to a table a shape governs with `as table`, "
+                    f"never on this save, so db.{table} gets no `{d}`.",
+                    line,
+                    f"If db.{table} should hold it, write it on the save: `{d} {d}` (the bound value "
+                    f"carries the default). If the table has no place for it, the save is right as it is.",
+                    "default_not_on_ungoverned_save"))
+    return warnings
+
+
 WARNING_SCANS = (
+    scan_default_not_on_ungoverned_save,
+    scan_write_route_no_idempotent,
     scan_journey_without_timezone,
+    scan_page_class_outranked,
+    scan_same_path_two_classes_warning,
     scan_success_on_possibly_empty_lookup,
     scan_comparison_can_meet_empty,
     scan_release_never_held,
@@ -11484,7 +12045,7 @@ WARNING_SCANS = (
     scan_audit_grade_requirement,
     scan_miofile_zone_coverage,
     scan_cookie_samesite_none_insecure,
-    scan_transaction_onfailure_futile,
+    scan_transaction_onfailure_success,
     scan_webhook_unverified_warning,
     scan_webhook_freshness_absent,
 )
@@ -11574,5 +12135,5 @@ def run_scans(program):
                 f"the {_name!r} scanner (mohio_reachability.py line {_scan_line}) crashed "
                 f"({type(e).__name__}: {e}) and did not finish -- this is a compiler bug; its "
                 f"findings for this run are missing.\n"
-                f"    Report this bug, naming {_name!r}.", line=_scan_line))
+                f"    Report this bug, naming {_name!r}.", line=_scan_line, code="scanner_crashed"))
     return errors, warnings

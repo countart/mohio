@@ -77,6 +77,14 @@ SEC_CLASSIFY_LEVEL_WORDS = frozenset(('confidential', 'classified'))
 # like one of the real ones.
 RECOGNIZED_CLASSIFIERS = frozenset(ENFORCED_CLASSIFIERS + RESERVED_CLASSIFIERS)
 
+# RESERVED LABELS (RULED by Ron 2026-10-22, `[important]` v1). A reserved label is a taken name with a
+# job of its own, NOT a classifier: it carries no protection and is never read as one, so it is kept
+# out of the sets above, which the runtime resolver reads. `[important]` is the first member: the
+# journey-override marker, trailing a journey.mho line. No sector profile may give it a meaning (the
+# profile refuses to load), and on a shape field the check names its real job. A pack never rewrites
+# it, because a bracketed label is never translated (mohio_langmap, 5c47e37).
+RESERVED_LABELS = frozenset(('important',))
+
 # The non-classifier kinds that ride the same identity. They are not tags a developer writes in
 # brackets; they are the other per-field rules that were also keyed by bare name and so had the
 # same borrowing bug.
@@ -96,9 +104,14 @@ class ClassificationResolver:
         # field -> {kind}, the union across every table that qualifies it. Maintained here
         # rather than computed per lookup because the lookup is on the write path.
         self._union: Dict[str, Set[str]] = {}
+        # (field, table) -> kinds, remembered until the next registration. Asked for every key of
+        # every row a read returns, so building the answer each time was a per-row cost on every
+        # read of a program with any protected field (measured: ~4-5% on a 100k-row read, 6.0.1).
+        self._memo: Dict[Tuple[str, Optional[str]], FrozenSet[str]] = {}
 
     # ── registration ─────────────────────────────────────────────────────────────────────────
     def register(self, field: str, kind: str, table: Optional[str] = None) -> None:
+        self._memo.clear()
         field = str(field)
         kind = str(kind)
         if table:
@@ -111,6 +124,10 @@ class ClassificationResolver:
     def kinds(self, field: str, table: Optional[str] = None) -> FrozenSet[str]:
         """Every kind attached to this field, as precisely as the caller allowed."""
         field = str(field)
+        key = (field, str(table) if table else None)
+        hit = self._memo.get(key)
+        if hit is not None:
+            return hit
         found: Set[str] = set()
         if table:
             found |= self._qualified.get((str(table), field), set())
@@ -118,13 +135,24 @@ class ClassificationResolver:
             # No table: the union, which is what the bare-name sets always answered. See rule 4.
             found |= self._union.get(field, set())
         found |= self._bare.get(field, set())
-        return frozenset(found)
+        out = frozenset(found)
+        self._memo[key] = out
+        return out
 
     def has(self, field: str, kind: str, table: Optional[str] = None) -> bool:
         return kind in self.kinds(field, table)
 
     def any_field_has(self, kind: str) -> bool:
-        """Is this kind registered anywhere at all? The cheap guard before a per-field scan."""
+        """Is this kind registered anywhere at all? The cheap guard before a per-field scan, asked for
+        every row a read returns, so remembered until the next registration too."""
+        hit = self._memo.get(('*any*', kind))
+        if hit is not None:
+            return bool(hit)
+        ans = self._any_field_has(kind)
+        self._memo[('*any*', kind)] = frozenset((kind,)) if ans else frozenset()
+        return ans
+
+    def _any_field_has(self, kind: str) -> bool:
         for kinds in self._qualified.values():
             if kind in kinds:
                 return True
@@ -132,6 +160,17 @@ class ClassificationResolver:
             if kind in kinds:
                 return True
         return False
+
+    def protected_fields(self, table: str) -> FrozenSet[str]:
+        """Every field `has(field, 'encrypted', table)` answers yes for, remembered until the next
+        registration: what a read of one row of `table` asks about, asked once instead of once per
+        key per row."""
+        key = ('*protected*', str(table))
+        hit = self._memo.get(key)
+        if hit is None:
+            hit = frozenset(self.fields_with('encrypted', table))
+            self._memo[key] = hit
+        return hit
 
     def fields_with(self, kind: str, table: Optional[str] = None):
         """Every field name carrying `kind`, for a message that has to list them."""

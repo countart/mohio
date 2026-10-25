@@ -1,10 +1,10 @@
 # LICENSE-SCOPE.md
 
-Release: 6.0.0
-Source-control tag: v6.0.0
-First public distribution date: 2026-10-19
+Release: 6.0.1
+Source-control tag: v6.0.1
+First public distribution date: 2026-10-24
 License: Business Source License 1.1
-Change Date: 2030-10-19
+Change Date: 2030-10-24
 Change License: AGPL-3.0-or-later — match LICENSE
 
 ---
@@ -26,8 +26,9 @@ Only files listed in this section are part of the Mohio Public Core Licensed Wor
 - `mohio_schema.py`
 - `mohio_reachability.py`
 - `mohio_version.py`
-- `_build_sha.txt` -- the build stamp `mohio_version.py` reads, so `mio version` names the commit a
-  release was built from; git fills it when the release archive is made (added in 6.0.0).
+- `mohio_data/_build_sha.txt` -- the build stamp `mohio_version.py` reads, so `mio version` names the
+  commit a release was built from; git fills it when the release archive is made (added in 6.0.0;
+  moved into `mohio_data` in 6.0.1 so an installed wheel carries it).
 - `mohio_framework.py`: the `framework:` declaration registry and resolution point (T1-FRAMEWORK-FOUNDATION). Scaffolds an app's target structure, orthogonal to `sector:`, which enforces rules.
 - `mohio_classification.py`: the qualified-identity classification resolver. One place that answers what a field is classified as, replacing five separate bare-field-name sets with a single resolver that DC-01/DC-02/DC-10/DC-11 depend on.
 - `mohio_timezones.py`: the one source for valid time zone names, read live from the installed

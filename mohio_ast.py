@@ -763,10 +763,11 @@ class MioconnectDecl(Node):
     alias:      Optional[str] = None    # NEW v3.8 -- as StripeUS
     source:     Any  = None             # from env.X shorthand
     address:    Any  = None
-    auth_type:  str  = ""               # "bearer" | "header" | "basic" | "key"
-    auth_value: Any  = None             # token / api-key / basic username
-    auth_value2: Any = None             # basic password (auth basic user pass)
-    auth_header_name: str = ""          # custom header name (auth header "X-API-Key")
+    # Every `auth` line, in order: (kind, header name, value, second value, line). kind is "bearer",
+    # "key", "basic" or "header"; the header name is "Authorization" for all but "header". Each line
+    # is its own header on the request; the same header twice refuses at transform (it used to be one
+    # slot, so the last line won and a bearer beside an Idempotency-Key was dropped without a word).
+    auth:       list = field(default_factory=list)
     timeout:    Any  = None
     operations: list = field(default_factory=list)   # list[MioconnectOperation]
     retry:      Optional[int] = None    # T1-RUN3: retry N times on a genuine connectivity
@@ -927,6 +928,9 @@ class JourneyMeta(Node):
     no-ops (see the journey_body comment in mohio.lark)."""
     kind: str = ""
     value: object = None
+    # `[important]` trailed the line: the journey's value wins over a page's own for it (`timezone`;
+    # a classification line is a floor for the pages under it, checked in mio.py's cascade).
+    important: bool = False
 
 @dataclass
 class SagaDecl(Node):               # NEW v3.8 (was stub)
@@ -2434,6 +2438,19 @@ class ViewCallStmt(Node):
 class RespondAsStmt(Node):
     """respond as "text/html" -- sets content-type for current response"""
     content_type: str = "text/html"
+
+@dataclass
+class IdempotentDecl(Node):
+    """idempotent by request.header "Idempotency-Key" keep for 24 hours (T1-ROUTE-IDEMPOTENCY).
+    `source` is the dotted name the key is read from and `header` the header it names ("" when the
+    source names no header, which check refuses). `keep_seconds` is None when no `keep for` was
+    written; `keep_written` is the duration as written, for messages."""
+    source:       Any = None
+    header:       str = ""
+    keep_seconds: Any = None
+    keep_written: str = ""
+    keep_unit:    str = ""
+    keep_count:   Any = None
 
 @dataclass
 class TitleDecl(Node):

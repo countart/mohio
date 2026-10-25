@@ -275,6 +275,79 @@ def _line(tree_or_token) -> int:
     return 0
 
 
+def _refuse_duplicate_headers(owner, entries, example):
+    """ONE HEADER, ONE LINE. `entries` is (header name, the line as written, line number) for every
+    header an outbound call declares. Different headers all go on the request; the same header
+    twice (names compared without case, every `auth` form being Authorization) has no right answer,
+    and the last line used to win without a word: a bearer beside an Idempotency-Key reached the
+    provider as an unauthorized request while `mio check` passed. It refuses here, at transform, so
+    `mio check` and `mio run` both say so before anything is sent."""
+    seen = {}
+    for hname, written, line in entries:
+        key = str(hname).strip().lower()
+        if key in seen:
+            first_name, first_written, first_line = seen[key]
+            raise MohioCompileError(
+                f"Line {line or '?'}: {owner} declares the `{first_name}` header twice, on line "
+                f"{first_line or '?'} (`{first_written}`) and line {line or '?'} (`{written}`). A request "
+                f"carries one value per header, so one of these would be dropped without a word, and a "
+                f"dropped credential reaches the provider as an unauthorized request. Keep the line the "
+                f"provider expects and remove the other; different headers sit side by side:\n"
+                f"        {example}",
+                line=line or 0)
+        seen[key] = (hname, written, line)
+
+
+def _refuse_repeated_line(owner, entries):
+    """ONE VALUE, ONE LINE. `entries` is (what the line sets, line number) for each line of a
+    declaration that holds one value: a connector's address, timeout, retry, an operation of one
+    name, on.failure, on.success; an operation's path, method, timeout, sends, returns. Written twice,
+    one of them used to win without a word (a second address sent the payment elsewhere, a second
+    operation of one name made the first unreachable, a second on.failure never ran)."""
+    first_at = {}
+    for what, line in entries:
+        if what in first_at:
+            raise MohioCompileError(
+                f"Line {line or '?'}: {owner} writes `{what}` twice, on line {first_at[what] or '?'} and "
+                f"line {line or '?'}. It holds one `{what}`, so one of these lines would win and the "
+                f"other would be ignored without a word. Keep the line you mean and remove the other.",
+                line=line or 0)
+        first_at[what] = line
+
+
+_ONE_VALUE_MODIFIERS = ('default', 'range', 'format', 'label', 'threshold', 'min', 'max')
+
+_LABEL_NOT_BUILT = ('sector:',)
+
+
+def _journey_line_label(children, written, line):
+    """The trailing label on a journey (or sector) line: True for `[important]` where it has a job,
+    False for none. `[important]` (RULED by Ron 2026-10-22) makes the journey's value win over a page's
+    own for that line: on `timezone`, and on the four classification lines as a FLOOR, a page below it
+    refused when the page is checked with its journeys (mio.py, on the shared _CLASS_RANK). It is not
+    built for `sector:`, a different axis from the class order, so it refuses there. Any other label
+    refuses: only `[important]` has a job in that slot."""
+    tag = next((c for c in children if isinstance(c, Token) and c.type == 'TAG_REF'), None)
+    if tag is None:
+        return False
+    label = str(tag).strip()[1:-1].strip()
+    where = line or _line(tag) or '?'  # SILENT-SHAPE-OK: the line a refusal names when none is known; the refusal is raised either way
+    if label.lower() != 'important':
+        raise MohioCompileError(
+            f"Line {where}: `{tag}` cannot trail `{written}`. The only label a journey line takes is "
+            f"`[important]`, the journey-override marker (`timezone \"Asia/Tokyo\" [important]` makes "
+            f"the journey's zone win over a page's own). Remove `{tag}`; to protect a field, tag the "
+            f"field in its shape.", line=_line(tag) or 0)
+    if written in _LABEL_NOT_BUILT:
+        raise MohioCompileError(
+            f"Line {where}: `[important]` cannot trail `{written}`. It trails `timezone` and the four "
+            f"page classes (public:, private:, hidden:, authorize:), where it makes the journey's value "
+            f"win over a page's own; it is not built for `{written}`, whose own rule already holds (a "
+            f"nearer journey may only add levels to the sector). Remove `[important]`; the line "
+            f"applies as written.", line=_line(tag) or 0)
+    return True
+
+
 def _whole_number(tok, phrase: str, example: str) -> int:
     """A NUMBER token in a place that counts whole things (characters, rows, pages, retries,
     tokens, seconds). The grammar's NUMBER admits a fraction, and `int()` of one raised a bare
@@ -767,32 +840,65 @@ class MohioTransformer(Transformer):
 
     _HANDLER_LINE = None
 
-    def _refuse_app_config_assignment(self, program):
-        """`app config` / `config` read as a variable (Ron, 2026-10-13): refused here, at the line that
-        made it, before a stranded `app config: done` closer is reported as a malformed body above it."""
-        from dataclasses import is_dataclass, fields as _flds
-        from mohio_ast import Assignment, DottedName
-        from mohio_reachability import app_config_refusal, APP_CONFIG_FIX
+    @staticmethod
+    def _refuse_second_journey(program):
+        """A file has one journey (T1-ROUTE-CLASS-PER-JOURNEY, RULED by Ron 2026-10-22). A journey is the
+        scope every handler in its file is served under; two in one file split that scope, and a handler
+        held by one was not gated by the other's page classes while the check read both (measured over
+        HTTP: served to anyone, no warning). Counted in this file's own source, so a folder journey.mho
+        over a page with a journey of its own is two files and stays legal."""
+        from mohio_ast import JourneyDecl
+        found = []
 
         def walk(node):
             if isinstance(node, (list, tuple)):
                 for c in node:
                     walk(c)
                 return
-            if not is_dataclass(node):
-                return
-            if isinstance(node, Assignment):
-                val = node.value
-                word = (val.parts[0] if isinstance(val, DottedName) and val.parts
-                        else getattr(val, 'name', None))
-                if node.name == 'config' or (node.name == 'app' and str(word or '') == 'config'):
-                    ln = getattr(node, 'line', 0) or 0
-                    raise MohioCompileError(
-                        app_config_refusal(ln, 'app config' if node.name == 'app' else 'config')
-                        + ".\n" + APP_CONFIG_FIX, line=ln)
-            for f in _flds(node):
-                walk(getattr(node, f.name, None))
+            if isinstance(node, JourneyDecl):
+                found.append(node)
+            for c in (getattr(node, 'body', None) or []) if isinstance(node, JourneyDecl) else ():
+                walk(c)
         walk(program.statements)
+        if len(found) < 2:
+            return
+        first, second = found[0], found[1]
+        raise MohioCompileError(
+            f"Line {getattr(second, 'line', 0) or '?'}: this file declares a second journey, "
+            f"`journey {getattr(second, 'name', '') or ''}`, and `journey {getattr(first, 'name', '') or ''}` "
+            f"is declared at line {getattr(first, 'line', 0) or '?'}. A file has one journey: it is the scope "
+            f"every handler in the file is served under, and a second one would split it, so a handler in "
+            f"one would not be gated by the other's page classes.\n"
+            f"Put the page classes and handlers in one journey, or move the second into its own folder's "
+            f"journey.mho.")
+
+    def _refuse_app_config_assignment(self, program):
+        """`app config` / `config` read as a variable (Ron, 2026-10-13): refused here, at the line that
+        made it, before a stranded `app config: done` closer is reported as a malformed body above it."""
+        from mohio_ast import Assignment, DottedName, JourneyDecl
+        from mohio_reachability import app_config_refusal, APP_CONFIG_FIX
+
+        # ONLY WHERE SETTINGS ARE WRITTEN (BS-005, Summit R35): a file's top level and a journey's
+        # own body, the positions the ruling measured. This walked every statement at every depth,
+        # so `config as list text` inside a handler's `on.failure`, a local variable, refused at
+        # check and at run as if it were application settings.
+        def refuse_if_settings(node):
+            if not isinstance(node, Assignment):
+                return
+            val = node.value
+            word = (val.parts[0] if isinstance(val, DottedName) and val.parts
+                    else getattr(val, 'name', None))
+            if node.name == 'config' or (node.name == 'app' and str(word or '') == 'config'):
+                ln = getattr(node, 'line', 0) or 0
+                raise MohioCompileError(
+                    app_config_refusal(ln, 'app config' if node.name == 'app' else 'config')
+                    + ".\n" + APP_CONFIG_FIX, line=ln)
+
+        for st in (program.statements or []):
+            refuse_if_settings(st)
+            if isinstance(st, JourneyDecl):
+                for inner in (st.body or []):
+                    refuse_if_settings(inner)
 
     def _refuse_swallowed_handlers(self, program):
         """A handler the source declares at the top of the file is a handler in the program, or the
@@ -907,6 +1013,7 @@ class MohioTransformer(Transformer):
         # the broken decomposition.
         self._refuse_swallowed_handlers(program)
         self._refuse_app_config_assignment(program)
+        self._refuse_second_journey(program)
         stray = self._scan_stray_closer(program)
         if stray is not None:
             bn = getattr(stray, 'block_name', None) or '?'
@@ -1235,6 +1342,22 @@ class MohioTransformer(Transformer):
                 current.fields.append(f)
             else:
                 loose.append(f)
+        # ONE FIELD, ONE LINE, within its scope (T1-SHAPE-MOD-SILENT, RULED by Ron 2026-10-23). Two lines
+        # declaring one field in one scope kept the first type and dropped the second without a word.
+        # Two tables may each have their own `id`; that is two scopes, so it is not this.
+        for scope, members in [("this shape", loose)] + [(f"table `{t}`", tb.fields) for t, tb in tables.items()]:
+            first = {}
+            for f in members:
+                written = getattr(f, '_written_name', None) or str(getattr(f, 'name', '') or '')
+                if written in first:
+                    raise MohioCompileError(
+                        f"Line {getattr(f, 'line', 0) or '?'}: {scope} declares the field `{written}` twice, on "
+                        f"line {first[written] or '?'} and line {getattr(f, 'line', 0) or '?'}. A field is "
+                        f"declared once, so one of the two would be used and the other ignored without a word "
+                        f"(a field declared `as int` and then `as text` kept `int`). Keep the line you mean and "
+                        f"remove the other.",
+                        line=getattr(f, 'line', 0) or 0)
+                first[written] = getattr(f, 'line', 0) or 0
         return loose, tables
 
     def _refuse_two_shape_fields_on_one_line(self, fields):
@@ -1416,12 +1539,44 @@ class MohioTransformer(Transformer):
               'html': 'text/html', 'text': 'text/plain', 'csv': 'text/csv'}.get(raw.lower(), raw)
         return RespondAsStmt(content_type=ct)
 
+    # The units `keep for` can be held in seconds. A month or a year has no fixed length and a
+    # millisecond keeps nothing worth replaying, so those leave keep_seconds None and check refuses.
+    _KEEP_FOR_SECONDS = {'second': 1, 'seconds': 1, 'minute': 60, 'minutes': 60, 'hour': 3600,
+                         'hours': 3600, 'day': 86400, 'days': 86400, 'week': 604800, 'weeks': 604800}
+
+    @v_args(meta=True)
+    def idempotent_decl(self, meta, children):
+        # idempotent by request.header "Idempotency-Key" (keep for N unit)?  (T1-ROUTE-IDEMPOTENCY)
+        from mohio_ast import IdempotentDecl
+        source, header = None, ""
+        src = next((c for c in children if isinstance(c, Tree) and c.data == 'verify_source'), None)
+        for cc in (src.children if src is not None else ()):
+            if isinstance(cc, Token) and cc.type == 'STRING':
+                header = str(cc).strip('"')
+            elif not isinstance(cc, Token):
+                source = cc
+        dur = next((c for c in children if isinstance(c, DurationExpr)), None)
+        decl = IdempotentDecl(source=source, header=header, line=getattr(meta, 'line', 0) or 0)
+        if dur is not None:
+            unit = str(dur.unit or '').strip().lower()
+            decl.keep_count = dur.count
+            decl.keep_unit = unit
+            decl.keep_written = " ".join(str(p) for p in (dur.count, dur.unit) if p not in (None, ""))
+            per = self._KEEP_FOR_SECONDS.get(unit)
+            if per is not None and isinstance(dur.count, (int, float)):
+                decl.keep_seconds = int(dur.count * per)
+        return decl
+
     def sector_decl(self, children):
         # children: [SECTOR, sector_name]. sector_name is SECTOR_SEG ("." SECTOR_SEG)*
         # -- join the segments into a dotted string (e.g. financial.banking.retail)
         # rather than leaving an unresolved Tree, which broke the warning and any
         # logic that reads the sector name.
-        type_node = children[-1]
+        # The name is the sector_name tree, found by what it is: a trailing label (TAG_REF) can now
+        # follow it, and it refuses (`[important]` on a security line, or any other label).
+        _journey_line_label(children, 'sector:', _line(children[0]) if children else 0)
+        type_node = next((c for c in children if isinstance(c, Tree)
+                          and str(getattr(c, 'data', '')) == 'sector_name'), children[-1])
         if isinstance(type_node, Tree) and str(getattr(type_node, 'data', '')) == 'sector_name':
             segs = [str(t) for t in type_node.children
                     if isinstance(t, Token) and t.type == 'SECTOR_SEG']
@@ -1529,26 +1684,36 @@ class MohioTransformer(Transformer):
     # filters the keyword literals ("address", "auth", "path", ...).
     def mc_address(self, children):
         val = next((c for c in children if not isinstance(c, Token)), None)
-        return ('address', val)
+        return ('address', val, self._first_line(children))
+
+    # Each `auth` line is ('auth', kind, header name, value, second value, line): the header it sets,
+    # so the declaration can hold every line and refuse one header named twice.
+    @staticmethod
+    def _first_line(children):
+        for c in children:
+            ln = c.line if isinstance(c, Token) else getattr(c, 'line', None)
+            if ln:
+                return ln
+        return 0
 
     def mc_auth_key(self, children):
         val = next((c for c in children if not isinstance(c, Token)), None)
-        return ('auth', 'key', val)
+        return ('auth', 'key', 'Authorization', val, None, self._first_line(children))
 
     def mc_auth_bearer(self, children):
         val = next((c for c in children if not isinstance(c, Token)), None)
-        return ('auth', 'bearer', val)
+        return ('auth', 'bearer', 'Authorization', val, None, self._first_line(children))
 
     def mc_auth_basic(self, children):
         vals = [c for c in children if not isinstance(c, Token)]
-        return ('auth', 'basic', vals[0] if vals else None,
-                vals[1] if len(vals) > 1 else None)
+        return ('auth', 'basic', 'Authorization', vals[0] if vals else None,
+                vals[1] if len(vals) > 1 else None, self._first_line(children))
 
     def mc_auth_header(self, children):
         name_tok = next((c for c in children if isinstance(c, Token) and c.type == 'STRING'), None)
         val = next((c for c in children if not isinstance(c, Token)), None)
         hname = str(name_tok).strip('"') if name_tok else ""
-        return ('auth', 'header', hname, val)
+        return ('auth', 'header', hname, val, None, self._first_line(children))
 
     def mc_webhook(self, children):
         # ACCEPTED BUT NEVER EXECUTED, so refused rather than warned (RULED by Ron, 2026-10-05):
@@ -1589,30 +1754,30 @@ class MohioTransformer(Transformer):
         return secs
 
     def mc_timeout(self, children):
-        return ('timeout', self._mc_seconds(children))
+        return ('timeout', self._mc_seconds(children), self._first_line(children))
 
     def mc_retry(self, children):
         num = next((c for c in children if isinstance(c, Token) and c.type == 'NUMBER'), None)
-        return ('retry', _whole_number(num, 'retry', 'retry 3') if num else None)
+        return ('retry', _whole_number(num, 'retry', 'retry 3') if num else None, self._first_line(children))
 
     def mc_op_path(self, children):
         s = next((c for c in children if isinstance(c, Token)), None)
-        return ('path', str(s).strip('"') if s else "")
+        return ('path', str(s).strip('"') if s else "", self._first_line(children))
 
     def mc_op_sends(self, children):
         s = next((c for c in children if isinstance(c, Token)), None)
-        return ('sends', str(s) if s else None)
+        return ('sends', str(s) if s else None, self._first_line(children))
 
     def mc_op_returns(self, children):
         s = next((c for c in children if isinstance(c, Token)), None)
-        return ('returns', str(s) if s else None)
+        return ('returns', str(s) if s else None, self._first_line(children))
 
     def mc_op_method(self, children):
         s = next((c for c in children if isinstance(c, Token)), None)
-        return ('method', str(s).upper() if s else "POST")
+        return ('method', str(s).upper() if s else "POST", self._first_line(children))
 
     def mc_op_timeout(self, children):
-        return ('timeout', self._mc_seconds(children))
+        return ('timeout', self._mc_seconds(children), self._first_line(children))
 
     def mioconnect_body(self, children):
         # Unwraps the unaliased alternatives (operation, on_failure_handler)
@@ -1622,7 +1787,7 @@ class MohioTransformer(Transformer):
     def mioconnect_operation(self, children):
         from mohio_ast import MioconnectOperation
         name_tok = next((c for c in children if isinstance(c, Token) and c.type == 'NAME'), None)
-        op = MioconnectOperation(name=str(name_tok) if name_tok else "")
+        op = MioconnectOperation(name=str(name_tok) if name_tok else "", line=_line(name_tok) if name_tok else 0)
         for c in children:
             if isinstance(c, tuple):
                 tag = c[0]
@@ -1631,6 +1796,7 @@ class MohioTransformer(Transformer):
                 elif tag == 'sends':   op.sends_shape = c[1]
                 elif tag == 'returns': op.returns_shape = c[1]
                 elif tag == 'timeout': op.timeout = c[1]
+        _refuse_repeated_line(f"operation `{op.name}`", [(c[0], c[2]) for c in children if isinstance(c, tuple)])
         return op
 
     def mioconnect_decl(self, children):
@@ -1661,18 +1827,22 @@ class MohioTransformer(Transformer):
                 tag = c[0]
                 if   tag == 'address':  decl.address = c[1]
                 elif tag == 'auth':
-                    decl.auth_type = c[1]
-                    if c[1] == 'header':
-                        decl.auth_header_name = c[2]; decl.auth_value = c[3]
-                    elif c[1] == 'basic':
-                        decl.auth_value = c[2]; decl.auth_value2 = c[3]
-                    else:  # bearer / key
-                        decl.auth_value = c[2]
+                    decl.auth.append(c[1:])
                 elif tag == 'timeout':  decl.timeout = c[1]
                 elif tag == 'retry':    decl.retry = c[1]
                 # webhook: parsed and accepted; no node field in MVP (unrelated to the
                 # STATE-channel facade this run closes -- webhook signature verification is
                 # its own separate, already-shipped feature elsewhere).
+        _refuse_duplicate_headers(
+            f"connector `{name}`",
+            [(hname, ('auth header "%s"' % hname) if kind == 'header' else 'auth ' + kind, line)
+             for kind, hname, _v, _v2, line in decl.auth],
+            'auth bearer env.PAY_KEY\n        auth header "Idempotency-Key" env.ORDER_KEY')
+        _refuse_repeated_line(
+            f"connector `{name}`",
+            [(c[0], c[2]) for c in children if isinstance(c, tuple) and c[0] in ('address', 'timeout', 'retry')]
+            + [("operation %s" % o.name, o.line) for o in decl.operations]
+            + [("on.failure" if isinstance(h, OnFailure) else "on.success", h.line) for h in decl.handlers])
         return decl
 
     def mioconnect_call(self, children):
@@ -1793,6 +1963,24 @@ class MohioTransformer(Transformer):
                 mods.append(c)
             elif isinstance(c, list) and c and all(isinstance(x, ShapeFieldModifier) for x in c):
                 mods.extend(c)
+        # ONE VALUE, ONE MODIFIER (T1-SHAPE-MOD-SILENT, RULED by Ron 2026-10-23 for 6.0.1). A field has
+        # one default, one range, one format: written twice, one silently won (two defaults kept the
+        # last, two ranges dropped the first). A tag or a purpose may be written more than once and
+        # each one counts, so those are not here.
+        seen = set()
+        for m in mods:
+            kind = m.modifier_type
+            if kind not in _ONE_VALUE_MODIFIERS:
+                continue
+            if kind in seen:
+                line = _line(name_tokens[0]) if name_tokens else 0
+                field = str(name_tokens[0]) if name_tokens else "this field"
+                raise MohioCompileError(
+                    f"Line {line or '?'}: field `{field}` has `{kind}` twice. A field holds one `{kind}`, so "
+                    f"one of the two would be used and the other ignored without a word. Keep the one you mean, "
+                    f"for example:\n        {field} as {type_name or 'text'} {kind} ...",
+                    line=line or 0)
+            seen.add(kind)
         return name_tokens, type_name, mods
 
     def _make_shape_field(self, tok, type_name, mods, grouped):
@@ -1819,8 +2007,10 @@ class MohioTransformer(Transformer):
         and its own method below, so nothing has to be inferred from a count.
         """
         name_tokens, type_name, mods = self._shape_field_parts(children)
-        return self._make_shape_field(name_tokens[0] if name_tokens else None,
-                                      type_name, mods, False)
+        f = self._make_shape_field(name_tokens[0] if name_tokens else None, type_name, mods, False)
+        # The whole written name, so `mfa.verified` and `mfa.at` are two fields to the duplicate check.
+        f._written_name = ".".join(str(t) for t in name_tokens)
+        return f
 
     def shape_field_group(self, children):
         """Several fields sharing everything written after them.
@@ -3497,21 +3687,31 @@ class MohioTransformer(Transformer):
     # _exec_JourneyDecl does not read kind='hidden'/'authorize' at all (ZERO runtime
     # effect, not a silent bug -- serve-layer enforcement is next session's build,
     # tracked in PRODUCTION-BUILD-PLAN.md, not guessed at here).
-    def journey_public(self, children):
+    # The four classifications carry their own line (from the parse tree's position: path_list has
+    # already turned its tokens into plain strings), so a check can name the line a path was declared on.
+    @v_args(meta=True)
+    def journey_public(self, meta, children):
         paths = next((c for c in children if isinstance(c, list)), [])
-        return JourneyMeta(kind='public', value=paths)
+        return JourneyMeta(kind='public', value=paths, line=getattr(meta, 'line', 0) or 0,
+                           important=_journey_line_label(children, 'public:', getattr(meta, 'line', 0)))
 
-    def journey_private(self, children):
+    @v_args(meta=True)
+    def journey_private(self, meta, children):
         paths = next((c for c in children if isinstance(c, list)), [])
-        return JourneyMeta(kind='private', value=paths)
+        return JourneyMeta(kind='private', value=paths, line=getattr(meta, 'line', 0) or 0,
+                           important=_journey_line_label(children, 'private:', getattr(meta, 'line', 0)))
 
-    def journey_hidden(self, children):
+    @v_args(meta=True)
+    def journey_hidden(self, meta, children):
         paths = next((c for c in children if isinstance(c, list)), [])
-        return JourneyMeta(kind='hidden', value=paths)
+        return JourneyMeta(kind='hidden', value=paths, line=getattr(meta, 'line', 0) or 0,
+                           important=_journey_line_label(children, 'hidden:', getattr(meta, 'line', 0)))
 
-    def journey_authorize(self, children):
+    @v_args(meta=True)
+    def journey_authorize(self, meta, children):
         paths = next((c for c in children if isinstance(c, list)), [])
-        return JourneyMeta(kind='authorize', value=paths)
+        return JourneyMeta(kind='authorize', value=paths, line=getattr(meta, 'line', 0) or 0,
+                           important=_journey_line_label(children, 'authorize:', getattr(meta, 'line', 0)))
 
     def journey_flow(self, children):
         paths = next((c for c in children if isinstance(c, list)), [])
@@ -3532,7 +3732,8 @@ class MohioTransformer(Transformer):
             raise MohioCompileError(
                 f"line {line}: {timezone_refusal_message(name)} "
                 f"Use one of the names listed in tools/timezone-names-reference.md.", line=line)
-        return JourneyMeta(kind='timezone', value=name)
+        return JourneyMeta(kind='timezone', value=name,
+                           important=_journey_line_label(children, 'timezone', line))
 
     def journey_serves_single(self, children):
         return JourneyMeta(kind='serves', value='single tenant')
@@ -5381,11 +5582,11 @@ class MohioTransformer(Transformer):
         # first nested statement for an inline action and silently dropped it,
         # which made a retrieve nested inside on.failure vanish from the AST.
         body = [c for c in children if not isinstance(c, Token)]
-        return OnFailure(body=body)
+        return OnFailure(body=body, line=_line(children[0]) if children else 0)
 
     def on_success_handler(self, children):
         body = [c for c in children if not isinstance(c, Token)]
-        return OnSuccess(body=body)
+        return OnSuccess(body=body, line=_line(children[0]) if children else 0)
 
     def on_error_handler(self, children):
         body = [c for c in children if not isinstance(c, Token)]
@@ -6258,6 +6459,16 @@ class MohioTransformer(Transformer):
         self._validate_closer('try', children, open_line)
         on_failure = next((c for c in children if isinstance(c, OnFailure)), None)
         on_success = next((c for c in children if isinstance(c, OnSuccess)), None)
+        # ONE HANDLER OF EACH KIND (T1-TRY-ONFAILURE-DUP-LASTWINS, RULED by Ron 2026-10-23). Two
+        # `on.failure` in one `try` ran only the second, without a word, as a connector's did.
+        _handlers = []
+        for c in children:
+            for h in (c.children if _is_tree(c, 'result_handlers') else [c]):
+                kind = ('on.failure' if isinstance(h, OnFailure) else 'on.success' if isinstance(h, OnSuccess)
+                        else 'always' if isinstance(h, AlwaysClause) else None)
+                if kind:
+                    _handlers.append((kind, getattr(h, 'line', 0) or 0))
+        _refuse_repeated_line("this `try`", _handlers)
         # on.failure / on.success arrive wrapped in a result_handlers Tree
         for c in children:
             if _is_tree(c, 'result_handlers'):
@@ -7638,6 +7849,18 @@ class MohioTransformer(Transformer):
                     if isinstance(c, Token) and c.type == 'NUMBER'), None)
         unit_node = _first_tree(children, 'time_unit')
         unit = _token_str(unit_node) if unit_node else ""
+        # A WORD BETWEEN THE COUNT AND THE UNIT (`30 business days`) IS DECLARED AND NOT BUILT
+        # (T1-DURATION-QUALIFIER-DROPPED, 2026-10-22). The grammar takes it and every reader dropped the
+        # word, so 30 business days was read as 30 days, a silent change of meaning in a retention, a
+        # timespan, an expiry or a `keep for`. No reader implements one, so it refuses here, once, for all.
+        qual = next((c for c in children if isinstance(c, Token) and c.type == 'NAME'), None)
+        if qual is not None:
+            raise MohioCompileError(
+                f"Line {_line(qual) or _line(num) or '?'}: `{num} {qual} {unit}` puts a word between the "
+                f"number and the unit. A length like `{qual} {unit}` is declared in the grammar but not "
+                f"built in this release (T1-DURATION-QUALIFIER-DROPPED), so it would be read as plain "
+                f"{unit}, which is not what it says.\n"
+                f"Write the length in plain units, for example `{num} {unit}`.")
         return DurationExpr(
             count=_coerce_number(str(num)) if num else None,
             unit=unit,
@@ -7784,38 +8007,6 @@ class MohioTransformer(Transformer):
         }.get(op_type, op_type)
         operand = non_tokens[0] if non_tokens else None
         return StringOpExpr(operation=op_name, operand=operand)
-
-
-
-
-        headers = []
-        body = auth = None
-        alias = ""
-        timeout = 30
-
-        for child in children:
-            if not _is_tree(child, "miohttp_body"):
-                continue
-            toks = [c for c in child.children if isinstance(c, Token)]
-            vals = [c for c in child.children if not isinstance(c, Token)]
-            key  = str(toks[0]).lower() if toks else ""
-
-            if key == "header":
-                # header "Name" value_expr
-                hname = str(toks[1]).strip('"') if len(toks) > 1 else ""
-                hval  = vals[0] if vals else None
-                headers.append((hname, hval))
-            elif key == "body":    body    = vals[0] if vals else None
-            elif key == "auth":    auth    = vals[0] if vals else None
-            elif key == "timeout":
-                timeout = _miohttp_timeout_seconds(toks, vals)
-            elif key == "as":
-                alias = str(toks[1]) if len(toks) > 1 else ""
-
-        return MiohttpStmt(
-            method=method, url=url, headers=headers,
-            body=body, auth=auth, timeout=timeout, alias=alias
-        )
 
     def concat_expr(self, children):
         from mohio_ast import ConcatExpr
@@ -10299,6 +10490,7 @@ class MohioTransformer(Transformer):
         body = auth = None
         alias = ""
         timeout = 30
+        declared = []               # (header name, the line as written, line) for the duplicate refusal
 
         for child in children:
             if not _is_tree(child, "miohttp_body"):
@@ -10312,13 +10504,18 @@ class MohioTransformer(Transformer):
                 hname = str(toks[1]).strip('"') if len(toks) > 1 else ""
                 hval  = vals[0] if vals else None
                 headers.append((hname, hval))
+                declared.append((hname, 'header "%s"' % hname, _line(toks[0])))
             elif key == "body":    body    = vals[0] if vals else None
-            elif key == "auth":    auth    = vals[0] if vals else None
+            elif key == "auth":
+                auth = vals[0] if vals else None
+                declared.append(("Authorization", "auth", _line(toks[0])))
             elif key == "timeout":
                 timeout = _miohttp_timeout_seconds(toks, vals)
             elif key == "as":
                 alias = str(toks[1]) if len(toks) > 1 else ""
 
+        _refuse_duplicate_headers(f"miohttp.{method}", declared,
+                                  'auth env.API_KEY\n        header "Idempotency-Key" env.ORDER_KEY')
         return MiohttpStmt(
             method=method, url=url, headers=headers,
             body=body, auth=auth, timeout=timeout, alias=alias

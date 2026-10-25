@@ -2,15 +2,92 @@
 <!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Part IX -- Operational Guarantees
 
-## Chapter 40: Connector calls, and what is not yet guaranteed
+## Chapter 40: Outbound HTTP -- connectors and miohttp, and what is not yet guaranteed
 
-An outbound integration call goes through `mioconnect` (the connection declaration and the
-`Connector.operation with PAYLOAD as RESULT` call). The call itself is built and runs. This chapter is about the
-RELIABILITY guarantees around it, because for a payment call the difference between built and planned is money.
+Mohio makes an outbound HTTP call two ways. `mioconnect` declares a connector once (the connection and its
+`Connector.operation with PAYLOAD as RESULT` calls); `miohttp.get` / `.post` / `.put` / `.delete` / `.patch`
+makes a direct one-off call. Both are built and run. This chapter covers how each carries HEADERS and
+AUTHENTICATION, and the RELIABILITY guarantees around a connector call, because for a payment call the difference
+between built and planned is money.
 
 **A connector call is an egress boundary.** A `[phi]`, `[pci]` or `[pii]` value in a connector payload (raw or
 shaped, including one built with `create`) is refused at check unless it is masked or the record is sent
 `stripped`; `miohttp` follows the same rule as an AI call. See the egress gate in `Docs/guides/compliance.md`.
+
+## Headers and authentication
+
+An outbound call carries two different things on its way out: HEADERS, which are DATA, and a CREDENTIAL, which is
+a SECRET. Mohio keeps them on separate lines because they cross the egress boundary differently, and the compiler
+enforces the split.
+
+**The secret-egress rule, enforced at `mio check`.** A secret may leave your app only as a credential: through
+`auth` on a `miohttp` call, or a connector's own `auth` line. A `secret.X` placed in a `header` line is refused
+at check, because a header is data and a secret is not data to hand around. Writing
+`header "X-Key" secret.API_KEY` on a `miohttp.get` is refused:
+
+    Line N: `secret.API_KEY`, or a value made from it, would reach the "X-Key" header of miohttp.get. A secret
+    is used only where it is declared for, a connector's credential or the `auth` of an outside call, and is
+    never shown, logged, sent elsewhere or stored, masked or not.
+    To fix it, pass it only as a credential (`auth secret.API_KEY` on the call, or `auth bearer secret.API_KEY`
+    in the connector's block); to show that it is set, check that it exists rather than showing it.
+
+That is why `header` and `auth` are separate statements: `header` is the data channel, and `auth` is the egress
+channel for a secret.
+
+### miohttp headers and authentication
+
+On a `miohttp` call, `header "Name" value` adds any header you name, and `auth value` authenticates the call.
+Two separate lines, two separate jobs:
+
+```mohio
+miohttp.get "https://api.example.com/orders"
+    header "Accept" "application/json"
+    auth secret.API_TOKEN
+miohttp.get: done
+```
+
+`header` takes a non-secret value (a content type, a trace or request id); a secret belongs on `auth`, per the
+rule above.
+
+### mioconnect authentication
+
+A `mioconnect` connector declares its credential with `auth`, which has four forms today, each verified by
+running:
+
+```mohio
+mioconnect Keyed
+    address env.A_URL
+    auth key env.A_KEY
+mioconnect: done
+```
+
+```mohio
+mioconnect Bearer
+    address env.B_URL
+    auth bearer secret.B_TOKEN
+mioconnect: done
+```
+
+```mohio
+mioconnect Basic
+    address env.C_URL
+    auth basic env.C_USER env.C_PASS
+mioconnect: done
+```
+
+```mohio
+mioconnect CustomHeader
+    address env.D_URL
+    auth header "X-Api-Key" secret.D_KEY
+mioconnect: done
+```
+
+`auth key`, `auth bearer` and `auth basic` name a scheme; `auth header "Name" value` is the custom-header AUTH
+form, for a provider that authenticates through a header it names, such as `X-Api-Key`. A secret is allowed on
+any of them, because `auth` is the egress channel.
+
+**mioconnect has no standalone `header` line today.** A non-auth custom header on a connector goes through
+`auth header "Name" value` for now (as the `Idempotency-Key` example later in this chapter does).
 
 **The timeout, built (verified by running).** A `timeout` on the connector bounds every call it makes, and an
 operation's own `timeout` overrides the connector's. Write it in seconds:

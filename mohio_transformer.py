@@ -234,7 +234,12 @@ class CompileContext:
         # contract is an error", so this keys the fail-closed behaviour to a set of regulated sector
         # NAMES for now, exactly as the financial multi-write warning keys on `financial`. When
         # profiles can carry rules, this moves into the profile and stops being name-keyed.
-        return self.sector_base in ("financial", "healthcare", "government", "legal", "insurance")
+        return self.sector_base in REGULATED_SECTORS
+
+
+# The regulated sector names, by their first level (T1-PROFILE-RULES: a profile cannot carry the rule
+# yet). One list, read by `ctx.regulated` and by the check scans that key a rule to a regulated sector.
+REGULATED_SECTORS = ("financial", "healthcare", "government", "legal", "insurance")
 
 
 def get_line(node):
@@ -287,6 +292,14 @@ _CRED_CONTEXT = re.compile(
     r'(?:\bhash\b|hashed|_hash\b|\bbcrypt\b|\bscrypt\b|\bargon2\b|\bpbkdf2\b|'
     r'\bpassword\b|\bpasswd\b|\bpassphrase\b|\bsecret\b|\btoken\b|'
     r'\bapi[_-]?key\b|\bapikey\b|\bprivate[_-]?key\b|\bcredential\b)', re.IGNORECASE)
+
+
+# A name in the code that says the value beside it is a public digest: a commit id, a revision, a
+# checksum. Read from the code with its strings blanked, never from the value.
+_PUBLIC_DIGEST_NAME = re.compile(r'(commit|revision|\bsha\b|_sha\b|\bsha\d|checksum|digest)', re.IGNORECASE)
+# ...and never when a name says secret anywhere in it (`commit_token`, `signing_key`): a part of a
+# name is enough to keep the warning.
+_SECRETISH_NAME = re.compile(r'(token|secret|passw|key|cred|auth|bearer|session|salt)', re.IGNORECASE)
 
 
 def _looks_like_secret_literal(s):
@@ -800,7 +813,7 @@ class MohioValidator:
                         _has_exit = True; break
                 if not _has_exit:
                     self.ctx.warn("This 'while' loop has no visible exit (stop / give back / halt) and may run forever.", i,
-                        hint="Ensure the condition becomes false or add a 'stop'. A runtime guard will also stop it, but catching it here is better.")
+                        hint="Ensure the condition becomes false or add a 'stop'. A runtime guard will also stop it, but catching it here is better.", code="while_no_exit")
             # Wrong data-verb connector. Each data verb pairs with exactly one
             # connector word: find/in, and retrieve/grab/get/remove/from. Using
             # the wrong one makes the parser mis-derive and report a confusing
@@ -826,11 +839,22 @@ class MohioValidator:
             # the fix: of `postgres://admin:pass@host/db`, a `redis://default:pw@host` and a
             # JWT, the detector fired on NONE of them, and warned only about the `sk_live_`
             # key beside them.
+            # THE CONTEXT IS THE CODE, NOT THE VALUE (Summit R35). The context words were searched in
+            # the whole line, the quoted value included, so the identifier `r35-password-contract`
+            # was its own "password" context; and a public commit id (`compiler_commit "cb944a..."`)
+            # has the hex shape of a key. A credential word written in the code still flags any
+            # 20+ character literal; a hex digest the code names as a commit, revision, checksum or
+            # digest, with no credential word beside it, is provenance, not a secret.
+            _code = re.sub(r'"[^"]*"', '""', raw)
+            _cred_ctx = _CRED_CONTEXT.search(_code)
             for secret in re.findall(r'"([A-Za-z0-9_\-]{20,})"', raw):
-                if ("env." not in raw and "secret." not in raw
-                        and (_looks_like_secret_literal(secret) or _CRED_CONTEXT.search(raw))):
+                _public_digest = (not _cred_ctx and re.fullmatch(r'[0-9a-fA-F]{7,64}', secret)
+                                  and _PUBLIC_DIGEST_NAME.search(_code)
+                                  and not _SECRETISH_NAME.search(_code))
+                if ("env." not in raw and "secret." not in raw and not _public_digest
+                        and (_looks_like_secret_literal(secret) or _cred_ctx)):
                     self.ctx.warn("Possible hardcoded credential.", i,
-                        hint=f"Value '{secret[:8]}...' looks like a key. Use env.X or secret.X.")
+                        hint=f"Value '{secret[:8]}...' looks like a key. Use env.X or secret.X.", code="possible_credential")
             # A URL with USERINFO is not a guess about shape -- a password written into a URL
             # IS a credential, wherever it appears. This is the form DB, Redis, AMQP and SMTP
             # credentials are almost always written in.
@@ -840,7 +864,7 @@ class MohioValidator:
                     hint=(f"The `{_scheme}://` URL carries a password for '{_user}' in the "
                           f"text. Anyone who reads this file has the credential, and it "
                           f"travels into every log and backup the file reaches. Move the "
-                          f"whole URL to `env.X` or `secret.X`."))
+                          f"whole URL to `env.X` or `secret.X`."), code="credential_in_url")
             # A JWT is three base64url segments separated by dots, so the shape above can never
             # match one -- the dots disqualify it. A signed token in source is a live credential
             # until it expires, and often longer.
@@ -848,13 +872,13 @@ class MohioValidator:
                                    raw):
                 self.ctx.warn("Hardcoded token.", i,
                     hint=(f"'{_jwt[:12]}...' is a signed token (JWT). It grants whatever it was "
-                          f"issued for until it expires. Use `env.X` or `secret.X`."))
+                          f"issued for until it expires. Use `env.X` or `secret.X`."), code="hardcoded_token")
             # A private key pasted into source. No length or charset rule catches this, because
             # the body is newline-wrapped base64 -- the header is the reliable tell.
             if re.search(r'-----BEGIN [A-Z ]*PRIVATE KEY-----', raw):
                 self.ctx.warn("Private key in source.", i,
                     hint=("A private key belongs in `env.X` or `secret.X`, never in a file that "
-                          "is committed, copied or pasted."))
+                          "is committed, copied or pasted."), code="private_key_in_source")
             # Hardcoded CONNECTION source. A connect source must be env.X or secret.X,
             # never a literal string. A literal here hardcodes a credential (e.g. a
             # postgres URL with user:pass) -- non-suppressible by principle -- AND the
@@ -934,11 +958,11 @@ class MohioValidator:
             # ## comments retired
             if re.match(r'\s*##', raw):
                 self.ctx.warn("'##' comments are retired.", i,
-                    hint="Use '//' for single-line comments or '/* */' for block comments.")
+                    hint="Use '//' for single-line comments or '/* */' for block comments.", code="comment_hash_retired")
             # or if -- in CODE only: `show "go left or if not, right"` is prose inside a string.
             if re.search(r'\bor\s+if\b', re.sub(r'//.*$', '', re.sub(r'"(?:[^"\\]|\\.)*"', '""', s))):
                 self.ctx.warn("'or if' is retired.", i,
-                    hint="Use 'check / when / otherwise'. mio fmt converts automatically.")
+                    hint="Use 'check / when / otherwise'. mio fmt converts automatically.", code="or_if_retired")
             # The bare `listen for` wrapper (no subject) is RETIRED and now fails loud in the AST
             # transform (mohio_transformer_ast.listen_block), which every path -- check, run, serve --
             # runs, so a warning here would only duplicate that error. A `listen for` WITH a subject
@@ -959,7 +983,7 @@ class MohioValidator:
             _s_nostr = re.sub(r'//.*$', '', _s_nostr)
             if (not _line_is_markup) and re.search(r'\{[^{]', _s_nostr) and not re.search(r'\{\{', _s_nostr):
                 self.ctx.warn("Curly braces '{ }' are retired.", i,
-                    hint="Use named fields or 'as list sh.[Shape]' for nested structures.")
+                    hint="Use named fields or 'as list sh.[Shape]' for nested structures.", code="curly_braces_retired")
             # Phase 3 reserved -- only flag as KEYWORDS, not inside string literals OR comments.
             # Strip string literals first, then a `//` comment, so a reserved word written as prose
             # ("// invoke this later") is not refused. Strings are stripped BEFORE the comment so a
@@ -1011,17 +1035,17 @@ class MohioValidator:
             # route retired
             if re.match(r'\s*route\s+(GET|POST|PUT|DELETE|PATCH)\b', raw, re.I):
                 self.ctx.warn("'route' is retired.", i,
-                    hint="Write a handler on its own: `request for sh.X at /path`, or `listen for sh.X at /path` for a write. Use `map route` for explicit routing.")
+                    hint="Write a handler on its own: `request for sh.X at /path`, or `listen for sh.X at /path` for a write. Use `map route` for explicit routing.", code="route_retired")
             # emit retired
             if re.match(r'\s*emit\b', s):
                 self.ctx.warn("'emit' is retired and reserved.", i,
                     hint="There is no replacement construct for it. Rename the variable, or "
-                         "remove the line if it was left over from an earlier draft.")
+                         "remove the line if it was left over from an earlier draft.", code="emit_retired")
             # A type label on a hold/assignment (space form) is parsed but dropped --
             # it does not coerce. Casting is the expression form: hold x = value as.int
             if re.match(r'\s*(?:hold|set)\s+[\w.]+\s+as\s+\w', raw) and ' as.' not in raw:
                 self.ctx.warn("A type label on a hold/assignment does not convert the value.", i,
-                    hint="To coerce, cast in the value: hold x = value as.int. A bare 'as <type>' here is ignored.")
+                    hint="To coerce, cast in the value: hold x = value as.int. A bare 'as <type>' here is ignored.", code="type_label_does_not_convert")
             # <-> bidirectional arrow -- reserved. Valid ONLY inside a languages
             # map block (or an inline langmap using 'using'). Anywhere else
             # (notably miomap field mapping) it is a compile error.
@@ -1147,7 +1171,7 @@ class MohioValidator:
         note = self._CM_ACTION_NOTES.get(str(head.type) if head is not None else '')
         # cm.lock is deliberately absent from the table: it works, so it gets no warning.
         if note:
-            self.ctx.warn(note[0], get_line(tree), hint=note[1])
+            self.ctx.warn(note[0], get_line(tree), hint=note[1], code="cm_action_note")
         for c in tree.children:
             self._walk(c)
 
@@ -1158,7 +1182,7 @@ class MohioValidator:
             get_line(tree),
             hint="Send the notification explicitly (miomail.send / miolog.alert) until "
                  "'notify' is wired. It refuses rather than skipping, so a program that "
-                 "reaches this line does not continue.")
+                 "reaches this line does not continue.", code="notify_not_built")
         for c in tree.children:
             self._walk(c)
 
@@ -1170,7 +1194,7 @@ class MohioValidator:
             str_tok = first_token(child, 'STRING')
             if tok and not str_tok:
                 self.ctx.warn(f"Role value '{tok}' should be in quotes.", line,
-                    hint=f'Use require role "{tok}" -- all role values are strings and go in quotes.')
+                    hint=f'Use require role "{tok}" -- all role values are strings and go in quotes.', code="role_unquoted")
         for c in tree.children:
             self._walk(c)
 
@@ -1199,7 +1223,7 @@ class MohioValidator:
                                              sector_not_found_message as _snfm)
             _line = getattr(getattr(tree, 'meta', None), 'line', 0) or 0
             if _fsp(full_name) is None and not _srl(full_name):
-                self.ctx.warn(_snfm(full_name), _line)
+                self.ctx.warn(_snfm(full_name), _line, code="sector_name_format")
             else:
                 self._check_sector_trust(full_name, getattr(tree, 'meta', None))
         for c in tree.children:
@@ -1218,7 +1242,7 @@ class MohioValidator:
                 from mohio_sector_loader import missing_level_message as _mlm
                 _mline = getattr(getattr(tree, 'meta', None), 'line', 0) or 0
                 for _lvl, _slug in (getattr(profile, 'missing_levels', None) or []):
-                    self.ctx.warn(_mlm(self.ctx.sector_full or self.ctx.sector_base, _lvl, _slug), _mline)
+                    self.ctx.warn(_mlm(self.ctx.sector_full or self.ctx.sector_base, _lvl, _slug), _mline, code="sector_level_message")
             except SectorVerificationError as _e:
                 line = getattr(getattr(tree, 'meta', None), 'line', 0) or 0
                 self.ctx.error(str(_e), line,
@@ -1258,8 +1282,8 @@ class MohioValidator:
                 f"sector: {sector_name} is Mohio-certified but not actively maintained. "
                 f"Verify it reflects current regulations before deployment.",
                 line,
-                hint="Run 'mio check --sector-verify' to check profile currency."
-            ))
+                hint="Run 'mio check --sector-verify' to check profile currency.",
+            code="sector_unmaintained"))
         elif tier is None and base.lower() in PAID_SECTORS:
             # A licensed/official sector whose profile isn't bundled with the open
             # compiler. The interpreter reports the licensed-profile note separately.
@@ -1269,14 +1293,14 @@ class MohioValidator:
                 f"sector: {sector_name} is a community or unverified profile. "
                 f"Review carefully before production use.",
                 line,
-                hint="Use an official Mohio sector profile for production compliance."
-            ))
+                hint="Use an official Mohio sector profile for production compliance.",
+            code="sector_community_profile"))
         if not is_known_sector_base(sector_name):
             self.ctx.warnings.append(CompileWarning(
                 f"Unrecognized sector base '{base}'. If custom, ensure it extends a known base.",
                 line,
-                hint="Use a paid/enterprise base or provide a matching .sector profile."
-            ))
+                hint="Use a paid/enterprise base or provide a matching .sector profile.",
+            code="sector_base_unrecognized"))
 
     def _check_reserved_name(self, name, context, line):
         """Check if a name is a reserved Mohio word. Fatal error if so."""
@@ -1342,8 +1366,8 @@ class MohioValidator:
                     "Dynamic field assignment -- cannot validate field name at compile time.",
                     get_line(fv) or line,
                     hint="'set field' resolves the column name at runtime. "
-                         "Ensure the value is a valid column name before executing."
-                )
+                         "Ensure the value is a valid column name before executing.",
+                code="dynamic_field_assignment")
         self._block(tree, "save")
 
     def _v_save_or_update_block(self, t):
@@ -1631,7 +1655,7 @@ class MohioValidator:
                 hint="Add 'max steps N' to prevent infinite loops and runaway token spend.")
         if not has_nc:
             self.ctx.warn("ai.agent has no 'not confident' block.", line,
-                hint="Add 'not confident' -- what to do when the agent cannot complete with sufficient confidence.")
+                hint="Add 'not confident' -- what to do when the agent cannot complete with sufficient confidence.", code="ai_agent_no_not_confident")
         self._block(tree, "ai.agent")
 
     def _v_ai_create_stmt(self, tree):
@@ -1657,7 +1681,7 @@ class MohioValidator:
                 "ai.create generates from a source via a live AI call but has no "
                 "'on.failure' fallback.", line,
                 hint="Add an 'on.failure' block inside ai.create so a model outage is "
-                     "handled gracefully.")
+                     "handled gracefully.", code="ai_create_no_failure")
         for c in tree.children:
             self._walk(c)
 
@@ -1722,7 +1746,7 @@ class MohioValidator:
             if found and found != "task" and found == task_name:
                 self.ctx.warn(f"Task closer '{task_name}: done' should be 'task: done'.",
                     get_line(closer) or line,
-                    hint="The canonical task closer is 'task: done'. mio fmt converts automatically.")
+                    hint="The canonical task closer is 'task: done'. mio fmt converts automatically.", code="task_closer_named")
                 suppress = True  # Don't also fire a closer mismatch error
         self._block(tree, "task", suppress_closer_error=suppress)
 
@@ -1870,10 +1894,15 @@ class MohioValidator:
 
     def _request_field_reads(self, t):
         """Yield (field, subtree) for every explicit `request.<field>` read under `t`. Shared by the
-        undeclared-field check and the fieldless-contract check so both see the same reads."""
+        undeclared-field check and the fieldless-contract check so both see the same reads.
+
+        `request.header "X"` (a verify_source, read by `verify token from` and `idempotent by`)
+        names a request HEADER, not a payload field, so it is no read of the shape."""
         from mohio_pretokenizer import unmark_dotted
+        _header_refs = {id(c) for s in t.iter_subtrees() if str(getattr(s, 'data', '')) == 'verify_source'
+                        for c in s.children if str(getattr(c, 'data', '')) == 'dotted_name'}
         for sub in t.iter_subtrees():
-            if str(getattr(sub, 'data', '')) != 'dotted_name':
+            if str(getattr(sub, 'data', '')) != 'dotted_name' or id(sub) in _header_refs:
                 continue
             toks = [c for c in sub.children if isinstance(c, Token)]
             # TWO shapes reach here, and only one of them exists on the path `mio check`
@@ -1936,7 +1965,7 @@ class MohioValidator:
                      "        save: done\n        on.failure\n            show \"failed\"\n"
                      "    try: done\n"
                      "A block inside the try may carry its own `on.failure` instead, which "
-                     "protects just as well. `try` on its own is a scope, not a guard.")
+                     "protects just as well. `try` on its own is a scope, not a guard.", code="try_without_failure")
         for c in tree.children:
             self._walk(c)
 
@@ -1947,7 +1976,7 @@ class MohioValidator:
         # Check for primary instead of current -- deprecation warning
         if 'primary' in text and 'current' not in text:
             self.ctx.warn("'primary' in languages block should be 'current'.", line,
-                hint="The canonical keyword is 'current' -- mio fmt converts 'primary' automatically.")
+                hint="The canonical keyword is 'current' -- mio fmt converts 'primary' automatically.", code="languages_primary_retired")
         for c in tree.children:
             self._walk(c)
 
@@ -1983,7 +2012,7 @@ class MohioValidator:
     def _v_ignore_stmt(self, tree):
         line = get_line(tree)
         self.ctx.warn("ignore suppresses inherited declarations.", line,
-            hint="Suppression logged to build report. Verify this is intentional.")
+            hint="Suppression logged to build report. Verify this is intentional.", code="ignore_inherited")
         for c in tree.children:
             self._walk(c)
 
@@ -2045,7 +2074,7 @@ class MohioValidator:
                 line,
                 hint="To erase rows, name where they live and which ones: "
                      "cm.purge from db.<table> / match <field> to <value> / reason \"...\". "
-                     "Keep this form when the record of the request is what you want.")
+                     "Keep this form when the record of the request is what you want.", code="cm_purge_records_only")
         for c in tree.children:
             self._walk(c)
 
@@ -2231,7 +2260,7 @@ def _check_script_bounds(tree, ctx):
                         _line_of(txt) or _line_of(sh_tok) or 0,
                         hint="The declaration is real and is enforced on the request path. This "
                              "says out loud that the script path is not the enforcing one, rather "
-                             "than letting the line look checked when it is not.")
+                             "than letting the line look checked when it is not.", code="bound_unchecked_length")
                 continue
             # NO NET ON THIS CONVERSION, deliberately. The grammar's NUMBER is a number
             # (mohio.lark), so a failure here does not mean `skip this field`, it means
@@ -2253,7 +2282,7 @@ def _check_script_bounds(tree, ctx):
                     _line_of(num) or _line_of(sh_tok) or 0,
                     hint="The declaration is real and is enforced on the request path. This "
                          "says out loud that the script path is not the enforcing one, rather "
-                         "than letting the line look checked when it is not.")
+                         "than letting the line look checked when it is not.", code="bound_unchecked_number")
 
 
 def _line_of(tok):
@@ -2383,8 +2412,8 @@ def _check_ai_test_coverage(tree, ctx, filename):
                   f"                       ai.decide <name>\n"
                   f"                       expect fallback was used\n"
                   f"                   it: done\n"
-                  f"    Then run them:  mio test {os.path.basename(present[0])}")
-        )
+                  f"    Then run them:  mio test {os.path.basename(present[0])}"),
+        code="ai_test_asserts_nothing")
         return
     if not has_tests:
         names = ", ".join(f"'{n}'" for n in ai_decides)
@@ -2398,8 +2427,8 @@ def _check_ai_test_coverage(tree, ctx, filename):
             # A tool may not instruct an action it cannot perform: name the file to write, and
             # say plainly that generation is not built yet rather than implying it is.
             hint=f"Create {os.path.basename(test_file)} or ai.test.mho with compliance tests.\n"
-                 f"Generating them is not built yet -- write the cases by hand for now."
-        )
+                 f"Generating them is not built yet -- write the cases by hand for now.",
+        code="ai_test_missing")
 
 
 # Leading-word that a newcomer reaches for out of another language, appended to the dead-store
@@ -2828,7 +2857,7 @@ def _check_dead_stores(tree, ctx, filename=""):
             ctx.warn(f"`{name}` is not a Mohio word. If you meant it as a variable name it will "
                      f"work, but this line reads as an instruction and is not one. Use the "
                      f"Mohio form shown below instead.",
-                     line, hint=FOREIGN_KEYWORDS[low])
+                     line, hint=FOREIGN_KEYWORDS[low], code="not_a_mohio_word")
             continue
         # tiers 3-4 are the assigned-but-never-read detector. A name that IS read anywhere is a
         # legitimate variable (tier 4) -- no diagnostic. A plausible unused variable (tier 3)
@@ -2856,12 +2885,12 @@ def _check_dead_stores(tree, ctx, filename=""):
                          f"read. This is usually one typo, not two problems.",
                          read_lines.get(_typo, line),
                          hint=f"Did you mean `{name}`? A `check` on an undeclared name fails "
-                              f"loud at runtime rather than silently taking `otherwise`.")
+                              f"loud at runtime rather than silently taking `otherwise`.", code="typo_declared_never_read")
                 continue
             # a plausible real variable, not a foreign keyword -- so this is an honest
             # unused-declaration notice, not a did-you-mean. Do not assume display intent.
             hint = "Declared but never read. Remove it, or read the value somewhere if it is needed."
-        ctx.warn(f"`{name}` is set but never used.", line, hint=hint)
+        ctx.warn(f"`{name}` is set but never used.", line, hint=hint, code="dead_store")
 
 
 # the script-path bound check runs with the other whole-program scans

@@ -242,10 +242,26 @@ Each was established by running on the current build.
   worked in 5.1.0; it does now (it is evaluated correctly, though it does not yet push down as a SQL `IN`, tracked
   as `T1-IN-FILTER-PUSHDOWN`).
 
-## Security note for 5.1.0 users
+## Security note for 4.9.0 to 5.1.0 users
 
-_Placeholder. The build lane is still establishing the facts for this note; it will be filled in once they are
-confirmed by running._
+Since 4.9.0, `on.failure` on a lookup fired ONLY when the lookup BROKE (a real error, such as a lost database
+connection), NOT when the lookup found nothing. So a not-found handled inside `on.failure` -- for example a
+`give back [404]`, or an ownership or existence guard -- never ran on a clean not-found, and execution fell
+through to whatever came after the lookup, including a write. A program meaning to stop when a record was not
+found would proceed instead. This is a security concern wherever that not-found branch was an access or
+ownership check.
+
+6.0.0 refuses that form at check and at run, so it cannot ship unnoticed. The first 6.0.0 fix covered
+`retrieve`, `find` and `grab` (a hand-listed set); the fix now covers EVERY lookup the grammar has, enumerated
+from the grammar so none is missed -- including `get`, `pull` and `check count`. Each refusal names the verb and
+its correct form.
+
+The correct way to handle a not-found is to branch on emptiness, not on failure: `when empty` / `otherwise` (or
+`when <name> is empty`). `on.failure` is only for a lookup that genuinely BREAKS; a not-found is empty, not a
+failure. `check count` now branches the same way (`when empty` / `otherwise`), with the count bound by `as NAME`.
+
+What to do: run `mio check` across your app (below). Any lookup that put a not-found response or guard inside
+`on.failure` is refused, naming the fix; rewrite it to `when empty` / `otherwise`.
 
 ## How to find them
 

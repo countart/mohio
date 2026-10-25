@@ -123,8 +123,14 @@ def run_program(spelling, expires="15 minutes"):
     out = (r.stdout or "") + (r.stderr or "")
     for token in out.split():
         if "X-Amz-Signature=" in token:
-            return token, out
+            # An upload shows as `url: <link>, headers: ...`, so the link may end at a comma.
+            return token.rstrip(","), out
     return None, out
+
+
+# The Cache-Control an upload into this program's private cloud vault signs and must be sent with
+# (PUBLIC-PUT-CACHE-CONTROL, RULED by Ron 2026-10-23).
+UPLOAD_CC = "private, no-cache"
 
 
 def _sign(key, msg):
@@ -145,8 +151,11 @@ def signature_for(url, method, secret=SK, region="us-east-1"):
         "%s=%s" % (urllib.parse.quote(k, safe="-_.~"),
                    urllib.parse.quote(urllib.parse.unquote(params[k]), safe="-_.~"))
         for k in sorted(params))
+    signed = urllib.parse.unquote(params["X-Amz-SignedHeaders"])
+    values = {"host": split.netloc, "cache-control": UPLOAD_CC}
     canonical = (method + "\n" + split.path + "\n" + canonical_query + "\n"
-                 + "host:" + split.netloc + "\n\nhost\nUNSIGNED-PAYLOAD")
+                 + "".join("%s:%s\n" % (n, values[n]) for n in signed.split(";"))
+                 + "\n" + signed + "\nUNSIGNED-PAYLOAD")
     scope = "%s/%s/s3/aws4_request" % (amzdate[:8], region)
     to_sign = ("AWS4-HMAC-SHA256\n" + amzdate + "\n" + scope + "\n"
                + hashlib.sha256(canonical.encode("utf-8")).hexdigest())
@@ -177,6 +186,9 @@ if up_url:
     check("...and NOT for GET, which is what it silently signed before",
           signature_in(up_url) != signature_for(up_url, "GET"),
           "the upload form signed a read, which is the wrong permission")
+    check("...signing the Cache-Control its PUT must send, and handing that header back beside it",
+          "X-Amz-SignedHeaders=cache-control%3Bhost" in up_url
+          and ("headers: Cache-Control: " + UPLOAD_CC) in up_out, up_out[-400:])
 
 
 # ══ 2. THE DOWNLOAD FORM SIGNS A READ, AND IS A DIFFERENT URL ═══════════════════════════
@@ -257,16 +269,17 @@ else:
     import urllib.error
     import urllib.request
 
-    def send(method, url, data=None):
+    def send(method, url, data=None, headers=None):
         try:
             with urllib.request.urlopen(
-                    urllib.request.Request(url, data=data, method=method), timeout=30) as r:
+                    urllib.request.Request(url, data=data, method=method, headers=headers or {}),
+                    timeout=30) as r:
                 return r.status, r.read()
         except urllib.error.HTTPError as e:
             return e.code, b""
 
     _body = b"%PDF-1.4 uploaded straight to the bucket by the browser"
-    _st, _ = send("PUT", up_url, _body)
+    _st, _ = send("PUT", up_url, _body, {"Cache-Control": UPLOAD_CC})
     check("the upload URL a real program printed uploads to a real bucket", _st == 200,
           "HTTP %s" % _st)
     _st2, _got = send("GET", dn_url)

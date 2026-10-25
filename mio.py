@@ -1825,17 +1825,94 @@ def _print_compile_error(err, source="", filename=""):
     print()
 
 
-def _print_compile_warning(warn, source="", filename=""):
-    """Print a single CompileWarning from the new transformer."""
+def _print_compile_warning(warn, source="", filename="", prefix=""):
+    """Print a single CompileWarning from the new transformer. `prefix` leads the message (a grouped
+    warning's `N x <code>: `), so the one site shown still carries its whole teaching message."""
     source, where = _finding_where(warn, source, filename)
     snippet = _source_snippet(source, warn.line)
     if snippet is not None:
         print(f"  {dim(where + ' |')} {snippet}")
-    print(_wrapped_finding(yellow('!'), '!', warn.message))
+    print(_wrapped_finding(yellow('!'), '!', prefix + warn.message))
     if warn.hint:
         for hint_line in warn.hint.splitlines():
             print(f"    {dim(hint_line)}")
     print()
+
+
+# A warning's code names its class. These two say only "a warning", so they never group one class with
+# another: a warning carrying one is grouped by what it says instead.
+_GENERIC_WARNING_CODES = ('', 'WARNING')
+
+# `mio check --locations [code]` (Ron 2026-10-22): list every site of a grouped warning instead of one.
+# Set by cmd_check from its arguments; `_CHECK_TARGET` is what the drill-down line tells the reader to
+# run again.
+_CHECK_LOCATIONS = {'on': False, 'code': None}
+_CHECK_TARGET = ['.']
+
+
+def _warning_code(warn):
+    code = str(getattr(warn, 'code', '') or '')
+    return '' if code in _GENERIC_WARNING_CODES else code
+
+
+def _warning_key(warn):
+    """Warnings of one CLASS group together (RULED by Ron 2026-10-22): two warnings with the same stable
+    code are the same warning, whatever name or path each message carries. A warning with no code of
+    its own is the same as another when it says the same thing: the same message and the same fix."""
+    code = _warning_code(warn)
+    if code:
+        return ('code', code)
+    return (str(getattr(warn, 'message', warn)), str(getattr(warn, 'hint', '') or ''))
+
+
+def _site_label(warn, source, filename, first_file):
+    _src, label = _finding_where(warn, source, filename)
+    if filename and filename != first_file and ':' not in label:
+        try:
+            page = os.path.relpath(filename)
+        except ValueError:      # another drive on Windows: the full path is the honest name
+            page = filename
+        return f"{page.replace(os.sep, '/')}:{label}"
+    return label if ':' in label else f"line {label}"
+
+
+def _print_warning_groups(items, heading=None):
+    """Print warnings with each class said ONCE (RULED by Ron 2026-10-22, grouping by stable code).
+    `items` is [(warning, source, filename)] in order. A class seen once prints as before. A class seen
+    N times prints ONE entry, `N x <code>: <message>`, with the first site's excerpt and its whole
+    teaching message (what, why, the fix), and one line naming the drill-down: `mio check <target>
+    --locations` lists every site. With --locations (all classes, or the one named) every site is
+    listed instead. The order is the order the classes first appear, which is the files' and lines'
+    order, so two runs on the same code print the same thing. Errors are never grouped: each is
+    printed where it is. `--json` is not affected: it lists every finding. `heading`, when given,
+    prints before the first warning, and only when there is one. Returns how many printed in full."""
+    groups, order = {}, []
+    for warn, source, filename in items:
+        k = _warning_key(warn)
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append((warn, source, filename))
+    if order and heading:
+        print(heading)
+    for k in order:
+        group = groups[k]
+        first = group[0]
+        if len(group) == 1:
+            _print_compile_warning(*first)
+            continue
+        code = _warning_code(first[0])
+        _print_compile_warning(*first, prefix=f"{len(group)} x {code or 'the same warning'}: ")  # SILENT-SHAPE-OK: wording for a class with no code
+        want = _CHECK_LOCATIONS['on'] and _CHECK_LOCATIONS['code'] in (None, code)
+        if want:
+            print(f"    {dim(f'All {len(group)} sites:')}")
+            for warn, source, filename in group:
+                print(f"      {dim(_site_label(warn, source, filename, first[2]))}")
+            print()
+        else:
+            _drill = f"mio check {_CHECK_TARGET[0]} --locations" + (f" {code}" if code else "")
+            print(f"    {dim(f'{len(group)} sites in all, the first shown. List every one: {_drill}')}\n")
+    return len(order)
 
 
 def _print_runtime_error(e, filename="", source="", line=0):
@@ -2890,6 +2967,15 @@ def _journey_program(journey_path, j_src, verbose=False):
     return copy.deepcopy(prog)
 
 
+# PAGE CLASSIFICATION STRICTNESS, loosest to strictest: the ONE order. The journey cascade uses it
+# (a subfolder journey may only tighten a class an ancestor set, 6d44d83) and so does `[important]`
+# (a journey line marked [important] may only tighten what a page declares, RULED by Ron 2026-10-22).
+# Module level so both read the same object and a change moves both; test_battery_important_tighten_
+# only asserts it is defined once. private: is unlisted but reachable direct, one notch tighter than
+# public:; authorize: requires login; hidden: is never served, "the strongest tier".
+_CLASS_RANK = {'public': 0, 'private': 1, 'authorize': 2, 'hidden': 3}
+
+
 def _apply_journey(program, file_path, verbose=False, app_root=None):
     """htaccess-style auto-discovery, now CASCADING (T1-JOURNEY-CASCADE, Batch 36).
 
@@ -2930,12 +3016,11 @@ def _apply_journey(program, file_path, verbose=False, app_root=None):
         return nearer == floor or nearer.startswith(floor + '.')
     # PAGE CLASSIFICATION ONLY TIGHTENS (T1-PAGE-CLASSIFICATION-MODEL, the same ruling extended
     # from sector to the other journey-level security floor): a nearer journey may not weaken the
-    # classification an ancestor already set for a path. Strictness, loosest to strictest, matching
-    # the locked model's own ordering (private: UNLISTED but still reachable direct, same as public,
-    # so it sits only one notch tighter; authorize: requires login; hidden: never served at all --
-    # "the strongest tier" per the grammar's own design-lock comment).
-    _CLASS_RANK = {'public': 0, 'private': 1, 'authorize': 2, 'hidden': 3}
+    # classification an ancestor already set for a path. The strictness order is the module-level
+    # _CLASS_RANK, shared with `[important]` below.
     floor_classifications = []   # accumulates (kind, norm_path, source_journey_path) root-first
+    journey_class_groups = []    # per journey.mho: (journey_path, [(kind, norm_path, line, important)])
+    _journey_dirs = []           # (folder, journey.mho) applied to this page, root-first
     def _norm_jpath(p):
         p = str(p or '')
         return p[:-1] if len(p) > 1 and p.endswith('/') else p
@@ -3044,8 +3129,84 @@ def _apply_journey(program, file_path, verbose=False, app_root=None):
                 # elif path2.startswith(path + '/'): a NARROWER path under the floor -- the
                 # existing public:-overrides exception mechanism; allowed at any strictness.
         floor_classifications.extend(own_class)
+        journey_class_groups.append((journey_path, [
+            (m.kind, _norm_jpath(p), getattr(m, 'line', 0) or 0, bool(getattr(m, 'important', False)))
+            for m in _journey_metas(j_prog.statements) if m.kind in _CLASS_RANK for p in (m.value or [])]))
 
+        # A JOURNEY'S LINES ARE THE JOURNEY'S (Zork, 6.0.1). Prepended as plain numbers, a finding a
+        # page's check made on journey code was printed against the PAGE's text at the same number
+        # (right number, wrong file). Stamped with the journey's file, as an included file's lines
+        # are (HC-137), it names `journey.mho:N` and shows the journey's own line.
+        # DEFENSIVE, and unreachable given the fix: the reachability scan now leaves journey code to
+        # the journey's own check (`from_journey`), so no finding on a journey line reaches a page's
+        # output today (measured: removing this stamp leaves test_battery_spine_findings_attribution
+        # green). It mirrors the include stamping so a future scan that does report one still names
+        # the right file.
+        from mohio_ast import tag_source_file as _tag_source_file
+        _tag_source_file(j_prog.statements, journey_path)
+        _journey_dirs.append((d, journey_path))
         prepend.extend(j_prog.statements)
+    # A PAGE BELOW ITS FOLDER'S CLASS (RULED by Ron 2026-10-22: `[important]` is a FLOOR). At serve time
+    # every journey's gate runs, so the stricter class always holds; that is unchanged. What a page
+    # declares below the class a journey.mho sets for its path is a line that does nothing, so the check
+    # says so: a WARNING when the journey's line is plain, a REFUSAL when it is marked `[important]`. A
+    # page at or above the journey's class is silent either way: `[important]` never drags a stricter
+    # page down. Judged on the shared _CLASS_RANK, per journey, at the page's path, the way the serve
+    # gate decides it (a `public:` in that journey overrides its other classes there, so a journey's own
+    # carve-out is never mistaken for a floor).
+    program.cascade_warnings = []
+    if journey_class_groups and os.path.basename(page_path) != 'journey.mho':
+        from mohio_ast import JourneyMeta as _JM4, JourneyDecl as _JD4
+        def _page_metas(stmts):
+            for s in stmts:
+                if isinstance(s, _JM4):
+                    yield s
+                elif isinstance(s, _JD4):
+                    yield from _page_metas(s.body)
+        def _covers(entry, path):
+            return path == entry or path.startswith(entry.rstrip('/') + '/')
+        def _journey_class_at(entries, path):
+            """This journey's effective class at `path`, as its serve gate decides it: (kind, path,
+            line, important) of the deciding line, or None when the journey says nothing there."""
+            covering = [e for e in entries if _covers(e[1], path)]
+            if not covering:
+                return None
+            public = [e for e in covering if e[0] == 'public']
+            if public:
+                return public[0]
+            top = max(_CLASS_RANK[e[0]] for e in covering)
+            same = [e for e in covering if _CLASS_RANK[e[0]] == top]
+            return next((e for e in same if e[3]), same[0])
+        _order = ' < '.join(sorted(_CLASS_RANK, key=_CLASS_RANK.get))
+        for m in _page_metas(program.statements):
+            if m.kind not in _CLASS_RANK:
+                continue
+            pkind, pline = m.kind, getattr(m, 'line', 0) or 0
+            for ppath in (_norm_jpath(p) for p in (m.value or [])):
+                for (fjourney, entries) in journey_class_groups:
+                    # the page's own path, and any narrower path this journey classifies under it
+                    points = [ppath] + [e[1] for e in entries if e[1] != ppath and _covers(ppath, e[1])]
+                    for q in points:
+                        floor = _journey_class_at(entries, q)
+                        if floor is None or _CLASS_RANK[pkind] >= _CLASS_RANK[floor[0]]:
+                            continue
+                        fkind, fpath, fline, fimportant = floor
+                        if fimportant:
+                            _die(
+                                f"Line {pline}: this page declares `{pkind}: {ppath}`, below the "
+                                f"`[important]` floor `{fkind}: {fpath}` set at line {fline} of {fjourney}. "
+                                f"A page may match or tighten an `[important]` journey class, never fall "
+                                f"below it ({_order}). Raise this line to `{fkind}:` or stricter, or remove "
+                                f"it to keep the journey's `{fkind}:`.", exit_code=1)
+                        program.cascade_warnings.append((pline, (
+                            f"Line {pline}: this page declares `{pkind}: {ppath}`, but the journey at "
+                            f"{fjourney} (line {fline}) classifies `{fpath}` as `{fkind}:`, which is "
+                            f"stricter ({_order}). Every journey's gate runs, so this page is served as "
+                            f"`{fkind}:` and its own line does nothing. Remove the line, or change the "
+                            f"journey's line if this page should be looser. (A warning: the stricter class "
+                            f"is what serves. Marking the journey line `[important]` makes this a "
+                            f"refusal.)")))
+                        break
     # Prepend root-first; the page's own statements register last, so the page wins over every
     # journey and a nearer journey wins over the root.
     program.statements = prepend + program.statements
@@ -3056,6 +3217,19 @@ def _apply_journey(program, file_path, verbose=False, app_root=None):
     # them. Only names, from the text with comments removed, so a check never parses the pages.
     if os.path.basename(page_path) == 'journey.mho':
         program.spine_names = _names_in_pages_under(page_dir, page_path)
+    elif _journey_dirs:
+        # A PAGE checked with its journeys sees the journey's decisions as its own statements, so a
+        # decision declared there and invoked from ANOTHER page under it was reported "declared but
+        # never invoked" against this page (Zork's _cheats.mho under `mio check --all`). The pages
+        # under each journey are what use it, so their names travel here too, but only for the
+        # names the journeys declare: a decision this page declares itself is judged on this page.
+        _spine = set()
+        for _jd, _jp in _journey_dirs:
+            _spine |= _names_in_pages_under(_jd, _jp)
+        program.spine_names = _spine
+        program.journey_declared = {
+            str(getattr(s, 'name', '') or '') for s in prepend
+            if type(s).__name__ == 'AiDecideBlock'}
     # IS THIS PROGRAM SERVED AS CHECKED? A journey checked on its own, and an underscore partial
     # (kept out of routing, reached only through a page that includes it), are never served as
     # they stand: a page that serves them supplies what they lean on, such as the store an
@@ -5088,24 +5262,38 @@ def _check_many(files, args, rel):
             continue
         print(f"\n  {bold(dim(rel(jf)))}  "
               f"{dim('(shared: the code is here, and every page under it inherits it)')}\n")
-        for w in info['own_warnings']:
-            _print_compile_warning(w, info['source'], jf)
+        _print_warning_groups([(w, info['source'], jf) for w in info['own_warnings']])
         for e in info['own_errors']:
             _print_compile_error(e, info['source'], jf)
         n_warn += len(info['own_warnings'])
         n_err += len(info['own_errors'])
         n_shared += len(info['own_warnings']) + len(info['own_errors'])
-    # 2) Each page's own findings, with that page's excerpt.
+    # 2) Each page's own findings, with that page's excerpt. A warning repeated across pages is said
+    #    ONCE, under the first page it appears on, naming every other page and line it applies to.
+    _by_key, _first_at = {}, {}
+    for f in ordered:
+        info = collected.get(f)
+        if not info or os.path.basename(f) == 'journey.mho':
+            continue
+        for w in info['own_warnings']:
+            k = _warning_key(w)
+            _by_key.setdefault(k, []).append((w, info['source'], f))
+            _first_at.setdefault(k, f)
     for f in ordered:
         info = collected.get(f)
         if not info:
             continue
-        if os.path.basename(f) != 'journey.mho' and (info['own_warnings'] or info['own_errors']):
+        if os.path.basename(f) != 'journey.mho':
+            n_warn += len(info['own_warnings'])
+            _leads = [k for k in dict.fromkeys(_warning_key(w) for w in info['own_warnings'])
+                      if _first_at.get(k) == f]
+        else:
+            _leads = []
+        if os.path.basename(f) != 'journey.mho' and (_leads or info['own_errors']):
             print(f"\n  {bold(dim(rel(f)))}  {yellow('Warnings')}\n"
                   if not info['own_errors'] else f"\n  {bold(dim(rel(f)))}\n")
-            for w in info['own_warnings']:
-                _print_compile_warning(w, info['source'], f)
-                n_warn += 1
+            for k in _leads:
+                _print_warning_groups(_by_key[k])
             for e in info['own_errors']:
                 _print_compile_error(e, info['source'], f)
                 n_err += 1
@@ -5133,6 +5321,17 @@ def cmd_check(args):
     """
     # --langmap: print the full unmapped-keyword list instead of the first five.
     globals()['_LANGMAP_FULL_LIST'] = bool(getattr(args, 'langmap', False))
+
+    # --locations [CODE]: every site of a repeated warning, or of the one class named. Written before the
+    # file (`mio check --locations app.mho`), argparse hands the file to CODE; a CODE that is a path on
+    # disk with no file given is the file.
+    _loc = getattr(args, 'locations', None)
+    if _loc and not getattr(args, 'file', None) and os.path.exists(_loc):
+        args.file, _loc = _loc, ""
+    _CHECK_LOCATIONS['on'] = _loc is not None
+    _CHECK_LOCATIONS['code'] = _loc or None
+    if not isinstance(getattr(args, '_collect_into', None), dict):   # the outer call names the target
+        _CHECK_TARGET[0] = getattr(args, 'file', None) or '.'  # SILENT-SHAPE-OK: the target a drill-down line names; a check of no file checks .
 
     # --all mode: check every .mho file in directory tree
     if getattr(args, 'all', False):
@@ -5608,15 +5807,15 @@ def cmd_check(args):
     for jp in dict.fromkeys(jp for (jp, _k, _f) in inherited):
         j_src = _SHARED_FINDINGS[os.path.realpath(jp)]['source']
         print(f"\n  {bold(dim(jp))}  {dim('(a journey this page inherits; the code is here)')}\n")
+        _print_warning_groups([(f, j_src, jp) for (jp2, kind, f) in inherited if jp2 == jp and kind == 'w'])
         for (jp2, kind, f) in inherited:
-            if jp2 == jp:
-                (_print_compile_warning if kind == 'w' else _print_compile_error)(f, j_src, jp)
+            if jp2 == jp and kind != 'w':
+                _print_compile_error(f, j_src, jp)
 
-    # Print warnings
+    # Print warnings, a repeated one once with where else it applies
     if own_w:
-        print(f"\n  {bold(dim(filename))}  {yellow('Warnings')}\n")
-        for w in own_w:
-            _print_compile_warning(w, source, filename)
+        _print_warning_groups([(w, source, filename) for w in own_w],
+                              heading=f"\n  {bold(dim(filename))}  {yellow('Warnings')}\n")
 
     # Print errors
     if own_e:
@@ -6933,7 +7132,10 @@ def _new_repurpose_notice():
     print( "  is the verb for making a project now. `mio new` is moving to making things INSIDE a")
     print( "  project (a page, a shape). Inside Mohio, `new` is reserved for a condition on")
     print( "  arriving data (handlers are `listen for sh.X`). Those are not built yet.")
-    print(f"  {dim('From v5.3, `mio new <name>` will stop creating a project -- use `mio create <name>`.')}")
+    # The release that ends the window is not set: the notice named v5.3, which never shipped (5.1.0
+    # went to 6.0.0), and a named release that has already passed is a false statement. When one is
+    # ruled, it goes here; test_battery_mio_create refuses any release at or below this build's.
+    print(f"  {dim('A later release will stop `mio new <name>` creating a project -- use `mio create <name>`.')}")
     print()
 
 
@@ -7317,6 +7519,8 @@ def build_arg_parser():
     c.add_argument("--fast",     action="store_true", help="Fast check: ASCII + reserved words only, skip full parse")
     c.add_argument("--all",      action="store_true", help="Check all .mho files in current directory tree")
     c.add_argument("--langmap",  action="store_true", help="List every keyword this file's langmap does not map (unmapped words fall back to English)")
+    c.add_argument("--locations", nargs="?", const="", default=None, metavar="CODE",
+                   help="List every site of a repeated warning, not just the first (name a CODE to list one class)")
     c.add_argument("file",       nargs="?",           help="File to check (omit with --all)")
 
     # walk -- terminal diagnostic for data maps
@@ -7705,6 +7909,10 @@ def cmd_migrate(args):
     program = _apply_journey(program, filename, verbose=False)
     from mohio_interpreter import MohioInterpreter, Context
     it = MohioInterpreter(verbose=False)
+    # A DECLARED TYPE THAT DIFFERS FROM THE FIELD REGISTER is what this command exists to make true
+    # (BS-008): the register's own refusal ("registered as `dec`, declared `usd`") is held while it
+    # runs, and the new type is recorded only for a column whose values converted.
+    it._migrating_types = True
     it.run_declarations(program)
     db = it._db
     engine = _migrate_engine(db) if db is not None else None
@@ -7736,11 +7944,21 @@ def cmd_migrate(args):
             if current is None:
                 continue                    # no table or column yet: it is created typed
             base = current.split('(')[0].strip()
-            if base not in _MIGRATE_TEXT_TYPES:
-                continue                    # already typed
             target = db._declared_column_sql_type(declared)
             if str(target).split('(')[0].strip().upper() in _MIGRATE_TEXT_TYPES:
                 continue                    # the declared type is stored as text on this engine
+            # THE SAME QUESTION THE WRITE ASKS (BS-006/008, Summit R35): is the live column the
+            # storage kind Mohio creates for the declaration? Only a TEXT column used to count as
+            # owed a migration, so a legacy NUMERIC or REAL money column was "already typed", the
+            # command reported nothing to migrate, and the next write refused that same column as
+            # a divergence. A column of the right kind is left alone, whatever its spelling.
+            _kinds = db.column_kinds(table) if hasattr(db, 'column_kinds') else None
+            _have = (_kinds or {}).get(str(col).lower())
+            if _have is not None and hasattr(db, '_storage_kind'):
+                if _have[0] == db._storage_kind(target):
+                    continue                # already the kind Mohio creates
+            elif base not in _MIGRATE_TEXT_TYPES:
+                continue                    # no kind reader on this engine: the text-only rule
             cur.execute(_migrate_sql(engine, f'SELECT id, {_migrate_q(engine, col)} FROM '
                                              f'{_migrate_q(engine, table)}'))
             rows = cur.fetchall()
@@ -7758,6 +7976,7 @@ def cmd_migrate(args):
             plan.append((table, col, declared, current, target, converted, bad))
             refusals.extend((table, col, rid, val, why) for rid, val, why in bad)
     if not plan:
+        _type_register_unmet(it, set())
         print(f"  {green('v')}  Nothing to migrate: every declared typed column is already typed.\n")
         return
     for table, col, declared, current, target, converted, bad in plan:
@@ -7771,10 +7990,12 @@ def cmd_migrate(args):
         print(f"\n  Fix or clear these values, then run it again.\n")
         sys.exit(0 if dry else 1)
     if dry:
+        _type_register_unmet(it, {(t, c) for t, c, *_r in plan}, dry=True)
         print(f"\n  {dim('Dry run: every value converts. Run without --dry-run to migrate.')}\n")
         return
     ctx = Context()
     ctx.set_connection('db', db)
+    _held = getattr(it, '_type_register_pending', None) or {}
     for table, col, declared, current, target, converted, bad in plan:
         tmp = f'{col}_mtyp'
         qt, qc, qtmp = _migrate_q(engine, table), _migrate_q(engine, col), _migrate_q(engine, tmp)
@@ -7791,7 +8012,32 @@ def cmd_migrate(args):
             'detail': f'{table}.{col}: {current} -> {target}, {len(converted)} value(s), declared {declared}',
         }, ctx)
         print(f"  {green('v')}  migrated {table}.{col} to {target}")
+        # THE REGISTER FOLLOWS THE DATA (BS-008): its new type is written only now, after this
+        # column's values converted, never at setup.
+        if (table, col) in _held:
+            _nt, _prot, _before, _rctx, _ot = _held.pop((table, col))
+            it._field_register_write(db, _rctx, table, col, _nt, _prot, _before)
+            print(f"  {green('v')}  field register: {table}.{col} is now `{_nt}` (was `{_ot}`)")
+    _type_register_unmet(it, set())
     print()
+
+
+def _type_register_unmet(it, planned, dry=False):
+    """A declared type the field register disagrees with, that this run did not make true: its
+    column needed no conversion, or is not one this command converts. Said loud, because the
+    program will still refuse that column at startup. Exits 1 (0 on a dry run, which reports)."""
+    held = {k: v for k, v in (getattr(it, '_type_register_pending', None) or {}).items()
+            if k not in planned}
+    if not held:
+        return
+    print(f"\n  {red('The field register disagrees with these declarations, and no conversion makes it true:')}\n")
+    for (table, col), (nt, _p, _b, _c, ot) in sorted(held.items()):
+        print(f"    db.{table}.{col} is registered `{ot}` and declared `{nt}`, and its column needed no "
+              f"conversion here, so the register was not changed.")
+    print(f"\n  Declare these as the register says, or convert the column's values deliberately, "
+          f"then run it again.\n")
+    if not dry:
+        sys.exit(1)
 
 
 def cmd_schedule(args):

@@ -12,7 +12,7 @@ tests/test_structural_invariants.py fails loud if anything starts to.
 """
 
 # The compiler/CLI release.
-VERSION = "6.0.0"
+VERSION = "6.0.1"
 
 # The LANGUAGE spec this build implements. A different thing, deliberately: the toolchain
 # ships faster than the language changes.
@@ -30,7 +30,9 @@ def _resolve_build_sha():
     Resolution order, most authoritative first:
       1. MOHIO_BUILD_SHA -- stamped by the deploy pipeline. The only one that survives into a
          container built without a .git directory, which is the case that matters in production.
-      2. _build_sha.txt beside this file -- written at package time for the same reason.
+      2. mohio_data/_build_sha.txt -- written at package time for the same reason. It lives in the
+         `mohio_data` package so a pip-installed wheel carries it too; beside this module it only
+         reached a `git archive`, and every installed build answered "unknown" (6.0.1).
       3. `git rev-parse --short HEAD` -- a developer running from a checkout.
       4. "unknown" -- said plainly. Never fabricated, never silently blank: a caller can tell the
          difference between "this build is X" and "this build did not record which commit it is,"
@@ -42,7 +44,7 @@ def _resolve_build_sha():
         return sha
     try:
         from pathlib import Path as _Path
-        _stamp = _Path(__file__).with_name('_build_sha.txt')
+        _stamp = _Path(__file__).with_name('mohio_data') / '_build_sha.txt'
         if _stamp.is_file():
             sha = _stamp.read_text(encoding='utf-8').strip()
             # `_build_sha.txt` is committed carrying the git export-subst placeholder `$Format:%h$`.

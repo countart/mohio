@@ -573,7 +573,7 @@ plaintext is visible in the trail rather than only on disk.
 
 ## Current state
 
-Current release: 6.0.0
+Current release: 6.0.1
 
 Mohio is built in the open and moving fast — the compiler updates multiple times a
 day. The core language is solid and tested; the surface around it is filling in.
@@ -728,6 +728,6 @@ For licensing: **hello@mohio.io**
 
 **Mohio Language Project · Particular LLC · BSL 1.1**
 
-*6.0.0 · Write intent. Execute reason. See everything.*
+*6.0.1 · Write intent. Execute reason. See everything.*
 
 </div>

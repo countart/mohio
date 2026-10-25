@@ -438,12 +438,14 @@ find: done
     run("find_paginate", """
 connect db as sqlite from env.DATABASE_URL
 find members in db.members
-    paginate by 25
+    up to 25
+    paginate by 1
 find: done
 """)
     # cursor pagination and paginate-with-or/not now refuse AT CHECK (T1-EXECUTOR-BRANCH-DEFERRALS),
-    # so the paginate case above tests the built bare-paginate form; the cursor form moved to a
-    # reject test below.
+    # so the paginate case above tests the built offset form; the cursor form moved to a reject test
+    # below. `paginate by` with no `up to` refuses too (T1-PAGINATE-WITHOUT-PAGE-SIZE): it names the
+    # page, and `up to` is the page's size.
     # 2026-09-01: `find ... by <field>` REFUSES when nothing says what each group comes back
     # as. CORRECTED same day: the first version of this comment (and the message it asserted)
     # said summarize "does not parse in this build" and that grouping had no working companion.

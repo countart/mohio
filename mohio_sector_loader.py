@@ -371,6 +371,16 @@ def _parse_sector_profile_text(text: str, source_path: str = "") -> SectorProfil
         ):
             fname = m.group(1).lower()
             tags = [t.strip() for t in m.group(2).split(',')]
+            # A RESERVED LABEL IS A TAKEN NAME (`[important]` v1, RULED by Ron 2026-10-22). A profile
+            # is the one place a label is given a meaning, so a profile classifying a field with one
+            # refuses to load rather than redefine it.
+            from mohio_classification import RESERVED_LABELS as _RESERVED
+            _taken = next((t for t in tags if t.lower() in _RESERVED), None)
+            if _taken is not None:
+                raise SectorUnreadableLineError(
+                    f"{_where}field `{fname}`: [{_taken}] is a reserved label (the journey-override "
+                    f"marker that trails a journey.mho line), so a profile cannot classify a field with it. "
+                    f"Classify the field with [phi], [pii], [pci] or [public].")
             modifiers = m.group(3)
             
             ft = FieldType(name=fname, classifications=tags)
