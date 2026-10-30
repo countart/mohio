@@ -617,6 +617,7 @@ CASE_YES.2: "case.yes"
          | applang_decl
          | respond_as_stmt
          | idempotent_decl
+         | not_idempotent_decl
          | title_decl
          | describe_decl
          | image_decl
@@ -661,11 +662,22 @@ respond_as_stmt: _RESPOND _AS STRING    // respond as "text/html"
 
 // An idempotent write route (T1-ROUTE-IDEMPOTENCY, ruled by Ron 2026-10-22): a repeated request with
 // the same key gets the answer the route already gave, and the work is not done again.
-//     idempotent by request.header "Idempotency-Key" keep for 24 hours
+//     once per request.header "Idempotency-Key" keep for 24 hours
+// RENAMED by Ron 2026-10-28 from `idempotent by` (D7): the plain words for what it does. Only the
+// spelling moved; the mechanism (the route's answer kept under the key in its own slot) is unchanged.
+// The old spelling is refused before the parse, naming the swap, and `mio fmt --write` makes it.
 // The key is read with the SAME `request.header "X"` form `verify token from` takes (verify_source),
 // never a second header spelling. `keep for` is optional (24 hours by default) and required under a
 // regulated sector. It stands at the top of a `listen for` body; check refuses it anywhere else.
-idempotent_decl: _IDEMPOTENT BY verify_source (_KEEP _FOR duration_expr)?
+idempotent_decl: _ONCE _PER verify_source (_KEEP _FOR duration_expr)?
+
+// The opt-out from sector-automatic idempotency (RULED by Ron 2026-10-24, BRIEF sector-idempotency-and-
+// diagnostics, Part A). Under a named sector a `listen for` that moves value (writes a currency field) or
+// calls another service is idempotent with no line written; this line, at the top of such a route, opts
+// it out, with the reason labelled so it reads as a decision at the call site:
+//     not idempotent reason "the provider deduplicates by its own reference"
+// The reason is optional here only so check can refuse its absence with a message, not a parse error.
+not_idempotent_decl.2: NOT _IDEMPOTENT (_REASON STRING)?
 
 // page head metadata for the render view shell
 title_decl: TITLE STRING                // title "Rates"
@@ -741,6 +753,26 @@ declaration: sector_decl
            | mioimage_decl
            | miopdf_decl
            | sector_profile_decl
+           | journey_class_line
+           | journey_bare_line
+
+// T1-CLASSIFICATION-WRAPPER-ONLY: the four page-classification lines at a file's top level, which is how
+// the canonical folder journey.mho is written (no `journey ... journey: done` wrapper). They mean what they
+// mean inside a wrapper: the transformer gathers them into the file's journey, so the serve gate, the
+// cascade and the `[important]` floor read them exactly as they read the wrapped form.
+journey_class_line: _PUBLIC    ":" path_list TAG_REF? -> journey_public
+                  | _PRIVATE   ":" path_list TAG_REF? -> journey_private
+                  | _HIDDEN    ":" path_list TAG_REF? -> journey_hidden
+                  | _AUTHORIZE ":" path_list TAG_REF? -> journey_authorize
+
+// T1-JOURNEY-LINES-WRAPPER-ONLY: the journey's other one-line settings at a file's top level, gathered the
+// same way (no line depends on a container). Unwrapped, `suppress ... reason "..."` and `timezone "..."`
+// read as variables and did nothing; `flow:` and `serves:` refused as bare syntax errors.
+journey_bare_line: _SERVES ":" "single tenant"    -> journey_serves_single
+                 | _SERVES ":" "multiple tenants" -> journey_serves_multiple
+                 | _FLOW      ":" path_list -> journey_flow
+                 | TIMEZONE STRING TAG_REF? -> journey_timezone
+                 | _SUPPRESS NAME (_REASON STRING)? -> journey_suppress
 
 // ── sector ───────────────────────────────────────────────────
 
@@ -1164,6 +1196,11 @@ mioconnect_body: _ADDRESS value_expr                  -> mc_address
                | _AUTH _BEARER value_expr             -> mc_auth_bearer
                | _AUTH _HEADER STRING value_expr      -> mc_auth_header
                | _AUTH _BASIC value_expr value_expr   -> mc_auth_basic
+               // T1-HEADER-SURFACE-UNIFY (RULED by Ron 2026-10-22, "one way only"): any header, spelled
+               // as miohttp spells it. `auth header "X"` stays for a provider that authenticates by a
+               // custom-named header, which Mohio governs as a credential; a header that is not a
+               // credential (a partner id, a tenant, an idempotency key) is `header "X"`.
+               | _HEADER STRING value_expr             -> mc_header
                | _WEBHOOK value_expr                   -> mc_webhook
                | _TIMEOUT NUMBER time_unit             -> mc_timeout
                | mioconnect_operation
@@ -1178,6 +1215,19 @@ mioconnect_op_body: _PATH STRING                      -> mc_op_path
                   | _RETURNS SH_REF                     -> mc_op_returns
                   | _METHOD NAME                        -> mc_op_method
                   | _TIMEOUT NUMBER time_unit           -> mc_op_timeout
+                  // RULED by Ron 2026-10-28 (the durable-work reconciler): a changing operation names the
+                  // read operation on the same connector that looks a call up by its key, so an outcome left
+                  // unknown is resolved by asking the service, never by guessing or sending it again:
+                  //     operation charge
+                  //         method POST
+                  //         outcome from findCharge
+                  //     operation: done
+                  //     operation findCharge
+                  //         method GET
+                  //         path "/charges?key={{ key }}"
+                  //     operation: done
+                  // `outcome` is a word only here (_OUTCOME has no priority), so it stays free as a name.
+                  | _OUTCOME _FROM NAME                 -> mc_op_outcome_from
 
 // Invocation: Connector.operation with payload as result
 // Anchored on `dotted_name WITH` — distinct from dynamic-assign (`dotted_name "to"`)
@@ -1399,6 +1449,11 @@ journey_body: _SERVES ":" "single tenant"    -> journey_serves_single
             | _AUTHORIZE ":" path_list TAG_REF? -> journey_authorize
             | _FLOW      ":" path_list -> journey_flow
             | TIMEZONE STRING TAG_REF? -> journey_timezone
+            // `suppress <code> reason "<why>"` (RULED by Ron 2026-10-25): quiets one ADVISORY diagnostic for
+            // every page this journey reaches, the root journey for the project and a folder's journey for
+            // the folder below it, as the rest of journey governance cascades. A governance code refuses.
+            // The reason is optional here only so check can refuse its absence with a message.
+            | _SUPPRESS NAME (_REASON STRING)? -> journey_suppress
             | languages_block
             | enterprise_block
             | limits_block
@@ -2282,7 +2337,17 @@ save_all_block: SAVE ALL? TO source_ref FROM value_expr result_handlers closer
 update_block: UPDATE source_ref (AS NAME)? update_body* result_handlers closer
 
 update_body: match_clause
+           | update_where_empty
            | save_field
+
+// MIOQL-EMPTY-UPDATE-01 (RULED by Ron 2026-10-25): `where <field> is empty` inside `update`, the
+// expected-empty half of a compare-and-set. It is the same predicate a `find`'s `where` has (no value,
+// or empty text) and it joins the update's own statement, so `update ... as changed` stays atomic.
+// Only the empty test: any other `where` in an update is still a match line's job. `match f to ""`
+// keeps refusing (an equality with nothing has no answer). Above save_field, which would otherwise
+// read `where` as a field name.
+update_where_empty.3: WHERE dotted_name IS_EMPTY
+                    | WHERE dotted_name IS EMPTY
 
 // ── remove ───────────────────────────────────────────────────
 
@@ -2294,7 +2359,9 @@ remove_condition: match_clause+    // stacked match lines are AND-ed (MHC-B011)
 
 // ── remove.all ────────────────────────────────────────────────
 
-remove_all_block.3: REMOVE_ALL FROM source_ref (result_handlers closer)?
+// `as NAME` binds the number of rows cleared, the same optional capture `remove` takes in the same
+// place (T1-REMOVE-ALL-COUNT, RULED 2026-10-27: parity of the existing clause, not a new form).
+remove_all_block.3: REMOVE_ALL FROM source_ref (AS NAME)? (result_handlers closer)?
 
 // `remove all` with a SPACE is NOT remove.all. Without this guard it parses as
 // two stray assignments (remove = all; from = db.x) and silently deletes
@@ -3324,7 +3391,8 @@ stream_stmt: STREAM value_expr TO dotted_name
 
 notify_stmt: NOTIFY dotted_name? (WITH)? notify_body*
 
-notify_body: (TO | FROM | _SUBJECT | _MESSAGE | _TEMPLATE | VIA) value_expr
+!notify_body: (TO | FROM | _SUBJECT | _MESSAGE | _TEMPLATE | VIA) value_expr
+           | INJECT dotted_name _INTO NAME        -> notify_inject
 
 // ── release ───────────────────────────────────────────────────
 
@@ -4539,10 +4607,21 @@ inject_stmt: INJECT NAME _INTO NAME closer?
 // warns)". `mio fmt` did not warn, `mio check` did not warn, and no md5/sha1 warning existed
 // anywhere in the codebase -- the comment described a guardrail that had never been built.
 
+// A KEYED HASH (RULED by Ron 2026-10-29, MER-PSI-01 d): `with key <value>` makes the digest an HMAC
+// under that key, so two parties holding the key can match a value without either being able to
+// enumerate it from the digest. Only a deterministic algorithm takes a key (sha256, sha512): a salted
+// password hash never matches twice, so `with key` on bcrypt or pbkdf2 is refused with that reason.
+//     hash account.iban as token using sha256 with key secret.PSI_KEY
+// An unkeyed digest of [pii]/[phi]/[pci] data or a secret, sent by mail, HTTP or a connector, warns:
+// it is enumerable. A certified sector refuses it.
 HASH_KW.2: /hash(?![A-Za-z0-9_])/
-hash_block: HASH_KW hash_field+ closer
-          | HASH_KW value_expr AS NAME USING NAME    // inline: hash val as result using algo
-          | HASH_KW value_expr USING NAME             // inline no alias
+// THE BLOCK FORM WINS a tie with the inline one. A line break does not end a statement
+// (T1-NEWLINE-ENDS-STATEMENT), so a block's `x as token / using sha256 / with key ...` lines also
+// read as one long inline `hash`, which strands its `hash: done`; measured with `with key` on a block.
+hash_block: _hash_block_form | _hash_inline_form
+_hash_block_form.2: HASH_KW hash_field+ closer
+_hash_inline_form: HASH_KW value_expr AS NAME USING NAME (WITH _KEY value_expr)?    // inline: hash val as result using algo
+                 | HASH_KW value_expr USING NAME (WITH _KEY value_expr)?             // inline no alias
 
 // `hash_field+` above accepts several fields, but the transformer REFUSES more than one --
 // deliberately, and the refusal is the final design, not a placeholder (T1-HASH-MULTI-FIELD,
@@ -4554,6 +4633,7 @@ hash_block: HASH_KW hash_field+ closer
 // The grammar stays permissive so the refusal can carry a message instead of a parse error.
 hash_field: value_expr AS NAME          // form.password as hashed_password
           | USING NAME               // using bcrypt
+          | WITH _KEY value_expr     // with key secret.PSI_KEY
 
 // check [value] against [stored] — verify hash / password
 // check form.password against member.hashed_password
@@ -4795,15 +4875,26 @@ MIOMAIL_SEND.3:     "miomail.send"
 MIOMAIL_QUEUE.3:    "miomail.queue"
 MIOMAIL_TEMPLATE.3: "miomail.template"
 
-miomail_stmt: MIOMAIL_SEND miomail_body* for_purpose? closer?
+// A line break does not end a statement here, so `miomail.send: done` could be read either as this
+// send's closer or as a closer standing alone after an unclosed send. With a variable recipient and
+// two text lines the parse took the second and check refused a correct block ("Unmatched block
+// closer"); the form closed by `miomail.send: done` is preferred so a send's own closer is always its
+// own. Only that exact closer is preferred: preferring any closer let an unclosed one-line send take
+// the closer of the block around it (`step: done` in a saga) and refuse a correct program.
+miomail_stmt: _miomail_send_closed
+            | MIOMAIL_SEND miomail_body* for_purpose? closer?
             | MIOMAIL_QUEUE miomail_body* closer?
             | MIOMAIL_TEMPLATE STRING miomail_body* closer?
+_miomail_send_closed.2: MIOMAIL_SEND miomail_body* for_purpose? miomail_send_closer
+miomail_send_closer: MIOMAIL_SEND ":" DONE -> closer
 
 !miomail_body: _TO       value_expr
             | _FROM     value_expr
             | _SUBJECT  value_expr
             | _BODY     value_expr
             | _TEMPLATE STRING
+            | _TEMPLATE NAME                      // a declared `template NAME`, by name (T1-TEMPLATE)
+            | INJECT dotted_name _INTO NAME       // fill a template slot: source into slot, two names
             | _ATTACH   value_expr
             | _CC       value_expr
             | _BCC      value_expr
@@ -5006,7 +5097,27 @@ view_param: NAME AS type_name (REQUIRED | OPTIONAL | DEFAULT value_expr)?
 
 display_block: DISPLAY_KW body_stmt* _DISPLAY ":" DONE
 
-template_decl: TEMPLATE_KW NAME view_param* closer
+// ── template -- a named, reusable email or document (T1-TEMPLATE) ──
+// Declared once, referenced by NAME (no quotes) in a send: `template invoice_email`. The send
+// binds its data with `inject <source> into <slot>` (two names, always), and every {{ }} in the
+// subject, the body and the html/text files is filled from those injected slots only.
+//   template invoice_email
+//       subject "Invoice {{ invoice.number }}"
+//       from "billing@example.com" as "Billing"
+//       reply to "help@example.com"
+//       html "templates/invoice.html"
+//       text "templates/invoice.txt"
+//   template: done
+// A slot may be declared like a view's (`invoice as any required`); a declared slot must be injected.
+template_decl: TEMPLATE_KW NAME template_line* closer
+
+template_line: view_param
+             | _SUBJECT STRING                    -> template_subject
+             | _FROM value_expr (_AS STRING)?     -> template_from
+             | _REPLY _TO value_expr              -> template_reply_to
+             | _HTML STRING                       -> template_html
+             | _TEXT STRING                       -> template_text
+             | _BODY STRING                       -> template_body
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -5205,11 +5316,15 @@ _HOST.2: /host(?![A-Za-z0-9_])/
 _HOUR.2: /hour(?![A-Za-z0-9_])/
 _HOURS.2: /hours(?![A-Za-z0-9_])/
 _HSTS.2: /hsts(?![A-Za-z0-9_])/
+_HTML.2: /html(?![A-Za-z0-9_])/
 _HTTP.2: /http(?![A-Za-z0-9_])/
 _HUMAN.2: /human(?![A-Za-z0-9_])/
 _HUMAN_REVIEW.2: /human_review(?![A-Za-z0-9_])/
 _IDENTITY.2: /identity(?![A-Za-z0-9_])/
 _IDEMPOTENT.2: /idempotent(?![A-Za-z0-9_])/
+// Contextual: matched only where an operation line expects it (mc_op_outcome_from), so `outcome` is
+// still a variable name everywhere else (`call fulfillOrder as outcome`).
+_OUTCOME: /outcome(?![A-Za-z0-9_])/
 _IMAGE.2: /image(?![A-Za-z0-9_])/
 _IMMEDIATELY.2: /immediately(?![A-Za-z0-9_])/
 _IMMUTABLE.2: /immutable(?![A-Za-z0-9_])/
@@ -5348,6 +5463,7 @@ _RATE.2: /rate(?![A-Za-z0-9_])/
 _RATIO.2: /ratio(?![A-Za-z0-9_])/
 _REALISTIC.2: /realistic(?![A-Za-z0-9_])/
 _REASON.2: /reason(?![A-Za-z0-9_])/
+_SUPPRESS.2: /suppress(?![A-Za-z0-9_])/
 _RECALL.2: /recall(?![A-Za-z0-9_])/
 _RECEIVED.2: /received(?![A-Za-z0-9_])/
 _RECIPIENT.2: /recipient(?![A-Za-z0-9_])/
@@ -5357,6 +5473,7 @@ _REGULATORY.2: /regulatory(?![A-Za-z0-9_])/
 _RELOAD.2: /reload(?![A-Za-z0-9_])/
 _REMEMBER.2: /remember(?![A-Za-z0-9_])/
 _REPEATS.2: /repeats(?![A-Za-z0-9_])/
+_REPLY.2: /reply(?![A-Za-z0-9_])/
 _REQUESTS.2: /requests(?![A-Za-z0-9_])/   // `max requests N per second` -- the rate backstop's operand
 _REQUIRED.2: /required(?![A-Za-z0-9_])/
 _REQUIREMENTS.2: /requirements(?![A-Za-z0-9_])/

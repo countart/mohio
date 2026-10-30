@@ -1511,12 +1511,61 @@ def _start_owed_drain_loop(interp):
     return stop
 
 
+def _start_outbound_reconcile_loop(interp):
+    """Resolve calls whose outcome is unknown, at start and on an interval (RULED by Ron 2026-10-28).
+
+    The pass at start is the restart pass: a call this app's last process left `sending` or
+    `unknown` is looked up before anything else would rely on it. Then every
+    MOHIO_RECONCILE_INTERVAL_SECONDS (60 by default; 0 keeps only the pass at start). A call is
+    resolved only to what its service says (mohio_reconcile); one with no lookup stays pending and
+    is said. A pass that fails says so and the next one tries again. Returns the stop event."""
+    if interp is None or not hasattr(interp, 'reconcile_outbound'):
+        return None
+    import threading
+    stop = threading.Event()
+    interval = interp._reconcile_interval()
+    seen = [None]
+
+    def _pass():
+        try:
+            from mohio_reconcile import describe
+            summary = interp.reconcile_outbound()
+            lines = describe(dict(summary, pending=[]))
+            pend = tuple(sorted(k for k, _c, _o, _w in summary.get("pending") or []))
+            if pend != seen[0]:      # the pending set is said when it changes, not every interval
+                lines += describe({"pending": summary.get("pending") or []})
+                seen[0] = pend
+            for line in lines:
+                print(line, flush=True)
+        except Exception as e:
+            print(f"  [mohio.outbound] a reconcile pass failed ({type(e).__name__}: "
+                  f"{str(e).splitlines()[0][:200]}); calls with an unknown outcome stay pending and "
+                  f"the next pass tries again.", flush=True)
+        finally:
+            _rel = getattr(interp, 'release_db_connections', None)
+            if _rel is not None:
+                try:
+                    _rel()
+                except Exception:   # SILENT-OK: nothing leased, the next pass starts clean regardless
+                    pass
+
+    def _loop():
+        _pass()
+        while interval and not stop.wait(interval):
+            _pass()
+
+    threading.Thread(target=_loop, name="mohio-outbound-reconcile", daemon=True).start()
+    return stop
+
+
 def create_app(server: MohioServer):
     # Root static serving at THIS app's directory (see _static_roots).
     if getattr(server, 'app_dir', None) is not None:
         _APP_DIR[0] = server.app_dir
     # Owed audit records drain on an interval while the app serves (day 2, item 2).
     server._owed_drain_stop = _start_owed_drain_loop(getattr(server, 'interp', None))
+    # Calls whose outcome is unknown are looked up at start and on an interval (the reconciler).
+    server._reconcile_stop = _start_outbound_reconcile_loop(getattr(server, 'interp', None))
     try:
         from starlette.applications import Starlette
         from starlette.requests import Request

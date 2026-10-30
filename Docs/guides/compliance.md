@@ -27,7 +27,7 @@ each one turns on the handling that data legally needs.
 table keyed by `id`, because each sealed value is bound to its row's id. A composite-key or other non-`id` table
 (a seeded or adopted table can have one) is not supported for protected fields yet: the write refuses as
 `protected_field_needs_id_key` (400) and keeps nothing. Composite-key and non-id tables gain protected fields in
-6.0.1. To use a protected field now, give the table an `id` primary key (Mohio creates one on every table it
+a later release. To use a protected field now, give the table an `id` primary key (Mohio creates one on every table it
 builds).
 
 ```mohio
@@ -230,6 +230,38 @@ Signing a profile is done off the repo, on a trusted machine:
 
 The private key NEVER goes in the repository. That is what makes the certified tier a real
 boundary: a profile's claim is only as good as a signature the deployment can verify.
+
+### What the uncertified-sector warning means
+
+Declare a sector with no certified profile on the search path and Mohio prints a warning at startup. Under
+`sector: financial` it reads:
+
+```
+[mohio.sector] WARNING: sector financial: certified rules are not installed. Built-in compliance
+defaults apply (an over-precise money amount is refused, never rounded; stored rows that break a
+declared `required` refuse at first touch; a default database on a temporary disk refuses at connect;
+every data write is recorded in the audit trail); certified sector rules do not. Provide the certified
+profile on the search path (~/.mohio/sectors) or run the licensed runtime.
+```
+
+This is not a failure, and it does not mean the sector did nothing. It means the two tiers are split right now:
+
+- **The BASE gate is live.** Declaring the sector turns the built-in compliance defaults on, and they are
+  enforced. The money contract refuses an over-precise amount rather than rounding it (verified by running:
+  `amount 10.129` in a `USD` value under `sector: financial` is refused with `money_precision`, "an amount is
+  never rounded, because a rounded amount is a changed record", never silently rounded); a stored row that
+  breaks a declared `required` refuses at first touch; a default database on a temporary disk refuses at connect;
+  and every data write is recorded in the audit trail, not only the tagged ones. The tag-level floor is on
+  regardless of the sector: protected data still cannot leave the app (the egress gate, section 2a), a tagged
+  write still raises its audit record (section 3), and a key is required wherever the rules require one.
+- **The CERTIFIED financial floor is NOT installed.** The signed `.sector` profile that carries the sector's
+  full breadth, its retention rules, its AI confidence floors, and the compliance *claim* is absent, so none of
+  those apply and nothing here may be described as certified.
+
+Honest about the roadmap: the certified financial rules depend on the financial-sector structuring (the signed,
+licensed profile described above), and they are not promised on any particular point release. Until a certified
+profile is on the search path, a `sector:` declaration gives you the base gate and the tag floor, which are real
+and enforced, and the warning is telling you exactly that.
 
 ### A profile that names a rule nothing enforces refuses to load
 

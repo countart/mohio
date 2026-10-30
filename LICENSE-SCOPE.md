@@ -1,10 +1,10 @@
 # LICENSE-SCOPE.md
 
-Release: 6.0.1
-Source-control tag: v6.0.1
-First public distribution date: 2026-10-24
+Release: 6.0.2
+Source-control tag: v6.0.2
+First public distribution date: 2026-10-29
 License: Business Source License 1.1
-Change Date: 2030-10-24
+Change Date: 2030-10-29
 Change License: AGPL-3.0-or-later — match LICENSE
 
 ---
@@ -80,6 +80,9 @@ keeps the artifact and this file in agreement.
 - `mio_utils.py`
 - `mohio_outbound.py`: what a changing outbound call is known to have done, and the record of every
   attempt (the outbound unknown-outcome core, added in 6.0.0).
+- `mohio_reconcile.py`: the durable-work reconciler. An outbound call whose outcome is unknown is
+  resolved to what the service says happened, by the lookup the connector names, never guessed and
+  never sent again (added in 6.0.2).
 
 ### Command-line tooling
 - `mio.py`
@@ -115,6 +118,8 @@ Rationale: consistent with the open-core model, the *loader* is mechanism and is
   (added in 6.0.0).
 - `mohio_data/share_destinations.json` -- the share destinations MioScript `share` knows, as data
   (added in 6.0.0).
+- `mohio_data/diagnostics.json` -- the diagnostic-code registry: each stable warning and error code with
+  its type, class, whether it may be suppressed, message and fix (added in 6.0.2).
 
 ### Dependency and packaging manifests
 - `requirements.txt`
@@ -335,6 +340,16 @@ Only the following may be redistributed in object-code form as Runtime Component
 - `mohio_metasource_sqlite.py`
 - `mohio_metasource_shared.py`
 - `mohio_metasource_store.py`
+- `mohio_capability.py`
+- `mohio_db_drivers.py`
+- `mohio_outbound.py`
+- `mohio_reconcile.py`
+- `mohio_runtime_vocab.py`
+- `mohio_timezones.py`
+- `mohio_write_intent.py`
+- `mohio_sector_sign.py`
+- `mohio_data/*.json`
+- `mohio_data/_build_sha.txt`
 
 Not redistributable as Runtime Components: `mio.py` (CLI), `mohio_fmt.py`, `mohio_test_grammar.py`, `tests/`, `tools/`, `mohio-vscode/`, docs, examples. These are development tooling, editor tooling, or non-runtime materials.
 

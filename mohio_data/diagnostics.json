@@ -1,0 +1,1051 @@
+{
+  "_about": "The diagnostic-code registry (BRIEF sector-idempotency-and-diagnostics, Part B). One entry per stable code: its type (warning, error, notice), its class (advisory or governance), whether a project may suppress it, what it says, and the fix. The getmohio link `mio check` prints and the published reference (tools/diagnostics/build_code_reference.py) derive from this file. tests/test_battery_diagnostics_registry.py fails the build on a code a compiler site uses that is missing here, and on an entry no compiler site uses.",
+  "link": "getmohio.com/codes/{code}",
+  "codes": {
+    "ai_agent_no_not_confident": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "An ai.agent has no `not confident` block, so nothing says what happens when it cannot finish with enough confidence.",
+      "fix": "Add a `not confident` block inside the ai.agent."
+    },
+    "ai_create_no_failure": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "An ai.create makes a live AI call with no `on.failure`, so a model outage stops the program.",
+      "fix": "Add an `on.failure` block inside the ai.create."
+    },
+    "ai_decide_audit_order": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An ai.decide's `ai.audit` line is out of order.",
+      "fix": "Move `ai.audit` to where the message shows."
+    },
+    "ai_decide_empty_not_confident": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An ai.decide's `not confident` block is empty.",
+      "fix": "Say what happens when the decision is not confident."
+    },
+    "ai_decide_empty_on_failure": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An ai.decide's `on.failure` block is empty.",
+      "fix": "Say what happens when the decision fails."
+    },
+    "ai_decide_never_invoked": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "An ai.decide is declared and never invoked, so it never runs and writes no audit entry.",
+      "fix": "Put its name on a line where the decision belongs, or remove the block."
+    },
+    "ai_decide_no_audit": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An ai.decide has no `ai.audit` line.",
+      "fix": "Add `ai.audit to <log>`."
+    },
+    "ai_decide_no_not_confident": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An ai.decide has no `not confident` block, which is required.",
+      "fix": "Add a `not confident` block."
+    },
+    "ai_decide_no_on_failure": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An ai.decide has no `on.failure` block.",
+      "fix": "Add an `on.failure` block."
+    },
+    "ai_test_asserts_nothing": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "The test file for these ai.decide blocks has no `it` case with an `expect`, so nothing is checked.",
+      "fix": "Write an `it` case with an `expect` for each decision."
+    },
+    "ai_test_missing": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "These ai.decide blocks have no compliance test file.",
+      "fix": "Create the named test file, or ai.test.mho, with cases for each decision."
+    },
+    "bound_unchecked_length": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A value written in a script breaks a shape's length limit, and only a bound request is checked against it.",
+      "fix": "Fix the value, or send it through a request bound to the shape."
+    },
+    "bound_unchecked_number": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A value written in a script breaks a shape's min or max, and only a bound request is checked against it.",
+      "fix": "Fix the value, or send it through a request bound to the shape."
+    },
+    "check_without_branches": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A `check` has no `when` and no `otherwise`, so it does nothing.",
+      "fix": "Add a `when` or `otherwise` branch, or remove the block."
+    },
+    "classification_same_path": {
+      "type": [
+        "warning",
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A journey classifies one path two ways. A warning while you build, an error under a regulated sector.",
+      "fix": "Keep the one class line you mean for that path."
+    },
+    "classifier_is_override_marker": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "`[important]` on a field does nothing; it marks a journey line that wins over a page.",
+      "fix": "Remove it from the field, and use a real classifier such as `[pii]`."
+    },
+    "classifier_is_sec_level": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A field tag names a `sec.classify` level, which nothing reads on a field, so the field gets no protection.",
+      "fix": "Declare the level in a `sec.classify` block, or use a field classifier."
+    },
+    "classifier_unrecognized": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A field tag is not a recognized classifier, so it applies no protection and the field is stored in the clear.",
+      "fix": "Use a recognized classifier, such as `[pii]` or `[phi]`."
+    },
+    "client_check_subject_mismatch": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A client `when` names a different value than its `check`.",
+      "fix": "Repeat the check's subject in the `when`, or drop it."
+    },
+    "cm_action_note": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "This cm action belongs to the commercial runtime and stops the program if it is reached.",
+      "fix": "Remove it, or do the work through your own path, until you are on the commercial runtime."
+    },
+    "cm_purge_records_only": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "This form of `cm.purge` records an erasure request and deletes nothing.",
+      "fix": "To erase rows, name the table and the rows: `cm.purge from db.<table>` with a `match` and a `reason`."
+    },
+    "comment_hash_retired": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`##` comments are retired.",
+      "fix": "Use `//` or `/* */`."
+    },
+    "comparison_can_meet_empty": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A value in a `when` can be empty, and an empty value matches no comparison, so the check goes to `otherwise`.",
+      "fix": "Guard it with `when <name> is empty` first, or give it a default or make it `required`."
+    },
+    "compliance_shape_no_marker": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "The program looks compliance-shaped and carries no compliance marker, so Mohio makes no compliance claim for it.",
+      "fix": "Declare a sector, or the compliance marker, if this program must be governed."
+    },
+    "condition_split": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A line was read as two conditions, so it does not test what it says.",
+      "fix": "Write one test per `when`, subject first."
+    },
+    "connect_default_regulated": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A `connect` under a sector carries a `default`, which a regulated app never uses.",
+      "fix": "Remove the default and set the variable to the approved database."
+    },
+    "connect_name_twice": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "One name is connected twice to different places.",
+      "fix": "Keep one, or give the second its own name."
+    },
+    "connector_retry_changes": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A connector `retry` covers operations that change something, and they are retried only when the request never left.",
+      "fix": "Make the operation safe to repeat on the other side, or retry only the reads."
+    },
+    "cookie_samesite_none_insecure": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`same site \"none\"` without `secure` is a cookie no browser sets.",
+      "fix": "Add `secure`, or use `same site \"lax\"` or `\"strict\"`."
+    },
+    "credential_in_url": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A connection url in the source carries a password.",
+      "fix": "Move the whole url to `env.X` or `secret.X`."
+    },
+    "curly_braces_retired": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "Single curly braces are retired.",
+      "fix": "Use named fields, or `as list sh.<Shape>` for nested structures."
+    },
+    "dead_store": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A value is set and never used.",
+      "fix": "Use it, or remove the line."
+    },
+    "default_not_on_ungoverned_save": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A save to a table no shape governs leaves out a field the shape gives a default, so the table gets no value for it.",
+      "fix": "Write the field on the save if the table should hold it."
+    },
+    "dynamic_field_assignment": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A field name is chosen at run, so it cannot be checked here.",
+      "fix": "Make sure the value is a real column name before the line runs."
+    },
+    "emit_retired": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`emit` is retired and reserved.",
+      "fix": "Rename the variable, or remove the line."
+    },
+    "financial_writes_outside_transaction": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "Under a financial sector, several writes are not inside a `transaction`, so a failure partway leaves partial state.",
+      "fix": "Wrap writes that belong together in `transaction ... transaction: done`."
+    },
+    "HANDLER_CLOSER": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A handler carries its own closer line, which ends nothing.",
+      "fix": "Remove the line; a handler ends at the next handler or its block's own closer."
+    },
+    "HARDCODED_CREDENTIAL": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A connect source is a literal string, which hardcodes a credential.",
+      "fix": "Use `from env.DATABASE_URL` or `from secret.DB_URL`."
+    },
+    "hardcoded_token": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A signed token is written in the source.",
+      "fix": "Use `env.X` or `secret.X`."
+    },
+    "hash_key_from_source": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "`hash ... with key` names a key written as text in the program.",
+      "fix": "Read the key as a secret: `with key secret.PSI_KEY`."
+    },
+    "hash_key_needs_deterministic": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "`with key` is on a salted password hash, which never gives the same token twice.",
+      "fix": "Key a deterministic hash (`using sha256 with key ...`), or leave the key off a password hash."
+    },
+    "idempotent_route": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A `once per` line is in the wrong place, is malformed, or keeps its answers for an unusable length.",
+      "fix": "Put `once per request.header \"Idempotency-Key\"` with a `keep for` length at the top of a `listen for` route."
+    },
+    "mail_template_quoted": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A send names its template in quotes.",
+      "fix": "Name it without quotes: `template invoice_email`."
+    },
+    "notify_channel_not_built": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A `notify` uses a channel other than email, which is not built in this release.",
+      "fix": "Send it `via email`, with a `to` line and a `template` (or a `subject` and `message`)."
+    },
+    "outcome_lookup": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An `outcome from` lookup is on an operation that changes nothing, names no operation, is not a read, or does not name the call by `{{ key }}`; or a path has braces no lookup fills.",
+      "fix": "On the changing operation write `outcome from findCharge`, and give `findCharge` `method GET` and a path carrying `{{ key }}`."
+    },
+    "ignore_inherited": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "`ignore` suppresses inherited declarations.",
+      "fix": "Confirm the suppression is intended; it is logged to the build report."
+    },
+    "include_line_emitted_as_text": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A bare `include` line in a render is shown as text, not run.",
+      "fix": "Write it as an evaluation, with `include \"file\"` inside a double-brace pair."
+    },
+    "inject_non_fragment": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "`inject` places markup, and its source is a value, not a rendered fragment.",
+      "fix": "Use `put <value> into <target>` for text, or inject a `render fragment` result."
+    },
+    "journey_no_timezone": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A journey declares no timezone, so its days and shown times are UTC unless MOHIO_APP_TIMEZONE says otherwise.",
+      "fix": "Declare `timezone \"<zone>\"` inside the journey."
+    },
+    "languages_primary_retired": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`primary` in a languages block is retired.",
+      "fix": "Write `current`; `mio fmt` converts it."
+    },
+    "match_to_empty_word": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "`match <field> to empty` compares with a value named `empty`, and there is none.",
+      "fix": "Write `where <field> is empty`."
+    },
+    "miofile_dangerous_accept": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A declared file area accepts an executable file type.",
+      "fix": "Remove the type from `accept`."
+    },
+    "miofile_zone_uncovered": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A miofile path is in no declared area, so the area's `accept` and `max size` rules do not apply.",
+      "fix": "Move the path inside a declared area, or declare one that covers it."
+    },
+    "modifier_not_enforced": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A field modifier is declared and not enforced in this build.",
+      "fix": "Do not rely on it; enforce the rule in the program, or remove it."
+    },
+    "modifier_partial": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A field modifier is enforced on some paths only.",
+      "fix": "Read the message for where it is enforced, and cover the rest in the program."
+    },
+    "not_a_mohio_word": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A word from another language reads as an instruction and is a variable name here.",
+      "fix": "Use the Mohio form the hint shows."
+    },
+    "not_executable": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A construct parses and is not executable in this build.",
+      "fix": "Remove it, or use the form the message names."
+    },
+    "or_if_retired": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`or if` is retired.",
+      "fix": "Use `check / when / otherwise`; `mio fmt` converts it."
+    },
+    "orphan_it": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "`it` has no step before it to refer to.",
+      "fix": "Start a `then` chain, or use a named variable."
+    },
+    "page_class_outranked": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A page declares a looser class than its journey gives its path, so the page's own line does nothing.",
+      "fix": "Classify the page at or above its journey's class for that path."
+    },
+    "paginate_without_page_size": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "`paginate by` with no page size would return every row.",
+      "fix": "Add `up to <size>`."
+    },
+    "password_no_format": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A password field has no `format \"password\"`, so a refused form is sent back with the password filled in.",
+      "fix": "Declare `<name> as text format \"password\"`."
+    },
+    "possible_credential": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A value in the source looks like a key.",
+      "fix": "Use `env.X` or `secret.X`."
+    },
+    "possible_event_typo": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A browser event name is one letter off from a real one, so the handler never triggers.",
+      "fix": "Correct the event name."
+    },
+    "possible_typo": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A line is one letter off from a verb, so it parsed as an assignment and the verb never happens.",
+      "fix": "Correct the verb, or rename the variable."
+    },
+    "private_key_in_source": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A private key is written in the source.",
+      "fix": "Use `env.X` or `secret.X`."
+    },
+    "refuse_after_unwrapped_write": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A handler writes and can still refuse afterwards, outside a transaction, so the refusal answers with the row already saved.",
+      "fix": "Check before writing, or wrap the write and the check in one `transaction`."
+    },
+    "regulated_field_needs_type": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A classified field has no declared type, and regulated data is never inferred.",
+      "fix": "Declare its type, for example `<name> as text [pii]`."
+    },
+    "release_never_held": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`release` names a value that is never held, so it does nothing.",
+      "fix": "Hold the value where it is set, or remove the release."
+    },
+    "reserved_namespace_name": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "`env`, `secret` or `hide` is bound as a name; each is reserved (`env.X`, `secret.X`, the `[hide]` tag).",
+      "fix": "Name the value for what it holds, for example `env_value`."
+    },
+    "require_device_permission": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A device `require` is declared and not built yet.",
+      "fix": "Gate the handler with `require role \"...\"` for now."
+    },
+    "require_unknown_subject": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "`require` names something it cannot check.",
+      "fix": "Write `require role \"<role>\"` or `require person`."
+    },
+    "role_unquoted": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A role value is not in quotes.",
+      "fix": "Write `require role \"<role>\"`."
+    },
+    "route_retired": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`route` is retired.",
+      "fix": "Write a handler on its own: `request for sh.X at /path`, or `listen for sh.X at /path`."
+    },
+    "scanner_crashed": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A check scanner crashed, so its findings for this run are missing. This is a compiler bug.",
+      "fix": "Report the bug, naming the scanner."
+    },
+    "script_in_render": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A render carries script, and a render is for markup only.",
+      "fix": "Put JavaScript in `render scripts`, or use MioScript."
+    },
+    "SEC_NONCRITICAL_NO_REASON": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "`sec.non_critical` has no reason.",
+      "fix": "Write `sec.non_critical reason \"<why>\"`."
+    },
+    "sector_audit_grade_required": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "The sector requires a grade of audit storage that the deployment must bind.",
+      "fix": "Bind an audit sink that meets the grade."
+    },
+    "sector_audit_grade_unknown": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "The sector names a framework with no known audit grade, which would be read as requiring nothing.",
+      "fix": "Correct the framework name, or add it to the framework table."
+    },
+    "sector_base_unrecognized": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "The sector base is not recognized.",
+      "fix": "Use a known base, or provide a matching `.sector` profile."
+    },
+    "sector_certified_not_installed": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "The sector names a certified profile that is not installed, so its rules are not applied.",
+      "fix": "Install the certified profile, or run the licensed runtime."
+    },
+    "sector_community_profile": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "The sector uses a community or unverified profile.",
+      "fix": "Use an official profile for production compliance."
+    },
+    "SECTOR_CONFIDENCE_FLOOR": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An ai.decide confidence is below the sector's floor.",
+      "fix": "Raise the confidence to the floor, or mark the decision `sec.non_critical reason \"...\"`."
+    },
+    "sector_idempotency_key_required": {
+      "type": [
+        "notice"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "Declaring a sector makes each route that moves value (writes an amount, or sends one out) require an `Idempotency-Key` header; a caller that sends none is refused 400. The notice is advisory: the 400 is never suppressed.",
+      "fix": "Update the callers to send a new key per request and the same key to retry, then record it in the journey with `suppress sector_idempotency_key_required reason \"<why>\"`; or write `not idempotent reason \"<why>\"` on a route that should not require one."
+    },
+    "sector_level_message": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A level of the sector declaration has no profile, so it adds no rules.",
+      "fix": "Install the level's profile, or remove the level."
+    },
+    "sector_name_format": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "No profile matches the sector, so no sector rules are applied.",
+      "fix": "Correct the sector name; the message names the nearest installed profile."
+    },
+    "SECTOR_NEVER_STORE": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A field the sector classifies as never-store is stored.",
+      "fix": "Store a token reference instead."
+    },
+    "sector_route_not_idempotent": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "Routes under a sector change something without moving value, and are not made idempotent.",
+      "fix": "Add `once per request.header \"Idempotency-Key\"` to any that should answer a repeat from the first answer."
+    },
+    "sector_route_unauthenticated": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A route reads data under a sector with nothing checking who asks.",
+      "fix": "Gate it with `authorize:`, or declare it `public:` in the journey."
+    },
+    "sector_unmaintained": {
+      "type": [
+        "warning"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "The sector profile is certified and not actively maintained.",
+      "fix": "Check it against current regulations before deployment."
+    },
+    "sector_webhook_unverified": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "Under a sector, an inbound request is accepted with nothing proving who sent it.",
+      "fix": "Add `verify signature using env.<SECRET>`."
+    },
+    "shape_may_not_loosen_sector": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A shape drops a classification the sector requires.",
+      "fix": "Write every classification the sector gives the field."
+    },
+    "subjectless_condition": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A `when` puts the test before its subject.",
+      "fix": "Name the subject first, then the test."
+    },
+    "success_on_possibly_empty_lookup": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`on.success` runs when a lookup finds no row, so the value may be empty inside it.",
+      "fix": "Handle `when <name> is empty` first."
+    },
+    "suppress_line": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A journey's `suppress` line names no code, an error, a governance code, has no reason, or repeats a code.",
+      "fix": "Suppress an advisory code, with a reason: `suppress <code> reason \"<why>\"`."
+    },
+    "task_answer_discarded": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A call drops the answer its task gives back.",
+      "fix": "Keep it: `call <task> as result`."
+    },
+    "task_closer_named": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A task closer names the task.",
+      "fix": "Close it with `task: done`; `mio fmt` converts it."
+    },
+    "template_display_block": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A `template` has a `display` block, which belongs to a `view`.",
+      "fix": "Give the template `body \"...\"`, or `html \"file\"` and `text \"file\"`."
+    },
+    "template_line_repeated": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A `template` says the same line twice, so one of the two would be ignored.",
+      "fix": "Keep one of the two lines."
+    },
+    "template_nothing_to_send": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A `template` has no `body`, `html` file or `text` file.",
+      "fix": "Add `body \"...\"`, or an `html` or `text` file."
+    },
+    "template_two_text_bodies": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A `template` has both `body` and a `text` file, two plain-text versions of one message.",
+      "fix": "Keep `body` or the `text` file; `html` goes alongside either."
+    },
+    "token_form": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A token verb is written in a form that refuses: a missing expiry, scope or use limit, or an action in a GET.",
+      "fix": "Use the form the message shows."
+    },
+    "transaction_onfailure_success": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "An `on.failure` inside a transaction answers success after the writes were rolled back.",
+      "fix": "Answer the failure, or put the success after `transaction: done`."
+    },
+    "try_without_failure": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A `try` has no `on.failure`, so it catches nothing.",
+      "fix": "Add an `on.failure` inside the try."
+    },
+    "type_label_does_not_convert": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A type label on an assignment does not convert the value.",
+      "fix": "Cast in the value, for example `as.int`."
+    },
+    "typo_declared_never_read": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "One name is never declared and a near one is declared and never read: usually one typo.",
+      "fix": "Correct the name."
+    },
+    "undeclared_name": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A line reads a name nothing in the program declares.",
+      "fix": "Declare the name, or correct it."
+    },
+    "unique_governs_no_table": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "`unique` on a shape that is never written to a table does nothing.",
+      "fix": "Remove `unique`, or write the shape to a table."
+    },
+    "unknown_render_kind": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "The word after `render` is not a render kind.",
+      "fix": "Write `render`, `render scripts` or `render code`, or move the content to the next line."
+    },
+    "upload_local_disk": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "Uploaded files go to local disk, which some hosts reset on restart or redeploy.",
+      "fix": "Point MOHIO_UPLOAD_DIR at durable storage, or use a cloud upload store."
+    },
+    "UPLOAD_SIZE": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "An upload field allows a large file.",
+      "fix": "Confirm the limit is intended."
+    },
+    "webhook_freshness_absent": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A webhook verifies its signature with no freshness window, so a delivery signed long ago is accepted.",
+      "fix": "Add a freshness bound to the `verify signature` line."
+    },
+    "webhook_secret_rotation": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "A webhook secret rotation is malformed.",
+      "fix": "Use the form the message shows."
+    },
+    "webhook_unverified": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "An inbound route accepts a request with nothing proving who sent it. An error under a regulated sector.",
+      "fix": "Add `verify signature using env.<SECRET>`, or `require role \"...\"`."
+    },
+    "while_no_exit": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A `while` loop has no visible exit and may run forever.",
+      "fix": "Make the condition become false, or add a `stop`."
+    },
+    "claim_result_unread": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "An update claims a field only where it is empty, and nothing reads whether it did.",
+      "fix": "Name the count with `update db.x as claimed` and branch on it with `check claimed`."
+    }
+  }
+}

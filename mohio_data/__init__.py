@@ -23,3 +23,6 @@ PROVIDERS_PATH = _ROOT / "providers.json"
 # hardcoded in the emitter, so a new destination is a one-line addition here, and an unknown
 # one is checked against this file rather than a list buried in Python.
 SHARE_DESTINATIONS_PATH = _ROOT / "share_destinations.json"
+# The diagnostic-code registry: one entry per stable warning or error code (type, class, whether it
+# may be suppressed, message, fix). The getmohio link and the suppressible codes derive from it.
+DIAGNOSTICS_PATH = _ROOT / "diagnostics.json"

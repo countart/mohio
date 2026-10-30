@@ -513,6 +513,8 @@ text around them.
 way out, because the everyday reason to hold an email is to show a person their own email.
 Sealing on disk and hiding on screen are different questions and Mohio answers them separately.
 
+> What makes mioscript, mioql, the CLI, and the tags one language is that the governance substrate travels across all of them. A `[pii]` classification means the same thing and gets enforced the same way whether it's declared in a save, filtered in a query, toggled by a script, printed by the CLI, or positioned on a page. Tags are the unification mechanism precisely because they carry governance uniformly across every surface.
+
 ### 11. One contract, five engines
 
 A source is described once and referenced through its connection. The same program runs against
@@ -557,23 +559,25 @@ plaintext is visible in the trail rather than only on disk.
 
 ## Firsts (as far as we know)
 
-- First language where `ai.decide` is a compiler-enforced primitive
-- First language where a missing AI fallback is a build error
-- First language with automatic immutable AI audit trails as a language construct
-- First language where compliance is a single declaration
-- First language where sector profiles enforce AI confidence floors
-- First language where a shape declaration serves DB, API, validation, compliance, and AI simultaneously
-- First language with the Walk-By Test as a formal design constraint
-- First language with named block closers as a compile-time safety mechanism
-- First language with deterministic runtime boundary gates on AI agents
+- First production language where `ai.decide` is a compiler-enforced primitive
+- First production language where a missing AI fallback is a build error
+- First production language with automatic immutable AI audit trails as a language construct
+- First production language where compliance is a single declaration
+- First production language where sector profiles enforce AI confidence floors
+- First production language where a shape declaration serves DB, API, validation, compliance, and AI simultaneously
+- First production language with the Walk-By Test as a formal design constraint
+- First production language with named block closers as a compile-time safety mechanism
+- First production language with deterministic runtime boundary gates on AI agents
 - A native Right to Be Forgotten verb (`cm.purge`) — syntax, mandatory `reason` audit modifier, and compile-time enforcement ship today; cascade-delete execution is in active development and fails safe
 - Zero-drift multilingual syntax — write Mohio in your language; structural connectors (`on.`, `as.`, `ai.`) never translate
+- First production language where declaring a compliance sector automatically makes every money-moving route idempotent, with no idempotency code beyond the declaration
+- First production language that distinguishes a keyed hash from an unkeyed one on a classified value such as PII, flags the unkeyed hash at the boundary it leaves by, and refuses it under a certified compliance sector
 
 ---
 
 ## Current state
 
-Current release: 6.0.1
+Current release: 6.0.2
 
 Mohio is built in the open and moving fast — the compiler updates multiple times a
 day. The core language is solid and tested; the surface around it is filling in.
@@ -611,6 +615,13 @@ in place, implementation pending.
 | sector profiles (activation, field types, floors) | Partial — wired, **not yet certified** |
 | Auth / security built-ins | Partial — early |
 | Web built-ins (routes, http, mail, file, cache) | Partial |
+| Mail templates: a declared `template` filled by `inject`, and `notify ... via email` | Working (verified end to end through the development mail provider; an html block written inside a send is not built, and notify channels other than email refuse) |
+| Keyed hash (`with key`) and the unkeyed-digest disclosure policy at egress | Working |
+| `[hide]` tag, with tags stacking as a union | Working (hidden on pages, responses, logs and errors; a hidden value still goes whole to an outbound call that uses it) |
+| Automatic idempotency for value-moving routes under a sector (`Idempotency-Key`) | Working |
+| Table keys and shape `unique` as real unique constraints on every engine | Working (an existing table gains one by a reviewed `mio migrate add-unique` step) |
+| Durable-work reconciler: an unknown outbound outcome resolved by the connector's lookup | Partial (the lookup resolver ships; replay is not built) |
+| Diagnostic code registry: every warning and error code, with the published reference generated from it | Working |
 | cm.purge — right to be forgotten | Partial — verb + reason audit + compile-time enforcement ship; cascade-delete in dev, fails safe |
 | Plugin registry — commercial extension point | Partial |
 
@@ -728,6 +739,6 @@ For licensing: **hello@mohio.io**
 
 **Mohio Language Project · Particular LLC · BSL 1.1**
 
-*6.0.1 · Write intent. Execute reason. See everything.*
+*6.0.2 · Write intent. Execute reason. See everything.*
 
 </div>

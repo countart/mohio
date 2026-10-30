@@ -306,9 +306,9 @@ boundary with `grant role`.
 ### Ending every session a person holds
 
 `end session` logs out the current caller. `end every session for person <who>` is the administrative version:
-it ends EVERY session that person holds, across every session store, each ending audited. Use it to revoke a
-person outright, a stolen laptop, a leaver, a reset password, where ending the one request that asked is not
-enough:
+it ends EVERY session that person holds, across every session store, each ending audited. It is THE pattern for
+disabling or banning an account and for signing someone out everywhere -- a stolen laptop, a leaver, a reset
+password, an account you are disabling -- where ending the one request that asked is not enough:
 
 ```mohio
 shape Revoke
@@ -345,10 +345,51 @@ the admin's single revoke request (read back from `security_audit_log`):
 
 It is not a logout of the caller and never counts as an authentication boundary; it is an act on someone else's
 sessions, so it is its own statement. Each session it ends is invalidated through the same primitive that expiry
-and rotation use, and recorded in the audit trail (`session_invalidated`, reason `ended_for_person`), on the
-memory and Postgres stores. If the person holds no sessions, nothing is ended; an empty `for person` refuses,
+and rotation use, and recorded in the audit trail (`session_invalidated`, reason `ended_for_person`). The same
+shared code reaches every session store; it is verified on SQLite and the in-memory store, and the Postgres leg
+is pending an engine run. If the person holds no sessions, nothing is ended; an empty `for person` refuses at run,
 naming the fix, because there is no person to act on; and it needs a session store, so it runs from a handler
 under `mio serve`.
+
+**The person is server-decided.** Pass a literal (`for person "alice@example.com"`), a value the server looked up
+(a field off a record you retrieved, `for person target.email`), or a validated shape field an authorized admin
+sent (`for person Revoke.who`, with `require role` on the handler, as above). The raw request accessor
+`for person request.who` is refused, the same guard that stops `grant role ... for person` from trusting the
+request: who to revoke is decided by your code, never read straight off an unauthenticated request. Under a
+sector, a handler that ends someone's sessions with nothing proving who sent it is refused at check, naming
+`require role` as the fix.
+
+**Disabling an account: call it mid-handler, then carry on.** "Account disabled" is application-defined, so the
+compiler cannot do it for you, and cannot flag its absence at check -- you decide what disabling means and call
+the revocation yourself, as one step in the handler that does the rest:
+
+```mohio
+shape Disable
+    user_id as int
+shape: done
+listen for sh.Disable at /admin/disable-account
+    require role "admin"
+    retrieve target from db.users match id to Disable.user_id
+        when target is empty
+            give back [404] "no such user"
+    retrieve: done
+    update db.users
+        status "disabled"
+        match id to Disable.user_id
+    update: done
+    end every session for person target.email
+    give back [200] "account disabled and signed out everywhere"
+listen: done
+```
+
+The handler sets the account's own `disabled` state, ends every session the person holds so they are logged out
+on their next request, and continues to its response. The revocation is one statement in the middle of the
+handler, not a special terminal step.
+
+**Two honest boundaries.** The cross-store behaviour is verified on SQLite and the in-memory store; the Postgres
+leg shares the same code but is pending an engine run. And the caller's OWN session is left untouched by design
+(this is an act on someone else's sessions, never a logout of the admin running it), though that specific case
+is reasoned from the design and was not separately run with a logged-in admin revoking a third party.
 
 ---
 

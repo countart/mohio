@@ -70,8 +70,8 @@ the engine stores, and whether the sink is append-only) is in `Docs/guides/datab
 **SQLite under contention: fail-closed, with one known gap.** On SQLite the audit path is fail-closed: no governed
 row is committed without its audit envelope. Under heavy single-file contention a run can still lose a
 security-plane record that sits OUTSIDE that envelope; the loss is alerted loudly, never silent, and the governed
-data itself is never committed un-audited. This ships as a known reliability gap, with hardening dated for early
-6.0.1. For a regulated production trail, bind an append-only or WORM sink (above) rather than a single SQLite file.
+data itself is never committed un-audited. This ships as a known reliability gap, with hardening planned for a
+later release. For a regulated production trail, bind an append-only or WORM sink (above) rather than a single SQLite file.
 
 FORK PREVENTION, the half a chain cannot cover on its own, is the anchor check. `mio audit verify-anchors <db>
 --anchors <file>` compares the live chain head against heads you published to a store the application cannot

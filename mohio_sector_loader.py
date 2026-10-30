@@ -37,8 +37,7 @@ class SectorUnenforceableRuleError(Exception):
 
 class SectorUnreadableLineError(SectorUnenforceableRuleError):
     """A sector profile line the loader cannot read: an unknown block, a loose control line, an unclosed
-    block, or an operation rule whose verdict is not exactly `forbidden`, `requires human review` or
-    `allowed` (Ron, 2026-10-13). A subclass of the unenforceable-rule refusal, so every place that
+    block, or the removed `operation rules for sector` block (Ron, 2026-10-13 and 2026-10-29). A subclass of the unenforceable-rule refusal, so every place that
     already refuses on that (check, run, the `.mho` and `.sector` loaders) refuses on this too, instead
     of the generic handler warning and running the program unenforced."""
 
@@ -105,12 +104,6 @@ class SectorProfile:
     retain_rules:       List[RetainRule] = field(default_factory=list)
     expire_rules:       List[ExpireRule] = field(default_factory=list)
 
-    # Operation-governance rules (official/certified profiles). Each entry:
-    #   {pattern, verdict ('forbidden'|'review'|'allowed'), reason, audit_log}
-    # The enforcement mechanism is open-core; these RULES are a paid profile artifact,
-    # so a public profile carries none and the open compiler governs no operations.
-    operation_rules:    List[dict] = field(default_factory=list)
-
     # Notes / disclaimers
     notes:              List[str] = field(default_factory=list)
 
@@ -152,57 +145,6 @@ class SectorProfile:
         
         return self.default_confidence_floor
 
-    def get_operation_verdict(self, connector: str, operation: str,
-                              touched_classes=None):
-        """Return (verdict, reason, audit_log) for a connector operation.
-
-        verdict is 'forbidden' | 'review' | 'allowed'. The first matching rule
-        wins, so a profile lists specific rules before broad ones. When no rule
-        matches, the operation is allowed -- an operation is only governed if the
-        active (paid) profile says so.
-
-        Two rule forms:
-          - name/pattern rules match against 'Connector.operation' with a wildcard
-            allowed on either side: 'Stripe.refund' (exact), '*.refund' (any
-            connector's refund), 'Stripe.*' (every Stripe operation).
-          - data-class rules (`any operation touching [pci]`) match when the call's
-            payload touches a field carrying that classification. `touched_classes`
-            is the set of classifications the payload touches, computed at the call
-            site; when it is None or empty, data-class rules simply do not match.
-        """
-        layers = getattr(self, 'layers', None)
-        if layers:
-            # A COMPOSED PROFILE (`sector: a, b`, broadest first) answers with the STRICTEST verdict
-            # any of its levels gives, each level keeping its own first-match order. A narrower level
-            # only adds rules, so its `allowed` can never shadow a broader level's `forbidden`. On a
-            # tie the narrower level's reason is the one reported.
-            rank = {'forbidden': 2, 'review': 1, 'allowed': 0}
-            best = ('allowed', '', '')
-            for layer in layers:
-                v = layer.get_operation_verdict(connector, operation, touched_classes)
-                if rank.get(v[0], 0) >= rank.get(best[0], 0):
-                    best = v
-            return best
-        touched = {str(c).lower() for c in (touched_classes or [])}
-        # THE STRICTEST MATCHING RULE WINS, within one profile as across levels (Ron, 2026-10-13). It
-        # used to be the first match, so a broad `allowed` rule written above a specific `forbidden`
-        # one hid it. Among rules of the same strictness, the first keeps its reason.
-        rank = {'forbidden': 2, 'review': 1, 'allowed': 0}
-        best = ('allowed', '', '')
-        for rule in self.operation_rules:
-            dc = rule.get('data_class')
-            if dc:
-                matched = dc.lower() in touched
-            else:
-                matched = _op_pattern_matches(rule.get('pattern', ''), connector, operation)
-            if not matched:
-                continue
-            if best == ('allowed', '', '') and rule.get('verdict') == 'allowed':
-                best = ('allowed', rule.get('reason', ''), rule.get('audit_log', ''))
-            if rank.get(rule.get('verdict'), 0) > rank.get(best[0], 0):
-                best = (rule.get('verdict'), rule.get('reason', ''), rule.get('audit_log', ''))
-        return best
-
     def is_never_store(self, field_name: str) -> bool:
         """Return True if this field must never be stored."""
         return field_name.lower() in self.never_store_fields
@@ -224,23 +166,6 @@ _TIME_UNIT_HOURS = {
     "month":  720,    "months":  720,
     "year":   8760,   "years":   8760,
 }
-
-
-def _op_pattern_matches(pattern: str, connector: str, operation: str) -> bool:
-    """Match 'Connector.operation' against a rule pattern, case-insensitive, with a
-    wildcard '*' allowed on the connector side, the operation side, or both.
-    A bare pattern with no dot is treated as an operation wildcard ('*.pattern')."""
-    if not pattern:
-        return False
-    if '.' in pattern:
-        pconn, pop = pattern.split('.', 1)
-    else:
-        pconn, pop = '*', pattern
-    pconn = pconn.strip().lower()
-    pop = pop.strip().lower()
-    conn_ok = (pconn == '*' or pconn == (connector or '').lower())
-    op_ok = (pop == '*' or pop == (operation or '').lower())
-    return conn_ok and op_ok
 
 
 def _parse_sector_profile_text(text: str, source_path: str = "") -> SectorProfile:
@@ -448,88 +373,18 @@ def _parse_sector_profile_text(text: str, source_path: str = "") -> SectorProfil
         if profile.confidence_floors:
             profile.default_confidence_floor = min(profile.confidence_floors.values())
 
-    # Extract operation-governance rules block (official/certified profiles only).
-    # Mechanism is open-core; the actual rules ship in the paid profile artifact.
-    #   operation rules for sector "financial"
-    #       any operation "Stripe.refund"
-    #           forbidden
-    #           reason "..."
-    #       any operation "*.charge"
-    #           requires human review
-    #           reason "..."
-    #           ai.audit to operation_audit_log
-    #   operation: done
-    op_block = re.search(
-        r'operation\s+rules\s+for\s+sector\s+"[^"]+"\s*\n(.*?)operation:\s*done',
-        clean, re.DOTALL
-    )
+    # THE OPERATION-RULES BLOCK IS REMOVED (RULED by Ron 2026-10-29). `operation` lives only inside a
+    # mioconnect connector; a profile does not govern calls by operation name. What a call carries is
+    # governed by its data's tags at the egress gate, for every transport. A profile still carrying the
+    # block refuses at load, naming the change, rather than loading with rules that no longer run.
+    op_block = re.search(r'operation\s+rules\s+for\s+sector\b', clean)
     if op_block:
-        _consume(op_block.start(), op_block.start(1))
-        _consume(op_block.end(1), op_block.end())
-        _op_base = op_block.start(1)
-        _op_lines = op_block.group(1).splitlines()
-        _first_line = _line_of(_op_base)
-        # THE VERDICT IS READ FROM THE VERDICT LINE ONLY (Ron, 2026-10-13). It used to be searched for
-        # anywhere in the rule's text, so a reason saying "forbidden" made a rule forbidden, and a word
-        # that was not exactly a verdict (`requires review`, `forbid`) fell through to `allowed`. Each
-        # rule now reads line by line: its `any operation` line, exactly one verdict line, a `reason`
-        # and an `ai.audit` line. Any other line, a second verdict or no verdict refuses at load.
-        _VERDICT_WORDS = {'forbidden': 'forbidden', 'requires human review': 'review', 'allowed': 'allowed'}
-        _rule = None
-
-        def _close_rule(rule):
-            if rule is None:
-                return
-            if rule['verdict'] is None:
-                raise SectorUnreadableLineError(
-                    f"{_where}line {rule['line']}: the rule `any operation {rule['head']}` names no verdict, "
-                    f"so it would decide nothing (it used to read as allowed). Give it one line that is "
-                    f"exactly `forbidden`, `requires human review` or `allowed`.")
-            profile.operation_rules.append({k: rule[k] for k in
-                                            ('pattern', 'data_class', 'verdict', 'reason', 'audit_log')})
-
-        for _i, _raw in enumerate(_op_lines):
-            _ln = _first_line + _i
-            _txt = ' '.join(_raw.split())
-            if not _txt:
-                continue
-            _head = re.match(r'any\s+operation\s+(.*)$', _txt)
-            if _head:
-                _close_rule(_rule)
-                _spec = _head.group(1)
-                # Two rule forms: a name/pattern rule (`any operation "Stripe.refund"`) and a
-                # data-class rule (`any operation touching [pci]`).
-                _pm = re.match(r'"([^"]+)"$', _spec)
-                _tm = re.match(r'touching\s+\[([A-Za-z_]+)\]$', _spec)
-                if not (_pm or _tm):
-                    raise SectorUnreadableLineError(
-                        f"{_where}line {_ln}: `{_txt}` is not a rule the loader reads. A rule names an "
-                        f"operation (`any operation \"Stripe.refund\"`) or a data class (`any operation "
-                        f"touching [pci]`).")
-                _rule = {'pattern': _pm.group(1) if _pm else None,
-                         'data_class': _tm.group(1).lower() if _tm else None,
-                         'verdict': None, 'reason': '', 'audit_log': '', 'line': _ln, 'head': _spec}
-                _read_lines.add(_ln)
-                continue
-            if _rule is None:
-                continue                     # left unread: refused at the end, naming the line
-            if _txt in _VERDICT_WORDS:
-                if _rule['verdict'] is not None:
-                    raise SectorUnreadableLineError(
-                        f"{_where}line {_ln}: the rule `any operation {_rule['head']}` already has a verdict; "
-                        f"a rule has exactly one.")
-                _rule['verdict'] = _VERDICT_WORDS[_txt]
-            elif re.match(r'reason\s+"[^"]*"$', _txt):
-                _rule['reason'] = re.match(r'reason\s+"([^"]*)"$', _txt).group(1)
-            elif re.match(r'ai\.audit\s+to\s+[\w_]+$', _txt):
-                _rule['audit_log'] = re.match(r'ai\.audit\s+to\s+([\w_]+)$', _txt).group(1)
-            else:
-                raise SectorUnreadableLineError(
-                    f"{_where}line {_ln}: a rule's verdict must be exactly one of `forbidden`, `requires "
-                    f"human review` or `allowed`, and its other lines are `reason \"...\"` and `ai.audit to "
-                    f"NAME`; `{_txt}` is none of these, so this rule would do nothing.")
-            _read_lines.add(_ln)
-        _close_rule(_rule)
+        raise SectorUnreadableLineError(
+            f"{_where}line {_line_of(op_block.start())}: `operation rules for sector` was removed from "
+            f"sector profiles, so these rules would no longer run. `operation` belongs to a mioconnect "
+            f"connector only. To protect what a call sends, classify the field under `field types` "
+            f"(`card_number is [pci]`): Mohio refuses classified data leaving by mail, HTTP, a connector "
+            f"or AI unless it is masked. Remove the `operation rules ... operation: done` block.")
 
     # Extract pci rules block -- additional never_store and enforcement
     pci_block = re.search(
@@ -593,7 +448,7 @@ def _parse_sector_profile_text(text: str, source_path: str = "") -> SectorProfil
             f"would do nothing, and a profile line that cannot be read refuses rather than being dropped"
             + (f" ({len(_unread)} such lines in this profile)" if len(_unread) > 1 else "")
             + ". A profile holds: meta, `compliance:` lines, `retain all [...] for N units`, `expire all "
-              "[...] after N units`, field types, ai.decide rules, operation rules, pci rules and profile "
+              "[...] after N units`, field types, ai.decide rules, pci rules and profile "
               "notes, each block closed by its own `...: done`.")
     return profile
 
@@ -705,7 +560,7 @@ def available_sector_names(search_paths: Optional[List[str]] = None) -> List[str
 
 # WHAT ANY SECTOR DECLARATION TURNS ON, with or without rules found (RULED by Ron 2026-10-12). Each
 # item is a runtime path that asks only "is a sector declared", verified by running; a profile's own
-# rules (session expiry, operation rules, confidence floors, field classes) come on top of these.
+# rules (session expiry, confidence floors, field classes) come on top of these.
 BUILTIN_COMPLIANCE_DEFAULTS = (
     "an over-precise money amount is refused, never rounded",
     "stored rows that break a declared `required` refuse at first touch",
@@ -820,8 +675,7 @@ def missing_level_message(sector_name: str, level: str, slug: str) -> str:
 def _compose_profiles(sector_name: str, layers: List[SectorProfile], missing) -> SectorProfile:
     """One profile from a declaration's levels, broadest first, where a narrower level ONLY ADDS: lists
     are joined, a confidence floor keeps the highest, a field keeps every classification any level gives
-    it and never-store if any level says so, and an operation verdict is the strictest any level gives
-    (SectorProfile.get_operation_verdict reads `layers`). The tier is the weakest of the levels: a chain is
+    it and never-store if any level says so. The tier is the weakest of the levels: a chain is
     only as certified as its least certified level."""
     import copy as _copy
     merged = SectorProfile(name=sector_name)
@@ -853,7 +707,6 @@ def _compose_profiles(sector_name: str, layers: List[SectorProfile], missing) ->
         merged.default_confidence_floor = max(merged.default_confidence_floor, layer.default_confidence_floor)
         merged.retain_rules.extend(layer.retain_rules)
         merged.expire_rules.extend(layer.expire_rules)
-        merged.operation_rules.extend(layer.operation_rules)
         merged.notes.extend(layer.notes)
     merged.layers = layers
     merged.missing_levels = list(missing)

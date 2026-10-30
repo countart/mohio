@@ -89,6 +89,29 @@ class StoreError(MetasourceError):
     """The storage layer could not do what was asked. Never used for a lost race."""
 
 
+# WINDOWS SHARES A FILE FOR A MOMENT (T1-METASOURCE-REGEN-LOCK-WINDOWS, measured 2026-10-28). A file
+# another process is still deleting, or still has open (a reader, a scanner), answers "access denied"
+# to a create, a remove or a replace, for the few milliseconds it takes. Under load one of eight
+# concurrent regenerations failed on `regen.lock.swap` that way. Each such step waits its turn, up to
+# this bound; a state that outlasts it is a real refusal, and says so, naming the file.
+_SHARING_WAIT_SECONDS = 2.0
+
+
+def _wait_for_sharing(op, what):
+    import time
+    deadline = time.monotonic() + _SHARING_WAIT_SECONDS
+    while True:
+        try:
+            return op()
+        except PermissionError as e:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise StoreError(
+                    f"Could not {what} ({e}). Another process held it past "
+                    f"{_SHARING_WAIT_SECONDS:g} seconds, or this account may not write there: check "
+                    f"that the store directory is writable and that nothing keeps the file open.") from e
+            time.sleep(0.02)
+
+
 class LockLost(MetasourceError):
     """This holder no longer holds the lock: its fence moved, so someone else has it."""
 
@@ -512,7 +535,7 @@ class LocalObjectStore(ObjectStore):
         # EGRESS-EXEMPT: upload object store transport; uploads are governed by the upload path (tagged content sealed at rest, read only through a checking handler)
         with open(tmp, "wb") as f:
             f.write(body)
-        os.replace(tmp, path)
+        _wait_for_sharing(lambda: os.replace(tmp, path), f"move {key} into place at {path}")
         return self._etag(body)
 
     def put_if_absent(self, key: str, body: bytes) -> Optional[str]:
@@ -522,8 +545,10 @@ class LocalObjectStore(ObjectStore):
         # for it. The catch is the specific FileExistsError, not a bare except, so a permission
         # error or a full disk still raises. Raising instead would be the wrong behaviour, not a
         # louder one: it would turn losing a race into a crash on every instance but the winner.
+        path = self._path(key)
         try:
-            fd = os.open(self._path(key), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = _wait_for_sharing(lambda: os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY),
+                                   f"create {path}")
         except FileExistsError:
             return None
         # EGRESS-EXEMPT: upload object store transport; uploads are governed by the upload path (tagged content sealed at rest, read only through a checking handler)
@@ -540,7 +565,8 @@ class LocalObjectStore(ObjectStore):
         # SAFE FALLBACK, same reason as put_if_absent above: another process holds the guard, so
         # this caller's swap did not land, which is exactly what None means here.
         try:
-            fd = os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = _wait_for_sharing(lambda: os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY),
+                                   f"take the swap guard {guard}")
         except FileExistsError:
             return None
         try:
@@ -553,7 +579,7 @@ class LocalObjectStore(ObjectStore):
                 f.write(body)
             return self._etag(body)
         finally:
-            os.remove(guard)
+            _wait_for_sharing(lambda: os.remove(guard), f"release the swap guard {guard}")
 
     def stat(self, key: str) -> Optional[Dict]:
         path = self._path(key)

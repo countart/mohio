@@ -85,6 +85,16 @@ RECOGNIZED_CLASSIFIERS = frozenset(ENFORCED_CLASSIFIERS + RESERVED_CLASSIFIERS)
 # it, because a bracketed label is never translated (mohio_langmap, 5c47e37).
 RESERVED_LABELS = frozenset(('important',))
 
+# VISIBILITY TAGS (RULED by Ron 2026-10-28, `[hide]`). ONE JOB: a field tagged `[hide]` shows its value in
+# NO output, for anyone, the owner included: not on a page or in a response, not in a log, a diagnostic
+# or an export. It is not a classifier and it carries no contract: no encryption (that stays [pii]'s,
+# [phi]'s and [pci]'s), no audit, no durable sink, no deploy refusal. So it is kept OUT of the sets
+# above, which decide sealing and compliance, and a program that never writes it pays nothing.
+# STACKED, the field gets the union of every tag's effects, and where two govern the same output the
+# most restrictive wins: `[pii] [hide]` is sealed and governed as [pii], and hidden even from its owner.
+VISIBILITY_TAGS = ('hide',)
+HIDDEN_TEXT = '[hidden]'
+
 # The non-classifier kinds that ride the same identity. They are not tags a developer writes in
 # brackets; they are the other per-field rules that were also keyed by bare name and so had the
 # same borrowing bug.
@@ -108,12 +118,37 @@ class ClassificationResolver:
         # every row a read returns, so building the answer each time was a per-row cost on every
         # read of a program with any protected field (measured: ~4-5% on a 100k-row read, 6.0.1).
         self._memo: Dict[Tuple[str, Optional[str]], FrozenSet[str]] = {}
+        # Tables a shape governs (`<name> as table`). A governed table states every column's own
+        # classification, so a lookup that knows it answers from that table's entries alone.
+        self._governed: Set[str] = set()
+        # field -> {kind}, a rule about the FIELD NAME wherever it appears (a sector profile's
+        # `member_id is [pii]`). Also held in _bare; kept apart so a governed table still answers it.
+        self._everywhere: Dict[str, Set[str]] = {}
 
     # ── registration ─────────────────────────────────────────────────────────────────────────
-    def register(self, field: str, kind: str, table: Optional[str] = None) -> None:
+    def govern(self, table: str) -> None:
+        """A shape declares `table` (`<name> as table`): from now on its columns are classified by its
+        own declaration only (T1-VALUE-BOUND-TAGS, BS-009, RULED by Ron 2026-10-21). A loose shape's tag
+        is bound to that shape's values, not to its field name, so it no longer reaches a governed
+        column that happens to share the name: `PrivateReview.reason [pii]` made every table's `reason`
+        protected, a governed `ordinary_reviews.reason` declared plain included, sealed and registered
+        as pii. A table no shape governs keeps rule 2 above unchanged, so every program written before
+        `as table` resolves exactly as it always has."""
+        self._memo.clear()
+        self._governed.add(str(table))
+
+    def governs(self, table: Optional[str]) -> bool:
+        return bool(table) and str(table) in self._governed
+
+    def register(self, field: str, kind: str, table: Optional[str] = None,
+                 everywhere: bool = False) -> None:
+        """`everywhere` marks a rule about the field name in every table, a governed one included: a
+        sector profile's classification. A loose shape's tag is not one (govern, above)."""
         self._memo.clear()
         field = str(field)
         kind = str(kind)
+        if everywhere:
+            self._everywhere.setdefault(field, set()).add(kind)
         if table:
             self._qualified.setdefault((str(table), field), set()).add(kind)
             self._union.setdefault(field, set()).add(kind)
@@ -134,10 +169,19 @@ class ClassificationResolver:
         else:
             # No table: the union, which is what the bare-name sets always answered. See rule 4.
             found |= self._union.get(field, set())
-        found |= self._bare.get(field, set())
+        if not self.governs(table):
+            # A governed table's own declaration is the whole answer (govern, above), and a sector's
+            # rule about the name, which reaches every table.
+            found |= self._bare.get(field, set())
+        else:
+            found |= self._everywhere.get(field, set())
         out = frozenset(found)
         self._memo[key] = out
         return out
+
+    def everywhere_kinds(self, field: str) -> FrozenSet[str]:
+        """The kinds a rule about the name gives this field in every table (register, everywhere)."""
+        return frozenset(self._everywhere.get(str(field), ()))
 
     def has(self, field: str, kind: str, table: Optional[str] = None) -> bool:
         return kind in self.kinds(field, table)
@@ -178,7 +222,7 @@ class ClassificationResolver:
         for (tbl, field), kinds in self._qualified.items():
             if kind in kinds and (table is None or tbl == str(table)):
                 out.add(field)
-        for field, kinds in self._bare.items():
+        for field, kinds in (self._everywhere if self.governs(table) else self._bare).items():
             if kind in kinds:
                 out.add(field)
         return sorted(out)

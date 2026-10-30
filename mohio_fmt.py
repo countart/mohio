@@ -107,6 +107,21 @@ _LISTEN_CLOSER_RE = re.compile(r'(listen\s*:\s*done|done)\b')
 
 _NEW_HANDLER_RE = re.compile(r'^(\s*)new(\s+sh\.\S.*)$')
 _NEW_CLOSER_RE = re.compile(r'^(\s*)new:\s*done\b(.*)$')
+_IDEMPOTENT_BY_RE = re.compile(r'^(\s*)idempotent\s+by\b(.*)$')
+
+
+def idempotent_by_to_once_per(lines):
+    """`idempotent by <key>` becomes `once per <key>` (RENAMED by Ron, 2026-10-28, D7). The words
+    alone change; what follows them (the key and any `keep for`) is kept as written. Returns
+    (lines, changes) in the shape the other line-based passes use."""
+    out = list(lines)
+    changes = []
+    for i, raw in enumerate(out):
+        m = _IDEMPOTENT_BY_RE.match(raw)
+        if m:
+            out[i] = f"{m.group(1)}once per{m.group(2)}"
+            changes.append((i + 1, raw.strip(), out[i].strip()))
+    return out, changes
 
 
 def new_to_listen(lines):

@@ -1,6 +1,6 @@
 # Copyright 2026 Particular LLC. MOHIO(TM) is a trademark of Particular LLC.
 # Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md.
-"""Three refusals that fired correctly and left nothing behind.
+"""Refusals that fired correctly and left nothing behind.
 
 ONE CONCERN: a refusal must leave a trace. Each of these stopped the wrong thing from happening,
 raised a good message, and wrote NOTHING, so the only record was a runtime error in somebody's
@@ -19,15 +19,10 @@ and then fails rolls everything back, deliberately writes no tombstone, and rais
 at all -- so the trail showed an erasure request that simply stops, indistinguishable from a
 crash that left rows half-deleted.
 
-THE SCAN FAILURE is an asymmetry inside one guard. When the sector profile CAN read a payload and
-a rule forbids the call, the refusal is audited. When the profile CANNOT read the payload it
-refuses too, and audited nothing, so the case a reviewer most wants to see -- something stopped
-because governance could not be applied at all -- was the one case that vanished.
+THE SCAN FAILURE, the third, went with the sector operation-rules DSL (RULED by Ron 2026-10-29).
 
 Each now writes through the seam its neighbours already use: the two `cm.purge` refusals through
-`_compliance_audit`, the same one `cm.retain`, `cm.expire` and `cm.lock` use, and the scan
-failure through `_audit_event` into the log the data-class rules name, matching the verdict path
-directly below it.
+`_compliance_audit`, the same one `cm.retain`, `cm.expire` and `cm.lock` use.
 
 READ THE AUDIT, NOT THE OUTPUT. Every assertion below reads the stored trail, because the whole
 defect is invisible in what the program prints.
@@ -193,112 +188,8 @@ check("nothing claims a rollback that did not happen",
       [r for r in trail(db) if r.get('action') == 'purge_rolled_back'] == [], trail(db))
 
 
-# ── 3. the sector scan failure ───────────────────────────────────────────────────────────────
-print("\n== a sector refusal that could not read the payload is recorded ==")
-sys.argv = ['mio.py']
-os.environ.setdefault('DATABASE_URL', ':memory:')
-SECTOR = ('sector profile "scantest"\n\n'
-          'meta\n    tier free\nmeta: done\n\n'
-          'field types\n    ssn as text [pci]\nfield: done\n\n'
-          'operation rules for sector "scantest"\n'
-          '    any operation touching [pci]\n'
-          '        forbidden\n'
-          '        reason "pci data may not leave this sector"\n'
-          '        ai.audit to operation_audit_log\n'
-          'operation: done\n')
-PROG = ('sector: scantest\n'
-        'shape Member\n    ssn as text\n    name as text\nshape: done\n'
-        'connect db as sqlite from env.DATABASE_URL\n'
-        'mioconnect Vendor\n    address "https://example.invalid"\n'
-        '    operation send\n        path "/s"\n        method POST\n'
-        '    operation: done\nmioconnect: done\n'
-        'save to db.members\n    ssn "111"\n    name "Ada"\nsave: done\n'
-        'retrieve m from db.members\n    match name to "Ada"\n'
-        '    on.failure\n        show "none"\nretrieve: done\n'
-        'Vendor.send with m as result\nshow "done"\n')
-
-SECDIR = os.path.join(TMP, "sec")
-os.makedirs(os.path.join(SECDIR, "sectors"), exist_ok=True)
-with open(os.path.join(SECDIR, "sectors", "sector-scantest.mho"), "w", encoding="utf-8") as fh:
-    fh.write(SECTOR)
-with open(os.path.join(SECDIR, "scan.mho"), "w", encoding="utf-8") as fh:
-    fh.write(PROG)
-
-
-def sector_run(inject):
-    """The real program, through the real pipeline, with the profile on the real search path.
-
-    `inject` makes the profile unable to answer what a field is classified as, which is the
-    condition this guard exists for. It is a fault at the seam, not a call into an internal
-    function: the program still runs end to end and the refusal still comes out of the real
-    governance check.
-    """
-    code = (
-        "import sys, os, json\n"
-        "sys.argv=['mio.py']\n"
-        "sys.path.insert(0, r'" + ROOT + "')\n"
-        "import mohio_data, mohio_sector_loader as SL\n"
-        "from lark import Lark\n"
-        "from mohio_transformer_ast import transform\n"
-        "from mohio_interpreter import MohioInterpreter, Context\n"
-        "if " + str(bool(inject)) + ":\n"
-        "    SL.SectorProfile.get_field_classifications = lambda self, n: (_ for _ in ()).throw(\n"
-        "        RuntimeError('classification table unavailable'))\n"
-        "g='\\n'.join(l for l in mohio_data.GRAMMAR_PATH.read_text(encoding='utf-8').splitlines()\n"
-        "            if not l.strip().startswith('//'))\n"
-        "P=Lark(g,parser='earley',ambiguity='resolve',propagate_positions=True)\n"
-        "src=open('scan.mho',encoding='utf-8').read()\n"
-        "prog=transform(P.parse(src), src)\n"
-        "it=MohioInterpreter(verbose=False); ctx=Context()\n"
-        "err=''\n"
-        "try:\n"
-        "    for st in prog.statements: it._exec(st, ctx)\n"
-        "except Exception as e:\n"
-        "    err=type(e).__name__+': '+str(e)[:200]\n"
-        "print('@@'+json.dumps({'err': err, 'logs': {k:[{kk:str(vv) for kk,vv in e.items()}\n"
-        "      for e in v] for k,v in (getattr(it,'_audit_logs',{}) or {}).items()}}))\n")
-    env = dict(os.environ, PYTHONPATH=ROOT, DATABASE_URL=":memory:",
-               MOHIO_ENCRYPTION_KEY="testkey")
-    r = subprocess.run([sys.executable, "-c", code], cwd=SECDIR, env=env,
-                       capture_output=True, text=True, timeout=300)
-    for line in ((r.stdout or "") + (r.stderr or "")).splitlines():
-        if line.startswith("@@"):
-            return json.loads(line[2:])
-    return {"err": (r.stdout or "") + (r.stderr or ""), "logs": {}}
-
-
-res = sector_run(inject=True)
-check("the scan failure still refuses", "sector_scan_failed" in res.get("err", ""),
-      res.get("err"))
-ops = [e for e in res.get("logs", {}).get("operation_audit_log", [])
-       if e.get("verdict") == "scan_failed"]
-check("a record is written for the refusal", len(ops) == 1, res.get("logs"))
-rec = ops[0] if ops else {}
-check("...marked as a refused operation, like the verdict path beside it",
-      rec.get("event") == "OPERATION_REFUSED", rec)
-check("...naming the connector and operation",
-      rec.get("connector") == "Vendor" and rec.get("operation") == "send", rec)
-check("...naming the sector whose rules could not be applied",
-      rec.get("sector") == "scantest", rec)
-check("...and saying it could not verify, with the underlying cause",
-      "could not verify" in str(rec.get("reason", ""))
-      and "classification table unavailable" in str(rec.get("reason", "")), rec)
-check("...stamped and chained like every other governance event",
-      bool(rec.get("audit_id")) and bool(rec.get("entry_hash")), sorted(rec))
-
-print("\n-- it goes to the log the data-class rules name, not a generic one --")
-# No rule has matched yet when the scan fails, so there is no verdict to take a log from. The
-# rules that forced the scan are the honest destination.
-check("the record lands in the rules' own audit log",
-      "operation_audit_log" in res.get("logs", {}), sorted(res.get("logs", {})))
-
-print("\n-- a scan that SUCCEEDS writes no scan-failure record --")
-res = sector_run(inject=False)
-ops = [e for e in res.get("logs", {}).get("operation_audit_log", [])
-       if e.get("verdict") == "scan_failed"]
-check("nothing claims a scan failure that did not happen", ops == [], res.get("logs"))
-check("...and the run got past governance to the call itself",
-      "sector_scan_failed" not in res.get("err", ""), res.get("err"))
+# The third refusal this battery carried, the sector operation-rules scan failure, went with the
+# operation-rules DSL (RULED by Ron 2026-10-29).
 
 shutil.rmtree(TMP, ignore_errors=True)
 if _failures:

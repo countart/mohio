@@ -1822,7 +1822,124 @@ def _print_compile_error(err, source="", filename=""):
     if err.hint:
         for hint_line in err.hint.splitlines():
             print(f"    {dim(hint_line)}")
+    _print_code_link(err)
     print()
+
+
+def _code_link(finding):
+    """The getmohio page of a finding's code, from the diagnostic-code registry; nothing for a finding
+    whose code is not registered."""
+    from mohio_transformer import diagnostic_link
+    return diagnostic_link(getattr(finding, 'code', None))
+
+
+def _journey_suppressions(program):
+    """{code: (reason, line)} for every `suppress <code> reason "..."` line in the journeys this page is
+    checked with (RULED by Ron 2026-10-25). The cascade is already merged into the program, root first,
+    so a root journey's line reaches the whole project and a folder journey's line the folder below it.
+    Only an advisory code with a reason is honoured; scan_suppress_lines refuses any other line."""
+    from mohio_ast import JourneyMeta
+    from mohio_transformer import diagnostic_entry
+    from mohio_reachability import _dataclass_nodes
+    out = {}
+    for n in _dataclass_nodes(program):
+        if not isinstance(n, JourneyMeta) or n.kind != 'suppress':
+            continue
+        code, reason = n.value
+        entry = diagnostic_entry(code)
+        if entry is not None and entry.get('suppressible') and reason and str(reason).strip():
+            out[code] = (str(reason), n.line)
+    return out
+
+
+def _apply_suppressions(ctx, program):
+    """Move each warning whose code a journey suppresses out of ctx.warnings, into ctx.suppressed as
+    (warning, reason, line declared). Errors are never touched: no error is suppressible."""
+    rules = _journey_suppressions(program) if program is not None else {}
+    kept, quiet = [], []
+    for w in list(ctx.warnings or []):
+        rule = rules.get(_warning_code(w))
+        if rule is None:
+            kept.append(w)
+        else:
+            quiet.append((w, rule[0], rule[1]))
+    ctx.warnings = kept
+    ctx.suppressed = quiet
+    return quiet
+
+
+def _distinct_suppressed(collected):
+    """The suppressed advisories of a folder check, each once: a journey's own finding that every page
+    under it inherits is one finding, not one per page."""
+    seen, out = set(), []
+    for page, info in (collected or {}).items():
+        for w, reason, line in (info or {}).get('suppressed', ()):
+            # A finding on a journey's line names that journey's file and is one finding however many
+            # pages inherit it; a page's own finding is that page's.
+            src = getattr(getattr(w, 'line', None), 'file', None) or page
+            k = (_warning_code(w), str(getattr(w, 'message', w)), str(getattr(w, 'line', '')), str(src))
+            if k not in seen:
+                seen.add(k)
+                out.append((w, reason, line, src))
+    return out
+
+
+def _advisory_counts(warnings):
+    """(advisories, of them suppressible) among `warnings`, each warning counted once per instance, the
+    way the warning count beside it is. The class and the suppressible flag are the registry's."""
+    from mohio_transformer import diagnostic_entry
+    adv = sup = 0
+    for w in warnings:
+        entry = diagnostic_entry(_warning_code(w))
+        if entry is not None and entry.get('class') == 'advisory':
+            adv += 1
+            sup += bool(entry.get('suppressible'))
+    return adv, sup
+
+
+def _print_advisory_count(counts, n_warn):
+    """`5 of the 7 warnings are advisories ...` under the summary (RULED by Ron 2026-10-26 #5): an
+    advisory is an ergonomic finding, so the rest of the count reads as the ones that matter, and the
+    line says how many a journey may silence by code. Nothing when no warning is an advisory."""
+    adv, sup = counts
+    if not adv:
+        return
+    lead = ((f"All {n_warn} warning(s) " if adv == n_warn else f"{adv} of the {n_warn} warning(s) ")
+            + ("is an advisory" if adv == 1 else "are advisories") + ", ergonomic rather than governance")
+    if sup:
+        lead += (f"; a journey may silence {sup} of " + ("it" if adv == 1 else "them") + " by code"
+                 f" (`suppress <code> reason \"...\"`)")
+    print(f"  {dim(lead + '.')}")
+
+
+def _print_suppressed(quiet, target, show):
+    """`N advisories suppressed, run mio check <target> --show-suppressed to see them` (the silence is
+    never opaque), or with --show-suppressed every one: its code, what it said and the reason given."""
+    if not quiet:
+        return
+    n = len(quiet)
+    if not show:
+        print(f"  {dim(f'{n} advisor' + ('y' if n == 1 else 'ies') + ' suppressed by a journey, run '
+                       f'`mio check {target} --show-suppressed` to see ' + ('it' if n == 1 else 'them'))}")
+        return
+    print(f"\n  {bold('Suppressed')}  {dim(f'{n} advisor' + ('y' if n == 1 else 'ies') + ', each by a journey line')}\n")
+    for item in quiet:
+        w, reason, line = item[:3]
+        first = str(getattr(w, 'message', w)).splitlines()[0]
+        src = getattr(line, 'file', None)
+        where = f"{os.path.basename(str(src))}:{line}" if src else f"journey line {line}"
+        page = f"{str(item[3]).replace(os.sep, '/')}  " if len(item) > 3 else ""
+        print(f"    {yellow(_warning_code(w))}  {dim(page)}{first}")
+        print(f"      {dim(f'suppressed at {where}, reason: {reason}')}")
+    print()
+
+
+def _print_code_link(finding):
+    """Close a finding with its code's page, `see getmohio.com/codes/<code>`, where the reader can read
+    what the code means and, for an advisory, how to suppress it."""
+    see = _code_link(finding)
+    if see:
+        print(f"    {dim('see ' + see)}")
 
 
 def _print_compile_warning(warn, source="", filename="", prefix=""):
@@ -1836,6 +1953,7 @@ def _print_compile_warning(warn, source="", filename="", prefix=""):
     if warn.hint:
         for hint_line in warn.hint.splitlines():
             print(f"    {dim(hint_line)}")
+    _print_code_link(warn)
     print()
 
 
@@ -2180,6 +2298,27 @@ def _check_new_handlers(source, filename):
          f"with `listen: done`; it behaves exactly as `new` did. Run `mio fmt --write {filename}` "
          f"to make every swap. (`new` is reserved for an arrival condition that is not "
          f"built yet: T1-NEW-ARRIVAL-CONDITION.)", exit_code=1)
+
+
+def _check_idempotent_by(source, filename):
+    """`idempotent by` is now written `once per` (RENAMED by Ron, 2026-10-28, D7), and every old line
+    in the file is named with its replacement, so a file is fixed in one pass, and `mio fmt --write`
+    makes every swap. Only the words moved: a route keeps its answers under the key exactly as before.
+    Comments and raw-text bodies are masked first, so a page that shows the old spelling is not refused."""
+    import re as _re
+    masked = _mask_noncode(source).split('\n')
+    original = source.split('\n')
+    hits = []
+    for i, l in enumerate(masked):
+        if _re.match(r'^\s*idempotent\s+by\b', l):
+            shown = original[i].strip() if i < len(original) else l.strip()
+            hits.append((i + 1, shown, 'once per' + _re.sub(r'^idempotent\s+by', '', shown)))
+    if not hits:
+        return
+    lines = '\n'.join(f"  Line {n}: {old}   ->   {new}" for n, old, new in hits)
+    _die(f"`idempotent by` is now written `once per`, so {len(hits)} line(s) here are refused:\n{lines}\n"
+         f"  Only the words changed: the route still answers a repeated request with the same key from "
+         f"its first answer. Run `mio fmt --write {filename}` to make every swap.", exit_code=1)
 
 
 def _check_against_closers(source, filename):
@@ -2707,6 +2846,7 @@ def _parse_and_validate(source, filename, verbose=False):
     _check_download_name(source, filename)
     _check_orphan_handlers(source, filename)
     _check_new_handlers(source, filename)
+    _check_idempotent_by(source, filename)
 
     # -1. PARSE CACHE. The cache holds the TREE only, keyed on the source and the parse-affecting
     # files (`_parse_fingerprint`). A hit skips the Earley parse (the 87s on a large app) but never
@@ -3351,13 +3491,17 @@ def _app_identity(mho_file):
     return 'app:' + hashlib.sha256(os.path.normcase(root).encode('utf-8')).hexdigest()[:16]
 
 
-def _cli_interpreter(ai, verbose, mho_file, args):
+def _cli_interpreter(ai, verbose, mho_file, args, serving=False):
     """An interpreter for a CLI run/serve/test: the resolved SQLite path as before, and only the
     flags as the supplied address."""
     from mohio_interpreter import MohioInterpreter
     interp = MohioInterpreter(ai=ai, verbose=verbose, db_path=_resolve_sqlite_db_path(mho_file, args))
     interp.supplied_address = _supplied_db_address(args)
     interp.app_id = _app_identity(mho_file)
+    # Handed to the protected-data-on-SQLite startup guard: whether this is a serve, and the
+    # platform variable that marks a deploy (_PLATFORM_VARS, the one `serve --dev` refuses on).
+    interp.serving = bool(serving)
+    interp.deploy_marker = next((v for v in _PLATFORM_VARS if (os.environ.get(v) or '').strip()), None)
     return interp
 
 
@@ -3745,8 +3889,29 @@ def cmd_translate(args=None):
         print(f"  {red('Error:')} file not found: {args.file}")
         sys.exit(3)
 
-    from_lang = getattr(args, 'from_lang', 'en')
     to_lang = getattr(args, 'to_lang', None)
+    # THE FILE SAYS WHAT IT IS WRITTEN IN (T1-TRANSLATE-REVERSE-SILENT-NOOP). `--from` defaulted to
+    # English, so a Klingon file translated `--to english` skipped the step out of Klingon, was written
+    # back unchanged, and the command said "keywords translated to english". The file's own
+    # `// language:` line names its language; `--from` that disagrees with it is refused, not obeyed.
+    import re as _re_lang
+    try:
+        _head = Path(args.file).read_text(encoding='utf-8-sig')[:2000]
+    except (OSError, ValueError):
+        _head = ''                      # an unreadable file is refused by the read below, by name
+    _declared = _re_lang.search(r'^\s*//\s*language:\s*([\w-]+)', _head, _re_lang.M | _re_lang.I)
+    _declared = _declared.group(1).lower() if _declared else None
+    def _lang_key(lang):
+        lang = str(lang).strip().lower()
+        return 'en' if lang in ('en', 'english', 'canonical') else lang
+    from_lang = getattr(args, 'from_lang', None)
+    if from_lang and _declared and _lang_key(from_lang) != _lang_key(_declared):
+        print(f"  {red('Error:')} --from {from_lang} disagrees with the file, which declares "
+              f"`// language: {_declared}`.")
+        print(f"  Leave --from out and the file's own line is used: "
+              f"mio translate {args.file} --to <lang>")
+        sys.exit(1)
+    from_lang = (from_lang or _declared or 'en')  # SILENT-OK: no line and no --from is the base language, as every file is unless it says otherwise
 
     if not to_lang:
         print(f"  {red('Error:')} --to language required")
@@ -3778,13 +3943,23 @@ def cmd_translate(args=None):
             return None
 
         source = _read_source(source_file)
-        
+
+        if _lang_key(from_lang) == _lang_key(to_lang):
+            print(f"  {red('Error:')} {source_file.name} is already written in {from_lang}, so there is "
+                  f"nothing to translate to {to_lang}. Nothing was written.")
+            sys.exit(1)
+
         # Step 1: translate from source lang to canonical (English)
         if from_lang not in ('en', 'english'):
             from_map_path = find_langmap(from_lang, maps_dir)
             if not from_map_path:
-                print(f"  {yellow('!')} No langmap found for '{from_lang}' -- assuming canonical English")
-                canonical = source
+                # It used to assume English and write the file back unchanged, saying it had translated.
+                print(f"  {red('Error:')} no language pack for '{from_lang}', the language this file is "
+                      f"written in, so it cannot be read back into the base language. Nothing was written.")
+                print(f"  Available langmaps in {maps_dir}:")
+                for lm in glob.glob(os.path.join(maps_dir, '*.langmap')):
+                    print(f"    {os.path.basename(lm)}")
+                sys.exit(1)
             else:
                 loader = LangmapLoader(from_map_path)
                 canonical = loader.translate(source, direction='backward')
@@ -3806,6 +3981,17 @@ def cmd_translate(args=None):
             loader = LangmapLoader(to_map_path)
             translated = loader.translate(canonical, direction='forward')
             print(f"  [translate] canonical -> {to_lang}: {to_map_path}")
+
+        # THE RECEIPT IS THE OUTCOME. Code that comes out word for word as it went in was not
+        # translated, so it is never written under a name that says it was.
+        def _code_only(text):
+            return '\n'.join(l for l in text.splitlines()
+                             if l.strip() and not _re_lang.match(r'\s*//', l)).strip()
+        if _code_only(translated) == _code_only(source):
+            print(f"  {red('Error:')} translating {source_file.name} from {from_lang} to {to_lang} "
+                  f"changed no word, so it was not written. Check the file's `// language:` line, or "
+                  f"name its language with --from.")
+            sys.exit(1)
 
         # THE HEADER DESCRIBES THE FILE IN HAND, so translating BACK to the base language
         # must take it off rather than leave the old one standing. A round trip
@@ -4392,7 +4578,7 @@ def _cmd_serve_directory(args, directory, verbose=False):
                              f"{len(ctx.errors)} error(s)")
                 _compiled[os.path.realpath(filepath)] = ('failed', len(ctx.errors))
                 continue
-            interp = _cli_interpreter(ai, verbose, filepath, args)
+            interp = _cli_interpreter(ai, verbose, filepath, args, serving=True)
             interp.run_declarations(program)
             programs[url_path] = program
             interps[url_path] = interp
@@ -4686,7 +4872,7 @@ def cmd_serve(args):
             ai = MockAiRuntime()
             print(f"  {dim('AI runtime:')} mock {dim('(use --ai for real Anthropic API)')}")
 
-        interp = _cli_interpreter(ai, verbose, filename, args)
+        interp = _cli_interpreter(ai, verbose, filename, args, serving=True)
 
         # Run declarations first to establish the real db connection, THEN load authored data.
         interp.run_declarations(program)
@@ -5220,7 +5406,8 @@ def _check_many(files, args, rel):
     are checked first, so every page that inherits one reuses its result. Findings print after the
     last file: each journey's own findings once, under the journey, then each page's own.
 
-    Returns (collected, failed, n_warn, n_err, n_shared)."""
+    Returns (collected, failed, n_warn, n_err, n_shared, advisory), `advisory` being
+    _advisory_counts over exactly the warnings counted into n_warn."""
     import random
     print(f"  [mio check] {random.choice([m for m in _CHECK_NOTES if '{n}' not in m])}")
     def _depth(f):
@@ -5249,6 +5436,7 @@ def _check_many(files, args, rel):
     args.all = saved_all
 
     n_warn = n_err = n_shared = 0
+    counted = []          # the warnings n_warn counts, so the advisory line counts the same ones
     # 1) Shared code: each journey's own findings, once, under the journey, with its own excerpts. A
     #    journey above the checked folder that a page inherits is reported here too.
     shared = list(journeys)
@@ -5266,6 +5454,7 @@ def _check_many(files, args, rel):
         for e in info['own_errors']:
             _print_compile_error(e, info['source'], jf)
         n_warn += len(info['own_warnings'])
+        counted += info['own_warnings']
         n_err += len(info['own_errors'])
         n_shared += len(info['own_warnings']) + len(info['own_errors'])
     # 2) Each page's own findings, with that page's excerpt. A warning repeated across pages is said
@@ -5285,6 +5474,7 @@ def _check_many(files, args, rel):
             continue
         if os.path.basename(f) != 'journey.mho':
             n_warn += len(info['own_warnings'])
+            counted += info['own_warnings']
             _leads = [k for k in dict.fromkeys(_warning_key(w) for w in info['own_warnings'])
                       if _first_at.get(k) == f]
         else:
@@ -5307,7 +5497,7 @@ def _check_many(files, args, rel):
         info = collected.get(f)
         if not info or not (info.get('own_errors') or info.get('errors')):
             n_err += 1
-    return collected, sorted(set(failed)), n_warn, n_err, n_shared
+    return collected, sorted(set(failed)), n_warn, n_err, n_shared, _advisory_counts(counted)
 
 
 def cmd_check(args):
@@ -5372,12 +5562,14 @@ def cmd_check(args):
             # The same aggregation as a folder check (`_check_many` clears `args.all` while it
             # recurses, for the reason above): one progress line per file, and a finding in a
             # shared journey reported once, at the journey, not under every page.
-            _c, failed, n_w, n_e, n_sh = _check_many(files, args, lambda f: f)
+            _c, failed, n_w, n_e, n_sh, _adv = _check_many(files, args, lambda f: f)
             print(f"\n  {bold('Summary')}  {dim(str(len(files)) + ' file(s) checked')} . "
                   f"{yellow(str(n_w) + ' warning(s)')} . "
                   f"{red(str(n_e) + ' error(s)') if n_e else dim('0 errors')}")
             if n_sh:
                 print(f"  {dim(f'{n_sh} finding(s) in shared code are shown once, at the file the code is in.')}")
+            _print_advisory_count(_adv, n_w)
+            _print_suppressed(_distinct_suppressed(_c), '--all', getattr(args, 'show_suppressed', False))
         if failed:
             print(f"  x {len(failed)} file(s) failed:")
             for f in failed:
@@ -5443,7 +5635,7 @@ def cmd_check(args):
                 return fp
         # AGGREGATE (`_check_many`): a finding whose code is in a journey is reported ONCE, at the
         # journey, with its real excerpt; each page shows only its OWN findings, with its own excerpt.
-        _c, failed, n_distinct_warn, n_distinct_err, _decl = _check_many(sorted(mho), args, _rel)
+        _c, failed, n_distinct_warn, n_distinct_err, _decl, _adv = _check_many(sorted(mho), args, _rel)
 
         private_failed = []
         for f in sorted(private):
@@ -5475,6 +5667,8 @@ def cmd_check(args):
         if _decl:
             print(f"  {dim(f'{_decl} finding(s) declared in a journey and inherited by every page '
                           f'are shown once, at the journey.')}")
+        _print_advisory_count(_adv, n_distinct_warn)
+        _print_suppressed(_distinct_suppressed(_c), _CHECK_TARGET[0], getattr(args, 'show_suppressed', False))
         if failed or private_failed:
             _n = len(failed) + len(private_failed)
             print(f"  {red('x')} {_n} file(s) failed:")
@@ -5749,6 +5943,10 @@ def cmd_check(args):
     # all 95 pages, and 344 is a line of the root journey). Each finding the page inherited is
     # matched, by message and line, against the journey's own check (run once per process) and
     # reported at the journey instead.
+    # SUPPRESSED ADVISORIES (RULED by Ron 2026-10-25): a journey's `suppress <code> reason "..."` takes
+    # that advisory out of the report for every page the journey reaches; the count, and with
+    # --show-suppressed each one and its reason, is still said, so the silence is never opaque.
+    _apply_suppressions(ctx, _program)
     own_w, own_e, inherited = _split_inherited_findings(filename, ctx, args)
 
     # JSON output mode -- for AI coding agents
@@ -5780,12 +5978,23 @@ def cmd_check(args):
                 "message": msg,
                 "hint":    HINT_TABLE.get(code, ""),
             }
+
+        def _registered(d):
+            # A registered code carries its class and its page, from the diagnostic-code registry.
+            from mohio_transformer import diagnostic_entry, diagnostic_link
+            entry = diagnostic_entry(d.get("code"))
+            if entry is None:
+                return d
+            return dict(d, **{"class": entry["class"], "link": diagnostic_link(d["code"])})
         # Each finding names the file its code is in: this file, or the journey it came from.
         _from = {id(f): jp for (jp, _kind, f) in inherited}
         for e in (ctx.errors or []):
-            output["errors"].append(dict(_err_to_dict(e), file=_finding_file(e) or _from.get(id(e), filename)))
+            output["errors"].append(dict(_registered(_err_to_dict(e)), file=_finding_file(e) or _from.get(id(e), filename)))
         for w in (ctx.warnings or []):
-            output["warnings"].append(dict(_err_to_dict(w), file=_finding_file(w) or _from.get(id(w), filename)))
+            output["warnings"].append(dict(_registered(_err_to_dict(w)), file=_finding_file(w) or _from.get(id(w), filename)))
+        output["suppressed"] = [dict(_registered(_err_to_dict(w)), file=_finding_file(w) or filename,
+                                     reason=reason, suppressed_at=int(line or 0))
+                                for w, reason, line in getattr(ctx, 'suppressed', [])]
         print(_json.dumps(output, indent=2))
         sys.exit(0 if output["passed"] else 1)
 
@@ -5800,6 +6009,7 @@ def cmd_check(args):
             'warnings': list(ctx.warnings or []),
             'errors': list(ctx.errors or []),
             'own_warnings': own_w, 'own_errors': own_e, 'inherited': inherited,
+            'suppressed': list(getattr(ctx, 'suppressed', [])),
         }
         return
 
@@ -5827,17 +6037,22 @@ def cmd_check(args):
     n_err  = len(ctx.errors)
     n_warn = len(ctx.warnings)
 
+    _quiet = getattr(ctx, 'suppressed', [])
     if n_err:
         warn_part = f" . {yellow(f'{n_warn} warning(s)')}" if n_warn else ""
         print(f"  {red('x')}  {bold(filename)}  "
               f"{dim(f'{n_lines} lines')}"
               f"{warn_part} . {red(f'{n_err} error(s)')}\n")
+        _print_advisory_count(_advisory_counts(ctx.warnings), n_warn)
+        _print_suppressed(_quiet, filename, getattr(args, 'show_suppressed', False))
         sys.exit(1)
     else:
         warn_part = f" . {yellow(f'{n_warn} warning(s)')}" if n_warn else ""
         print(f"\n  {green('v')}  {bold(filename)}  "
               f"{dim(f'{n_lines} lines . no errors')}"
               f"{warn_part}\n")
+        _print_advisory_count(_advisory_counts(ctx.warnings), n_warn)
+        _print_suppressed(_quiet, filename, getattr(args, 'show_suppressed', False))
         sys.exit(0)
 
 
@@ -6425,11 +6640,19 @@ def _sector_facts(name):
             f["signature"] = "REFUSED"
             f["explanation"] = str(e)
     else:
-        prof = _SL.load_sector_profile(name)
-        f["case"] = "community"
         f["tier"] = "community"
-        f["version"] = (prof.version or None) if prof else None
         f["signature"] = "n/a (community profiles are unsigned)"
+        try:
+            prof = _SL.load_sector_profile(name)
+        except _SL.SectorUnenforceableRuleError as e:
+            # A community profile that declares a rule nothing enforces refuses to load (it would claim
+            # protection nobody checks). The inventory reports it refused, with the loader's reason,
+            # rather than stopping on it: one bad profile on the search path stopped the whole listing.
+            f["case"] = "community_refused"
+            f["explanation"] = str(e)
+            return f
+        f["case"] = "community"
+        f["version"] = (prof.version or None) if prof else None
         f["status"] = "would_apply"
     return f
 
@@ -6483,6 +6706,7 @@ def _sector_inventory():
 
 _SECTOR_CASE_LABEL = {
     "community": ("COMMUNITY", green),
+    "community_refused": ("COMMUNITY but REFUSED", red),
     "certified_verified": ("CERTIFIED", green),
     "certified_refused": ("CERTIFIED but REFUSED", red),
     "known_certified_no_local_profile": ("KNOWN CERTIFIED, no local profile", yellow),
@@ -6524,8 +6748,12 @@ def cmd_sector(args):
                 label, colour = _SECTOR_CASE_LABEL.get(p["case"], (p["case"], dim))
                 ver = p["version"] if p["version"] else "-"
                 loc = os.path.relpath(p["resolved_path"]) if p["resolved_path"] else "-"
-                print(f"    {p['name']:<18} {colour(label.split()[0].lower()):<20} "
+                # A profile that refuses to load says REFUSED here; its tier alone read as one in force.
+                word = "refused" if str(p["case"]).endswith("_refused") else label.split()[0].lower()
+                print(f"    {p['name']:<18} {colour(word):<20} "
                       f"v{ver:<6} {dim(loc)}")
+                if word == "refused" and p.get("explanation"):
+                    print(f"      {dim(str(p['explanation']).splitlines()[0])}")
             print(f"    {dim('(' + str(len(inv['profiles'])) + ' found)')}")
         else:
             print(f"    {dim('none found')}")
@@ -7521,6 +7749,8 @@ def build_arg_parser():
     c.add_argument("--langmap",  action="store_true", help="List every keyword this file's langmap does not map (unmapped words fall back to English)")
     c.add_argument("--locations", nargs="?", const="", default=None, metavar="CODE",
                    help="List every site of a repeated warning, not just the first (name a CODE to list one class)")
+    c.add_argument("--show-suppressed", action="store_true", dest="show_suppressed",
+                   help="List each advisory a journey's `suppress` line quiets, with the reason it gives")
     c.add_argument("file",       nargs="?",           help="File to check (omit with --all)")
 
     # walk -- terminal diagnostic for data maps
@@ -7568,8 +7798,8 @@ def build_arg_parser():
                      help="minimum hit count to include (default: 1)")
     tr = sub.add_parser("translate", add_help=False)
     tr.add_argument("file", nargs="?", help=".mho source file to translate")
-    tr.add_argument("--from", dest="from_lang", default="en",
-                    help="source human language (default: en)")
+    tr.add_argument("--from", dest="from_lang", default=None,
+                    help="source human language (default: the file's `// language:` line, else en)")
     tr.add_argument("--to", dest="to_lang", default=None,
                     help="target human language (e.g. pt, klingon)")
     tr.add_argument("--output", dest="output", default=None,
@@ -7582,8 +7812,11 @@ def build_arg_parser():
                     choices=["generate", "check", "show"])
     sc.add_argument("file", nargs="?", default=None)
     mig = sub.add_parser("migrate", add_help=False)
-    mig.add_argument("migrate_action", nargs="?", default=None, choices=["typed-storage", "protect"])
+    mig.add_argument("migrate_action", nargs="?", default=None,
+                     choices=["typed-storage", "protect", "add-unique", "unprotect"])
     mig.add_argument("file", nargs="?", default=None)
+    # `mio migrate add-unique code,region on claims app.mho`: the key, `on`, the table, the program.
+    mig.add_argument("more", nargs="*", default=[])
     mig.add_argument("--dry-run", dest="dry_run", action="store_true",
                      help="List the plan and every value that will not convert; change nothing")
     wr = sub.add_parser("writes", add_help=False)
@@ -7878,12 +8111,181 @@ def cmd_migrate_protect(path, dry):
         sys.exit(1)
 
 
+def cmd_migrate_add_unique(key_text, more):
+    """mio migrate add-unique code,region on <table> <program.mho>: the reviewed step that adds a
+    table's declared key, as a UNIQUE, to a table that already exists without it (T1-DECLARED-UNIQUE-
+    ENFORCE, RULED by Ron 2026-10-27). A deployed app refuses to start on such a table and names this
+    command; development adds the key itself when no key repeats. Only the key the program declares
+    for that table (`save ... unless code, region exists`), and never over a repeated key: the
+    repeats are named and nothing changes. One audit record names the table and the key."""
+    usage = ("Usage: mio migrate add-unique <key> on <table> <program.mho>\n"
+             "  Adds the key a program declares for a table (`save to db.<table> unless <key> exists`)\n"
+             "  as a UNIQUE on a table that already exists without it, for example\n"
+             "      mio migrate add-unique code,region on claims app.mho")
+    if not key_text or len(more) != 3 or more[0] != 'on':
+        _die(usage, exit_code=3)
+    table, filename = more[1], more[2]
+    cols = [c.strip() for c in key_text.split(',') if c.strip()]
+    path = Path(filename)
+    if path.is_dir():
+        _die(f"mio migrate add-unique takes one .mho file, not a folder ({filename}).", exit_code=3)
+    source = _read_source(path, exit_code=3)
+    tree, pctx = _parse_and_validate(source, filename, False)
+    if pctx.errors:
+        for e in pctx.errors:
+            _print_compile_error(e, source, filename)
+        sys.exit(1)
+    from mohio_transformer_ast import transform as ast_transform
+    program = ast_transform(tree, source)
+    program = _resolve_includes(program, filename, verbose=False)
+    program = _apply_journey(program, filename, verbose=False)
+    from mohio_interpreter import MohioInterpreter, Context
+    it = MohioInterpreter(verbose=False)
+    it._migrating_unique = True          # this command is the step the connect-time review names
+    from mohio_interpreter import MohioRuntimeError
+    try:
+        it.run_declarations(program)
+    except MohioRuntimeError as e:
+        _die(f"{filename} could not start, so nothing was changed: {e}", exit_code=1)
+    db = it._db
+    print(f"\n  {bold('mio migrate add-unique')}  {dim(filename)}\n")
+    declared = (getattr(it, '_declared_unique', None) or {}).get(table)
+    # A field the program's shape declares `unique` on this table is the other key this adds (RULED
+    # by Ron 2026-10-28): a deployed app names this command for it too.
+    shaped = [str(c) for c in ((getattr(it, '_shaped_unique_cols', None) or {}).get(table) or [])]
+    by_shape = len(cols) == 1 and cols[0] in shaped and not (declared and set(cols) == set(declared))
+    if not declared and not by_shape:
+        _die(f"{filename} declares no key for db.{table}: no `save to db.{table} unless ... exists` and no "
+             f"shape field `{', '.join(cols)}` marked `unique` for it. This command adds only a key the "
+             f"program declares.", exit_code=1)
+    if not by_shape and set(cols) != set(declared):
+        _die(f"{filename} declares db.{table}'s key as {', '.join(declared)}, not {', '.join(cols)}. "
+             f"This command adds only the key the program declares:\n"
+             f"      mio migrate add-unique {','.join(declared)} on {table} {filename}", exit_code=1)
+    if db is None or not hasattr(db, 'unique_index_sets'):
+        _die(f"{filename} connects to no SQL database Mohio can migrate (sqlite, postgres, mysql or "
+             f"oracle).", exit_code=1)
+    if by_shape:
+        declared = cols
+        _phys = list(db._shaped_unique_cols.get(table) or shaped)
+        physical = [_phys[shaped.index(cols[0])]]
+    else:
+        physical = list(db._declared_unique.get(table) or declared)
+    sets = db.unique_index_sets(table)
+    if sets is None:
+        _die(f"db.{table} does not exist yet, so there is nothing to add: the program creates it with "
+             f"the UNIQUE on {', '.join(declared)} at its first save.", exit_code=1)
+    if frozenset(c.lower() for c in physical) in sets:
+        print(f"  db.{table} already has the UNIQUE on {', '.join(declared)}. Nothing to do.\n")
+        return
+    repeats, total = db.repeated_keys(table, physical)
+    if repeats:
+        _die(f"db.{table} holds a key more than once: "
+             f"{it._repeated_key_text(repeats, total, physical)}. Nothing was changed.\n"
+             f"  Remove or merge the repeated rows, then run this command again.", exit_code=1)
+    db.add_unique_key(table, physical)
+    it._audit_event('security_audit_log', {
+        'event': 'unique_key_added', 'table': table, 'field': ', '.join(declared),
+        'detail': f'{table}: UNIQUE on {", ".join(declared)} added by mio migrate add-unique',
+    }, Context())
+    print(f"  {green('v')}  db.{table}: added the UNIQUE on {', '.join(declared)}\n")
+
+
+def _protection_words(prot):
+    """`pii` or `phi, pii`, or `plain` for a column with no protection."""
+    named = sorted(p for p in prot if p)
+    return ', '.join(named) if named else 'plain'
+
+
+def _tag_words(prot):
+    """The class tags a protected column is declared with: its tags, `pii` when it is only `encrypted`."""
+    named = sorted(p for p in prot if p and p != 'encrypted')
+    return ', '.join(named) if named else 'pii'
+
+
+def cmd_migrate_unprotect(target, more):
+    """mio migrate unprotect <table>.<column> <program.mho>: correct a field register that records a
+    PLAIN column as protected (T1-MIGRATE-UNPROTECT, RULED by Ron 2026-10-27, D1 option B). The old
+    name-wide tag binding registered unrelated plain columns, and the register's rule that protection
+    never goes down then refused the program that declares the column plain, at every start. One
+    column at a time, never on boot: the program must declare it plain, and the column must hold NO
+    sealed value; any sealed value is a real downgrade, and the refusal stands. The register entry is
+    rewritten as an audited write, and one audit record names the change."""
+    usage = ("Usage: mio migrate unprotect <table>.<column> <program.mho>\n"
+             "  Records as plain one column the field register over-protected, when the program\n"
+             "  declares it plain and it holds no sealed value, for example\n"
+             "      mio migrate unprotect staff_decisions.reason app.mho")
+    if not target or len(more) != 1 or target.count('.') != 1:
+        _die(usage, exit_code=3)
+    table, col = target.split('.')
+    filename = more[0]
+    path = Path(filename)
+    if path.is_dir():
+        _die(f"mio migrate unprotect takes one .mho file, not a folder ({filename}).", exit_code=3)
+    source = _read_source(path, exit_code=3)
+    tree, pctx = _parse_and_validate(source, filename, False)
+    if pctx.errors:
+        for e in pctx.errors:
+            _print_compile_error(e, source, filename)
+        sys.exit(1)
+    from mohio_transformer_ast import transform as ast_transform
+    program = ast_transform(tree, source)
+    program = _resolve_includes(program, filename, verbose=False)
+    program = _apply_journey(program, filename, verbose=False)
+    from mohio_interpreter import MohioInterpreter
+    it = MohioInterpreter(verbose=False)
+    # The register's refusal for THIS column is the one this command answers, so it is held for it
+    # alone; every other column is checked as at any start.
+    it._migrating_unprotect = (table, col)
+    from mohio_interpreter import MohioRuntimeError
+    try:
+        it.run_declarations(program)
+    except MohioRuntimeError as e:
+        _die(f"{filename} could not start, so nothing was changed: {e}", exit_code=1)
+    db = it._db
+    print(f"\n  {bold('mio migrate unprotect')}  {dim(filename)}\n")
+    pending = getattr(it, '_unprotect_pending', None)
+    if pending is None:
+        reg = it._field_register_read(db) if db is not None else {}
+        entry = reg.get((table, col))
+        if entry is None:
+            _die(f"db.{table}.{col} has no field-register entry in this database, so there is nothing "
+                 f"to unprotect.", exit_code=1)
+        _die(f"{filename} declares db.{table}.{col} with the protection the register records "
+             f"({_protection_words(str(entry.get('protection') or '').split(','))}), so there is nothing to unprotect. This command "
+             f"records a column plain only for a program that declares it plain.", exit_code=1)
+    sealed = db.sealed_count(table, col) if db.table_columns(table) else 0
+    if sealed:
+        _die(f"db.{table}.{col} holds {sealed} sealed value(s), so recording it plain would leave them "
+             f"unreadable to every program reading it as plain. Nothing was changed, and the register "
+             f"keeps it protected ({', '.join(sorted(pending['was']))}).\n"
+             f"  A column holding sealed values stays protected: declare it `{col} as "
+             f"{pending['declared_type'] if pending['declared_type'] else 'text'} [{_tag_words(pending['was'])}]`.",
+             exit_code=1)
+    ctx = pending['ctx']
+    it._field_register_write(db, ctx, table, col, pending['declared_type'], pending['protection'],
+                             pending['before'])
+    it._audit_event('security_audit_log', {
+        'event': 'field_unprotected', 'table': table, 'field': col,
+        'detail': (f"{table}.{col}: the field register recorded {', '.join(sorted(pending['was']))} and "
+                   f"the program declares {_protection_words(pending['protection'])}; "
+                   f"no sealed value held; recorded by mio migrate unprotect"),
+    }, ctx)
+    print(f"  {green('v')}  db.{table}.{col}: the field register records it as "
+          f"{_protection_words(pending['protection'])} (was {_protection_words(pending['was'])}); "
+          f"it held no sealed value\n")
+
+
 def cmd_migrate(args):
     action = getattr(args, 'migrate_action', None)
     filename = getattr(args, 'file', None)
     dry = bool(getattr(args, 'dry_run', False))
     if action == 'protect' and filename:
         return cmd_migrate_protect(Path(filename), dry)
+    if action == 'add-unique':
+        return cmd_migrate_add_unique(filename, list(getattr(args, 'more', None) or []))
+    if action == 'unprotect':
+        return cmd_migrate_unprotect(filename, list(getattr(args, 'more', None) or []))
     if action != 'typed-storage' or not filename:
         _die("Usage: mio migrate typed-storage <file.mho> [--dry-run]\n"
              "  Converts the text columns of tables created before typed storage into the types\n"
@@ -7892,7 +8294,13 @@ def cmd_migrate(args):
              "       mio migrate protect <file.mho> [--dry-run]\n"
              "  Encrypts, in place, the stored values of every field the program declares\n"
              "  protected ([pii], [phi], [pci], sec.encrypt) that another program wrote\n"
-             "  unprotected, and builds their search index. --dry-run counts and changes nothing.",
+             "  unprotected, and builds their search index. --dry-run counts and changes nothing.\n"
+             "       mio migrate add-unique <key> on <table> <file.mho>\n"
+             "  Adds the key the program declares for a table (`unless <key> exists`) as a UNIQUE\n"
+             "  on a table that already exists without it.\n"
+             "       mio migrate unprotect <table>.<column> <file.mho>\n"
+             "  Records as plain one column the field register over-protected, when it holds no\n"
+             "  sealed value and the program declares it plain.",
              exit_code=3)
     path = Path(filename)
     if path.is_dir():
@@ -8157,6 +8565,10 @@ def cmd_fmt(args):
     # the swap to `listen for sh.X` happens here, line by line, like the wrapper removal above.
     _wrap_lines, _new_changes = new_to_listen(_wrap_lines)
     _wrap_changes = _wrap_changes + _new_changes
+    # `idempotent by` is now `once per` (ruled 2026-10-28): refused before the parse, swapped here.
+    from mohio_fmt import idempotent_by_to_once_per
+    _wrap_lines, _once_changes = idempotent_by_to_once_per(_wrap_lines)
+    _wrap_changes = _wrap_changes + _once_changes
     # A handler's request data is read by the shape's name exactly as declared (RULED 2026-10-09);
     # check refuses the retired lowercase-first name, so the rewrite happens here, before the parse.
     from mohio_fmt import shape_binding_names

@@ -138,6 +138,37 @@ HINT_TABLE = {
                                   "Contract addresses belong in environment variables.",
 }
 
+# THE DIAGNOSTIC-CODE REGISTRY (BRIEF sector-idempotency-and-diagnostics, Part B, 2026-10-25). One entry per
+# stable code in mohio_data/diagnostics.json: its type, its class (advisory or governance), whether a project
+# may suppress it, what it says and its fix. The getmohio link a finding prints derives from it, and so does
+# the published reference (tools/diagnostics); nothing keeps a second list. test_battery_diagnostics_registry
+# fails the build on a code a compiler site names that is missing here, and on an entry no site names.
+_DIAGNOSTIC_REGISTRY = []
+
+
+def diagnostic_registry():
+    """The registry, read once. A missing or unreadable file raises: the registry is shipped data, and a
+    build without it is broken, not quietly without links."""
+    if not _DIAGNOSTIC_REGISTRY:
+        import json
+        import mohio_data
+        _DIAGNOSTIC_REGISTRY.append(json.loads(mohio_data.DIAGNOSTICS_PATH.read_text(encoding="utf-8")))
+    return _DIAGNOSTIC_REGISTRY[0]
+
+
+def diagnostic_entry(code):
+    """The registry entry for a code, or None for a finding that carries no registered code."""
+    if not code:
+        return None
+    return diagnostic_registry()["codes"].get(str(code))
+
+
+def diagnostic_link(code):
+    """`getmohio.com/codes/<code>` for a registered code; nothing for any other."""
+    if diagnostic_entry(code) is None:
+        return ""
+    return diagnostic_registry()["link"].format(code=code)
+
 @dataclass
 class CompileError:
     message: str
@@ -1176,13 +1207,8 @@ class MohioValidator:
             self._walk(c)
 
     def _v_notify_stmt(self, tree):
-        self.ctx.warn(
-            "'notify' is not built yet and will STOP this program if it is reached; no "
-            "notification is sent.",
-            get_line(tree),
-            hint="Send the notification explicitly (miomail.send / miolog.alert) until "
-                 "'notify' is wired. It refuses rather than skipping, so a program that "
-                 "reaches this line does not continue.", code="notify_not_built")
+        # `notify ... via email` runs (T1-TEMPLATE); any other channel is refused by the AST
+        # transformer (notify_channel_not_built), so there is no blanket warning left to give.
         for c in tree.children:
             self._walk(c)
 
@@ -1233,7 +1259,7 @@ class MohioValidator:
         # surface a compile error naming the file and why, and never fall back to a same-named `.mho`.
         try:
             from mohio_sector_loader import (get_sector_profile, SectorVerificationError,
-                                             SectorUnenforceableRuleError)
+                                             SectorUnenforceableRuleError, SectorUnreadableLineError)
             try:
                 profile = get_sector_profile(self.ctx.sector_full or self.ctx.sector_base)
                 self.ctx.sector_profile = profile
@@ -1255,9 +1281,14 @@ class MohioValidator:
                 # A profile naming a rule this loader does not enforce (mfa/session/lockout/password)
                 # must refuse at CHECK time too, not only surface as a runtime surprise at `mio run`.
                 line = getattr(getattr(tree, 'meta', None), 'line', 0) or 0
+                # An unreadable line names its own fix in the message; the security-requirements hint
+                # is about the unenforced-rule refusal only, and sent a reader after the wrong block.
                 self.ctx.error(str(_e), line,
-                    hint="Remove the unenforced rule lines from the sector profile, or drop the "
-                         "`security requirements` block. `require role` covers access control today.")
+                    hint=("Correct or remove the profile line the message names; a line the loader "
+                          "cannot read refuses rather than doing nothing."
+                          if isinstance(_e, SectorUnreadableLineError) else
+                          "Remove the unenforced rule lines from the sector profile, or drop the "
+                          "`security requirements` block. `require role` covers access control today."))
                 self.ctx.sector_profile = None
         except ImportError:
             self.ctx.sector_profile = None
@@ -1318,7 +1349,7 @@ class MohioValidator:
             }
             suggestion = suggestions.get(name_lower, f"{name_lower}_value or {name_lower}_data")
             self.ctx.errors.append(CompileError(
-                f"'{name}' is reserved -- it is the Mohio {what}. "
+                f"`{name}` is reserved; it is the Mohio {what}. "
                 f"Use '{suggestion}' or similar instead.",
                 line,
                 hint=f"Reserved words cannot be used as {context} names. "
@@ -1896,7 +1927,7 @@ class MohioValidator:
         """Yield (field, subtree) for every explicit `request.<field>` read under `t`. Shared by the
         undeclared-field check and the fieldless-contract check so both see the same reads.
 
-        `request.header "X"` (a verify_source, read by `verify token from` and `idempotent by`)
+        `request.header "X"` (a verify_source, read by `verify token from` and `once per`)
         names a request HEADER, not a payload field, so it is no read of the shape."""
         from mohio_pretokenizer import unmark_dotted
         _header_refs = {id(c) for s in t.iter_subtrees() if str(getattr(s, 'data', '')) == 'verify_source'

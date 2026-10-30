@@ -12,7 +12,7 @@ tests/test_structural_invariants.py fails loud if anything starts to.
 """
 
 # The compiler/CLI release.
-VERSION = "6.0.1"
+VERSION = "6.0.2"
 
 # The LANGUAGE spec this build implements. A different thing, deliberately: the toolchain
 # ships faster than the language changes.

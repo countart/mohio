@@ -645,6 +645,16 @@ def scan_executor_branch_deferrals(program):
     errors = []
     seen = set()
     list_vars = _collect_list_vars(program)
+    # Names that hold a list for the `.count` rule below: a list literal, a find's result, and a
+    # retrieve of all or every row. Kept apart from list_vars, which also drives the held-list
+    # write refusals, where a query's result is not a held list.
+    list_like = set(list_vars)
+    for _q in _all_nodes(getattr(program, 'statements', None) or []):
+        _qk = type(_q).__name__
+        if _qk == 'FindBlock' or (_qk == 'RetrieveBlock' and getattr(_q, 'modifier', None) in ('all', 'every')):
+            for _qn in (getattr(_q, 'name', None), getattr(_q, 'alias', None)):
+                if _qn:
+                    list_like.add(str(_qn))
     TAG = "T1-EXECUTOR-BRANCH-DEFERRALS"
 
     def err(msg, node):
@@ -912,6 +922,14 @@ def scan_executor_branch_deferrals(program):
                 err(f"(T1-EXECUTOR-BRANCH-DEFERRALS) `{parts[0]}.{parts[1]}` is not a built list operation -- first, last, count and "
                     f"position.N are built; aggregates (max/min/sum/average/total) are not, so it 500s "
                     f"at run.", node)
+            # A LIST COUNTS WITH `.count` (T1-LIST-LENGTH-AT-CHECK, RULED by Ron 2026-10-26): `.length`
+            # measures text, and on a list it refused only at run. Not a deferral: the words are wrong.
+            if len(parts) == 2 and parts[0] in list_like and str(parts[1]) in ('size', 'length'):
+                ln = getattr(node, 'line', 0) or 0
+                errors.append(CompileError(
+                    f"Line {ln}: `{parts[0]}.{parts[1]}` measures a list with a text word. Write "
+                    f"`{parts[0]}.count` for the number of items in a list; `.length` is the length of text.",
+                    line=ln))
             # RESULT-WORDS RENAME (T1-RESULT-WORDS-REGISTERED, 2026-10-03): `<result>.page.<field>`
             # is a CLOSED, known vocabulary (PAGE_FIELDS in mohio_interpreter.py), unlike
             # `request.*` which is whatever the program/payload names. `page` at parts[1] (not
@@ -1572,7 +1590,6 @@ DEFERRED_CONSTRUCTS = {
     'MiomapDecl':         ('miomap',           'unbuilt'),
     'MiopdfDecl':         ('miopdf',           'unbuilt'),
     'MiotestDecl':        ('miotest',          'unbuilt'),
-    'NotifyStmt':         ('notify',           'unbuilt'),
     'PatternDecl':        ('pattern',          'unbuilt'),
     'RateLimitDecl':      ('rate limit',       'unbuilt'),
     'SendStmt':           ('send',             'unbuilt'),
@@ -2940,6 +2957,69 @@ def scan_block_opener_as_variable(program):
     return errors
 
 
+# `env` AND `secret` NAME THE ENVIRONMENT AND THE SECRET STORE (T1-RESERVE-ENV-SECRET, RULED by Ron
+# 2026-10-27, D6). `env.X` and `secret.X` always mean those two (T1-ENV-SECRET-IN-EXPRESSION), and the
+# bare words were still legal names: `env 5` and `secret "s"` checked clean and ran, a value sitting
+# beside a `.X` that never reads it. Reserved wherever a name is bound: a value line or typed
+# declaration, `hold`, `lock`, a loop item, a task's `take`, a query's result, an `as` capture, a
+# connection. A FIELD called `secret` (`row.secret`, `secret "x"` inside a save) is not a name in scope
+# and is untouched. `hold env` and `connect env` are refused already by the check transformer's
+# reserved-word table (which the pretokenizer also reads, so `env` stays there); skipped here so the
+# line is refused once.
+RESERVED_NAMESPACE_WORDS = {
+    'env': "it is the Mohio environment namespace: `env.PORT` reads the variable PORT",
+    'secret': "it names the secret-handling surface: `secret.API_KEY` reads a secret",
+    # `hide` IS A TAG, NOT A NAMESPACE (RULED by Ron 2026-10-28, the `[hide]` tag): reserved the same
+    # way, so a value called `hide` never sits beside a field tagged `[hide]`.
+    'hide': "it is the tag `[hide]`, which hides a field's value in every output",
+}
+# The words above that name a `.X` surface; the clash a namespace word has is with its own `.X`.
+_NAMESPACE_SURFACES = ('env', 'secret')
+_BINDS_NAME = ('Assignment', 'HoldDecl', 'LockDecl', 'TaskParam', 'RetrieveBlock', 'FindBlock',
+               'GrabBlock', 'ConnectDecl')
+_BINDS_ATTRS = ('alias', 'as_name', 'result_name')
+_TRANSFORMER_REFUSES = {('env', 'HoldDecl'), ('env', 'ConnectDecl')}
+
+
+def scan_reserved_namespace_names(program):
+    errors = []
+
+    def refuse(word, node, how):
+        line = getattr(node, 'line', 0) or 0
+        clash = (f"or `{word}` and `{word}.X` would mean two different things" if word in _NAMESPACE_SURFACES
+                 else f"or a reader could not tell the value from the tag")
+        errors.append(CompileError(
+            f"Line {line}: `{word}` is reserved; {RESERVED_NAMESPACE_WORDS[word]}. It cannot also be "
+            f"{how}, {clash}.\n"
+            f"    Name the value for what it holds, for example:  {word}_value",
+            line=line, code="reserved_namespace_name"))
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c)
+            return
+        if not is_dataclass(node):
+            return
+        kind = type(node).__name__
+        name = str(getattr(node, 'name', '') or '')
+        if kind in _BINDS_NAME and name in RESERVED_NAMESPACE_WORDS and (name, kind) not in _TRANSFORMER_REFUSES:
+            refuse(name, node, 'a connection name' if kind == 'ConnectDecl' else 'a variable name')
+        if kind == 'EachBlock' and str(getattr(node, 'item', '') or '') in RESERVED_NAMESPACE_WORDS:
+            refuse(node.item, node, 'a loop variable')
+        for attr in _BINDS_ATTRS:
+            v = getattr(node, attr, None)
+            if isinstance(v, str) and v in RESERVED_NAMESPACE_WORDS:
+                refuse(v, node, 'the name a result is kept under')
+        for f in fields(node):
+            walk(getattr(node, f.name, None))
+
+    walk(getattr(program, 'statements', []) or [])
+    return errors
+
+
 # ── THE CANONICAL SCANNER LIST ────────────────────────────────────────────────
 # There is ONE list of scanners, and it is here, next to the scanners.
 #
@@ -3549,6 +3629,37 @@ def scan_release_never_held(program):
                 f"Write `hold {n.name} <value>` where the value is set, or remove this release.",
                 code="release_never_held",
             ))
+    return out
+
+
+def scan_claim_result_unread(program):
+    """An `update` guarded by `where <field> is empty` is a claim: of two arriving together, or a replay,
+    exactly one changes the row. With no `as <name>` nothing tells the loser it lost; it changed nothing
+    and the program carried on as if it had claimed, with no word at check or run (measured,
+    T1-CLAIM-RESULT-UNREAD). An advisory: a last-writer-does-nothing update is legitimate, and a journey
+    may suppress it with a reason."""
+    from mohio_ast import UpdateBlock, UpdateWhereEmpty
+    out = []
+    for n in _all_nodes(getattr(program, 'statements', None) or []):
+        if not isinstance(n, UpdateBlock) or getattr(n, 'alias', None):
+            continue
+        guard = next((b for b in (n.body or []) if isinstance(b, UpdateWhereEmpty)), None)
+        if guard is None:
+            continue
+        src = getattr(n, 'source', None)
+        parts = [str(x) for x in (getattr(src, 'parts', None) or [])]
+        target = ('db.' + str(src.table)) if getattr(src, 'table', None) else '.'.join(parts)
+        ln = getattr(n, 'line', 0) or 0
+        out.append(CompileWarning(
+            f"Line {ln}: this update claims `{guard.field}` only where it is empty, and nothing reads "
+            f"whether it did. When another claim got there first it changes nothing, and the program "
+            f"carries on as if it had claimed.",
+            ln,
+            f"Name the count and branch on it: `update {target} as claimed`, then `check claimed` with "
+            f"`when claimed is more than 0` for the winner and `otherwise` for the conflict (for example "
+            f"`give back [409] \"already claimed\"`).",
+            code="claim_result_unread",
+        ))
     return out
 
 
@@ -6409,6 +6520,30 @@ def scan_two_statements_one_line(program):
     return errors
 
 
+def scan_match_to_empty_word(program):
+    """`match <field> to empty` refuses at check (MIOQL-EMPTY-UPDATE-01, RULED by Ron 2026-10-25). It
+    checked clean and then refused at run, `empty` read as a variable nobody declared. A program that
+    declares a value named `empty` means that value, and is left alone."""
+    nodes = list(_all_nodes(getattr(program, 'statements', None) or []))
+    if any(type(n).__name__ == 'Assignment' and str(getattr(n, 'name', '')) == 'empty' for n in nodes):
+        return []
+    errors = []
+    for n in nodes:
+        if type(n).__name__ != 'MatchClause':
+            continue
+        v = getattr(n, 'value', None)
+        if [str(p) for p in (getattr(v, 'parts', None) or [])] != ['empty']:
+            continue
+        field = str(n.field)
+        ln = getattr(n, 'line', 0) or getattr(v, 'line', 0) or 0
+        errors.append(CompileError(
+            f"Line {ln}: `match {field} to empty` compares {field} with a value named `empty`, and there "
+            f"is none, so it would refuse when it runs. To ask for rows where {field} has no value (no "
+            f"value at all, or empty text), write:\n        where {field} is empty",
+            line=ln, code="match_to_empty_word"))
+    return errors
+
+
 def scan_paginate_without_page_size(program):
     """`paginate by` with no `up to` refuses (T1-PAGINATE-WITHOUT-PAGE-SIZE, RULED by Ron 2026-10-23).
     `paginate by N` names the PAGE; `up to N` is the page's size, and without one the page number was
@@ -6607,6 +6742,36 @@ def scan_plus_on_text(program):
     return errors
 
 
+def _sector_classified_names(program):
+    """{field name: tag} for every field a DECLARED sector's profile classifies [phi], [pci] or [pii]
+    (`member_id is [pii]`). The runtime registers these as a rule about the name in every table, a
+    governed one included (T1-VALUE-BOUND-TAGS), so the check reads them the same way
+    (T1-CHECK-SECTOR-CLASSIFIED-VALUES). Not wrapped in a try, for the reason
+    scan_regulated_field_needs_type gives: a profile that cannot be read must not quietly switch the
+    rule off."""
+    out = {}
+    stack = [program]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (list, tuple)):
+            stack.extend(node)
+            continue
+        if node is None or not is_dataclass(node):
+            continue
+        if type(node).__name__ == 'SectorDecl':
+            name = str(getattr(node, 'name', '') or getattr(node, 'sector', '') or '')
+            if name:
+                from mohio_sector_loader import load_sector_profile
+                prof = load_sector_profile(name)
+                for fname, ft in ((prof.field_types if prof else None) or {}).items():
+                    tag = next((t for t in (getattr(ft, 'classifications', None) or [])
+                                if t in ('phi', 'pci', 'pii')), None)
+                    if tag:
+                        out.setdefault(str(fname), tag)
+        stack.extend(getattr(node, f.name, None) for f in fields(node))
+    return out
+
+
 def _classified_field_names(program):
     """{field name: tag} for every shape field tagged [phi], [pci] or [pii]. Tags apply by field
     name across the program (the runtime resolver's own rule), so a name is enough to know a value
@@ -6649,6 +6814,21 @@ _RAW_SQL_TARGET = re.compile(
     r'(?is)\b(update(?:\s+only)?|delete\s+(?:[\w"`\[\]]+\s+)?from|insert\s+(?:or\s+\w+\s+)?into|'
     r'replace\s+into|merge\s+into|drop\s+table(?:\s+if\s+exists)?|alter\s+table(?:\s+only)?|'
     r'truncate(?:\s+table)?)\s+((?:[`"\[]?[A-Za-z_][\w$]*[`"\]]?\s*\.\s*)*[`"\[]?[A-Za-z_][\w$]*[`"\]]?)')
+
+
+def raw_sql_written_tables(sql_text):
+    """[(verb, table)] for every statement in `sql_text` that writes rows (UPDATE, DELETE FROM, INSERT
+    INTO, REPLACE INTO, MERGE INTO); comments removed first, as the audit reading does."""
+    text = re.sub(r'/\*.*?\*/', ' ', str(sql_text or ''), flags=re.S)
+    text = re.sub(r'--[^\n]*', ' ', text)
+    out = []
+    for m in _RAW_SQL_TARGET.finditer(text):
+        verb = ' '.join(m.group(1).split()).upper()
+        if verb.startswith(('DROP', 'ALTER', 'TRUNCATE')):
+            continue
+        out.append(('DELETE FROM' if verb.startswith('DELETE') else verb,
+                    re.split(r'\s*\.\s*', m.group(2))[-1].strip('`"[]')))
+    return out
 
 
 def raw_sql_audit_targets(sql_text):
@@ -6779,12 +6959,87 @@ def scan_raw_sql_writes_classified_field(program):
 _TEMPLATE_REF = re.compile(r"\{\{\s*([A-Za-z_][\w.]*)\s*\}\}")
 
 
-def _protected_value_tracker(program, tagged):
+class _ReachingAssignments:
+    """Which assignments of a name can reach one read of it (T1-EGRESS-REUSED-NAME, 2026-10-26).
+
+    The trackers below kept one answer per NAME, the first protected assignment anywhere, so a name
+    reused for another value took the first one's classification: two handlers each naming a local
+    `payload` were refused naming the other handler's field and class, and a name restated to plain
+    text was still refused. Read here instead: walking back from the read, an assignment in the same
+    statement list, or an enclosing one, decides (it dominates); an assignment inside a branch only
+    adds a possibility; a loop around the read adds every assignment in its body (the next turn reads
+    them). A handler or task boundary ends the walk, since a handler can run after any top-level line.
+    `reach` answers (assignments, dominated); with nothing dominating, a caller keeps its own rule."""
+
+    _LOOPS = ('LoopBlock', 'EachBlock', 'RepeatBlock', 'WhileBlock', 'WhileActiveBlock')
+    _ASSIGNS = ('Assignment', 'HoldDecl', 'CreateBlock')
+
+    def __init__(self, program):
+        from mohio_ast import TOP_HANDLER_TYPES
+        self._bounds = tuple(TOP_HANDLER_TYPES)
+        self.pos, self.parent = {}, {}
+        stack = [(program, None)]
+        while stack:
+            node, par = stack.pop()
+            if node is None or isinstance(node, (str, int, float, bool)):
+                continue
+            if isinstance(node, (list, tuple)):
+                for i, c in enumerate(node):
+                    if is_dataclass(c):
+                        self.pos[id(c)] = (node, i, par)
+                    stack.append((c, par))
+                continue
+            if not is_dataclass(node):
+                continue
+            self.parent[id(node)] = par
+            for f in fields(node):
+                stack.append((getattr(node, f.name, None), node))
+
+    @classmethod
+    def assigns(cls, node, name):
+        k = type(node).__name__
+        if k in cls._ASSIGNS:
+            return str(getattr(node, 'name', '') or '') == name
+        return k == 'RunBlock' and str(getattr(node, 'alias', '') or '') == name
+
+    def _inside(self, node, name):
+        out = []
+        for m in _all_nodes(node):
+            if m is not node and type(m).__name__ != 'TaskDecl' and self.assigns(m, name):
+                out.append(m)
+        return out
+
+    def reach(self, name, use):
+        cur = use
+        while cur is not None and id(cur) not in self.pos:
+            cur = self.parent.get(id(cur))
+        found = []
+        while cur is not None and id(cur) in self.pos:
+            lst, i, owner = self.pos[id(cur)]
+            for j in range(i - 1, -1, -1):
+                s = lst[j]
+                if not is_dataclass(s):
+                    continue
+                if self.assigns(s, name):
+                    found.append(s)
+                    return found, True
+                found.extend(self._inside(s, name))
+            if owner is None or isinstance(owner, self._bounds) or type(owner).__name__ == 'TaskDecl':
+                break
+            if type(owner).__name__ in self._LOOPS:
+                found.extend(self._inside(owner, name))
+            cur = owner
+        return found, False
+
+
+def _protected_value_tracker(program, tagged, sector=None):
     """Follow protected data through a program, for the scans that refuse it leaving or landing
     where it should not: every node, and `prot(expr)` answering (what, class) when `expr` carries
     a [phi]/[pci]/[pii] value, a value derived from one, or a record holding one, else None. Shared
     by scan_protected_data_egress and scan_protected_into_untagged_field so both see the same
-    derivations (a name assigned from protected data carries it, to a fixed point)."""
+    derivations (a name assigned from protected data carries it, to a fixed point). `sector` is a
+    declared sector's field rules ({name: tag}); only the untagged-field scan passes them today."""
+    sector = sector or {}
     nodes = []
 
     def collect(node):
@@ -6803,14 +7058,78 @@ def _protected_value_tracker(program, tagged):
     collect(program)
     kind = lambda n: type(n).__name__
 
-    # Tables a shape gives a tagged field, and the record names bound from them.
-    tagged_tables = set()
+    # VALUE-BOUND CLASSIFICATION (T1-VALUE-BOUND-TAGS, BS-009, RULED by Ron 2026-10-21). What a dotted read
+    # carries is decided by what it reads, not by its last name: `OrdinaryReview.reason` carries what the
+    # shape `OrdinaryReview` declares for `reason`, `request.reason` in a handler what that handler's shape
+    # declares, and `row.reason` for a record looked up from a governed table what that table declares.
+    # A `reason [pii]` in some OTHER shape made every one of those protected (seven summit refusals). Only
+    # a read whose owner cannot be told (a variable, a task's parameter, an ungoverned table's record)
+    # keeps the name rule, so nothing that was protected before stops being protected by accident.
+    def _own_tag(fld):
+        for m in (getattr(fld, 'modifiers', None) or []):
+            if str(getattr(m, 'modifier_type', '') or '') == 'tag':
+                for part in [x.strip().lower() for x in str(getattr(m, 'value', '') or '').split(',')]:
+                    if part in ('phi', 'pci', 'pii'):
+                        return part
+        return None
+
+    shape_fields, table_fields = {}, {}
     for n in nodes:
         if kind(n) == 'ShapeDecl':
+            if getattr(n, 'name', None):
+                shape_fields[str(n.name)] = {str(f.name): _own_tag(f) for f in (getattr(n, 'fields', None) or [])
+                                             if getattr(f, 'name', None)}
             for tname, t in (getattr(n, 'tables', None) or {}).items():
-                for fld in (getattr(t, 'fields', None) or []):
-                    if str(getattr(fld, 'name', '')) in tagged:
-                        tagged_tables.add(str(tname))
+                table_fields[str(tname)] = {str(f.name): _own_tag(f) for f in (getattr(t, 'fields', None) or [])
+                                            if getattr(f, 'name', None)}
+    handler_shape = {}
+    for n in nodes:
+        if kind(n) in ('NewBlock', 'RequestInboundBlock') and getattr(n, 'shape', None):
+            sh = str(n.shape).split('.')[-1]
+            stack = [getattr(n, 'body', None)]
+            while stack:
+                m = stack.pop()
+                if isinstance(m, (list, tuple)):
+                    stack.extend(m)
+                elif is_dataclass(m):
+                    handler_shape.setdefault(id(m), sh)
+                    stack.extend(getattr(m, f.name, None) for f in fields(m))
+    # Tables whose OWN declaration tags a field, and the record names bound from them.
+    tagged_tables = {t for t, flds in table_fields.items() if any(flds.values())}
+    bound = {}
+    for n in nodes:
+        if kind(n) in ('FindBlock', 'RetrieveBlock', 'GrabBlock'):
+            src = getattr(n, 'source', None)
+            _parts = [str(x) for x in (getattr(src, 'parts', None) or [])]
+            _tbl = (str(getattr(src, 'table', '')) if kind(src) == 'DbRef'
+                    else _parts[1] if len(_parts) == 2 and _parts[0] == 'db' else '')
+            if _tbl in table_fields:
+                for nm in (getattr(n, 'name', None), getattr(n, 'alias', None)):
+                    if nm:
+                        bound[str(nm)] = _tbl
+
+    def owner_tag(parts, node=None):
+        """The tag the read's OWNER declares for it, '' when the owner declares it plain, or None when
+        the owner cannot be told (the caller then keeps the name rule)."""
+        head, fld = parts[0], parts[1]
+        if head in shape_fields:
+            return shape_fields[head].get(fld) or ''
+        if head == 'request' and node is not None and handler_shape.get(id(node)) in shape_fields:
+            return shape_fields[handler_shape[id(node)]].get(fld) or ''
+        if head in bound:
+            return table_fields[bound[head]].get(parts[-1]) or ''
+        return None
+
+    def read_tag(parts, node=None):
+        """The class a dotted read carries, value-bound where its owner is known, else by name."""
+        if len(parts) < 2:
+            return None
+        own = owner_tag(parts, node)
+        if own is not None:
+            # A shape declaring the field plain does not lift a sector's rule about the name.
+            return own or sector.get(parts[-1])
+        return tagged.get(parts[-1]) or sector.get(parts[-1])
+
     records = {}
     for n in nodes:
         if kind(n) in ('FindBlock', 'RetrieveBlock', 'GrabBlock'):
@@ -6825,7 +7144,7 @@ def _protected_value_tracker(program, tagged):
                         records[str(nm)] = f"a record from db.{_tbl}"
         if kind(n) == 'DottedName':
             parts = [str(p) for p in (getattr(n, 'parts', None) or [])]
-            if len(parts) >= 2 and parts[-1] in tagged:
+            if read_tag(parts, n):
                 records.setdefault(parts[0], f"`{'.'.join(parts)}`")
 
     derived = {}
@@ -6850,6 +7169,17 @@ def _protected_value_tracker(program, tagged):
         if kind(_t) == 'TaskDecl' and getattr(_t, 'name', None):
             _mark_task(_t)
 
+    reaching = _ReachingAssignments(program)
+
+    def _assigned_hit(a, depth):
+        """(what, class) for the value assignment `a` gives its name, else None."""
+        if kind(a) == 'RunBlock':
+            t = tasks.get(str(getattr(a, 'task_name', '') or ''))
+            h = _task_gives(t) if t is not None else None
+            return (f"`{a.alias}` (from {h[0]}, given back by task `{t.name}`)", h[1]) if h else None
+        h = prot(getattr(a, 'body', None) if kind(a) == 'CreateBlock' else getattr(a, 'value', None), depth + 1)
+        return (f"`{a.name}` (from {h[0]})", h[1]) if h else None
+
     def prot(expr, depth=0):
         """(what, class) when `expr` carries protected data, else None."""
         if expr is None or depth > 30:
@@ -6857,8 +7187,9 @@ def _protected_value_tracker(program, tagged):
         if isinstance(expr, str):
             for ref in _TEMPLATE_REF.findall(expr):
                 parts = ref.split('.')
-                if len(parts) >= 2 and parts[-1] in tagged:
-                    return (f"`{{{{ {ref} }}}}`", tagged[parts[-1]])
+                cls = read_tag(parts)
+                if cls:
+                    return (f"`{{{{ {ref} }}}}`", cls)
                 if parts[0] in derived:
                     return (f"`{{{{ {ref} }}}}`", derived[parts[0]][1])
             return None
@@ -6881,8 +7212,19 @@ def _protected_value_tracker(program, tagged):
             parts = [str(p) for p in (getattr(expr, 'parts', None) or [])]
             if getattr(expr, 'stripped', False):
                 return None
-            if len(parts) >= 2 and parts[-1] in tagged:
-                return (f"`{'.'.join(parts)}`", tagged[parts[-1]])
+            cls = read_tag(parts, expr)
+            if cls:
+                return (f"`{'.'.join(parts)}`", cls)
+            if len(parts) == 1:
+                # What THIS read's name holds here (_ReachingAssignments): the assignment that reaches
+                # it, not the first one anywhere with that name.
+                cands, dominated = reaching.reach(parts[0], expr)
+                for a in cands:
+                    h = _assigned_hit(a, depth)
+                    if h:
+                        return h
+                if dominated:
+                    return None
             if len(parts) == 1 and parts[0] in derived:
                 return derived[parts[0]]
             if len(parts) == 1 and (in_task.get(id(expr)), parts[0]) in param_derived:
@@ -7001,9 +7343,10 @@ def scan_protected_into_untagged_field(program):
     destination field, or mask the value first. The run-time half (_encrypt_fields_for_write)
     refuses what this cannot see."""
     tagged = _classified_field_names(program)
-    if not tagged:
+    sector = _sector_classified_names(program)
+    if not tagged and not sector:
         return []
-    nodes, prot, _records, _derived, _tt = _protected_value_tracker(program, tagged)
+    nodes, prot, _records, _derived, _tt = _protected_value_tracker(program, tagged, sector)
     by_table, types = _table_tagged_fields(program)
     errors = []
     for n in nodes:
@@ -7021,8 +7364,9 @@ def scan_protected_into_untagged_field(program):
         for fv in fvs:
             name = str(getattr(fv, 'name', '') or '')
             # A destination no `as table` shape describes takes the program's bare-name tags, the
-            # runtime resolver's own rule for a loose shape; one that a shape describes, its own.
-            if not name or name in (by_table[table] if table in by_table else tagged):
+            # runtime resolver's own rule for a loose shape; one that a shape describes, its own. A
+            # declared sector's rule about the name reaches every table, as the runtime seals it.
+            if not name or name in sector or name in (by_table[table] if table in by_table else tagged):
                 continue
             hit = prot(getattr(fv, 'value', None))
             if not hit or hit[1] == 'record':
@@ -7137,11 +7481,24 @@ def scan_protected_data_egress(program):
             h = prot(getattr(n, 'payload', None))
             if h:
                 refuse(n, f"the payload of {n.connector}.{n.operation}", h, False)
-        elif k == 'MiomailStmt':
+        elif k in ('MiomailStmt', 'NotifyStmt'):
+            _lines = dict(getattr(n, 'body', None) or []) if k == 'NotifyStmt' else {}
             for attr in ('subject', 'body', 'attach'):
-                h = prot(getattr(n, attr, None))
+                _v = (_lines.get('message' if attr == 'body' else attr) if k == 'NotifyStmt'
+                      else getattr(n, attr, None))
+                h = prot(_v)
                 if h:
-                    refuse(n, f"the {attr} of miomail.send", h, False)
+                    refuse(n, f"the {attr} of {'notify' if k == 'NotifyStmt' else 'miomail.send'}", h, False)
+            # A value injected into a template slot is sent in the message (T1-TEMPLATE). A protected
+            # FIELD injected refuses here; a whole record may be injected for its other fields, and
+            # the run refuses the protected one only if the template actually puts it in the message.
+            for _src, _slot in (getattr(n, 'injects', None) or []):
+                h = prot(_src)
+                if h and h[1] != 'record':
+                    refuse(n, f"the template slot `{_slot}` of "
+                              f"{'notify' if k == 'NotifyStmt' else 'miomail.send'}", h, False)
+            if k == 'NotifyStmt':
+                continue
             # The addresses are the destination: a [pii] address is how mail is delivered and the
             # purpose rule governs it; anything else protected there is data sent (HC-066).
             for attr in ('to', 'from_', 'reply_to', 'cc', 'bcc'):
@@ -7523,6 +7880,16 @@ def scan_secret_egress(program):
         if kind(_t) == 'TaskDecl' and getattr(_t, 'name', None):
             _mark_task(_t)
 
+    reaching = _ReachingAssignments(program)
+
+    def _assigned_secret(a, depth):
+        """The secret the value of assignment `a` carries, else None."""
+        if kind(a) == 'RunBlock':
+            t = tasks.get(str(getattr(a, 'task_name', '') or ''))
+            h = _task_gives(t) if t is not None else None
+            return f"{h} (given back by task `{t.name}`)" if h else None
+        return sec(getattr(a, 'body', None) if kind(a) == 'CreateBlock' else getattr(a, 'value', None), depth + 1)
+
     def sec(expr, depth=0):
         """The `secret.X` that `expr` carries, as written, else None."""
         if expr is None or depth > 30:
@@ -7546,6 +7913,16 @@ def scan_secret_egress(program):
             return f"`secret.{expr.key}`"
         if kind(expr) == 'DottedName':
             parts = [str(p) for p in (getattr(expr, 'parts', None) or [])]
+            if parts:
+                # What THIS read's name holds here, not the first assignment of it anywhere
+                # (_ReachingAssignments).
+                cands, dominated = reaching.reach(parts[0], expr)
+                for a in cands:
+                    h = _assigned_secret(a, depth)
+                    if h:
+                        return h
+                if dominated:
+                    return None
             if parts and parts[0] in derived:
                 return derived[parts[0]]
             if parts and (in_task.get(id(expr)), parts[0]) in param_derived:
@@ -7704,6 +8081,19 @@ def scan_secret_egress(program):
                 h = sec(getattr(n, attr, None))
                 if h:
                     refuse(n, f"the {attr.rstrip('_')} of miomail", h)
+            for _src, _slot in (getattr(n, 'injects', None) or []):
+                h = sec(_src)
+                if h:
+                    refuse(n, f"the template slot `{_slot}` of miomail", h)
+        elif k == 'NotifyStmt':
+            for _w, _v in (getattr(n, 'body', None) or []):
+                h = sec(_v)
+                if h:
+                    refuse(n, f"the {_w} of notify", h)
+            for _src, _slot in (getattr(n, 'injects', None) or []):
+                h = sec(_src)
+                if h:
+                    refuse(n, f"the template slot `{_slot}` of notify", h)
         elif k in ('AiDecideBlock', 'AiCompareBlock', 'AiRespondBlock', 'AiAgentBlock', 'AiCreateStmt'):
             for b in (getattr(n, 'body', None) or []):
                 if kind(b) == 'WeighClause':
@@ -9919,9 +10309,12 @@ def scan_write_field_outside_table_shape(program):
         if declared is None:
             continue
         fvs = [f for f in (items or []) if kind(f) == 'FieldValue']
-        extra = [str(f.name) for f in fvs if str(f.name) not in declared and str(f.name) != 'id']
+        # An update's `where <field> is empty` names a field of the table too (MIOQL-EMPTY-UPDATE-01).
+        named = [(str(f.name), f) for f in fvs] + [(str(w.field), w) for w in (items or [])
+                                                   if kind(w) == 'UpdateWhereEmpty']
+        extra = [nm for nm, _f in named if nm not in declared and nm != 'id']
         if extra:
-            line = next((getattr(f, 'line', 0) for f in fvs if str(f.name) == extra[0]), 0) \
+            line = next((getattr(f, 'line', 0) for nm, f in named if nm == extra[0]), 0) \
                 or getattr(n, 'line', 0) or 0
             errors.append(CompileError(
                 f"Line {line}: " + table_shape_field_message(table, owner.get(table, ''), declared, extra, verb),
@@ -10097,7 +10490,7 @@ def _regulated_sector_as_written(nodes):
 
 
 def scan_route_idempotency(program):
-    """`idempotent by request.header "X" (keep for N)?` (T1-ROUTE-IDEMPOTENCY, RULED by Ron 2026-10-22).
+    """`once per request.header "X" (keep for N)?` (T1-ROUTE-IDEMPOTENCY, RULED by Ron 2026-10-22).
 
     It describes a whole `listen for` route, so it stands once at the top of one. It reads its key
     from a request header, with the one `request.header "X"` form. It keeps answers in the database,
@@ -10124,39 +10517,39 @@ def scan_route_idempotency(program):
     drivers = [str(getattr(n, 'driver', None) or getattr(n, 'connect_type', '') or '').lower()
                for n in nodes if type(n).__name__ == 'ConnectDecl']
     regulated = _regulated_sector_as_written(nodes)
-    fix = 'idempotent by request.header "Idempotency-Key"'
+    fix = 'once per request.header "Idempotency-Key"'
     for d in decls:
         line = getattr(d, 'line', 0) or 0
 
         if id(d) in under_read:
-            errors.append(CompileError(f"Line {line}: " "`idempotent by` is for a route that changes something, a `listen for`. A `request for` "
+            errors.append(CompileError(f"Line {line}: " "`once per` is for a route that changes something, a `listen for`. A `request for` "
                 "route only reads, and a read is already safe to repeat.", line=line, hint="Remove the line, or move the work that changes something to a `listen for` route.", code="idempotent_route"))
             continue
         if id(d) not in top:
-            errors.append(CompileError(f"Line {line}: " "`idempotent by` describes a whole `listen for` route, so it stands at the top of the "
+            errors.append(CompileError(f"Line {line}: " "`once per` describes a whole `listen for` route, so it stands at the top of the "
                 "route's body, not inside a branch or anywhere else.", line=line, hint=f"Move it to the first lines of the `listen for` it guards:\n    listen for sh.Pay at /pay\n"
                 f"        {fix}\n        ...\n    listen: done", code="idempotent_route"))
             continue
         _route, mine = top[id(d)]
         if mine[0] is not d:
             first = getattr(mine[0], 'line', 0) or 0
-            errors.append(CompileError(f"Line {line}: " f"this route already says `idempotent by` at line {first}. A route keeps its answers "
+            errors.append(CompileError(f"Line {line}: " f"this route already says `once per` at line {first}. A route keeps its answers "
                 f"under one key.", line=line, hint="Remove one of the two lines.", code="idempotent_route"))
             continue
         src = getattr(d, 'source', None)
         parts = [str(p).replace('__USERVAR__', '') for p in (getattr(src, 'parts', None) or [])]
         if parts != ['request', 'header'] or not getattr(d, 'header', ''):
             shown = '.'.join(parts) or 'this source'  # SILENT-SHAPE-OK: the words a refusal names a source by
-            errors.append(CompileError(f"Line {line}: " f"`idempotent by` reads its key from a request header, and `{shown}` is not one. A key the "
+            errors.append(CompileError(f"Line {line}: " f"`once per` reads its key from a request header, and `{shown}` is not one. A key the "
                 f"caller sends in the body would make the body the thing that names the request.", line=line, hint=f"Read the header the caller sends:\n    {fix}", code="idempotent_route"))
             continue
         if not drivers:
-            errors.append(CompileError(f"Line {line}: " "`idempotent by` keeps each answer in the database, and this program connects none, so "
+            errors.append(CompileError(f"Line {line}: " "`once per` keeps each answer in the database, and this program connects none, so "
                 "a repeated request would find nothing to answer from.", line=line, hint="Connect one, for example:\n    connect db as sqlite from env.DATABASE_URL", code="idempotent_route"))
         elif all(dr in ('mongo', 'mongodb') for dr in drivers):
             # DEFER: T1-MONGO-PROGRAM-TRANSACTION. The key and the work commit in one request
             # transaction, which MongoDB does not run in this release.
-            errors.append(CompileError(f"Line {line}: " "`idempotent by` keeps the key and the work in one transaction, and a MongoDB request "
+            errors.append(CompileError(f"Line {line}: " "`once per` keeps the key and the work in one transaction, and a MongoDB request "
                 "transaction is declared but not built in this release (T1-MONGO-PROGRAM-TRANSACTION).", line=line, hint="Run this route on Postgres, MySQL, Oracle or SQLite until the MongoDB transaction lands.", code="idempotent_route"))
         unit = str(getattr(d, 'keep_unit', '') or '')
         written = str(getattr(d, 'keep_written', '') or '')
@@ -10175,56 +10568,515 @@ def scan_route_idempotency(program):
     return errors
 
 
-def _routes_without_idempotent_line(program):
-    """Each `listen for` that changes something (a write, or a call that changes something on another
-    service) and has no `idempotent by` line (T1-IDEMPOTENT-ROUTE-REQUIRED, RULED by Ron 2026-10-23).
-    Followed through `run`/`call` into the tasks the route reaches."""
+# ── SECTOR-AUTOMATIC IDEMPOTENCY (BRIEF sector-idempotency-and-diagnostics, Part A, RULED by Ron 2026-10-24) ──
+# Under ANY named sector, a `listen for` that moves value (writes a field declared in a currency) or calls
+# another service is idempotent with no line written: a repeat with the same Idempotency-Key header gets
+# the first answer, and a request with no key is refused 400. With no sector nothing is automatic, and
+# an explicit `once per` is the only way in. `not idempotent reason "..."` opts one route out.
+# THE ONE PREDICATE: sector_idempotency below decides it for check AND for run (the interpreter reads
+# it), so the two can never disagree about which routes a sector covers.
+
+AUTO_IDEMPOTENCY_HEADER = "Idempotency-Key"
+
+# Every verb that changes stored data. One list, named for what it is (it was a `_WRITE_NODES` that a
+# later, narrower `_WRITE_NODES` lower in this file replaced at import, so `modify` and `remove.all`
+# were not seen as changes here or by the financial-transaction rule).
+_CHANGE_NODES = ('SaveBlock', 'SaveOrUpdateBlock', 'SaveAllBlock', 'UpdateBlock', 'RemoveBlock',
+                 'RemoveAllBlock', 'ModifyBlock', 'FlowStmt')
+
+
+def _sector_as_written(nodes):
+    """The sector the program declares, ANY sector, its levels as the coder writes them, or None."""
+    for n in nodes:
+        if type(n).__name__ != 'SectorDecl':
+            continue
+        levels = [x.strip() for x in str(getattr(n, 'sector', '') or '').replace(',', '.').split('.') if x.strip()]
+        if levels:
+            return ', '.join(levels)
+    return None
+
+
+def _write_table(ref):
+    """The table a write names (`db.payments` -> `payments`), or '' when it names none at check."""
+    if ref is None:
+        return ''
+    if type(ref).__name__ == 'DbRef':
+        return str(getattr(ref, 'table', '') or '')
+    parts = [str(p) for p in (getattr(ref, 'parts', None) or [])] or str(ref).split('.')
+    return parts[1] if len(parts) >= 2 and parts[0] == 'db' else ''
+
+
+def _flow_destinations(map_decl):
+    """[(table, field)] for every `db.<table>.<field>` stage a map's data chains write into: the stage a
+    forward hop arrives at, the one a reverse hop leaves from, and both sides of a two-way hop."""
+    out = []
+    for pl in (getattr(map_decl, 'data', None) or []):
+        stages, hops = list(getattr(pl, 'stages', None) or []), list(getattr(pl, 'hops', None) or [])
+        for i, st in enumerate(stages):
+            arrives = i > 0 and hops[i - 1] in ('forward', 'bidirectional')
+            leaves_back = i < len(hops) and hops[i] in ('reverse', 'bidirectional')
+            if not (arrives or leaves_back) or str(getattr(st, 'qualifier', '')) != 'db':
+                continue
+            parts = str(getattr(st, 'path', '') or '').split('.')
+            if len(parts) >= 2:
+                out.append((parts[0], parts[-1]))
+    return out
+
+
+def sector_idempotency(program):
+    """What a named sector makes of each `listen for` (the one predicate, read by check and by run):
+    {'sector': as written or None, 'auto': [(route, what, line, via)], 'other': [route],
+     'opted_out': [(route, decl)]}.
+    `auto` routes move value or call out and have neither `once per` nor `not idempotent`: the
+    sector makes them idempotent. `other` routes change something else and are left as they are (one
+    grouped advisory names them). With no sector, every list is empty."""
+    from mohio_runtime_vocab import CURRENCIES      # the table the runtime reads, not the interpreter
+    currencies = {str(c).upper() for c in CURRENCIES}
     nodes = list(_dataclass_nodes(program))
+    result = {'sector': _sector_as_written(nodes), 'auto': [], 'other': [], 'opted_out': []}
+    if result['sector'] is None:
+        return result
     tasks, ops = _tasks_and_operations(program)
+    tables, shapes, maps = {}, {}, {}
+    for n in nodes:
+        k = type(n).__name__
+        if k == 'MapSectionsDecl' and getattr(n, 'name', ''):
+            maps[str(n.name)] = n
+        if k != 'ShapeDecl':
+            continue
+        shapes[str(n.name)] = {str(f.name): str(getattr(f, 'type_name', '') or '').upper()
+                               for f in (getattr(n, 'fields', None) or []) if type(f).__name__ == 'ShapeField'}
+        for tname, t in (getattr(n, 'tables', None) or {}).items():
+            tables[str(tname)] = {str(f.name): str(getattr(f, 'type_name', '') or '').upper()
+                                  for f in (getattr(t, 'fields', None) or [])}
+
+    # WHAT AN OUTBOUND CALL SENDS, read with the money contract (RULED by Ron 2026-10-25: the outbound arm
+    # is money-outbound only). A value carries money when it names a currency-typed thing: a field of the
+    # route's shape declared in a currency, a record looked up from a table that declares one, a name the
+    # program types in a currency (`limit as USD`), a task's `take amount as USD`, or a connector
+    # operation that `sends` a shape declaring one.
+    typed_money = {str(n.name) for n in nodes if type(n).__name__ in ('Assignment', 'TaskParam')
+                   and str(getattr(n, 'type_name', '') or '').upper() in currencies}
+    bound = {}
+    for n in nodes:
+        if type(n).__name__ in ('RetrieveBlock', 'FindBlock', 'GrabBlock'):
+            table = _write_table(getattr(n, 'source', None))
+            for var in (getattr(n, 'alias', None), getattr(n, 'name', None)):
+                if var and table:
+                    bound[str(var)] = table
+    sends = {}
+    for n in nodes:
+        if type(n).__name__ == 'MioconnectDecl':
+            for o in (getattr(n, 'operations', None) or []):
+                sends[(str(n.name), str(o.name))] = str(getattr(o, 'sends_shape', '') or '').split('.')[-1]
+
+    def _names(v):
+        out, stack = [], [v]
+        while stack:
+            x = stack.pop()
+            if x is None or isinstance(x, (str, int, float, bool)) and not hasattr(x, 'type'):
+                continue
+            if getattr(x, 'type', None) == 'NAME' and not is_dataclass(x):
+                out.append([str(x)])
+            elif type(x).__name__ == 'DottedName':
+                out.append([str(p).replace('__USERVAR__', '') for p in (x.parts or [])])
+            elif is_dataclass(x):
+                stack.extend(getattr(x, f.name, None) for f in fields(x))
+            elif isinstance(x, (list, tuple)):
+                stack.extend(x)
+        return out
+
+    def carries_money(values, route_fields, route_shape, money_names):
+        for parts in (p for v in values for p in _names(v)):
+            head, last = parts[0], parts[-1]
+            if len(parts) == 1:
+                if head in typed_money or head in money_names or route_fields.get(head) in currencies:
+                    return True
+                if head == 'request' and any(u in currencies for u in route_fields.values()):
+                    return True
+                if head in bound and any(u in currencies for u in tables.get(bound[head], {}).values()):
+                    return True
+            elif head in ('request', route_shape):
+                if route_fields.get(last) in currencies:
+                    return True
+            elif head in bound and tables.get(bound[head], {}).get(last) in currencies:
+                return True
+        return False
+
+    def money_outbound(n, route_fields, route_shape, money_names):
+        what = _outbound_effect(n, ops)
+        if not what:
+            return None
+        k = type(n).__name__
+        if k == 'MioconnectCall':
+            sent = shapes.get(sends.get((str(n.connector), str(n.operation)), ''), {})
+            if any(u in currencies for u in sent.values()) or \
+                    carries_money([n.payload], route_fields, route_shape, money_names):
+                return what
+            return None
+        values = ([n.body] + [v for _h, v in (getattr(n, 'headers', None) or [])] if k == 'MiohttpStmt'
+                  else [getattr(n, 'body', None), getattr(n, 'subject', None)])
+        return what if carries_money(values, route_fields, route_shape, money_names) else None
 
     def changes(n):
         k = type(n).__name__
-        if k in _WRITE_NODES:
+        if k in _CHANGE_NODES or (k == 'SqlBlock' and raw_sql_written_tables(getattr(n, 'sql', ''))):
             return k
         return _outbound_effect(n, ops)
 
-    out = []
+    def moves_value(route_fields, route_shape='', money_names=frozenset()):
+        def effect(n):
+            k = type(n).__name__
+            if k == 'SqlBlock':
+                # RAW SQL MOVES VALUE UNTYPED (the money contract's one way around the verbs): a raw
+                # write into a table that declares a currency field, naming that field, is money moving.
+                sql = str(getattr(n, 'sql', '') or '')
+                for verb, table in raw_sql_written_tables(sql):
+                    if verb == 'DELETE FROM':
+                        continue
+                    for col, unit in tables.get(table, {}).items():
+                        if unit in currencies and re.search(r'(?<![A-Za-z0-9_])' + re.escape(col)
+                                                            + r'(?![A-Za-z0-9_])', sql, re.I):
+                            return f"writes `{col}`, an amount in {unit}, to {table} by raw sql"
+                return None
+            if k == 'FlowStmt':
+                for table, col in _flow_destinations(maps.get(str(getattr(n, 'map_name', '')))):
+                    unit = tables.get(table, {}).get(col)
+                    if unit in currencies:
+                        return f"writes `{col}`, an amount in {unit}, to db.{table}"
+                return None
+            if k in ('SaveBlock', 'SaveAllBlock'):
+                ref, items = getattr(n, 'target', None), getattr(n, 'fields', None)
+            elif k == 'SaveOrUpdateBlock':
+                ref, items = getattr(n, 'source', None), getattr(n, 'fields', None)
+            elif k == 'UpdateBlock':
+                ref, items = getattr(n, 'source', None), getattr(n, 'body', None)
+            elif k == 'ModifyBlock':
+                # `apply r / <field> <value> / apply: done` reaches the block's body as its FieldValues.
+                ref, items = getattr(n, 'collection', None), getattr(n, 'body', None)
+            else:
+                return money_outbound(n, route_fields, route_shape, money_names)
+            table = _write_table(ref)
+            typed = tables.get(table, route_fields)
+            # `save all` writes whatever fields the records bring, so every field the table declares.
+            written = list(typed) if k == 'SaveAllBlock' else \
+                [str(f.name) for f in (items or []) if type(f).__name__ == 'FieldValue']
+            money = next((f for f in written if typed.get(f) in currencies), None)
+            if money is None:
+                return None
+            return f"writes `{money}`, an amount in {typed[money]}, to db.{table or '?'}"
+        return effect
+
     for n in nodes:
         if type(n).__name__ != 'NewBlock':
             continue
         body = getattr(n, 'body', None) or []
         if any(type(x).__name__ == 'IdempotentDecl' for x in _dataclass_nodes(body)):
-            continue                    # a misplaced line is scan_route_idempotency's to refuse
+            continue                    # idempotent by its own line; a misplaced one is refused elsewhere
+        opt = next((b for b in body if type(b).__name__ == 'NotIdempotentDecl'), None)
         if not _first_effect(body, tasks, changes):
             continue                    # a route that changes nothing is already safe to repeat
-        out.append(n)
-    return out
-
-
-def scan_write_route_no_idempotent(program):
-    """A `listen for` that changes something with no `idempotent by` line is named at check, because a
-    request sent twice does its work twice."""
-    warnings = []
-    for n in _routes_without_idempotent_line(program):
         shape = str(getattr(n, 'shape', '') or '').split('.')[-1]
-        path = str(getattr(n, 'path', '') or '')
-        line = getattr(n, 'line', 0) or 0
-        warnings.append(CompileWarning(
-            f"Line {line}: the `listen for` route at `{path or 'sh.' + shape}` changes something and has no "
-            f"`idempotent by` line, so a request sent twice (a double click, a network retry) does its work "
-            f"twice.",
-            line,
-            f"Name the header that carries the caller's key, at the top of the route:\n"
-            f"    listen for sh.{shape}{' at ' + path if path else ''}\n"
-            f"        idempotent by request.header \"Idempotency-Key\"\n        ...\n    listen: done",
-            code="write_route_no_idempotent"))
-    return warnings
+        fields_here = shapes.get(shape, {})
+        # A task the route calls receives an amount when the call hands it one (`call book / amount
+        # request.amount`): that parameter carries money inside the task.
+        money_names = {str(a.name) for r in _dataclass_nodes(body) if type(r).__name__ == 'RunBlock'
+                       for a in (getattr(r, 'args', None) or []) if type(a).__name__ == 'FieldValue'
+                       and carries_money([getattr(a, 'value', None)], fields_here, shape, frozenset())}
+        hit = _first_effect(body, tasks, moves_value(fields_here, shape, frozenset(money_names)))
+        if opt is not None:
+            result['opted_out'].append((n, opt))
+        elif hit:
+            result['auto'].append((n,) + tuple(hit))
+        else:
+            result['other'].append(n)
+    return result
+
+
+def _route_names(n):
+    shape = str(getattr(n, 'shape', '') or '').split('.')[-1]
+    path = str(getattr(n, 'path', '') or '')
+    return shape, path, (path or f"sh.{shape}")
+
+
+def scan_sector_idempotency_notice(program):
+    """THE CLIENT-CONTRACT NOTICE (BRIEF Part A: required, loud). Declaring a sector is the opt-in to
+    governance, and it makes each route that moves value (writes an amount, or sends one out) require an
+    `Idempotency-Key` header; a caller that sends none is refused 400. That changes what every caller
+    must send, so check says it in one notice, naming each route. It is an ADVISORY code (RULED by Ron
+    2026-10-25): it is said until a journey line `suppress sector_idempotency_key_required reason "..."`
+    records that the callers were told, which is the acknowledgement; the 400 itself is never
+    suppressed. A sector that does not resolve to a profile (one not installed, or misspelled) is still
+    the opt-in, so its money routes still require the key, and the notice says the sector did not
+    resolve and names both ways forward."""
+    s = sector_idempotency(program)
+    if not s['auto']:
+        return []
+    first = s['auto'][0][0]
+    line = getattr(first, 'line', 0) or 0
+    listed = []
+    for n, what, at, via in s['auto']:
+        _shape, _path, where = _route_names(n)
+        task = f", in task `{via[0]}`" if via else ""
+        does = what if what.startswith('writes') else f"calls `{what}` with an amount"
+        listed.append(f"    {where} (line {getattr(n, 'line', 0) or 0}): {does}{task}")
+    count = len(s['auto'])
+    routes = "route" if count == 1 else "routes"
+    resolved = True
+    raw = _declared_sector(program)
+    if raw is not None:
+        # Resolved means a profile file was found for the name, the same question the sector line's own
+        # warning asks (a certified profile not installed, or a name that is no profile, is not).
+        from mohio_sector_loader import find_sector_profile
+        resolved = find_sector_profile(raw) is not None
+    unresolved = ("" if resolved else
+                  f"`sector: {s['sector']}` did not resolve to a sector profile (not installed, or not the "
+                  f"name of one), so its rules are not loaded. Declaring it is still the opt-in to "
+                  f"governance, so money routes require an `{AUTO_IDEMPOTENCY_HEADER}` by default. ")
+    lead = (f"Line {line}: {unresolved}" + (f"Declaring `sector: {s['sector']}` makes" if resolved else "This makes")
+            + f" {count} {routes} that {'moves' if count == 1 else 'move'} value idempotent, and "
+            f"{'it' if count == 1 else 'each'} now REQUIRES an `{AUTO_IDEMPOTENCY_HEADER}` header: a "
+            f"request without one is refused 400, and a repeat with the same key gets the first answer. "
+            f"Update your callers to send a new key for each new request and the same key to retry one.\n")
+    profile = ("" if resolved else
+               f"For the sector's full rules, add the `{s['sector']}` profile (a `sectors/` folder beside "
+               f"the program, or ~/.mohio/sectors). ")
+    return [CompileWarning(
+        lead + "\n".join(listed),
+        line,
+        f"{profile}To leave a route out, put `not idempotent reason \"<why>\"` at its top. Once the callers "
+        f"send the key, record that in the journey, which quiets this notice (the key stays required):\n"
+        f"    suppress sector_idempotency_key_required reason \"callers send Idempotency-Key\"",
+        code="sector_idempotency_key_required")]
+
+
+def scan_sector_routes_not_idempotent(program):
+    """THE GROUPED ADVISORY (BRIEF Part A). Under a named sector, routes that change something but move
+    no value and call nothing out are not made idempotent; one line names how many, never one per
+    route. An advisory: a journey's `suppress sector_route_not_idempotent reason "..."` quiets it."""
+    s = sector_idempotency(program)
+    if not s['other']:
+        return []
+    first = s['other'][0]
+    line = getattr(first, 'line', 0) or 0
+    count = len(s['other'])
+    names = ", ".join(_route_names(n)[2] for n in s['other'][:5]) + (", ..." if count > 5 else "")
+    return [CompileWarning(
+        f"Line {line}: {count} `listen for` route{'' if count == 1 else 's'} under `sector: {s['sector']}` "
+        f"change{'s' if count == 1 else ''} something without moving value, and "
+        f"{'is' if count == 1 else 'are'} not made idempotent: a request sent twice does its work twice "
+        f"({names}).",
+        line,
+        f"Add `once per request.header \"{AUTO_IDEMPOTENCY_HEADER}\"` to any that should answer a "
+        f"repeat from the first answer. If none should, say so once in the journey:\n"
+        f"    suppress sector_route_not_idempotent reason \"<why>\"",
+        code="sector_route_not_idempotent")]
+
+
+def scan_suppress_lines(program):
+    """`suppress <code> reason "<why>"` in a journey (RULED by Ron 2026-10-25) quiets one ADVISORY code.
+    A line that would quiet anything else refuses, so suppression never reaches what it may not: a code
+    Mohio does not have, an error (never suppressible), a governance code (security, classification,
+    money, a sector's rules, never silenced by configuration), and a line with no reason. One journey
+    naming one code twice refuses too: the second line could only disagree with the first."""
+    from mohio_transformer import diagnostic_entry
+    errors = []
+    fix = 'suppress dead_store reason "kept while the page is drafted"'
+    for j in (n for n in _dataclass_nodes(program) if type(n).__name__ == 'JourneyDecl'):
+        seen = {}
+        for m in (getattr(j, 'body', None) or []):
+            if type(m).__name__ != 'JourneyMeta' or getattr(m, 'kind', '') != 'suppress':
+                continue
+            code, reason = m.value
+            line = getattr(m, 'line', 0) or 0
+            entry = diagnostic_entry(code)
+            if entry is None:
+                errors.append(CompileError(
+                    f"Line {line}: `suppress {code}` names no Mohio diagnostic code, so it would quiet nothing.",
+                    line=line, hint=f"Use the code a warning prints (the `see getmohio.com/codes/<code>` line), "
+                                    f"for example:\n    {fix}", code="suppress_line"))
+            elif 'error' in (entry.get('type') or []):
+                errors.append(CompileError(
+                    f"Line {line}: `{code}` is an error, and an error is never suppressed: the program it "
+                    f"names does not run as written.", line=line,
+                    hint="Fix what the error says and remove this line.", code="suppress_line"))
+            elif not entry.get('suppressible'):
+                errors.append(CompileError(
+                    f"Line {line}: `{code}` is a governance diagnostic (security, classification, money or a "
+                    f"sector's rules), and a governance diagnostic is never silenced by configuration.",
+                    line=line, hint="Fix what it names, and remove this line.", code="suppress_line"))
+            elif reason is None or not str(reason).strip():
+                errors.append(CompileError(
+                    f"Line {line}: `suppress {code}` takes a reason, so the next reader (and an auditor) sees "
+                    f"why this advisory is quiet.", line=line,
+                    hint=f"Say why on the line:\n    suppress {code} reason \"<why>\"", code="suppress_line"))
+            elif code in seen:
+                errors.append(CompileError(
+                    f"Line {line}: this journey already suppresses `{code}` at line {seen[code]}.",
+                    line=line, hint="Remove one of the two lines.", code="suppress_line"))
+            seen.setdefault(code, line)
+    return errors
+
+
+def scan_not_idempotent_line(program):
+    """`not idempotent reason "<why>"` opts one route out of sector-automatic idempotency, so it stands
+    once at the top of a `listen for`, carries a reason, sits in a program that declares a sector, and
+    is not written beside `once per`. The sector's auto routes need a database that keeps answers in
+    the request transaction, the same as `once per`."""
+    errors = []
+    nodes = list(_dataclass_nodes(program))
+    sector = _sector_as_written(nodes)
+    top = {}
+    for n in nodes:
+        if type(n).__name__ == 'NewBlock':
+            body = getattr(n, 'body', None) or []
+            mine = [b for b in body if type(b).__name__ == 'NotIdempotentDecl']
+            for d in mine:
+                top[id(d)] = (n, mine, any(type(b).__name__ == 'IdempotentDecl' for b in body))
+    fix = 'not idempotent reason "the provider deduplicates by its own reference"'
+    for d in (n for n in nodes if type(n).__name__ == 'NotIdempotentDecl'):
+        line = getattr(d, 'line', 0) or 0
+        if id(d) not in top:
+            errors.append(CompileError(
+                f"Line {line}: `not idempotent` opts a whole `listen for` route out of the sector's automatic "
+                f"idempotency, so it stands at the top of one, not inside a branch or another block.",
+                line=line, hint=f"Move it to the first lines of the route:\n    listen for sh.Pay at /pay\n"
+                                f"        {fix}\n        ...\n    listen: done", code="idempotent_route"))
+            continue
+        _route, mine, explicit = top[id(d)]
+        if mine[0] is not d:
+            errors.append(CompileError(
+                f"Line {line}: this route already says `not idempotent` at line {getattr(mine[0], 'line', 0) or 0}.",
+                line=line, hint="Remove one of the two lines.", code="idempotent_route"))
+            continue
+        if explicit:
+            errors.append(CompileError(
+                f"Line {line}: this route says both `once per` and `not idempotent`, which contradict "
+                f"each other.", line=line, hint="Keep the one you mean.", code="idempotent_route"))
+            continue
+        if d.reason is None or not str(d.reason).strip():
+            errors.append(CompileError(
+                f"Line {line}: `not idempotent` takes a reason, so the next reader sees why this route may do "
+                f"its work twice for a request sent twice.", line=line,
+                hint=f"Say why on the line:\n    {fix}", code="idempotent_route"))
+            continue
+        if sector is None:
+            errors.append(CompileError(
+                f"Line {line}: `not idempotent` opts a route out of the idempotency a named sector gives it, and "
+                f"this program declares no sector, so the line does nothing.", line=line,
+                hint="Remove the line; without a sector no route is made idempotent unless it says "
+                     "`once per`.", code="idempotent_route"))
+    auto = sector_idempotency(program)['auto']
+    if auto:
+        drivers = [str(getattr(n, 'driver', None) or getattr(n, 'connect_type', '') or '').lower()
+                   for n in nodes if type(n).__name__ == 'ConnectDecl']
+        first = auto[0][0]
+        line = getattr(first, 'line', 0) or 0
+        where = _route_names(first)[2]
+        out_fix = f"or put `not idempotent reason \"<why>\"` at the top of the route."
+        if not drivers:
+            errors.append(CompileError(
+                f"Line {line}: under `sector: {sector}` the route at `{where}` is idempotent automatically, and "
+                f"its answers are kept in the database, which this program does not connect.", line=line,
+                hint=f"Connect one, for example `connect db as postgres from env.DATABASE_URL`, {out_fix}",
+                code="idempotent_route"))
+        elif all(dr in ('mongo', 'mongodb') for dr in drivers):
+            # DEFER: T1-MONGO-PROGRAM-TRANSACTION, the same refusal `once per` gives on MongoDB.
+            errors.append(CompileError(
+                f"Line {line}: under `sector: {sector}` the route at `{where}` is idempotent automatically, which "
+                f"keeps the key and the work in one transaction, and a MongoDB request transaction is "
+                f"declared but not built in this release (T1-MONGO-PROGRAM-TRANSACTION).", line=line,
+                hint=f"Run it on Postgres, MySQL, Oracle or SQLite, {out_fix}", code="idempotent_route"))
+    return errors
+
+
+_KEY_SLOT_RE = re.compile(r"\{\{\s*key\s*\}\}")
+
+
+def scan_outcome_lookups(program):
+    """`outcome from <lookup>` on a connector operation (the durable-work reconciler, RULED by Ron
+    2026-10-28). The lookup is a read on the same connector whose path names the call by `{{ key }}`,
+    and it belongs on an operation that changes something: only those can end with an unknown outcome.
+    A `{{` in any other operation's path would be sent to the service as written."""
+    errors = []
+    fix_shape = ('    operation charge\n        method POST\n        outcome from findCharge\n    operation: done\n'
+                 '    operation findCharge\n        method GET\n        path "/charges?key={{ key }}"\n'
+                 '    operation: done')
+    for n in _all_nodes(program):
+        if type(n).__name__ != 'MioconnectDecl':
+            continue
+        ops = {str(o.name): o for o in (getattr(n, 'operations', None) or [])}
+        lookups = {str(getattr(o, 'outcome_from', '') or '') for o in ops.values()} - {''}
+        for o in ops.values():
+            name, method = str(o.name), str(o.method).upper()   # the AST defaults it to POST
+            target = getattr(o, 'outcome_from', None)
+            line = getattr(o, 'outcome_line', 0) or getattr(o, 'line', 0) or 0
+            if target:
+                looked = ops.get(str(target))
+                if method in ('GET', 'HEAD', 'OPTIONS'):
+                    errors.append(CompileError(
+                        f"Line {line}: `{n.name}.{name}` is a {method}, which changes nothing, so its outcome is "
+                        f"never unknown and there is nothing for `outcome from {target}` to look up. Move it to "
+                        f"the operation that changes something.",
+                        line=line, hint="For example:\n" + fix_shape,
+                        code="outcome_lookup"))
+                elif looked is None:
+                    known = ", ".join(sorted(ops))    # never empty: this operation is one of them
+                    errors.append(CompileError(
+                        f"Line {line}: `outcome from {target}` names no operation on `{n.name}` (it has: "
+                        f"{known}), so a call left unknown could never be looked up.",
+                        line=line, hint="Declare the lookup on the same connector:\n" + fix_shape,
+                        code="outcome_lookup"))
+                else:
+                    lm = str(looked.method).upper()
+                    if lm != 'GET':
+                        errors.append(CompileError(
+                            f"Line {line}: `outcome from {target}` names `{n.name}.{target}`, a {lm}. A lookup "
+                            f"only reads: asking about a call must never do the work again.",
+                            line=line, hint=f"Give `{target}` `method GET`:\n" + fix_shape, code="outcome_lookup"))
+                    elif not _KEY_SLOT_RE.search(str(getattr(looked, 'path', '') or '')):
+                        errors.append(CompileError(
+                            f"Line {line}: `{n.name}.{target}` is the lookup for `{name}`, and its path does not "
+                            f"name the call with `{{{{ key }}}}`, so the service would not know which call is "
+                            f"being asked about.",
+                            line=line, hint="Put the call's key in the lookup's path:\n" + fix_shape,
+                            code="outcome_lookup"))
+            if '{{' in str(getattr(o, 'path', '') or '') and name not in lookups:
+                pl = getattr(o, 'line', 0) or 0
+                errors.append(CompileError(
+                    f"Line {pl}: `{n.name}.{name}` has `{{{{` in its path, and only an outcome lookup's path "
+                    f"is filled in (with the key of the call it asks about). Here it would be sent as written.",
+                    line=pl, hint=("Name it from the changing operation with `outcome from " + name + "`, or "
+                                   "write the path without braces."), code="outcome_lookup"))
+    # A program calling a lookup itself has no key to put in its path (the run-time twin of this
+    # refusal is in _exec_MioconnectCall).
+    keyed = set()
+    for n in _all_nodes(program):
+        if type(n).__name__ == 'MioconnectDecl':
+            for o in (getattr(n, 'operations', None) or []):
+                if '{{' in str(getattr(o, 'path', '') or ''):
+                    for nm in (n.name, getattr(n, 'alias', None)):
+                        if nm:
+                            keyed.add((str(nm), str(o.name)))
+    for n in _all_nodes(program):
+        if type(n).__name__ == 'MioconnectCall' and (str(n.connector), str(n.operation)) in keyed:
+            cl = getattr(n, 'line', 0) or 0
+            errors.append(CompileError(
+                f"Line {cl}: `{n.connector}.{n.operation}` is an outcome lookup: only the reconciler calls it, "
+                f"with the key of the call it asks about, and a program calling it has no key to put there.",
+                line=cl, hint="Call the changing operation that names it with `outcome from`; Mohio looks an "
+                              "unknown outcome up for you.", code="outcome_lookup"))
+    return errors
 
 
 ERROR_SCANS = (
+    scan_outcome_lookups,
     scan_route_idempotency,
+    scan_not_idempotent_line,
+    scan_suppress_lines,
     scan_connect_name_twice,
     scan_paginate_without_page_size,
+    scan_match_to_empty_word,
     scan_same_path_two_classes_refused,
     scan_upload_zone_ambiguous,
     scan_write_verb_on_audit_relation,
@@ -10306,6 +11158,7 @@ ERROR_SCANS = (
     scan_route_path_param_form,
     scan_otherwise_placement,
     scan_block_opener_as_variable,
+    scan_reserved_namespace_names,
     scan_give_back_no_value,
     scan_audit_destinations,
     scan_audit_store_reachable,
@@ -10927,7 +11780,7 @@ def scan_unrecognized_field_classifier(program):
     # answers waiting to diverge. `identifier` is gone from it: nothing anywhere reads it, so
     # leaving it recognized made it look like one of the real ones.
     from mohio_classification import RECOGNIZED_CLASSIFIERS as RECOGNIZED
-    from mohio_classification import RESERVED_LABELS
+    from mohio_classification import RESERVED_LABELS, VISIBILITY_TAGS
     from mohio_classification import SEC_CLASSIFY_LEVEL_WORDS as LEVEL_WORDS
     # What a developer most plausibly meant, for the ones worth naming outright. Anything not
     # listed still warns; this only sharpens the suggestion where the intent is unmistakable.
@@ -10984,7 +11837,7 @@ def scan_unrecognized_field_classifier(program):
                                 f"carries enforcement: [pii], [phi] or [pci].",
                                 line=getattr(fld, 'line', 0) or getattr(node, 'line', 0) or 0, code="classifier_is_sec_level"))
                             continue
-                        if part in RECOGNIZED:
+                        if part in RECOGNIZED or part in VISIBILITY_TAGS:
                             continue
                         # A RESERVED LABEL NAMES ITS OWN JOB (`[important]` v1, RULED 2026-10-22).
                         # The generic text called it an unknown classifier kept as a searchable
@@ -11725,7 +12578,9 @@ def scan_shape_unique_governs_no_table(program):
 
 _CM_MARKER_NODES = ('CmPurgeBlock', 'CmRetainStmt', 'CmReportStmt',
                     'CmExpireStmt', 'CmLockStmt', 'CmNotifyStmt')
-_WRITE_NODES = ('SaveBlock', 'UpdateBlock', 'SaveOrUpdateBlock', 'SaveAllBlock', 'RemoveBlock')
+# The writes the compliance-shape signal reads. Its own name: it was a second `_WRITE_NODES`, which
+# replaced the full set above at import, so the financial-transaction rule missed `modify` and `remove.all`.
+_COMPLIANCE_WRITE_NODES = ('SaveBlock', 'UpdateBlock', 'SaveOrUpdateBlock', 'SaveAllBlock', 'RemoveBlock')
 # NARROW compliance-shape signals, deliberately conservative (Ron 2026-09-24: a false positive on an
 # ordinary app is worse than a missed one). A table NAME that reads like an audit/evidence store, and
 # a shape FIELD named unambiguously for an audit record. LEFT OUT on purpose, and reported: `actor`,
@@ -11792,7 +12647,7 @@ def scan_compliance_shape_no_marker(program):
                     shaped[0] = (getattr(node, 'line', 0) or 0,
                                  f"the shape `{getattr(node, 'name', '')}` declares an audit-record "
                                  f"field `{fname}`")
-        if tn in _WRITE_NODES:
+        if tn in _COMPLIANCE_WRITE_NODES:
             tbl = _write_target_table_name(node)
             if tbl and any(w in tbl for w in _COMPLIANCE_TABLE_WORDS) and shaped[0] is None:
                 shaped[0] = (getattr(node, 'line', 0) or 0,
@@ -12019,13 +12874,15 @@ def scan_default_not_on_ungoverned_save(program):
 
 WARNING_SCANS = (
     scan_default_not_on_ungoverned_save,
-    scan_write_route_no_idempotent,
+    scan_sector_idempotency_notice,
+    scan_sector_routes_not_idempotent,
     scan_journey_without_timezone,
     scan_page_class_outranked,
     scan_same_path_two_classes_warning,
     scan_success_on_possibly_empty_lookup,
     scan_comparison_can_meet_empty,
     scan_release_never_held,
+    scan_claim_result_unread,
     scan_retry_after_send,
     scan_password_field_without_format,
     scan_compliance_shape_no_marker,

@@ -768,6 +768,10 @@ class MioconnectDecl(Node):
     # is its own header on the request; the same header twice refuses at transform (it used to be one
     # slot, so the last line won and a bearer beside an Idempotency-Key was dropped without a word).
     auth:       list = field(default_factory=list)
+    # Every `header "Name" value` line, in order: (header name, value, line). A header that is not a
+    # credential (T1-HEADER-SURFACE-UNIFY), sent on every operation; the same header twice, here or
+    # beside an `auth` line, refuses at transform as the `auth` lines do.
+    headers:    list = field(default_factory=list)
     timeout:    Any  = None
     operations: list = field(default_factory=list)   # list[MioconnectOperation]
     retry:      Optional[int] = None    # T1-RUN3: retry N times on a genuine connectivity
@@ -784,6 +788,8 @@ class MioconnectOperation(Node):
     returns_shape: Optional[str] = None
     method:       str  = "POST"
     timeout:      Any  = None   # seconds; overrides the connector's own timeout for this operation
+    outcome_from: Optional[str] = None   # the read operation that looks a call up by its key (reconciler)
+    outcome_line: int  = 0
 
 @dataclass
 class MioconnectCall(Node):
@@ -1275,6 +1281,13 @@ class UpdateBlock(Node):
     alias:   Optional[str] = None                 # update ... as NAME -> bind rows-changed count
 
 @dataclass
+class UpdateWhereEmpty(Node):
+    """`where site_id is empty` inside an update: the row must have no value there (no value, or
+    empty text). Part of the update's own statement, so an expected-empty compare-and-set stays one
+    write (MIOQL-EMPTY-UPDATE-01)."""
+    field: str = ""
+
+@dataclass
 class RemoveBlock(Node):
     """remove from db.sessions match user_id to user.id"""
     source:    Any  = None
@@ -1288,6 +1301,7 @@ class RemoveAllBlock(Node):         # NEW v3.8
     """remove.all from db.temp_imports  (optional on.success / on.failure)"""
     source:   Any  = None
     handlers: list = field(default_factory=list)
+    alias:    Optional[str] = None   # remove.all ... as NAME -> bind rows-cleared count
 
 @dataclass
 class CheckMioqlBlock(Node):         # NEW v3.8
@@ -1852,6 +1866,7 @@ class NotifyStmt(Node):
     target:  Any  = None
     channel: Optional[str] = None
     body:    list = field(default_factory=list)
+    injects: list = field(default_factory=list)   # (source DottedName, slot name), as on miomail.send
 
 @dataclass
 class ServiceCallStmt(Node):
@@ -2233,6 +2248,8 @@ class MiomailStmt(Node):
     cc:       list = field(default_factory=list)
     bcc:      list = field(default_factory=list)
     reply_to: Any  = None
+    template_name: str  = ""                            # `template NAME`: a declared template (T1-TEMPLATE)
+    injects:  list = field(default_factory=list)       # (source DottedName, slot name) per `inject X into Y`
 
 @dataclass
 class SqlBlock(Node):
@@ -2256,11 +2273,12 @@ class ShowBlock(Node):
 
 @dataclass
 class HashBlock(Node):
-    """hash form.password as hashed using bcrypt"""
+    """hash form.password as hashed using bcrypt; hash account.iban as token using sha256 with key secret.K"""
     value:     Any  = None
     alias:     Optional[str] = None
     algorithm: str  = "sha256"
     body:      list = field(default_factory=list)
+    key:       Any  = None          # `with key <value>`: the digest is an HMAC under it
 
 @dataclass
 class CheckAgainstStmt(Node):
@@ -2441,16 +2459,25 @@ class RespondAsStmt(Node):
 
 @dataclass
 class IdempotentDecl(Node):
-    """idempotent by request.header "Idempotency-Key" keep for 24 hours (T1-ROUTE-IDEMPOTENCY).
+    """once per request.header "Idempotency-Key" keep for 24 hours (T1-ROUTE-IDEMPOTENCY).
     `source` is the dotted name the key is read from and `header` the header it names ("" when the
     source names no header, which check refuses). `keep_seconds` is None when no `keep for` was
-    written; `keep_written` is the duration as written, for messages."""
+    written; `keep_written` is the duration as written, for messages. `sector` names the sector that
+    made a route idempotent with no line written (the run builds that declaration), "" for a line."""
     source:       Any = None
     header:       str = ""
     keep_seconds: Any = None
     keep_written: str = ""
     keep_unit:    str = ""
     keep_count:   Any = None
+    sector:       str = ""
+
+@dataclass
+class NotIdempotentDecl(Node):
+    """not idempotent reason "<why>" -- opts a `listen for` out of the idempotency a named sector gives a
+    route that moves value or calls out (BRIEF sector-idempotency-and-diagnostics, Part A). `reason` is
+    None when no `reason` was written, which check refuses."""
+    reason: Any = None
 
 @dataclass
 class TitleDecl(Node):
@@ -2478,10 +2505,21 @@ class ViewDecl(Node):
 
 @dataclass
 class TemplateDecl(Node):
-    """template welcome_email / guest_name as text / ... / template: done"""
-    name:   str  = ""
-    params: list = field(default_factory=list)
-    body:   list = field(default_factory=list)
+    """template welcome_email / subject "..." / from "..." as "Name" / html "path" / template: done
+
+    A named email or document, declared once and sent by name (T1-TEMPLATE). `subject`, `body` and the
+    html/text FILES are text with {{ }} slots, filled at send from the injected values only. `params`
+    holds declared slots as (name, type, mode, default node); mode is required, optional or default."""
+    name:      str  = ""
+    params:    list = field(default_factory=list)
+    body:      list = field(default_factory=list)
+    subject:   Any  = None    # raw text with {{ }}, rendered at send
+    text_body: Any  = None    # inline `body "..."`, raw text rendered at send
+    html_path: Any  = None    # `html "path"`, read at send, relative to the program
+    text_path: Any  = None    # `text "path"`, read at send, relative to the program
+    from_:     Any  = None    # value node, evaluated at send in the sender's scope
+    from_name: Any  = None
+    reply_to:  Any  = None
 
 @dataclass
 class MiotestDecl(Node):
@@ -2677,6 +2715,34 @@ def mongo_tagged_refusal(fields, line=None):
             f"    Until it is built, keep this app's data on an engine that keeps the trail: SQLite, "
             f"Postgres, MySQL or Oracle, for example\n"
             f"        connect db as postgres from env.DATABASE_URL")
+
+
+def sqlite_protected_deploy_refusal(fields, frameworks, marker):
+    """Protected data on SQLite on a deploy (T1-SQLITE-PROTECTED-DATA-TIERING): the one-file engine is
+    the development tier for tagged data and for a sector, so a deployed app refuses to boot."""
+    if fields:
+        what = ("tagged data (" + ', '.join(f"`{f}`" for f in fields[:6])
+                + (', ...' if len(fields) > 6 else '') + ")")
+    else:
+        what = "data under a sector (" + ', '.join(str(f) for f in frameworks[:4]) + ")"
+    return (f"this app keeps {what} on SQLite, and {marker} is set, which the platform sets on a "
+            f"deployed app. SQLite is one file with one writer at a time, so it is the development "
+            f"tier for protected data; a deployed app keeps it on a server database.\n"
+            f"    Point the connection at Postgres, MySQL or Oracle, for example\n"
+            f"        connect db as postgres from env.DATABASE_URL")
+
+
+def sqlite_protected_dev_notice(fields, frameworks=()):
+    """The local side of the same boundary: a local `mio serve` on SQLite with tagged data or a sector
+    (inform locally, enforce at deploy)."""
+    if fields:
+        what = ("tagged data (" + ', '.join(f"`{f}`" for f in fields[:6])
+                + (', ...' if len(fields) > 6 else '') + ")")
+    else:
+        what = "data under a sector (" + ', '.join(str(f) for f in list(frameworks)[:4]) + ")"
+    return (f"  [connect] SQLite holds {what} here. That is fine on this machine while you "
+            f"build; deploy it on Postgres, MySQL or Oracle, where a deployed app with protected "
+            f"data on SQLite refuses to start.")
 
 
 def mongo_ai_audit_refusal(logs, line=None):

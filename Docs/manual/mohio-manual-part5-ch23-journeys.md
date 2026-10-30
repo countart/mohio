@@ -190,6 +190,7 @@ subfolder could silently make a hidden path public.
 | `sector: ...` | the compliance floor | Yes, tighten-only (section 5) |
 | `limits ... limits: done` | the AI ceiling | Yes (same assembly) |
 | an `include` | pulls a shared file in | Yes (part of the journey's statements) |
+| `suppress <code> reason "..."` | quiets one advisory diagnostic (section 8) | Yes: a folder journey quiets its folder (check-verified) |
 | `public:` / `private:` / `hidden:` / `authorize:` | page classification | Wrapper-only; not declarable in a folder `journey.mho` today |
 
 "Run-verified" means a subfolder page was served and shown to inherit it this pass; "same assembly"
@@ -306,6 +307,72 @@ Both were hit by real application lanes, and both look like the journey is broke
   `:memory:`) works; a `sqlite:///...` URL form fails at runtime with "unable to open database file". A
   connection declared in a journey is only as good as the value in the environment. (Tracked as
   `T1-SQLITE-URL-FORM-MISMATCH`.)
+
+---
+
+### 8. Quieting an advisory: `suppress`
+
+Some warnings are advice: a known pattern you have decided to keep, a nudge that does not apply to your
+application. Left in the report, a warning you have chosen to ignore is noise, and noise is how a new,
+important warning gets missed. So a journey may quiet one advisory, by its code, with the reason on the
+line:
+
+```mohio
+journey App
+    timezone "UTC"
+    suppress release_never_held reason "the teaching pages release on purpose"
+journey: done
+```
+
+The code is the one the warning prints (its `see getmohio.com/codes/<code>` line). The line lives in the
+journey, so it is in version control, it travels with the repository, and a reviewer or an auditor reads
+it there.
+
+**It cascades like the rest of the journey.** The root `journey.mho` quiets the advisory for the whole
+project; a folder's `journey.mho` quiets it for that folder and the folders below it, and not for a page
+above it (each verified with `mio check`).
+
+**The silence is never opaque.** `mio check` still says how many advisories it suppressed:
+
+```
+  v  page.mho  3 lines . no errors
+
+  1 advisory suppressed by a journey, run `mio check page.mho --show-suppressed` to see it
+```
+
+and `--show-suppressed` lists each one, with what it said, where it was suppressed and the reason:
+
+```
+  Suppressed  1 advisory, each by a journey line
+
+    release_never_held  Line 2: release does nothing here because x is never held; hold it first if you meant to protect it.
+      suppressed at journey.mho:3, reason: the teaching pages release on purpose
+```
+
+`mio check --json` carries them too, in a `suppressed` list beside `warnings`, each with its reason.
+
+**Advisory codes only.** Every code has a class, and the class decides. An **advisory** is a heuristic, a
+nudge or a matter of style, and may be suppressed. A **governance** code is the enforcement itself
+(security, classification, money, a sector's rules) and is never silenced by configuration; an **error**
+is never suppressed at all. The published code reference marks each code's class. `mio check` refuses a
+`suppress` line:
+
+- with no reason, or an empty one;
+- naming an error, or a governance code;
+- naming a code Mohio does not have;
+- naming a code the same journey already suppresses.
+
+**The sector notice is an advisory.** The notice that a sector makes money routes require an
+`Idempotency-Key` (Chapter 44) prints until a journey suppresses it, and the `suppress` line, with its
+reason, IS the record that your callers were told. The key itself stays required: suppressing the notice
+never turns the `400` off.
+
+```mohio
+journey Payments
+    timezone "UTC"
+    suppress sector_idempotency_key_required reason "every caller sends Idempotency-Key since 6.0.2"
+journey: done
+```
 
 ---
 

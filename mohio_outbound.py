@@ -26,7 +26,10 @@ import uuid
 
 ATTEMPTS_TABLE = "mohio_outbound_attempts"
 ATTEMPT_COLUMNS = ["key", "connector", "operation", "status", "reconcile_required", "handler",
-                   "person", "started_at", "finished_at", "fingerprint"]
+                   "person", "started_at", "finished_at", "fingerprint",
+                   # the reconciler's own record of asking (mohio_reconcile): how many times, when last,
+                   # and what settled it ("" until something did)
+                   "reconcile_checks", "last_checked_at", "resolved_by"]
 
 
 class KeyReusedError(Exception):
@@ -148,7 +151,8 @@ class AttemptLog:
         store.save(ATTEMPTS_TABLE, {
             "key": key, "connector": connector, "operation": operation, "status": "sending",
             "reconcile_required": "true", "handler": handler or "", "person": person or "",
-            "started_at": started_at, "finished_at": "", "fingerprint": fingerprint or ""},
+            "started_at": started_at, "finished_at": "", "fingerprint": fingerprint or "",
+            "reconcile_checks": "0", "last_checked_at": "", "resolved_by": ""},
             allow_new_columns=True)
         return True
 
@@ -165,7 +169,7 @@ class AttemptLog:
 # -- INBOUND: the answers an idempotent route has given (T1-ROUTE-IDEMPOTENCY, Ron 2026-10-22) --
 #
 # The sibling of AttemptLog, facing the other way. A `listen for` route declared
-# `idempotent by request.header "Idempotency-Key"` keeps each answer it gives under the caller's key,
+# `once per request.header "Idempotency-Key"` keeps each answer it gives under the caller's key,
 # so a repeated request is answered from the record and the work is not done again.
 #
 # THE KEY AND THE WORK ARE ONE TRANSACTION. The slot is claimed on the app's OWN connection inside the

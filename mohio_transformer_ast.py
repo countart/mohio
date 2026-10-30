@@ -90,7 +90,7 @@ from mohio_ast import (
     CheckBlock, CheckWhen,
     EachBlock, RepeatBlock, WhileBlock, SectionBlock,
     # Data operations
-    RetrieveBlock, FindBlock, SaveBlock, UpdateBlock, RemoveBlock,
+    RetrieveBlock, FindBlock, SaveBlock, UpdateBlock, UpdateWhereEmpty, RemoveBlock,
     FieldValue, MatchClause, WhereClause, AndClause, ReturnClause,
     OrderClause, LimitClause, CacheClause,
     # Result handlers
@@ -841,6 +841,30 @@ class MohioTransformer(Transformer):
     _HANDLER_LINE = None
 
     @staticmethod
+    def _gather_bare_classification(stmts):
+        """T1-CLASSIFICATION-WRAPPER-ONLY: a page-classification line written at a file's top level (the
+        canonical folder journey.mho has no `journey ... journey: done` wrapper) means what it means inside
+        one. The lines join the file's journey when it has one (a file has one journey), or become a
+        journey of their own at the first line's place, so the serve gate, the cascade and the
+        `[important]` floor read them exactly as they read the wrapped form. T1-JOURNEY-LINES-WRAPPER-ONLY:
+        the journey's other one-line settings (`suppress`, `timezone`, `flow:`, `serves:`) join the same way."""
+        from mohio_ast import JourneyDecl
+        bare = [s for s in stmts if isinstance(s, JourneyMeta)
+                and s.kind in ('public', 'private', 'hidden', 'authorize',
+                               'suppress', 'timezone', 'flow', 'serves')]
+        if not bare:
+            return stmts
+        rest = [s for s in stmts if not any(s is b for b in bare)]
+        journey = next((s for s in rest if isinstance(s, JourneyDecl)), None)
+        if journey is not None:
+            journey.body = list(bare) + list(journey.body)
+            return rest
+        at = next(i for i, s in enumerate(stmts) if s is bare[0])
+        before = sum(1 for s in stmts[:at] if not any(s is b for b in bare))
+        rest.insert(before, JourneyDecl(name=None, body=list(bare), line=getattr(bare[0], 'line', 0) or 0))
+        return rest
+
+    @staticmethod
     def _refuse_second_journey(program):
         """A file has one journey (T1-ROUTE-CLASS-PER-JOURNEY, RULED by Ron 2026-10-22). A journey is the
         scope every handler in its file is served under; two in one file split that scope, and a handler
@@ -1004,7 +1028,7 @@ class MohioTransformer(Transformer):
         # synthetic ListenBlock here, which bound every handler to every other and made a `listen for`
         # wrapper look required; that container is gone. Do NOT reintroduce it -- the router matches a
         # request against the registry of standalone handlers directly.
-        stmts = [c for c in children if c is not None]
+        stmts = self._gather_bare_classification([c for c in children if c is not None])
         program = Program(statements=stmts)
         # Fail loud on a stray block closer ANYWHERE -- top level or nested.
         # A closer (`X: done`) is normally consumed by its block; if one leaks
@@ -1074,6 +1098,18 @@ class MohioTransformer(Transformer):
                         "likely non-canonical. Valid comparisons: is above / is more than, "
                         "is below / is less than, is between A and B, contains, starts.with, "
                         "is empty, is not.")
+            elif bn == 'operation':
+                # `operation` exists only inside a connector (RULED by Ron 2026-10-29), so one written
+                # on its own is not a malformed body: it is in the wrong place, and the fix is the home.
+                hint = (". An `operation` is declared inside a `mioconnect` connector, never on its "
+                        "own, because it names a call that connector makes. Put it in its connector:\n"
+                        "    mioconnect Payments\n"
+                        "        address env.PAYMENTS_URL\n"
+                        "        operation charge\n"
+                        "            path \"/charges\"\n"
+                        "            method POST\n"
+                        "        operation: done\n"
+                        "    mioconnect: done")
             else:
                 hint = (". The block it should close did not parse -- check the lines "
                         "above it for a malformed or non-canonical block body.")
@@ -1546,7 +1582,7 @@ class MohioTransformer(Transformer):
 
     @v_args(meta=True)
     def idempotent_decl(self, meta, children):
-        # idempotent by request.header "Idempotency-Key" (keep for N unit)?  (T1-ROUTE-IDEMPOTENCY)
+        # once per request.header "Idempotency-Key" (keep for N unit)?  (T1-ROUTE-IDEMPOTENCY)
         from mohio_ast import IdempotentDecl
         source, header = None, ""
         src = next((c for c in children if isinstance(c, Tree) and c.data == 'verify_source'), None)
@@ -1566,6 +1602,13 @@ class MohioTransformer(Transformer):
             if per is not None and isinstance(dur.count, (int, float)):
                 decl.keep_seconds = int(dur.count * per)
         return decl
+
+    @v_args(meta=True)
+    def not_idempotent_decl(self, meta, children):
+        # not idempotent reason "<why>"  (sector-automatic idempotency's opt-out)
+        from mohio_ast import NotIdempotentDecl
+        why = next((str(c)[1:-1] for c in children if isinstance(c, Token) and c.type == 'STRING'), None)
+        return NotIdempotentDecl(reason=why, line=getattr(meta, 'line', 0) or 0)
 
     def sector_decl(self, children):
         # children: [SECTOR, sector_name]. sector_name is SECTOR_SEG ("." SECTOR_SEG)*
@@ -1715,6 +1758,13 @@ class MohioTransformer(Transformer):
         hname = str(name_tok).strip('"') if name_tok else ""
         return ('auth', 'header', hname, val, None, self._first_line(children))
 
+    def mc_header(self, children):
+        # header "Name" value  (T1-HEADER-SURFACE-UNIFY): the name is the first child, the value the last
+        name_tok = children[0] if children else None
+        hname = str(name_tok).strip('"') if name_tok is not None else ""
+        val = children[-1] if len(children) > 1 else None
+        return ('header', hname, val, self._first_line(children))
+
     def mc_webhook(self, children):
         # ACCEPTED BUT NEVER EXECUTED, so refused rather than warned (RULED by Ron, 2026-10-05):
         # nothing stores or uses a mioconnect `webhook` line, so a program that declares one
@@ -1779,6 +1829,11 @@ class MohioTransformer(Transformer):
     def mc_op_timeout(self, children):
         return ('timeout', self._mc_seconds(children), self._first_line(children))
 
+    def mc_op_outcome_from(self, children):
+        # outcome from findCharge: the lookup the reconciler asks about a call left unknown
+        s = next((c for c in children if isinstance(c, Token) and c.type == 'NAME'), None)
+        return ('outcome_from', str(s) if s else None, self._first_line(children))
+
     def mioconnect_body(self, children):
         # Unwraps the unaliased alternatives (operation, on_failure_handler)
         # so they reach mioconnect_decl directly.
@@ -1796,6 +1851,8 @@ class MohioTransformer(Transformer):
                 elif tag == 'sends':   op.sends_shape = c[1]
                 elif tag == 'returns': op.returns_shape = c[1]
                 elif tag == 'timeout': op.timeout = c[1]
+                elif tag == 'outcome_from':
+                    op.outcome_from, op.outcome_line = c[1], c[2] or 0
         _refuse_repeated_line(f"operation `{op.name}`", [(c[0], c[2]) for c in children if isinstance(c, tuple)])
         return op
 
@@ -1828,16 +1885,21 @@ class MohioTransformer(Transformer):
                 if   tag == 'address':  decl.address = c[1]
                 elif tag == 'auth':
                     decl.auth.append(c[1:])
+                elif tag == 'header':
+                    decl.headers.append(c[1:])
                 elif tag == 'timeout':  decl.timeout = c[1]
                 elif tag == 'retry':    decl.retry = c[1]
                 # webhook: parsed and accepted; no node field in MVP (unrelated to the
                 # STATE-channel facade this run closes -- webhook signature verification is
                 # its own separate, already-shipped feature elsewhere).
+        # ONE HEADER, ONE LINE across the `auth` and the `header` lines alike, in the order written.
         _refuse_duplicate_headers(
             f"connector `{name}`",
-            [(hname, ('auth header "%s"' % hname) if kind == 'header' else 'auth ' + kind, line)
-             for kind, hname, _v, _v2, line in decl.auth],
-            'auth bearer env.PAY_KEY\n        auth header "Idempotency-Key" env.ORDER_KEY')
+            sorted([(hname, ('auth header "%s"' % hname) if kind == 'header' else 'auth ' + kind, line)
+                    for kind, hname, _v, _v2, line in decl.auth]
+                   + [(hname, 'header "%s"' % hname, line) for hname, _v, line in decl.headers],
+                   key=lambda e: e[2] or 0),
+            'auth bearer env.PAY_KEY\n        header "Idempotency-Key" env.ORDER_KEY')
         _refuse_repeated_line(
             f"connector `{name}`",
             [(c[0], c[2]) for c in children if isinstance(c, tuple) and c[0] in ('address', 'timeout', 'retry')]
@@ -3713,6 +3775,13 @@ class MohioTransformer(Transformer):
         return JourneyMeta(kind='authorize', value=paths, line=getattr(meta, 'line', 0) or 0,
                            important=_journey_line_label(children, 'authorize:', getattr(meta, 'line', 0)))
 
+    @v_args(meta=True)
+    def journey_suppress(self, meta, children):
+        # suppress <code> reason "<why>": value is (code, reason); reason None when not written (check refuses)
+        code = next((str(c) for c in children if isinstance(c, Token) and c.type == 'NAME'), "")
+        why = next((str(c)[1:-1] for c in children if isinstance(c, Token) and c.type == 'STRING'), None)
+        return JourneyMeta(kind='suppress', value=(code, why), line=getattr(meta, 'line', 0) or 0)
+
     def journey_flow(self, children):
         paths = next((c for c in children if isinstance(c, list)), [])
         return JourneyMeta(kind='flow', value=paths)
@@ -4884,7 +4953,7 @@ class MohioTransformer(Transformer):
                         if isinstance(c, (OnFailure, OnSuccess, OnError, CheckWhen, OtherwiseClause))]
             # block form -> exactly one block closer is present; validate it
             self._validate_closer('remove.all', children, _line(open_token))
-        return RemoveAllBlock(source=source, handlers=handlers,
+        return RemoveAllBlock(source=source, handlers=handlers, alias=_write_alias(children),
                               line=_line(open_token))
 
     def miomap_decl(self, children):
@@ -4906,6 +4975,14 @@ class MohioTransformer(Transformer):
         """Unwrap update_body wrapper -- pass through contents."""
         return children[0] if len(children) == 1 else children
 
+    def update_where_empty(self, children):
+        """`where site_id is empty` (or `is.empty`) inside an update (MIOQL-EMPTY-UPDATE-01)."""
+        name = next((c for c in children if isinstance(c, (DottedName, Token)) and not
+                     (isinstance(c, Token) and c.type in ('WHERE', 'IS', 'IS_EMPTY', 'EMPTY'))), None)
+        parts = [str(p) for p in getattr(name, 'parts', None) or []] or [str(name)]
+        tok = next((c for c in children if isinstance(c, Token) and c.type == 'WHERE'), None)
+        return UpdateWhereEmpty(field=parts[-1], line=_line(tok))
+
     def update_field(self, children):
         """v3.8 grammar: field value inside update block."""
         return self.save_field(children)
@@ -4924,7 +5001,7 @@ class MohioTransformer(Transformer):
                             if isinstance(x, FieldValue))
             elif type(c).__name__ in _MATCH_NODE_NAMES:
                 body.extend(_take_match([c], 'update'))
-            elif isinstance(c, FieldValue):
+            elif isinstance(c, (FieldValue, UpdateWhereEmpty)):
                 body.append(c)
         # SIBLING of the save case: `update` collects the same FieldValue nodes from the same
         # newline-blind grammar, so `set st "ZZZ" allowed "c"` splits the same way and writes
@@ -6966,9 +7043,32 @@ class MohioTransformer(Transformer):
         dotted = next((c for c in children if isinstance(c, DottedName)), None)
         via_token = next((str(c) for c in children
                           if isinstance(c, Token) and c.type == 'NAME'), None)
-        body = [c for c in children
-                if _is_tree(c, 'notify_body')]
-        return NotifyStmt(target=dotted, channel=via_token, body=body)
+        # Each line as (word, value): `to`, `from`, `subject`, `message`, `template` or `via`.
+        body = []
+        for c in children:
+            if _is_tree(c, 'notify_body'):
+                _w = next((str(k).lower() for k in c.children if isinstance(k, Token)), '')
+                body.append((_w, next((k for k in c.children if not isinstance(k, Token)), None)))
+        injects = []
+        for c in children:
+            if _is_tree(c, 'notify_inject'):
+                _src = next((k for k in c.children if not isinstance(k, Token)), None)
+                _slot = [k for k in c.children if isinstance(k, Token) and k.type == 'NAME']
+                injects.append((_src, str(_slot[-1])))
+        line = _line(next((c for c in children if isinstance(c, Token)), None)) or 0
+        # `via email` is built (T1-TEMPLATE); every other channel is declared and not built, and
+        # refuses here, at check, as the whole statement did before email was built.
+        _via = next((v for w, v in body if w == 'via'), None)
+        if not (isinstance(_via, DottedName) and _via.parts == ['email']):
+            _said = ('via ' + '.'.join(str(p) for p in _via.parts)) if isinstance(_via, DottedName) \
+                else 'no `via` line'
+            raise MohioCompileError(
+                f"This notify has {_said}, and the only channel built in this release is email "
+                f"(other channels are declared, not built yet, T1-NOTIFY-CHANNELS). Send it by email:\n"
+                f"    notify with\n        to member.email\n        template welcome_email\n"
+                f"        inject member into member\n        via email",
+                line=line, code="notify_channel_not_built")
+        return NotifyStmt(target=dotted, channel=via_token, body=body, injects=injects, line=line)
 
     def release_stmt(self, children):
         variant_token = next((c for c in children
@@ -7517,6 +7617,12 @@ class MohioTransformer(Transformer):
         # None -- a silent no-op on basic list access.
         parts = [str(c) for c in children
                  if isinstance(c, Token) and c.type in ('NAME', 'AVERAGE', 'NUMBER')]
+        # T1-ENV-SECRET-IN-EXPRESSION: inside an expression (`(env.SINK & "/hook")`) the grammar reads
+        # `env.X` and `secret.X` as a plain dotted name, so they looked up a variable called `env` and
+        # failed at run while the bare value form read the environment. One job for the words: the
+        # environment and the secret store, wherever they are written.
+        if len(parts) == 2 and parts[0] in ('env', 'secret'):
+            return EnvRef(key=parts[1]) if parts[0] == 'env' else SecretRef(key=parts[1])
         return DottedName(parts=parts)
 
     def sh_ref(self, children):
@@ -7896,9 +8002,11 @@ class MohioTransformer(Transformer):
             action = "send"
 
         to_ = from_ = from_name = subject = body = template = reply_to = None
+        template_name = ""
         attach = []
         cc = []
         bcc = []
+        injects = []
 
         # Walk body nodes
         for child in children:
@@ -7908,6 +8016,25 @@ class MohioTransformer(Transformer):
             body_vals = [c for c in child.children if not isinstance(c, Token)]
             key = str(body_toks[0]).lower() if body_toks else ""
             val = body_vals[0] if body_vals else (body_toks[1] if len(body_toks) > 1 else None)
+
+            if key == "inject":
+                # `inject <source> into <slot>`: the source is the value, the slot is the name the
+                # template's {{ }} reads it by. Two names always (Ron, 2026-09-25).
+                injects.append((body_vals[0], str(body_toks[-1])))
+                continue
+            if key == "template" and isinstance(val, Token) and val.type == 'STRING':
+                # This line used to parse and then be dropped: the mail went out with no subject
+                # and an empty body, and nothing said why.
+                _tn = _unquote(str(val))
+                raise MohioCompileError(
+                    f"`template \"{_tn}\"` names a template in quotes. A template is declared with "
+                    f"`template {_tn}` and named the same way in a send, without quotes:\n"
+                    f"    miomail.send\n        to member.email\n        template {_tn}\n"
+                    f"        inject member into member\n    miomail.send: done",
+                    line=_line(val) or 0, code="mail_template_quoted")
+            if key == "template":
+                template_name = str(val)
+                continue
 
             if key == "to":          to_ = val
             elif key == "from":
@@ -7927,7 +8054,9 @@ class MohioTransformer(Transformer):
         return self._wrap_for_purpose(MiomailStmt(
             action=action, to=to_, from_=from_, from_name=from_name,
             subject=subject, body=body, template=template,
-            attach=attach, cc=cc, bcc=bcc, reply_to=reply_to
+            attach=attach, cc=cc, bcc=bcc, reply_to=reply_to,
+            template_name=template_name, injects=injects,
+            line=_line(next((c for c in children if isinstance(c, Token)), None)) or 0
         ), children)
 
 
@@ -7941,6 +8070,23 @@ class MohioTransformer(Transformer):
             return StringOpExpr(operation='unknown', operand=None)
         op_tok = tokens[0]
         op_type = str(op_tok.type).lower()
+        # A TEXT OPERATION STARTS NO LINE (T1-TEXT-OP-LINE-GLUE, found 2026-10-27). Line breaks are not
+        # tokens in this grammar, so a line that begins with one of these words (`before`, `after`,
+        # `by`, `uppercase`, `trim`, ...) was read as part of the line above: `x 3` then `before (x + 0)`
+        # parsed as `x 3 before (x + 0)`, checked clean, and failed at run reading `x` before it was set.
+        # The value a text operation works on is written on the same line as the operation.
+        _src = children[0] if children and not isinstance(children[0], Token) else None
+        _src_line = getattr(_src, 'line', 0) or 0
+        if _src is not None and _src_line and (op_tok.line or 0) > _src_line:
+            _word = str(op_tok).strip()
+            _takes = op_type in ('str_after', 'str_before', 'str_left', 'str_right', 'by_kw')
+            _shown = f"name {_word} \"x\"" if _takes else f"name {_word}"
+            raise MohioCompileError(
+                f"`{_word}` starts this line, and `{_word}` is a text operation, so it was read as part of "
+                f"the value on line {_src_line} rather than as a line of its own. A text operation goes on "
+                f"the line of the value it works on, and a new value takes a name first, for example "
+                f"`result ({_shown})`.",
+                line=op_tok.line or 0)
         # Slice operators: value_expr OP value/number
         if op_type in ('str_after', 'str_before', 'str_left', 'str_right'):
             # Structure: value_expr OP value_expr [STR_DEFAULT value_expr]
@@ -8743,6 +8889,7 @@ class MohioTransformer(Transformer):
         # hash filed under the PIN column, silently.
         pairs = []          # [{'value': node, 'alias': str|None}]
         algorithm = None
+        key = None
         line = next((c.line for c in items
                      if isinstance(c, Token) and getattr(c, 'line', None)), None)
         i = 0
@@ -8754,6 +8901,8 @@ class MohioTransformer(Transformer):
                 i += 2; continue
             if isinstance(c, Token) and c.type == 'USING' and i + 1 < len(items):
                 algorithm = str(items[i + 1]); i += 2; continue
+            if isinstance(c, Token) and c.type == 'WITH' and i + 1 < len(items):
+                key = items[i + 1]; i += 2; continue
             # The closer arrives as a Closer AST NODE, not a Tree, so `_is_tree(c,
             # 'closer')` alone never matched it. The old code's `if value is None`
             # guard swallowed the surplus item silently; counting pairs exposes it.
@@ -8823,9 +8972,28 @@ class MohioTransformer(Transformer):
                 + "    For a CHECKSUM:  " + ", ".join(self._HASH_FOR_CHECKSUMS),
                 line=line)
 
+        if key is not None and algo in self._HASH_FOR_PASSWORDS:
+            # A salted hash never comes out the same twice, so a key cannot make it matchable; and a
+            # password needs no key, because nobody else should ever match it.
+            raise MohioCompileError(
+                "`with key` makes a matchable token, and `using " + algorithm + "` cannot make one: it "
+                "salts every hash, so the same value never gives the same result twice." + chr(10)
+                + "    For a token two parties match:  hash account.iban as token using sha256 with key "
+                "secret.PSI_KEY" + chr(10)
+                + "    For a PASSWORD, leave the key out:  hash form.password as hashed using bcrypt",
+                line=line, code="hash_key_needs_deterministic")
+        if key is not None and type(key).__name__ == 'Literal':
+            # A key written in the source is a key everyone who reads the source holds.
+            raise MohioCompileError(
+                "`with key` takes the key from a secret, not from text written in the program: a key "
+                "in the source is shared with everyone who can read the source, which is the person "
+                "it is meant to keep out." + chr(10)
+                + "    Set it in the environment and read it as a secret:  hash account.iban as token "
+                "using sha256 with key secret.PSI_KEY",
+                line=line, code="hash_key_from_source")
         return HashBlock(value=pairs[0]['value'] if pairs else None,
                          alias=pairs[0]['alias'] if pairs else None,
-                         algorithm=algo)
+                         algorithm=algo, key=key)
 
     def replace_block(self, children):
         from mohio_ast import ReplaceBlock
@@ -9370,10 +9538,77 @@ class MohioTransformer(Transformer):
         return ViewDecl(name=str(name_tok) if name_tok else "")
 
     def template_decl(self, children):
+        """A named email or document (T1-TEMPLATE). Each line is kept RAW: the subject and body are
+        text whose {{ }} slots fill at send from the injected values, never here, where nothing has
+        been injected yet. A line written twice refuses, since one of the two would silently lose."""
         from mohio_ast import TemplateDecl
         name_tok = next((c for c in children
                          if isinstance(c, Token) and c.type == 'NAME'), None)
-        return TemplateDecl(name=str(name_tok) if name_tok else "")
+        name = str(name_tok) if name_tok else ""
+        decl = TemplateDecl(name=name, line=_line(name_tok) or 0)
+        seen = {}
+        def once(word, line):
+            if word in seen:
+                raise MohioCompileError(
+                    f"template `{name}` says `{word}` twice (lines {seen[word]} and {line}), and only "
+                    f"one can be used, so the other would be silently ignored. Remove one of the two `{word}` lines.",
+                    line=line, code="template_line_repeated")
+            seen[word] = line
+        for c in children:
+            if not isinstance(c, Tree):
+                continue
+            ln = _line(c) or decl.line
+            kind = c.data
+            if kind == 'template_line':
+                vp = next((k for k in c.children if _is_tree(k, 'view_param')), None)
+                if vp is None or any(_is_tree(k, 'display_block') for k in vp.children):
+                    raise MohioCompileError(
+                        f"template `{name}` has a `display` block, which belongs to a `view` (a piece of "
+                        f"a page). A template is a message: give it `body \"...\"`, or `html \"file\"` "
+                        f"and `text \"file\"`, for example:\n"
+                        f"    template {name}\n        subject \"Hello {{{{ member.first_name }}}}\"\n"
+                        f"        body \"Hi {{{{ member.first_name }}}}\"\n    template: done",
+                        line=ln, code="template_display_block")
+                toks = [k for k in vp.children if isinstance(k, Token)]
+                slot = str(toks[0])
+                tn = next((k for k in vp.children if _is_tree(k, 'type_name')), None)
+                tname = str(tn.children[0]) if tn is not None and tn.children else ''
+                mode_tok = next((k for k in toks[1:] if k.type in ('REQUIRED', 'OPTIONAL', 'DEFAULT')), None)
+                mode = str(mode_tok.type).lower() if mode_tok is not None else 'required'
+                default = next((k for k in vp.children
+                                if not isinstance(k, Token) and not _is_tree(k, 'type_name')), None)
+                once(f"slot {slot}", ln)
+                decl.params.append((slot, tname, mode, default))
+                continue
+            word = {'template_subject': 'subject', 'template_from': 'from',
+                    'template_reply_to': 'reply to', 'template_html': 'html',
+                    'template_text': 'text', 'template_body': 'body'}.get(kind)
+            if word is None:
+                continue
+            once(word, ln)
+            strs = [k for k in c.children if isinstance(k, Token) and k.type == 'STRING']
+            vals = [k for k in c.children if not isinstance(k, Token)]
+            if kind == 'template_subject':   decl.subject = _unquote(strs[0])
+            elif kind == 'template_body':    decl.text_body = _unquote(strs[0])
+            elif kind == 'template_html':    decl.html_path = _unquote(strs[0])
+            elif kind == 'template_text':    decl.text_path = _unquote(strs[0])
+            elif kind == 'template_reply_to': decl.reply_to = vals[0] if vals else None
+            elif kind == 'template_from':
+                decl.from_ = vals[0] if vals else None
+                decl.from_name = _unquote(strs[-1]) if strs else None
+        if decl.text_body is not None and decl.text_path is not None:
+            raise MohioCompileError(
+                f"template `{name}` has both `body` and a `text` file, two plain-text versions of one "
+                f"message, and only one can be sent. Remove one: use `body` for a short message or `text` "
+                f"for a file; `html` is the one that goes alongside either.",
+                line=decl.line, code="template_two_text_bodies")
+        if decl.text_body is None and decl.text_path is None and decl.html_path is None:
+            raise MohioCompileError(
+                f"template `{name}` has nothing to send: it needs a `body`, an `html` file or a `text` "
+                f"file. For example:\n    template {name}\n        subject \"Hello\"\n"
+                f"        body \"Hi {{{{ member.first_name }}}}\"\n    template: done",
+                line=decl.line, code="template_nothing_to_send")
+        return decl
 
     def miotest_decl(self, children):
         from mohio_ast import MiotestDecl
