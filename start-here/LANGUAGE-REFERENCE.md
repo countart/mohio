@@ -2,7 +2,7 @@
 <!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Language Reference
 
-*Generated from the grammar on 2026-10-11. Do not edit by hand -- edit `tools/langref/langref_meta.json` and regenerate.*
+*Generated from the grammar on 2026-11-04. Do not edit by hand -- edit `tools/langref/langref_meta.json` and regenerate.*
 
 ## How to use this reference
 
@@ -284,7 +284,23 @@ Example:
 ```mohio
 show {{ name }}
 ```
-Drop a value into rendered output and render inline Mohio. The only brace form; single braces are illegal.
+Drop a value into rendered output and render inline Mohio. The only brace form; single braces are illegal. A `{{ name }}` also resolves in a CONDITION value position, in a `where`, a `match` and a `check when`, quoted or not, and is the value of `name` (verified by running: with a row holding `Aria`, `where v is {{ name }}` and `match v to {{ name }}` each return it, and `when x is "{{ name }}"` matches `x "Aria"`; brace-escape probe, reports/BRACE-ESCAPE-PROBE-2026-10-15).
+
+### ✅ `\{{ ... }} (literal braces)`  
+*canonical*
+
+```
+\{{ VALUE }}
+```
+Example:
+```mohio
+name "Aria"
+show
+    L1:{{ name }}
+    L2:\{{ name }}
+show: done
+```
+A leading backslash before a `{{ }}` pair prints the pair LITERALLY instead of interpolating. Verified by running in text strings, `show` (inline and block), `render` / `render html`, and `render scripts`: the example above prints `L1:Aria` then `L2:{{ name }}`, and `show "A:\{{ name }}"` prints `A:{{ name }}` where `show "A:{{ name }}"` prints `A:Aria`; in a render, `<p>B:\{{ name }}</p>` emits `<p>B:{{ name }}</p>`, and in `render scripts` `var b = "\{{ name }}";` stays literal. `render code` is the REVERSE, because its job is to show code samples, which themselves contain `{{ }}`: there a bare `{{ name }}` prints literally and `\{{ name }}` SUBSTITUTES the value (verified: a `render code` body of `A:{{ name }}` then `B:\{{ name }}` emits `A:{{ name }}` then `B:Aria`). One rule in both kinds: the backslash always means the OTHER behaviour. The escape emits no message of its own; escaping a variable's only use leaves it unread, so `mio check` then warns it `is set but never used`. Cite: brace-escape probe, reports/BRACE-ESCAPE-PROBE-2026-10-15.
 
 ### ✅ `{{ form sh.X }}`  
 *canonical*
@@ -783,7 +799,7 @@ retrieve player from db.players
     match id to 1
 retrieve: done
 ```
-One row. Stack match lines for AND. `match any` = OR, `no.match` = NOT (closes no.match: done). A POST-FETCH CLAUSE IS REFUSED on `retrieve` at check: `return`, `export`, `summarize`, `calculate`, `inject` and the time clause (`timespan`) each give `retrieve: <clause> is declared but not yet built on retrieve` and stop the build (they used to be silently dropped; `inject` was the last to slip through and is now caught too). `join` (`with ... from`) is refused as well, but by its own build-wide message (native JOIN is not executable yet -- use the SQL escape hatch), not the retrieve-specific one. Ron's ruling: `retrieve` returns ONE record while those clauses shape or write from a RESULT SET, so they belong on `find`, the collection verb that already exports; a one-row export is `find` with a `match` and a limit. (Fresh-tenant read: a DECLARED-but-unmaterialised table returns empty, an UNDECLARED table fails loud -- see `connect`.)
+One row, and EXACTLY one -- this is the single-entity read. CANONICAL SURFACE is bare `retrieve` (confirmed against the 6.0.3 grammar: there is no dedicated `retrieve.one` rule; `retrieve.one` is accepted only as the generic modifier form and runs identically, but bare `retrieve` is the form to teach). FAILS LOUD WHEN MORE THAN ONE ROW MATCHES (6.0.3, verified by running on the freeze candidate): rather than bind whichever row the engine returned first, `retrieve` refuses with a DEVELOPER error -- a program mistake, not a governed refusal, so it never reaches `on.failure` and is never a 403. An arbitrary pick is how one person with two memberships gets approved, then denied, by an unrelated update. The message names the fix -- for example, retrieve `player` found more than one row in db.players matching field `city`: `retrieve reads exactly one record, so Mohio will not pick one for you`. Match a key so only one row can match (`match id to ...`, or a field declared `unique`); to ask whether any such row exists use `check exists player in db.players` with the same match; to read all of them use `find player in db.players`. THE CARDINALITY TRIAD: `retrieve` reads ONE entity; `check exists` asks a ONE-TO-MANY condition (does any such row exist); `find` reads THE MANY. Enforced across ALL FIVE engines -- sqlite, postgres, mysql and oracle read two rows and refuse on the second (`len(rows) > 1`); Mongo does the same via `.find(...).limit(2)` then `len(docs) > 1` -- verified live on SQLite, read-verified in the other four (the executor catches one shared `_SeveralRows` and turns it into the message above). `grab` and `get` are the other two single-row reads and now FAIL LOUD on more than one match exactly as `retrieve` does (6.0.3; T1-GRAB-SEVERAL-MATCHES has landed, verified live on all three): the refusal names the verb -- `grab`/`get reads exactly one record, so Mohio will not pick one for you` -- and points at the same fix (match a key, `check exists`, or `find`), while a single match still returns the one row. So the triad covers all three single-row verbs: `retrieve`/`grab`/`get` each read ONE entity and none will silently pick a row when several match. Stack match lines for AND. `match any` = OR, `no.match` = NOT (closes no.match: done). A POST-FETCH CLAUSE IS REFUSED on `retrieve` at check: `return`, `export`, `summarize`, `calculate`, `inject` and the time clause (`timespan`) each give `retrieve: <clause> is declared but not yet built on retrieve` and stop the build (they used to be silently dropped; `inject` was the last to slip through and is now caught too). `join` (`with ... from`) is refused as well, but by its own build-wide message (native JOIN is not executable yet -- use the SQL escape hatch), not the retrieve-specific one. Ron's ruling: `retrieve` returns ONE record while those clauses shape or write from a RESULT SET, so they belong on `find`, the collection verb that already exports; a one-row export is `find` with a `match` and a limit. (Fresh-tenant read: a DECLARED-but-unmaterialised table returns empty, an UNDECLARED table fails loud -- see `connect`.)
 
 ### ✅ `find (many rows)`  
 *canonical*
@@ -1240,7 +1256,7 @@ listen for sh.Event at /webhook
     give back [200] "ok"
 listen: done
 ```
-Prove an inbound webhook came from who it claims. It computes HMAC-SHA256 over the RAW request bytes and compares it constant-time against a signature header, failing CLOSED: a bad or missing signature is a 401 before anything binds, reads or writes. The secret must come from the environment (a literal in the page is refused). `header "..."` names the header the signature arrives in (default `X-Signature`); `within N minutes` adds a freshness bound that requires an `X-Timestamp` header folded into the signature. It works on BOTH handler kinds (verified): a `request for sh.X` (GET) webhook and a `new sh.X` (POST) webhook, not only `new`. REPLAY PROTECTION (verified end to end, scoped to a declared `within N minutes`): a validly-signed delivery that is RESENT identically is answered 200 WITHOUT reprocessing the handler, and the repeat is RECORDED to the audit trail as its own event (a replay is an event, not a silent no-op); a resend carrying a DIFFERENT but still-fresh timestamp is a genuinely new delivery and runs. `within N minutes` is the one configurable acceptance window this grammar has, and replay dedup rides on it: a webhook with NO `within` clause has signature verification but no replay dedup. An inbound handler WITHOUT any `verify signature` clause earns the `webhook_unverified` warning.
+Prove an inbound webhook came from who it claims. It computes HMAC-SHA256 over the RAW request bytes and compares it constant-time against a signature header, failing CLOSED: a bad or missing signature is a 401 before anything binds, reads or writes. The secret must come from the environment (a literal in the page is refused). `header "..."` names the header the signature arrives in (default `X-Signature`); `within N minutes` adds a freshness bound that requires an `X-Timestamp` header folded into the signature. It works on BOTH handler kinds (verified): a `request for sh.X` (GET) webhook and a `listen for sh.X at /path` (POST) webhook, closed with `listen: done`. REPLAY PROTECTION (verified end to end, scoped to a declared `within N minutes`): a validly-signed delivery that is RESENT identically is answered 200 WITHOUT reprocessing the handler, and the repeat is RECORDED to the audit trail as its own event (a replay is an event, not a silent no-op); a resend carrying a DIFFERENT but still-fresh timestamp is a genuinely new delivery and runs. `within N minutes` is the one configurable acceptance window this grammar has, and replay dedup rides on it: a webhook with NO `within` clause has signature verification but no replay dedup. An inbound handler WITHOUT any `verify signature` clause earns the `webhook_unverified` warning.
 
 ### ✅ `one-time links (mioauth.token.create / verify token / mioauth.token.revoke)`  
 *canonical*
@@ -1574,7 +1590,7 @@ Example:
 ```mohio
 sector: financial
 ```
-Activate a sector profile. Hierarchical and additive, levels separated by COMMAS: `sector: education, north_carolina, highschool` applies every layer, each level only ADDING rules. The dotted form (`education.north_carolina.highschool`) is RETIRED and fails loud. One per file. A NAME THAT DOES NOT RESOLVE now REFUSES at check and at run, naming three fixes (remove the line, name a sector that exists, or fix the spelling) plus a did-you-mean on a near miss -- it used to warn and run unenforced. A known paid/licensed sector whose profile is not bundled (`financial`, `healthcare`, and siblings) still WARNS and runs unenforced, pointing at the commercial profile or runtime; a bundled community profile loads and runs. Compliance is opt-in by ANY single marker -- a sector like this, a sensitive field tag (`card as text [pci]`), or a `.cm` verb -- and the compliance minimum (an audit chain and a tamper-evident envelope on writes) applies from that one marker on.
+Activate a sector profile. Hierarchical and additive, levels separated by COMMAS: `sector: education, north_carolina, highschool` applies every layer, each level only ADDING rules. The dotted form (`education.north_carolina.highschool`) is RETIRED and fails loud. One per file. A NAME THAT DOES NOT RESOLVE now REFUSES at check and at run, naming three fixes (remove the line, name a sector that exists, or fix the spelling) plus a did-you-mean on a near miss -- it used to warn and run unenforced. A known paid/licensed sector whose certified profile is not installed (`financial`, `healthcare`, and siblings) still WARNS and RUNS, on BUILT-IN COMPLIANCE DEFAULTS -- an over-precise money amount is refused (never rounded), a stored row missing a declared `required` field refuses at first touch, a default database on a temporary disk refuses at connect, and every data write is recorded in the audit trail -- while the CERTIFIED sector rules do NOT apply. That absent-profile state is the canonical example here on purpose: it shows the floor you get for free. Installing the profile (a signed `.sector`, or a community `.mho` in `MOHIO_CERTIFIED_SECTORS_DIR`) is how you OPT IN to full sector enforcement; a bundled community profile loads and runs. Compliance is opt-in by ANY single marker -- a sector like this, a sensitive field tag (`card as text [pci]`), or a `.cm` verb -- and the compliance minimum (an audit chain and a tamper-evident envelope on writes) applies from that one marker on.
 
 ### ✅ `security requirements (sector profile block)`  
 *canonical*
@@ -1674,11 +1690,32 @@ journey: done
 Example:
 ```mohio
 journey App
+    timezone "UTC"
     public: /notice
     private: /admin
 journey: done
 ```
 Journey-level access classifications for routes (`public:` is the implicit default). They parse ONLY inside a `journey NAME ... journey: done` wrapper. In a bare folder-scoped `journey.mho` (no wrapper) they do NOT parse: `public: /x` fails at check with `Syntax error ... No terminal matches '/'` (verified Batch 36). So the canonical folder `journey.mho`, which is what a developer reaches for, cannot carry them bare today -- use the wrapper form where you need them. Access control today is enforced by `require role` on a route. CASCADE, TIGHTEN-ONLY (verified by running the cascade assembly): a root `journey.mho` cascades its classifications to pages in its subfolders, and a subfolder `journey.mho` may only TIGHTEN a page's classification, NEVER loosen it. Strictness runs public < private < authorize < hidden. A subfolder tightening (`hidden:` under a parent's `authorize:`) is accepted; a loosening (`public:` under a parent's `hidden:`) is REFUSED at assembly, naming the path and the floor: `A subfolder journey may only TIGHTEN a page's classification, never relax it: /secret must stay hidden or something stricter here, not drop to public.` This holds even when a broader subfolder path (`public: /x`) would cover a narrower path a parent already protected, and a subfolder silent on classification inherits the parent's floor unchanged. The same tighten-only rule governs the sector cascade: a subfolder may ADD sector layers (`financial` -> `financial, banking`), never swap to a looser profile (`financial` -> `healthcare` is refused).
+
+### ✅ `[important] -- the reserved journey-override label`  
+*canonical*
+
+```
+timezone "Zone/Name" [important]   (trailing a journey line)
+```
+Example:
+```mohio
+shape Q
+    q as text
+shape: done
+journey App
+    timezone "Asia/Tokyo" [important]
+    request for sh.Q at /t
+        give back [200] "ok"
+    request: done
+journey: done
+```
+`[important]` is the first RESERVED label (`mohio_classification.RESERVED_LABELS`): a taken name, never a field classifier, that a langmap pack cannot translate or rebind (verified: a pack mapping the word `important` leaves a bracket span alone). v1 (RULED by Ron 2026-10-22, T1-IMPORTANT-LABEL-V1): it trails a journey `timezone` line and makes the `journey.mho` value WIN over a page's own timezone for that line -- the default is page-wins, `[important]` inverts it per line (the build lane measured it over HTTP, Tokyo vs New York; the outermost `[important]` zone in the cascade holds). On a SECURITY line (`public:`/`private:`/`hidden:`/`authorize:`) `[important]` makes the journey class a FLOOR (RULED by Ron 2026-10-22, the floor model; it SUPERSEDES the earlier tighten-only reading, which was inverted and never reached main). The floor is the journey class's rank at the page's path (`_CLASS_RANK`: `public` < `private` < `authorize` < `hidden`, mio.py); the page's rank is what the page itself declares for that path. A page AT OR ABOVE the floor is clean -- `[important]` never drags a stricter page down. A page BELOW the floor is REFUSED at check when the journey class carries `[important]` (the refusal names the page, its class, the floor and the journey file/line), and WARNED when the journey class is plain (no `[important]`). Otherwise silent. WHAT IT CHANGES is CHECK, not serving: at serve every journey gate already runs, so the stricter class always holds regardless -- `[important]` turns the below-floor case from a warning into a hard refusal at check; it does not change what serves. (Pre-existing serving nuance, queued T1-HIDDEN-UNDER-GATE-ANSWERS-403: a page `hidden:` under a journey `authorize:` answers 403 to an anonymous caller, not 404, because the outer refusing gate answers first.) Any OTHER label trailing a journey line refuses, naming `[important]` as the only label a journey line takes. On a SHAPE FIELD `[important]` is a check WARNING naming its real job -- it is the journey-override marker, not a field label, and gives the field no protection (use `[pii]`/`[phi]`/`[pci]`); a sector profile that classifies a field `[important]` refuses to load. BUILD STATE (honest): the timezone form, the reserved-label status, the other-label refusal and the shape-field warning are VERIFIED by running on the shipped v1 (dev 0ac3e50) and are stable. The FLOOR SECURITY behaviour above is RULED (the floor model, 2026-10-22) and BUILT in a dev worktree (mohio-dev-quiet), not yet on main -- the shipped v1 (0ac3e50) still refuses every security line, and the earlier tighten-only build (3d5c11c) was inverted and never reached main -- so the floor behaviour, its runnable example and `--verify` land when the build reaches main and this clone, where I run-verify it (page >= floor clean; page < floor with `[important]` refuses; page < a plain journey class warns) before the entry is settled. `sector: [important]` stays REFUSED: `_CLASS_RANK` does not cover `sector:`, so it is not built there, and the sector cascade's own rule (a nearer journey may only ADD levels) already holds; the refusal says so with no ranking claim.
 
 ### ✅ `social preview (title / describe / image)`  
 *canonical*
@@ -2577,7 +2614,7 @@ show ("hi " & greeting & ", total " & a)
 cutoff now - 2 days
 show cutoff
 ```
-Arithmetic lives INSIDE comparison/math grouping parentheses: `+`, `-`, `*`, `/`, and `%` (remainder). The ONE exception written OUTSIDE parentheses is a DATE OFFSET -- a number and a time unit applied to a temporal anchor, `now - 2 days` or `last_month - 3 days` (verified by running: `now - 2 days` yields the datetime two days back). To JOIN TEXT, `&` is the only operator (`"hi " & name`), and it coerces a number to its text form; `+` never joins text. `->`, `<-` and `<->` are FLOW arrows only (mapping, language flow, the cosmetic check/otherwise separator) and are never math. EQUALITY inside `( )` is a single `=`, arriving with the build that makes it evaluate; until it lands, compare with the word form `is`.
+Arithmetic lives INSIDE comparison/math grouping parentheses: `+`, `-`, `*`, `/`, and `%` (remainder). The ONE exception written OUTSIDE parentheses is a DATE OFFSET -- a number and a time unit applied to a temporal anchor, `now - 2 days` or `last_month - 3 days` (verified by running: `now - 2 days` yields the datetime two days back). To JOIN TEXT, `&` is the only operator (`"hi " & name`), and it coerces a number to its text form; `+` never joins text. `->`, `<-` and `<->` are FLOW arrows only (mapping, language flow, the cosmetic check/otherwise separator) and are never math. EQUALITY inside `( )` is a single `=`, arriving with the build that makes it evaluate; until it lands, compare with the word form `is`. The date-offset DURATION is a literal NUMBER and a full unit word (verified by running: `millisecond`/`ms`, `second`, `minute`, `hour`, `day`, `week`, `month`, `year`, each singular or plural, all parse and compute, e.g. `now - 1 hour` and `now - 2 hours`). The count must be a LITERAL: a variable in the count position does not parse today (`(now - n days)`, `(now - n hours)` and `where ... is.in last n days` each fail to parse; `(now - 7 days)` works) -- a variable duration is a deferral, not built (verified, date-duration probe reports/DATE-DURATION-PROBE-cb944a9-2026-10-14).
 
 ### ✅ `absolute`  
 *canonical*
@@ -2797,6 +2834,27 @@ check: done
 ```
 The symbolic comparisons live inside comparison grouping parentheses: `!=` (not equal), `<=`, `>=`, `==`, `<`, `>`. In a `check`/`when` the SPOKEN forms are: `is less than` / `is more than` (and `is below` / `is above`) for `<` / `>`, and `is at least N` / `is at most N` for `>=` / `<=`. The `is at least` / `is at most` server-side forms WORK on the current tip (verified by running 2026-10-11: `score 7` matches `is at least 5` and not `is at most 5`); the earlier refusal that sent them to client-side-only is gone. A LENGTH form compares a text's character count: `is at least N characters` / `is at most N characters` (verified: a four-letter name matches `is at least 3 characters`, not `is at most 3 characters`). The same spoken forms also exist client-side inside a MioScript `validate` block.
 
+### ✅ `value kinds (money and cross-kind comparison)`  
+*canonical*
+
+```
+compare a money field only with the SAME currency, or with a currency-typed value; a bare non-zero number refuses
+```
+Example:
+```mohio
+limit as EUR
+limit 5000.00
+amount as EUR
+amount 125000.00
+check amount
+    when amount is more than limit
+        show "over"
+    otherwise
+        show "ok"
+check: done
+```
+Values of different kinds should never compare or combine silently (ruled Ron 2026-10-13). The money rules are BUILT and proven (dev battery `tests/test_battery_value_kinds.py` 61 of 61, mutation-proven): comparing an `EUR` value with a `USD` value refuses `currency_mismatch`; comparing a money field with a TEXT literal (`when amount is "125000.00"`, the Volarix trigger), `match amount to "125000.00"`, and `where amount is more than "0"` each refuse `kind_mismatch` at check (not the old silent not-equal / coerce); malformed money text (`abc`, `1e5`) refuses at the money write boundary. A bare NON-ZERO number compared with, added to or matched against money refuses at check (`when amount is more than 4.99` -> write it with its currency, e.g. `limit as EUR`); the allowed exceptions are ZERO (`when amount is 0`, zero has no currency) and scaling by a plain factor (`(amount * 2)`). So declare a threshold with its currency and compare same-currency, as the example does. GAP, verified by running, NOT yet closed: money compared with a BOOLEAN or an EMPTY value is NOT caught -- it compares silently. `when amount is more than true` answers `T` (the boolean is coerced), `when amount is true` and `when amount is ""` answer `F`, and the `where` / `match` / paren forms do the same. The counted langref matrix (money-left, all 12 right kinds, all 16 operators, SQLite, no-sector) found 572 refusals and 0 silent cells against text/number/other-currency, but 80 SILENT WRONG cells, every one money-vs-boolean or money-vs-empty; see reports/VALUE-KINDS-MATRIX-R0-2026-10-16. Non-money-left cross-kind pairs (text vs boolean and the like) are a separate, named deferral, not yet built.
+
 ### ✅ `now() / uuid()`  
 *canonical*
 
@@ -2811,7 +2869,7 @@ id uuid()
 show created_at
 show id
 ```
-The producing call forms: `now()` builds the current datetime, `uuid()` builds a new unique id. Both belong in a value position (a field, a default). Bare `now` names the moment only in a temporal context (`now - 2 days`). Bare `now` as a VALUE is now refused AT CHECK (verified: `x now` no longer merely 500s at run, it fails `mio check` with `` `now` on its own is not a value. Write `now()` to produce the current moment.``); bare `uuid` alone is refused the same way. In a TEMPORAL position bare `now` is the live anchor (verified at check): a timespan may end `until now`, and a query may filter `where <field> is after now` or `since now` -- `now` resolves to the current moment there, so these need no `now()`.
+The producing call forms: `now()` builds the current datetime, `uuid()` builds a new unique id. Both belong in a value position (a field, a default). Bare `now` names the moment only in a temporal context (`now - 2 days`). Bare `now` as a VALUE is now refused AT CHECK (verified: `x now` no longer merely 500s at run, it fails `mio check` with `` `now` on its own is not a value. Write `now()` to produce the current moment.``); bare `uuid` alone is refused the same way. In a TEMPORAL position bare `now` is the live anchor (verified at check): a timespan may end `until now`, and a query may filter `where <field> is after now` or `since now` -- `now` resolves to the current moment there, so these need no `now()`. WHAT `now()` RETURNS (verified by running): a NAIVE UTC datetime with NO `Z` and NO offset (e.g. `2026-10-14T18:55:19.802195`), and it is UNAFFECTED by a journey/app `timezone` -- it is always UTC. Comparing a stored datetime with `now` compares INSTANTS: a value written with an offset (`...Z`, `...+03:00`, `...-04:00`) is converted to UTC before the compare, so `where <field> is after now` is correct even when a text or wall-clock reading would flip it (datetime-instant probe reports/DATETIME-INSTANT-PROBE-2026-10-14).
 
 ### ✅ `as.days / as.hours / as.minutes / as.seconds / as.weeks`  
 *canonical*
@@ -2922,10 +2980,11 @@ Example:
 ```mohio
 connect db as sqlite from env.DATABASE_URL
 find r in db.items
+    up to 20
     paginate by 2
 find: done
 ```
-Page a query's results. `paginate by N` takes a whole number of 1 or more, and since Batch 38 also a VARIABLE or expression (`paginate by page_number`). An INVALID value -- not a whole number, or below 1 -- FAILS LOUD at run (`400 validation_error: ... paginate by needs a whole number of 1 or more`), naming the line; the old silent page-one fallback is gone. A MISSING value takes the clause's own `default`: `paginate by request.page default 1` (ruled 2026-09-22, grammar landed 2026-10-05, verified at check) uses 1 when `?page=` is absent, while an invalid page is still refused, never clamped. Pairs with `limit`, `skip` and `cursor`. The paged RESULT is read through `rows.page.*`: `current`, `total`, `more`, `count`, `size`, `next`, `prev`, `cursor` (plus `rows.page.unmatched.count` / `.start` on a `with.all` join). THREE snake_case spellings are RETIRED and refuse at check with a teaching message naming the replacement (verified): `page.has_more` -> `page.more`, `page.per_page` -> `page.size`, `page.next_cursor` -> `page.cursor`.
+Page a query's results. `paginate by N` REQUIRES a page size via `up to N` beside it: the bare `paginate by N` with no `up to` REFUSES at check and at run (T1-PAGINATE-WITHOUT-PAGE-SIZE, ruled 2026-10-23), naming `up to`, rather than silently returning every row; N is the 1-based PAGE NUMBER and `up to N` is the page size. `paginate by N` takes a whole number of 1 or more, and since Batch 38 also a VARIABLE or expression (`paginate by page_number`). An INVALID value -- not a whole number, or below 1 -- FAILS LOUD at run (`400 validation_error: ... paginate by needs a whole number of 1 or more`), naming the line; the old silent page-one fallback is gone. A MISSING value takes the clause's own `default`: `paginate by request.page default 1` (ruled 2026-09-22, grammar landed 2026-10-05, verified at check) uses 1 when `?page=` is absent, while an invalid page is still refused, never clamped. The `up to N` page size is required (above); pairs also with `skip` and `cursor`. The paged RESULT is read through `rows.page.*`: `current`, `total`, `more`, `count`, `size`, `next`, `prev`, `cursor` (plus `rows.page.unmatched.count` / `.start` on a `with.all` join). THREE snake_case spellings are RETIRED and refuse at check with a teaching message naming the replacement (verified): `page.has_more` -> `page.more`, `page.per_page` -> `page.size`, `page.next_cursor` -> `page.cursor`.
 
 ### ✅ `rate limit`  
 *canonical*
@@ -3566,7 +3625,7 @@ A field/regulatory threshold modifier. It parses but enforces nothing today, so 
 ```
 timezone "Zone"   (declaration)   |   VALUE in.timezone "Zone" | VALUE in.timezone FIELD   (display)
 ```
-Ruled 2026-10-05. The `timezone` keyword works in FOUR contexts (each verified at check): (1) a JOURNEY DEFAULT -- `timezone "Asia/Bahrain"` inside a journey sets the zone for the app; (2) a FIELD OVERRIDE -- `created as datetime timezone "Asia/Bahrain"` on a shape field; (3) the `timezone` TYPE -- `z as timezone`, a field that holds a zone name; and (4) DISPLAY conversion via `in.timezone` -- `show payment.created in.timezone "Asia/Bahrain"` or `... in.timezone customer.zone` (a dotted field), which renders a stored datetime in that zone. ZONE NAMES are standard only: a real IANA `Area/Location` name or the bare word `UTC`; a fixed offset and an `Etc/GMT...` name BOTH refuse (even though `Etc/GMT+3` is a loadable zoneinfo key, it is explicitly excluded). STORAGE: datetimes are stored in UTC; a datetime that arrives WITHOUT an offset is read in the field's declared zone, otherwise UTC -- never guessed, never refused.
+Ruled 2026-10-05. The `timezone` keyword works in FOUR contexts (each verified at check): (1) a JOURNEY DEFAULT -- `timezone "Asia/Bahrain"` inside a journey sets the zone for the app; (2) a FIELD OVERRIDE -- `created as datetime timezone "Asia/Bahrain"` on a shape field; (3) the `timezone` TYPE -- `z as timezone`, a field that holds a zone name; and (4) DISPLAY conversion via `in.timezone` -- `show payment.created in.timezone "Asia/Bahrain"` or `... in.timezone customer.zone` (a dotted field), which renders a stored datetime in that zone. ZONE NAMES are standard only: a real IANA `Area/Location` name or the bare word `UTC`; a fixed offset and an `Etc/GMT...` name BOTH refuse (even though `Etc/GMT+3` is a loadable zoneinfo key, it is explicitly excluded). STORAGE: datetimes are stored in UTC; a datetime that arrives WITHOUT an offset is read in the field's declared zone, otherwise UTC -- never guessed, never refused. SCOPE, verified by running (calendar-zone probe reports/DATETIME-CALENDAR-ZONE-PROBE-2026-10-14): a journey `timezone` governs ONLY that storage read of a naive datetime. It does NOT move `now()` (always UTC), and it does NOT move the CALENDAR periods -- `today`, `this_month` and the other `this_*`/`last_*` forms, and `is.in <period>` -- which follow the `MOHIO_APP_TIMEZONE` environment setting (default UTC), not the journey declaration; under a journey `timezone` alone, `is.in today` returns the UTC day's rows, not the app zone's. Bare `today` the value is the machine's local date, a third clock. DISPLAY: `show`, `give back ... as.json` and `render` all emit a datetime as a naive ISO string with NO zone marker; only `in.timezone` attaches an offset.
 
 ### ✅ `toggle`  
 *canonical*
@@ -3659,6 +3718,7 @@ languages: done
 Example:
 ```mohio
 journey J
+    timezone "UTC"
     languages
         current EN
         deploy EN
@@ -3768,7 +3828,7 @@ request for sh.Acct at /balance
     retrieve: done
 request: done
 ```
-A route in a declared sector that reads the database with no `require role` anywhere in it is an unauthenticated path to governed data. Check warns so it is a decision someone made, not one nobody noticed. If a public read is intended, say so in a comment; otherwise add `require role`.
+A route in a declared sector that reads the database with no `require role` anywhere in it is an unauthenticated path to governed data. Check warns so it is a decision someone made, not one nobody noticed. To make a public read INTENTIONAL, use the page-classification model, not a comment: declare `public: <path>` or `authorize: <path>` in the journey's `journey NAME ... journey: done` WRAPPER (a bare `public:`/`authorize:` in a folder `journey.mho` is a syntax error -- T1-CLASSIFICATION-WRAPPER-ONLY), or gate the handler with `require role`. The sector read-check consults that classification (T1-SECTOR-READ-CONSULTS-CLASSIFICATION, verified by running): an `authorize:`, `hidden:` or an explicit `public:` route is a made decision and is not warned, while an undeclared default-public sector read still is. The path match is by whole path segments, not substring -- `authorize: /admin` covers a route at `/admin/users` but NOT one at `/administrator`, which is still warned. There is NO comment marker -- a `// public:` line does nothing (verified by running); the earlier `say so in a comment` wording described a mechanism that never existed.
 
 ### ✅ `grant role from a client value`  
 *canonical*
@@ -3869,16 +3929,9 @@ Mentioned in a note but with no entry of its own (16): `context`, `define`, `fie
 
 Harvest is authoritative for whether a word EXISTS. This catalog is authoritative for its STATUS and content. Where they differ the difference is reported here and never resolved automatically. A curated `reserved` or `retired` sitting against a harvested `canonical` is usually correct: the word is still in the grammar but is not for use.
 
-- broadcast: meta says not-built, harvest says canonical
-- catch: meta says retired, harvest says canonical
 - conflict: meta says not-built, harvest says canonical
 - import: meta says reserved, harvest says canonical
-- miomap: meta says not-built, harvest says canonical
-- mock: meta says not-built, harvest says canonical
-- on.error: meta says retired, harvest says canonical
-- rerun: meta says not-built, harvest says canonical
 - seed: meta says not-built, harvest says canonical
-- set: meta says retired, harvest says canonical
 - template: meta says not-built, harvest says canonical
 - threshold: meta says not-built, harvest says canonical
 - undo: meta says non-canonical, harvest says canonical

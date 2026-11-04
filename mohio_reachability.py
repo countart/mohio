@@ -5495,6 +5495,14 @@ def scan_render_include_bare(program):
     return warnings
 
 
+# THE PATHS THE RUNTIME ANSWERS ITSELF, for GET and HEAD: its health checks (mohio_server's create_app,
+# which every served file and every page of a served directory is built from). They are registered
+# ahead of any page or handler, so a GET handler or a page served at one of them never runs, and the
+# request gets the runtime's own answer with nothing said. test_battery_runtime_route_reserved fails
+# if this list and the server's own routes ever disagree.
+RUNTIME_GET_ROUTES = ('/ping', '/health', '/mio/health')
+
+
 def scan_duplicate_routes(program):
     """Two handlers that answer the SAME method and path is a mistake: a method and path together
     name exactly one route, so the second can never be reached, silently. Refuse it at check and name
@@ -5544,6 +5552,14 @@ def scan_duplicate_routes(program):
                     f"page, so this handler would have no address of its own. Say where it answers, "
                     f"for example `{_opener(h)} at /orders`.",
                     line=line))
+                continue
+            if m == 'GET' and path in RUNTIME_GET_ROUTES:
+                errors.append(CompileError(
+                    f"Line {line}: `{_opener(h)} at {path}` can never run. The runtime answers GET "
+                    f"{path} itself (it is a health check), ahead of every handler, so a request there "
+                    f"gets the runtime's answer and this handler is never reached. Give it its own "
+                    f"path, for example `{_opener(h)} at /status`.",
+                    line=line, code="route_shadowed_by_runtime"))
                 continue
             key = (m, path if path is not None else PAGE)
             for other in ([(m, '/')] if key[1] == PAGE else [(m, PAGE)] if key[1] == '/' else []):

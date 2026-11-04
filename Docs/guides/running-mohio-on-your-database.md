@@ -34,8 +34,16 @@ unbounded number of connections; it refuses the request and names the knob to ra
 > database connection pool exhausted: all N connections [in use] ... Raise `MOHIO_DB_POOL_MAX` (currently
 > N), or reduce [concurrency].
 
-So the most connections one app instance will hold against your database is `MOHIO_DB_POOL_MAX` (default
+So the most connections ONE runtime will hold against your database is `MOHIO_DB_POOL_MAX` (default
 10). The pool backs PostgreSQL and MySQL today.
+
+`MOHIO_DB_POOL_MAX` bounds one runtime's pool, not a whole process. A single-file app (`mio serve app.mho`)
+is one runtime, so for it the pool-max is the process ceiling. A directory app (`mio serve <dir>`) is not:
+it serves each `.mho` page from its own runtime with its own pool, so one process runs as many pools as it
+has route files. Such an app opens roughly two connections per route file as it starts, and under load each
+runtime's pool can grow to `MOHIO_DB_POOL_MAX`, so a single `MOHIO_DB_POOL_MAX` does not cap the process
+total. Size your database ceiling for (route files x `MOHIO_DB_POOL_MAX`), not one pool-max. A post-summit
+change (T0-SERVE) will reduce the per-route-file count.
 
 **Oracle (now pooled).** The Oracle backend is pooled, with the same lease discipline as PostgreSQL and
 MySQL: each worker thread leases a connection from an `oracledb` session pool, holds it for the request so a
@@ -52,8 +60,11 @@ on its own connection, section 6). Both are closed at the request boundary or at
 **A worked example a DBA can size against (SQL engines today):**
 
     connections a DBA should allow
-      = (app instances) x MOHIO_DB_POOL_MAX
+      = (app instances) x (runtimes per instance) x MOHIO_DB_POOL_MAX
       + (per app instance, Oracle only) 1 relay-lock session + up to 1 DDL session per thread (rare)
+
+      runtimes per instance = 1 for a single-file app, or the number of route .mho files for a
+      directory app served with `mio serve <dir>`
 
 So four instances of an app at the default pool size need room for 4 x 10 = 40 pooled connections. On
 Oracle, add one relay-lock session per instance, and allow for a brief DDL session on a thread that creates
@@ -279,10 +290,12 @@ database (section 3), not to any external service.
 
 ## 9. Questions a decision-maker asks
 
-**How many sessions will it open against my database?** At most `MOHIO_DB_POOL_MAX` (default 10) per app
-instance, one leased per request and returned at the end, on PostgreSQL, MySQL AND Oracle (Oracle is now
-pooled on the same discipline). Multiply by your instance count. On Oracle, add one relay-lock session per
-instance and, rarely, one brief DDL session on a thread that creates a table inside a transaction.
+**How many sessions will it open against my database?** At most `MOHIO_DB_POOL_MAX` (default 10) per
+runtime, one leased per request and returned at the end, on PostgreSQL, MySQL AND Oracle (Oracle is now
+pooled on the same discipline). A single-file app is one runtime; a directory app (`mio serve <dir>`) runs
+one runtime per route `.mho` file, so multiply by the route-file count as well as by your instance count. On
+Oracle, add one relay-lock session per instance and, rarely, one brief DDL session on a thread that creates
+a table inside a transaction.
 
 **What privileges does the account need?** Ordinary table privileges in a schema of its own, nothing more.
 No `DBMS_LOCK` grant, no access to `v$` views.

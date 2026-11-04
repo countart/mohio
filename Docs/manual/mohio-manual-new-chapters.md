@@ -79,7 +79,7 @@ an empty shape. (The old `page ... page: done` wrapper is retired.)
 ```mohio
 shape Home
 shape: done
-shape Health
+shape Status
 shape: done
 journey App
     connect db from env.DATABASE_URL
@@ -88,11 +88,15 @@ journey App
             <h1>Welcome</h1>
         render: done
     request: done
-    request for sh.Health at /health
+    request for sh.Status at /status
         give back [200] "ok" as.json
     request: done
 journey: done
 ```
+
+The runtime answers `/ping`, `/health` and `/mio/health` itself, as its own health check, ahead of
+every handler, so a GET route declared at one of those paths is refused at check with
+`route_shadowed_by_runtime`. Give a status page its own path, the way `/status` does above.
 
 For endpoints that **create or submit** (a form post, an API write), add a `listen for sh.X at /path`
 handler right alongside your GET routes, each handler standing on its own:

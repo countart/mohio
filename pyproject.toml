@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mohio"
-version = "6.0.2"
+version = "6.0.3"
 readme = "README.md"
 description = "Mohio, an AI-native language where AI reasoning and compliance are compiler-enforced primitives."
 # The floor is what the suite is ACTUALLY exercised on, and that is 3.12: the development

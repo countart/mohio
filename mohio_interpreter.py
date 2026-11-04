@@ -440,6 +440,42 @@ def _decode_bare_decimal(v):
     return Decimal(s)
 
 
+def _is_bare_decimal_type(declared_type):
+    """A decimal declared with no places (`as decimal`, `as dec`): not a dec.N, not a currency."""
+    return str(declared_type or '').strip().lower() in ('dec', 'decimal')
+
+
+def _bare_decimal_text(value):
+    """THE ONE TEXT A BARE DECIMAL IS STORED AS where it is kept as text (SQLite), and the text an
+    equality on it binds (T0-SQLITE-BARE-DECIMAL-EQUALITY, RULED by Ron 2026-10-31): the form every
+    read gives (_decode_bare_decimal), trailing zeros trimmed, never an exponent, and zero unsigned.
+
+    WHY. SQLite stored the text a value was written with, so 12.50 was kept as '12.50' while every
+    read trimmed it to 12.5. An equality with the value a read gave bound '12.5' and matched no row,
+    silently: the self-snapshot compare-and-swap (`match amount to current.amount`) updated nothing
+    (R71). The other engines keep a real number and compare it as one. Equality stays an exact
+    text compare here, never a cast to REAL, which would let two different amounts compare equal.
+
+    A value that is not a number is returned as given, for the write's kind check to refuse; an
+    in-list is converted item by item."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (list, tuple)):
+        return type(value)(_bare_decimal_text(v) for v in value)
+    raw = value.to_python() if isinstance(value, MohioValue) else value
+    if isinstance(raw, bool):
+        return value
+    from decimal import Decimal, InvalidOperation
+    try:
+        d = raw if isinstance(raw, Decimal) else Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError, TypeError):  # SILENT-OK: not a number; the write's kind check refuses it
+        return value
+    if not d.is_finite():
+        return value
+    text = format(_decode_bare_decimal(d), 'f')
+    return '0' if text == '-0' else text
+
+
 def _coerce_read(v, declared_type=None, db=None):
     """Restore a stored TEXT value to its natural type using the SAME rule as
     literal parsing (_number_or_code), so codes survive a round trip:
@@ -994,6 +1030,13 @@ class MohioRuntimeError(Exception):
     def __init__(self, message="", line=None):
         super().__init__(_scrub_classified(message))
         self.line = line
+
+
+class _SeveralRows(Exception):
+    """A single-row read (`retrieve`) found a second matching row. Each engine's retrieve_one_spec
+    reads at most two rows and raises this on the second, so the verb refuses an ambiguous match
+    instead of handing back whichever row the engine happened to return first. Caught by
+    _exec_RetrieveBlock, which turns it into the developer-facing error naming the fix."""
 
 
 # ── outbound-HTTP SSRF guard (S9, 2026-08-01) ─────────────────────────────────────────────
@@ -3046,6 +3089,15 @@ def _shape_binding_name(shape):
     `staffStatus`, a name written nowhere in the program. `sh.X` stays the blueprint, the bare
     declared name is the data that arrived, and `request.field` stays the raw inbound data."""
     return str(shape)
+
+
+def _mark_request_field(value, name, shape=None):
+    """`value`, a request payload field bound as a bare variable (`note` reads the request's `note`),
+    marked as that field of the request, and of `shape` when the handler names one. A one-word read
+    is classified by a field's tag only when it is such a binding; any other one-word name is a
+    program variable, whose value carries its own class (R71, T1-CLASS-BY-BARE-NAME-ON-VARIABLE)."""
+    value._request_field = (str(name), str(shape) if shape else None)
+    return value
 
 
 def _conn_in_autocommit(conn):
@@ -5134,6 +5186,12 @@ class _QueryableRuntime:
                     clauses.append(f'({qf} IS NULL OR {qf} != ?)')
                     params.append(val)
                 continue
+            if kind == 'exact':
+                # `is not` on a number: exact, never through a cast, and a row with no value is
+                # kept, as the text form and the app-side twin keep it.
+                clauses.append(f'({q(field)} IS NULL OR {q(field)} != ?)')
+                params.append(self._match_value(table, field, val))
+                continue
             col = self._sql_numeric_cast(q(field), kind)
             # A bound compared with a declared dec.N is placed at its scale first, the same value on
             # every engine (_canon_compare_value): `between 3.105 and 3.109` on a dec.2 is 3.10..3.10.
@@ -5809,13 +5867,90 @@ class DbRuntime(_QueryableRuntime):
     def _match_value(self, table, field, value):
         """A value a query compares with a column, encoded the way a write stores it. SQLite keeps a
         currency as a scaled integer and a dec.N as exact text, so `match amount to limit` with an
-        EUR amount of 10 compared the stored 1000 with 10 and silently found nothing. Every
+        EUR amount of 10 compared the stored 1000 with 10 and silently found nothing. A bare decimal
+        binds its one stored text (_bare_decimal_text), so 12.50 and 12.5 both match the row. Every
         equality this runtime binds passes through here; other engines store the value natively."""
         declared = ((getattr(self, '_shaped_col_types', None) or {}).get(table) or {}).get(field)
-        if (declared is None or value is None or isinstance(value, bool)
-                or _decimal_scale_for_type(declared) is None):
+        if declared is None or value is None or isinstance(value, bool):
+            return value
+        if _is_bare_decimal_type(declared):
+            return _bare_decimal_text(value)
+        if _decimal_scale_for_type(declared) is None:
             return value
         return _encode_typed_value(value, declared)
+
+    # A BARE DECIMAL IS KEPT AS TEXT HERE, AS ONE TEXT PER NUMBER (T0-SQLITE-BARE-DECIMAL-EQUALITY,
+    # RULED by Ron 2026-10-31). Every write verb reaches this encoder (_guard_write), so a write of
+    # 12.50 stores '12.5', the text an equality binds. The capability is what the startup review
+    # (_reconcile_bare_decimal_text) asks, never the engine's name.
+    stores_bare_decimal_as_text = True
+
+    def _encode_typed_value(self, value, declared_type):
+        if _is_bare_decimal_type(declared_type):
+            return _bare_decimal_text(value)
+        return _encode_typed_value(value, declared_type)
+
+    def bare_decimal_rewrites(self, table, col):
+        """Each stored value of the bare-decimal column `col` that is not its one text, as
+        [(storage class, stored text, one text, rows)]: a value written before 6.0.3 kept the places
+        it was written with ('12.50'), and one written outside Mohio may be a REAL. A value that is not
+        a number is left as it is, for its own read or write to judge. Only a TEXT column is asked:
+        a column of another type (a currency's scaled INTEGER) is not a bare decimal kept as text,
+        whatever a program declares, and the field register judges that disagreement."""
+        q = self.quote_ident
+        if str((self._read_column_types(table) or {}).get(col) or '').upper() != 'TEXT':
+            return []
+        cur = self.raw_cursor()
+        try:
+            cur.execute(f'SELECT typeof({q(col)}), CAST({q(col)} AS TEXT), COUNT(*) FROM {q(table)} '
+                        f'WHERE {q(col)} IS NOT NULL GROUP BY 1, 2')
+            found = cur.fetchall()
+        finally:
+            cur.close()
+        out = []
+        for r in found:
+            kind, stored, n = (list(r.values()) if isinstance(r, dict) else list(r))[:3]
+            text = _bare_decimal_text(stored)
+            if text is stored or (kind == 'text' and text == stored):
+                continue
+            out.append((kind, stored, text, int(n)))
+        return sorted(out, key=lambda r: (r[2], r[1]))
+
+    def rewrite_bare_decimals(self, table, col, rewrites):
+        """Store each value `bare_decimal_rewrites` named as its one text, in one transaction: every
+        row is rewritten or none is. Two stored values that are one number, in a column that holds each
+        value once, refuse, naming them, and nothing changes."""
+        q = self.quote_ident
+        cur = self.raw_cursor()
+        try:
+            for kind, stored, text, _n in rewrites:
+                cur.execute(f'UPDATE {q(table)} SET {q(col)} = ? WHERE typeof({q(col)}) = ? '
+                            f'AND CAST({q(col)} AS TEXT) = ?', (text, kind, stored))
+            if not getattr(self, '_in_transaction', False):
+                self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            self.conn.rollback()
+            same = {}
+            for _k, stored, text, _n in rewrites:
+                same.setdefault(text, []).append(stored)
+            pairs = [f"{', '.join(v)} and {t}" for t, v in sorted(same.items())][:3]
+            raise MohioRuntimeError(
+                f"db.{table}.{col} holds each value once, and it already stores {'; '.join(pairs)}, "
+                f"which are the same number written two ways. Storing each as its one text would hold "
+                f"that number twice, so nothing was changed ({e}).\n"
+                f"    Keep one row for each number, then start the program again.") from e
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cur.close()
+        left = self.bare_decimal_rewrites(table, col)
+        if left:
+            raise MohioRuntimeError(
+                f"db.{table}.{col}: {sum(r[3] for r in left)} stored value(s) are still not the one text "
+                f"each number has after the rewrite (first: {left[0][1]!r}), so an equality on the field "
+                f"would not match them. Something else may be writing to db.{table} while the program "
+                f"starts; stop it and start the program again.")
 
     def _match_values(self, table, pairs):
         return [self._match_value(table, f, v) for f, v in pairs]
@@ -6040,9 +6175,13 @@ class DbRuntime(_QueryableRuntime):
         self._validate_fields(table, [f for _kind, pairs in spec for f, _v in pairs])
         try:
             where, params = _spec_to_sql(self._encoded_spec(table, spec), '?', '"')
+            # Two rows, never one: a second match is an ambiguous single-row read (_SeveralRows).
             cur = self.conn.execute(
-                f'SELECT * FROM "{table}" WHERE {where} LIMIT 1', params)
-            row = cur.fetchone()
+                f'SELECT * FROM "{table}" WHERE {where} LIMIT 2', params)
+            rows = cur.fetchall()
+            if len(rows) > 1:
+                raise _SeveralRows(table)
+            row = rows[0] if rows else None
             return _cast_row(dict(row), self._col_types(table), db=self) if row else None
         except sqlite3.OperationalError as e:
             # T1-GUARD-FAILOPEN sibling of retrieve_one/retrieve_one_multi (carve-out
@@ -6361,20 +6500,39 @@ def _pool_is_exhausted(exc):
     return 'exhaust' in str(exc).lower() or type(exc).__name__ == 'PoolError'
 
 
+class _PoolSettingInvalid(MohioRuntimeError):
+    """A pool setting that is not a whole number of 1 or more: a misconfiguration named by itself."""
+
+
 def _pool_settings():
-    """Pool size and acquire timeout, env-tunable. Mirrors the other MOHIO_* floors."""
-    def _int(name, default):
-        raw = (os.environ.get(name) or '').strip()
-        try:
-            v = int(raw)
-            return v if v > 0 else default
-        except ValueError:
+    """Pool size and acquire timeout, env-tunable. Unset means the default. A value that is set and
+    is not a whole number of 1 or more refuses, naming the setting, as the relay settings do
+    (_audit_count): falling back to the default with no word sized the database's connection budget
+    to a number nobody chose."""
+    def _int(name, default, meaning):
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).strip():
             return default
-    mn = _int('MOHIO_DB_POOL_MIN', 1)
-    mx = _int('MOHIO_DB_POOL_MAX', 10)
+        try:
+            v = int(str(raw).strip())
+        except ValueError:
+            v = 0  # SILENT-OK: refused just below, naming the value
+        if v < 1:
+            raise _PoolSettingInvalid(
+                f"{name}={raw!r} is not a whole number of 1 or more. It sets {meaning}; the default is "
+                f"{default}. Set it to a whole number, for example {name}={default}, or unset it to use "
+                f"the default.")
+        return v
+    mn = _int('MOHIO_DB_POOL_MIN', 1, 'the connections the pool keeps open')
+    mx = _int('MOHIO_DB_POOL_MAX', 10, 'the most connections the pool opens, per process')
     if mx < mn:
-        mx = mn
-    return mn, mx, float(_int('MOHIO_DB_POOL_TIMEOUT', 10))
+        # Raising the maximum to the minimum quietly opened more connections than the operator allowed.
+        raise _PoolSettingInvalid(
+            f"MOHIO_DB_POOL_MAX ({mx}) is below MOHIO_DB_POOL_MIN ({mn}), so the pool cannot keep {mn} "
+            f"open within a ceiling of {mx}. Raise MOHIO_DB_POOL_MAX to at least {mn}, or lower "
+            f"MOHIO_DB_POOL_MIN.")
+    return mn, mx, float(_int('MOHIO_DB_POOL_TIMEOUT', 10,
+                              'the seconds a request waits for a free connection'))
 
 
 def _db_statement_timeout_ms():
@@ -7341,10 +7499,16 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
         try:
             where, params = _spec_to_sql(spec, '%s', '"')
             cur = self.conn.cursor(cursor_factory=self._cursor_factory)
-            cur.execute(f'SELECT * FROM "{table}" WHERE {where} LIMIT 1', params)
-            row = cur.fetchone()
+            # Two rows, never one: a second match is an ambiguous single-row read (_SeveralRows).
+            cur.execute(f'SELECT * FROM "{table}" WHERE {where} LIMIT 2', params)
+            rows = cur.fetchall()
             cur.close()
+            if len(rows) > 1:
+                raise _SeveralRows(table)
+            row = rows[0] if rows else None
             return _cast_row(dict(row), self._col_types(table), db=self) if row else None
+        except _SeveralRows:
+            raise
         except Exception as e:
             self.conn.rollback()   # heal aborted-transaction state; don't brick the session
             # T1-GUARD-FAILOPEN sibling of retrieve_one/retrieve_one_multi (carve-out
@@ -8406,10 +8570,16 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
         try:
             where, params = _spec_to_sql(spec, '%s', '`')
             cur = self.conn.cursor()
-            cur.execute(f'SELECT * FROM `{table}` WHERE {where} LIMIT 1', params)
-            row = cur.fetchone()
+            # Two rows, never one: a second match is an ambiguous single-row read (_SeveralRows).
+            cur.execute(f'SELECT * FROM `{table}` WHERE {where} LIMIT 2', params)
+            rows = cur.fetchall()
             cur.close()
+            if len(rows) > 1:
+                raise _SeveralRows(table)
+            row = rows[0] if rows else None
             return _cast_row(dict(row), self._col_types(table), db=self) if row else None
+        except _SeveralRows:
+            raise
         except Exception as e:
             self.conn.rollback()   # heal aborted-transaction state; don't brick the session
             # T1-GUARD-FAILOPEN sibling of retrieve_one/retrieve_one_multi (carve-out
@@ -9164,7 +9334,13 @@ class MongoRuntime(_QueryableRuntime):
     # inherit SQLite's encoder, which stores a currency as a scaled integer (5.00 USD as 500), and
     # nothing scaled it back on the way out, so a saved $5.00 read back as $500.00 with no error.
     # The Decimal codec (_mongo_codec_options) makes an exact Decimal storable as Decimal128.
+    # A BARE DECIMAL IS STORED AS ITS ONE NUMBER (T0-SQLITE-BARE-DECIMAL-EQUALITY, 2026-10-31): a
+    # Decimal128 keeps the places it was given, and a document is read back without the trim every
+    # SQL read applies (_decode_bare_decimal), so 100.0 showed as 100.0 here and 100 everywhere else.
     def _encode_typed_value(self, value, declared_type):
+        if _is_bare_decimal_type(declared_type):
+            text = _bare_decimal_text(value)
+            return value if text is value else Decimal(text)
         return _quantize_decimal_or_raise(value, declared_type)   # stored as Decimal128, exact
 
     def _decode_typed_value(self, value, declared_type):
@@ -9232,7 +9408,11 @@ class MongoRuntime(_QueryableRuntime):
 
     def retrieve_one_spec(self, table, spec):
         try:
-            doc = self._mongo_db[table].find_one(_spec_to_mongo(spec))
+            # Two documents, never one: a second match is an ambiguous single-row read.
+            docs = list(self._mongo_db[table].find(_spec_to_mongo(spec)).limit(2))
+            if len(docs) > 1:
+                raise _SeveralRows(table)
+            doc = docs[0] if docs else None
             if doc:
                 doc['id'] = _mongo_id_out(doc.pop('_id', ''))
             return doc
@@ -10444,10 +10624,15 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
         where, params = _spec_to_sql(spec, '?', '')
         cur = self.conn.cursor()
         try:
-            cur.execute(self._renum(f'SELECT * FROM {self.quote_ident(table)} WHERE {where} FETCH FIRST 1 ROWS ONLY'), params)
+            # Two rows, never one: a second match is an ambiguous single-row read (_SeveralRows).
+            cur.execute(self._renum(f'SELECT * FROM {self.quote_ident(table)} WHERE {where} FETCH FIRST 2 ROWS ONLY'), params)
             rows = self._rows(cur, table)
             cur.close()
+            if len(rows) > 1:
+                raise _SeveralRows(table)
             return rows[0] if rows else None
+        except _SeveralRows:
+            raise
         except Exception as e:
             try: cur.close()
             except Exception: pass
@@ -12020,8 +12205,8 @@ class MohioInterpreter:
             if _rid:
                 ctx.set('request_id', MohioValue(_rid, 'text'))
             for k, v in clean.items():
-                ctx.set(k, MohioValue(v) if not isinstance(v, dict)
-                        else MohioValue(v, 'shape'))
+                ctx.set(k, _mark_request_field(MohioValue(v) if not isinstance(v, dict)
+                                               else MohioValue(v, 'shape'), k))
         try:
             self._expand_program_includes(program)
             # AFTER include expansion: a `unless a, b exists` in an included file declares the
@@ -12323,6 +12508,52 @@ class MohioInterpreter:
                       f"table already held each value once. A deployed app does not do this itself: "
                       f"there it is `mio migrate add-unique`.")
 
+    def _reconcile_bare_decimal_text(self, db):
+        """A BARE DECIMAL STORED BEFORE IT HAD ONE TEXT (T0-SQLITE-BARE-DECIMAL-EQUALITY, RULED by Ron
+        2026-10-31). An engine that keeps a bare decimal as text (SQLite) kept, until 6.0.3, the
+        places a value was written with: 12.50 stayed '12.50' while every read gave 12.5, so an
+        equality with what a read gave matched no row, silently. Writes now store the one text
+        (_bare_decimal_text). Asked once the program's declarations have loaded, for each bare-decimal
+        column of a table that is here:
+          * development: each stored value is rewritten as its one text, in one transaction, and the
+            program says how many;
+          * a deploy (`deploy_marker`): refused, naming the reviewed step, `mio migrate typed-storage`;
+          * two stored values that are one number, in a unique column: refused, naming both.
+        An audit relation is append-only and is never rewritten. `mio migrate typed-storage` holds
+        this while it runs (`_migrating_types`), since it is the step this names."""
+        if (db is None or not getattr(db, 'stores_bare_decimal_as_text', False)
+                or getattr(self, '_migrating_types', False)):
+            return
+        from mohio_audit_grades import audit_append_only_refusal
+        col_types = getattr(db, '_shaped_col_types', None) or {}
+        for table in sorted(col_types):
+            bare = sorted(c for c, t in (col_types[table] or {}).items() if _is_bare_decimal_type(t))
+            if not bare or audit_append_only_refusal(table, 'the bare-decimal review'):
+                continue
+            have = {str(c).lower() for c in (db.table_columns(table) or [])}
+            for col in bare:
+                if str(col).lower() not in have:
+                    continue                # no table or column yet: it is written in the one text
+                rewrites = db.bare_decimal_rewrites(table, col)
+                if not rewrites:
+                    continue
+                rows = sum(r[3] for r in rewrites)
+                example = f"{rewrites[0][1]} as {rewrites[0][2]}"
+                marker = getattr(self, 'deploy_marker', None)
+                if marker:
+                    raise MohioRuntimeError(
+                        f"db.{table}.{col} is a decimal, and {rows} stored value(s) keep the places they "
+                        f"were written with ({rewrites[0][1]}), so an equality with the value a read gives "
+                        f"({rewrites[0][2]}) matches no row. {marker} is set, so this is a deployed app, "
+                        f"and a deployed app does not rewrite stored values on its own.\n"
+                        f"    Review and rewrite them once, then start the app again:\n"
+                        f"        mio migrate typed-storage <your program>.mho")
+                db.rewrite_bare_decimals(table, col, rewrites)
+                print(f"  [schema] db.{table}.{col}: stored {rows} decimal value(s) as the one text each "
+                      f"number has ({example}), so an equality on the field matches the value a read "
+                      f"gives. A deployed app does not do this itself: there it is "
+                      f"`mio migrate typed-storage`.")
+
     def _unique_registry(self, base):
         """`base` (table -> unique columns) as the connection must see it: see _UniqueKeyRegistry."""
         return _UniqueKeyRegistry(base, lambda t, c: any(self.classification.has(str(c), k, t)
@@ -12467,6 +12698,9 @@ class MohioInterpreter:
         # conflict or a protection downgrade, and give a program without the shape the registered
         # types and protection. Before the widening below, so a column it adds takes the right type.
         self._field_register_sync(ctx)
+        # A bare decimal stored before it had one text is reviewed once the register has judged every
+        # declared type, so a column the register types differently is refused there, never rewritten.
+        self._reconcile_bare_decimal_text(getattr(self, '_db', None))
         # A DECLARED SECTOR (or a .cm marker) KEEPS EVERY SQLITE COMMIT DURABLE: the default is
         # synchronous=NORMAL, which can roll back the last commits on a power loss (the runtime's
         # _new_connection says why); a regulated record must not. Both the sector and the connection
@@ -17185,6 +17419,39 @@ class MohioInterpreter:
             return [self._apply_pci_mask(x, masked=_masked, top_masked=top_masked) for x in raw]
         return raw
 
+    def _masked_structure(self, val, raw):
+        """A list or record as it may leave the program: every classified value in it masked by its
+        own class at any depth, and every field its table tags masked by name (the union of every
+        table's when the table is unknown, which over-masks and never leaks). The text casts use it;
+        as.json runs the same two steps in place."""
+        _jst = getattr(val, '_source_table', None)
+        return self._apply_pci_mask(self._mask_classified_within(raw),
+                                    top_masked=self._masked_names_for_table(_jst) if _jst else None)
+
+    def _mask_classified_within(self, x, depth=0):
+        """A list or record with every CLASSIFIED value in it masked, at any depth, and nothing else
+        changed: a list element that is a tagged value unwraps as it always did (T1-LIST-DISPLAY-FORM),
+        and a record keeps its keys for the key mask that runs after this. The element carries the
+        class; the list or record around it carries none, so a mask that asks only the outer value
+        let `[["123-45-6789", "x"], "y"]` out (found 2026-11-02, SEAM 3)."""
+        if depth > 16:
+            return x
+        if isinstance(x, list):
+            out = []
+            for e in x:
+                if self._value_is_classified(e):
+                    out.append(self._display_value(e))
+                    continue
+                if isinstance(e, MohioValue):
+                    e = e.to_python()
+                out.append(self._mask_classified_within(e, depth + 1) if isinstance(e, (list, dict)) else e)
+            return out
+        if isinstance(x, dict):
+            return {k: (self._display_value(e) if self._value_is_classified(e)
+                        else self._mask_classified_within(e, depth + 1) if isinstance(e, (list, dict)) else e)
+                    for k, e in x.items()}
+        return x
+
     def _display_value(self, mv):
         # An EMPTY value displays as Mohio's empty form, never Python's `None`. A cleared or
         # never-filled variable used to surface the host language's internals straight into user
@@ -17226,9 +17493,15 @@ class MohioInterpreter:
             _pv = mv.to_python()
             if isinstance(_pv, (int, float, Decimal)) and not isinstance(_pv, bool):
                 return _mohio_padded(_pv, _pad)
-        if isinstance(_raw, list) and any(isinstance(e, MohioValue) for e in _raw):
+        if isinstance(_raw, list) and any(isinstance(e, (MohioValue, list, dict)) or self._value_is_classified(e)
+                                          for e in _raw):
             # an amount in a list is kept tagged; it shows as its value, as before (T1-LIST-DISPLAY-FORM)
-            _raw = [e.to_python() if isinstance(e, MohioValue) else e for e in _raw]
+            # A CLASSIFIED ELEMENT IS MASKED HERE. An element carries its own class (a ClassifiedText
+            # or a tagged MohioValue) and the list carries none, so every mask below, which asks the
+            # list, passed `items as list ssn, "x"` out of `give back` as ["123-45-6789", "x"] while
+            # `show items` masked it, whichever way the list was built (found 2026-11-02, SEAM 3).
+            # Every element that carries no class unwraps exactly as before.
+            _raw = self._mask_classified_within(_raw)
             mv = MohioValue(_raw, 'list') if isinstance(mv, MohioValue) else _raw
         if not self._egress_masked_fields() and not self._value_is_classified(mv):
             return mv.to_python() if hasattr(mv, 'to_python') else mv
@@ -17270,9 +17543,13 @@ class MohioInterpreter:
         still the value rather than its serialization. Unwrapping here as well masked it twice
         and corrupted it: `****111"` -- the second pass counted the closing quote as a digit.
         One masking point per path, chosen where the value is still itself.
+
+        A ONE-WORD NAME IS A VARIABLE, NOT A FIELD READ (R71): `give back message` masked a public
+        literal because another table's `message` is [phi]. Its value carries its own class, which
+        the caller masks by (a bare request field is classified as its field at the read).
         """
         parts = getattr(expr, 'parts', None)
-        return str(parts[-1]) if parts else None
+        return str(parts[-1]) if parts and len(parts) > 1 else None
 
     def _giveback_masked(self, value, source_expr=None):
         if value is None:
@@ -19410,7 +19687,7 @@ class MohioInterpreter:
         # correctly for its own fields -- `default` was the one field effect that did not.
         if _defaulted:
             for _dn in _defaulted:
-                exec_ctx.set(_dn, MohioValue(_data.get(_dn)))
+                exec_ctx.set(_dn, _mark_request_field(MohioValue(_data.get(_dn)), _dn, shape_var))
             if exec_ctx.exists('request'):
                 _drq = exec_ctx.get('request')
                 _drqd = _drq.to_python() if isinstance(_drq, MohioValue) else _drq
@@ -19438,7 +19715,8 @@ class MohioInterpreter:
                 errors[_fn] = _p.get('error') or _err
                 continue
             _data[_fn] = _typed
-            exec_ctx.set(_fn, _typed if isinstance(_typed, MohioValue) else MohioValue(_typed))
+            exec_ctx.set(_fn, _mark_request_field(_typed if isinstance(_typed, MohioValue)
+                                                  else MohioValue(_typed), _fn, shape_var))
             # `request` is bound separately from the shape var, so the typed value has to land
             # there too or `request.amount` still reads the raw text.
             if isinstance(_rqd, dict):
@@ -19707,7 +19985,7 @@ class MohioInterpreter:
         _bind_shape_value(self._strip_plumbing(req))
         for k, v in req.items():
             if not k.startswith('_'):
-                exec_ctx.set(k, MohioValue(v))
+                exec_ctx.set(k, _mark_request_field(MohioValue(v), k, shape_var))
 
         # Shape-gate validation: enforce the shape's own rules (required, email,
         # allowed) before the handler runs. On failure, re-render the form with the
@@ -19747,7 +20025,7 @@ class MohioInterpreter:
             stored = self._store_uploads(shape, _data, exec_ctx)
             for fn, path in stored.items():
                 _data[fn] = path
-                exec_ctx.set(fn, MohioValue(path))
+                exec_ctx.set(fn, _mark_request_field(MohioValue(path), fn, shape_var))
             if stored:
                 _bind_shape_value(_data)
                 # EVERY BINDING HOLDS THE STORED FILE'S NAME (RDC-V6-UPLOAD-READ). `request` is bound
@@ -19771,7 +20049,7 @@ class MohioInterpreter:
                 _rqo.shape_name = node.shape
             for _ofn in (_allowed or ()):
                 if _ofn not in _data:
-                    exec_ctx.set(_ofn, MohioValue(None, 'null'))
+                    exec_ctx.set(_ofn, _mark_request_field(MohioValue(None, 'null'), _ofn, shape_var))
 
         # AN IDEMPOTENT ROUTE (T1-ROUTE-IDEMPOTENCY): a repeated key is answered here from the record
         # (or refused), with nothing run. A new key always runs in the request transaction, even
@@ -19986,7 +20264,7 @@ class MohioInterpreter:
         child.set(shape_var, MohioValue(req, 'shape'))
         for k, v in req.items():
             if not k.startswith('_'):
-                child.set(k, MohioValue(v))
+                child.set(k, _mark_request_field(MohioValue(v), k, shape_var))
         # A GET query value is validated against the shape's rules exactly as a POST body value is --
         # the SAME `_validate_and_coerce_shape`. Before this it was not partial enforcement, it was
         # NONE: required / type / min / max / pattern / matches / range / allowed all ran on a body and
@@ -21360,6 +21638,36 @@ class MohioInterpreter:
             raise _Raise(error_name='not_found_in_failure', message=first,
                          line=hit[2] or getattr(node, 'line', None), hint=rest)
 
+    def _refuse_several_rows(self, node, source, name, verb='retrieve'):
+        """`retrieve`, `grab` and `get` read exactly one record. A match that finds two refuses,
+        naming the fix, rather than binding whichever row came back first: an arbitrary pick is how
+        one person with two memberships was approved, then denied, by an unrelated update. A program
+        error, not a governed refusal, so it never reaches on.failure and is never a 403. `grab`
+        carries its match on node.match (T1-GRAB-SEVERAL-MATCHES), `retrieve` in its body."""
+        from mohio_ast import MatchBlock, MatchAnyBlock, NoMatchBlock
+        fields = []
+        _grab_match = getattr(node, 'match', None)
+        for b in ((_grab_match if isinstance(_grab_match, list) else [_grab_match])
+                  if _grab_match is not None else (node.body or [])):
+            if isinstance(b, MatchClause):
+                fields.append(str(b.field))
+            elif isinstance(b, (MatchBlock, MatchAnyBlock, NoMatchBlock)):
+                fields.extend(str(f) for f, _v in b.pairs)
+        _f = [f'`{f}`' for f in dict.fromkeys(fields)]
+        _on = (' matching ' + (' and '.join(_f) if len(_f) < 3 else ', '.join(_f[:-1]) + ' and ' + _f[-1])
+               if _f else '')
+        # The source as the program wrote it: db.members, ledger.accounts, or a held list's name.
+        _s = node.source
+        _src = (f'db.{_s.table}' if isinstance(_s, DbRef) else
+                '.'.join(str(p) for p in _s.parts) if isinstance(_s, DottedName) else str(source))
+        raise MohioRuntimeError(
+            f"{verb} `{name}` found more than one row in {_src}{_on}. {verb} reads exactly one "
+            f"record, so Mohio will not pick one for you. Match a key so only one row can match "
+            f"(`match id to ...`, or a field declared `unique`). To ask whether any such row "
+            f"exists, use `check exists {name} in {_src}` with the same match. To read all of "
+            f"them, use `find {name} in {_src}`.",
+            line=getattr(node, 'line', None))
+
     def _exec_RetrieveBlock(self, node, ctx):
         self._refuse_not_found_in_failure(node)
         held_list = self._resolve_held_list_source(node.source, ctx)
@@ -21548,6 +21856,8 @@ class MohioInterpreter:
                 return self._handle_failure(node.handlers, ctx, "retrieve: no match clause")
             if not _rows:
                 return _bind_and_succeed(self._lookup_miss('retrieve', _held_name, name, node))
+            if len(_rows) > 1:
+                self._refuse_several_rows(node, _held_name, name)
             self._audit_data_access('retrieve', _held_name, _rows[0], ctx)
             if _src_col:
                 return _bind_and_succeed(MohioValue(
@@ -21632,6 +21942,7 @@ class MohioInterpreter:
                     _result = MohioValue(row, 'shape')
             else:
                 # ── single-row: .one (default) -- requires a match clause ──
+                # A second matching row refuses (_SeveralRows), before anything is bound.
                 row = db.retrieve_one_spec(table, spec)
                 row = self._decrypt_row(row, table) if row else row
                 if row is None:
@@ -21649,6 +21960,9 @@ class MohioInterpreter:
             # now that handler bodies run outside the try, but re-raising is what makes that
             # guarantee explicit instead of dependent on the code above staying arranged this way.
             raise
+        except _SeveralRows:
+            # A program error, not a broken query: never the on.failure channel.
+            self._refuse_several_rows(node, table, name)
         except Exception as e:
             return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
         # Handlers run OUT here, on the same footing as `on.failure`: a `give back` in a branch
@@ -22641,6 +22955,10 @@ class MohioInterpreter:
         # ── single-row: .one (default) ──
         if not nested:
             return _bind(MohioValue(None, 'null'))
+        # One record per matched parent: the joined children stay nested inside it, so a
+        # one-to-many join never adds a parent. Two parents is the same ambiguity as above.
+        if len(nested) > 1:
+            self._refuse_several_rows(node, table, name)
         return _bind(MohioValue(nested[0], 'shape'))
 
     def _exec_find_with_all(self, node, ctx, db, table, inner_table, join, on, order_by,
@@ -23472,7 +23790,18 @@ class MohioInterpreter:
               for _flt in post_filters:
                   _field, _op = _flt[0], _flt[1]
                   _kind = self._numeric_kind(_ctypes.get(_field))
-                  if _kind and _field not in _enc and db.can_push(_op, _ctypes.get(_field)):
+                  if (_kind and _op == 'is_not' and _field not in _enc
+                          and db.can_push(_op, _ctypes.get(_field))):
+                      # `is not` ON A NUMBER IS AN EXACT INEQUALITY, bound as the column stores the
+                      # value, the way an equality binds it (_match_value). It reached the range
+                      # path below, which has no `is not`, and every SQL engine refused the find
+                      # with "db_error: 'is_not'" (found 2026-10-31 beside R71).
+                      _v = self._pushdown_number(_flt[2])
+                      if _v is not None:
+                          _push.append(_flt)
+                          _range_filters.append((_field, 'is_not', _v, None, 'exact'))
+                          continue
+                  elif _kind and _field not in _enc and db.can_push(_op, _ctypes.get(_field)):
                       _v = self._pushdown_number(_flt[2])
                       _v2 = (self._pushdown_number(_flt[3])
                              if len(_flt) > 3 and _flt[3] is not None else None)
@@ -24380,7 +24709,15 @@ class MohioInterpreter:
         if cond == 'contains':                    return raw is not None and _text_predicate('contains', raw, sval)
         if cond in ('starts', 'starts_with'):     return raw is not None and _text_predicate('starts', raw, sval)
         if cond in ('ends', 'ends_with'):         return raw is not None and _text_predicate('ends', raw, sval)
-        if cond == 'is_not':                      return str(raw) != str(value)
+        if cond == 'is_not':
+            # A number is compared as a number: 12.5 is not "not 12.50". The text compare kept the
+            # row, silently, wherever this runs (a held list, MongoDB, an unpushed find).
+            if isinstance(raw, (int, Decimal)) and not isinstance(raw, bool):
+                try:
+                    return raw != Decimal(sval)
+                except InvalidOperation:  # SILENT-OK: the value is not a number; compared as text below
+                    pass
+            return str(raw) != str(value)
         if cond == 'empty':                       return raw in (None, '', [])
         if cond == 'not_empty':                   return raw not in (None, '', [])
         if cond in ('is_in', 'in_list', 'in'):    return raw in (value if isinstance(value, (list, tuple, set)) else [value])
@@ -29744,6 +30081,9 @@ class MohioInterpreter:
             _where = {mc.field.split('.')[-1]: self._eval_simple(mc.value, ctx) for mc in match_clauses}
             _matches, _w = self._filter_held_list(held_list, _where, [], 'grab', _held_name,
                                                     self._held_list_declared(ctx, _held_name))
+            if len(_matches) > 1:
+                # One record, never the first of several (T1-GRAB-SEVERAL-MATCHES), as retrieve.
+                self._refuse_several_rows(node, _held_name, node.name, verb=self._grab_verb(node))
             row = _matches[0] if _matches else None
         else:
             # T1-GUARD-FAILOPEN (2026-08-19): retrieve_one/retrieve_one_multi no longer
@@ -29753,17 +30093,18 @@ class MohioInterpreter:
             self._refuse_filter_kind_clash(table, [(mc.field, self._eval(mc.value, ctx))
                                                    for mc in match_clauses],
                                            getattr(node, 'line', None))
+            # ONE RECORD, NEVER THE FIRST OF SEVERAL (T1-GRAB-SEVERAL-MATCHES, 2026-11-03). grab read
+            # through retrieve_one / retrieve_one_multi, which ask for one row, so a match that found
+            # two bound whichever the engine returned first. It reads through retrieve's own
+            # retrieve_one_spec now, every match ANDed, which reads two and refuses on the second
+            # (_SeveralRows) on every engine. BLIND INDEX: an encrypted field matches through its
+            # shadow column.
+            spec = [('and', [(mc.field, self._eval_simple(mc.value, ctx)) for mc in match_clauses])]
             try:
-                if len(match_clauses) == 1:
-                    mc = match_clauses[0]
-                    match_val = self._eval_simple(mc.value, ctx)
-                    # BLIND INDEX: an encrypted field matches through its shadow column.
-                    _f, match_val = self._bidx_pair(db, table, mc.field, match_val, node)
-                    row = db.retrieve_one(table, _f, match_val)
-                else:
-                    conditions = {mc.field: self._eval_simple(mc.value, ctx) for mc in match_clauses}
-                    conditions = self._bidx_dict(db, table, conditions, node)
-                    row = db.retrieve_one_multi(table, conditions)
+                row = db.retrieve_one_spec(table, self._bidx_spec(db, table, spec, node))
+            except _SeveralRows:
+                # A program error, not a broken query: never the on.failure channel.
+                self._refuse_several_rows(node, table, node.name, verb=self._grab_verb(node))
             except Exception as e:
                 return self._handle_failure(node.handlers, ctx, str(e), operational_failure=True)
         row = self._decrypt_row(row, table) if (row and table is not None) else row
@@ -29795,6 +30136,12 @@ class MohioInterpreter:
     def _exec_GetBlock(self, node, ctx):
         """get — assertive retrieval, same as grab at runtime."""
         return self._exec_GrabBlock(node, ctx)
+
+    @staticmethod
+    def _grab_verb(node):
+        """The verb a grab-family refusal names: the one the program wrote."""
+        from mohio_ast import GetBlock
+        return 'get' if isinstance(node, GetBlock) else 'grab'
 
     def _exec_PullBlock(self, node, ctx):
         """pull up to N [random] from <source> — bounded or random retrieval.
@@ -30070,11 +30417,14 @@ class MohioInterpreter:
             def _lookup_existing():
                 # BLIND INDEX: the dedupe lookup matches an encrypted key through its shadow
                 # column, so `save or update ... match ssn to X` finds the existing row rather
-                # than inserting a duplicate every time.
+                # than inserting a duplicate every time. It matches the PLAINTEXT key in
+                # `conditions`, never `fields`: the read-back after the insert runs once `fields` is
+                # the sealed write, and the blind index of a ciphertext matched no row, so a new
+                # row on a single tagged key answered save_unless_exists_unresolved (2026-11-03).
                 try:
                     _bx_conditions = self._bidx_dict(db, table, conditions, node)
                     _bx_f, _bx_v = self._bidx_pair(db, table, dedupe_fields[0],
-                                                   fields[dedupe_fields[0]], node)
+                                                   conditions[dedupe_fields[0]], node)
                     return (db.retrieve_one_multi(table, _bx_conditions)
                             if len(conditions) > 1
                             else db.retrieve_one(table, _bx_f, _bx_v))
@@ -33234,9 +33584,23 @@ message=(f"Raw sql cannot run on this connection: "
         # does not require migrating an append-only log or breaking the hash chain.
         # A literal weighed as context is classified `literal`, recorded under its line and
         # position like every input under its name, and its text is not recorded (RULED 2026-08-30).
-        inputs_dict = {str(k): ('literal' if isinstance(k, WeighLiteralKey)
-                                else self._classify_audit_field(k, ctx))
-                       for k in decision.inputs.keys()}
+        # EVERY INPUT IS RECORDED BY THE CLASS ITS VALUE CARRIES (R71), so a weighed public
+        # `message` is not audited as [phi] because another table's `message` is. A DOTTED input
+        # also asks its name, and the more sensitive answer wins. The name alone under-reported:
+        # in `weigh claim.amt` the `claim` is a variable, not a table, so a [phi] record field
+        # audited as "-" while the value it weighed carried [phi] (found 2026-11-02).
+        _rank = {'[phi]': 4, '[pci]': 3, '[pii]': 2, '[encrypted]': 1, '-': 0}
+
+        def _audited_class(k):
+            if isinstance(k, WeighLiteralKey):
+                return 'literal'
+            _v = decision.inputs.get(k)
+            _c = getattr(_v, 'data_class', None) if isinstance(_v, MohioValue) else value_class_of(_v)
+            by_value = f"[{_c}]" if _c in ('phi', 'pci', 'pii') else '-'
+            if '.' not in str(k):
+                return by_value
+            return max(by_value, self._classify_audit_field(k, ctx), key=lambda c: _rank.get(c, 1))
+        inputs_dict = {str(k): _audited_class(k) for k in decision.inputs.keys()}
         input_binding = None   # reserved; filled only by the detailed (mioaudit) tier
 
         entry = {
@@ -35106,8 +35470,8 @@ message=(f"Raw sql cannot run on this connection: "
         clean = {k: v for k, v in req.items() if not k.startswith('_')}
         child.set('request', MohioValue(clean, 'shape'))
         for k, v in clean.items():
-            child.set(k, MohioValue(v) if not isinstance(v, dict)
-                      else MohioValue(v, 'shape'))
+            child.set(k, _mark_request_field(MohioValue(v) if not isinstance(v, dict)
+                                             else MohioValue(v, 'shape'), k))
         try:
             result = self._exec_block(page.body, child)
         except _GiveBack as gb:
@@ -35954,7 +36318,15 @@ message=(f"Raw sql cannot run on this connection: "
                 sensitive |= (self._phi_fields or set())
                 sensitive |= (self._pii_fields or set())
                 field_name = parts[-1]
-                if field_name in sensitive:
+                # A ONE-WORD TARGET IS A VARIABLE, NOT A FIELD (T2-DEBUG-LOG-BARE-NAME-REDACTION, the
+                # R71 rule the read path applies): `debug.log message` omitted a public receipt text
+                # because another table's `message` is tagged. A variable is judged by the class its
+                # value carries; a request field bound as a bare variable keeps its field's rule.
+                _rf = getattr(val, '_request_field', None) if len(parts) == 1 else None
+                if len(parts) == 1 and _rf is None:
+                    if getattr(val, 'data_class', None) in ('phi', 'pci', 'pii'):
+                        return f'[omitted -- {sector} sector field]'
+                elif (_rf[0] if _rf else field_name) in sensitive:
                     return f'[omitted -- {sector} sector field]'
             # `never log` IS NOT GATED ON A SECTOR, and that is the difference between it and
             # the redaction above. The sector rule is a compliance profile deciding for the
@@ -35963,6 +36335,10 @@ message=(f"Raw sql cannot run on this connection: "
             # rule when it is copied, because a secret copied into another variable and logged
             # from there is the ordinary way one reaches a log.
             _fld = parts[-1] if parts else None
+            if len(parts) == 1:
+                # A one-word target is a variable: its value's own rule below decides, unless it is a
+                # request field bound bare, which keeps that field's name (as the sector rule above).
+                _fld = (getattr(val, '_request_field', None) or (None,))[0]
             if ((_fld and (_fld in (self._never_log_fields or set())
                            or self.classification.has(_fld, 'never_log')))
                     or getattr(val, 'handling', None) == 'never_log'
@@ -39639,6 +40015,12 @@ message=(f"Raw sql cannot run on this connection: "
             # An empty value converts to empty text. It used to become the text "None" (or "NONE"
             # through as.uc), a value the program never held, printed with nothing said.
             return MohioValue('', 'text')
+        if cast in ('string', 'uc', 'lc', 'title', 'sentence') and isinstance(raw, (list, dict)):
+            # A LIST OR RECORD TURNED INTO TEXT IS EGRESS-SHAPED, so it is masked first, by the same
+            # walk as.json uses. `str(raw)` wrote every element as stored: `items as.text` with a
+            # [phi] element gave back "['123-45-6789', 'x']", and a found row's [phi] field and a
+            # joined child's [pci] field went out the same way (found 2026-11-03, list-leak sweep).
+            raw = self._masked_structure(val, raw)
         if cast == 'string':   return MohioValue(str(raw), 'text')
         if cast == 'boolean':  return MohioValue(bool(raw), 'boolean')
         if cast == 'uc':       return MohioValue(str(raw).upper(), 'text')
@@ -39672,7 +40054,13 @@ message=(f"Raw sql cannot run on this connection: "
             # phi field to ****1111 while `give back p as.json` on the same row returned
             # 111-11-1111, because the cast ran first and handed masking a string.
             _jst = getattr(val, '_source_table', None)
-            _payload = self._apply_pci_mask(raw, top_masked=self._masked_names_for_table(_jst) if _jst else None)
+
+            # AN ELEMENT CARRIES ITS OWN CLASS, AND A KEY IS NOT THE ONLY THING THAT CAN SAY SO. The
+            # key mask below cannot see a classified value in a list, or under a key that names no
+            # tagged field, so `items as.json` served ["123-45-6789", "x"] (found 2026-11-02, SEAM 3).
+            _payload = self._apply_pci_mask(self._mask_classified_within(raw) if isinstance(raw, (list, dict))
+                                            else raw,
+                                            top_masked=self._masked_names_for_table(_jst) if _jst else None)
             # A SCALAR CAST needs the field name too, for the same reason the give-back path
             # does: there is no key to match on. Taken from the operand the author wrote.
             # BY VALUE FIRST. A [phi]/[pci] value copied into a plain variable (`x p.ssn`)
@@ -40126,6 +40514,21 @@ message=(f"Raw sql cannot run on this connection: "
                 # So a tag that encrypts at rest stopped encrypting the moment the value was
                 # copied, for one classifier out of three.
                 _fld = str(node.parts[-1])
+                _parts = [str(p) for p in node.parts]
+                # A ONE-WORD READ IS A VARIABLE, NOT A FIELD (R71, T1-CLASS-BY-BARE-NAME-ON-VARIABLE).
+                # It was classified by every table's field of that spelling, so `message "Paid"` read
+                # back as [pii] because another table's `message` is [pii]: a public receipt refused at
+                # its save, and with [phi] or [pci] shown as `****`. A variable's value carries its own
+                # class from where it was read (the reasoning above), which is the rule `mio check`
+                # applies. The one exception is a request field bound as a bare variable: it IS a field
+                # of the request, so it keeps the field rule, by the handler's own shape when it has one.
+                if len(_parts) == 1:
+                    _rf = getattr(val, '_request_field', None)
+                    if _rf is None:
+                        return val
+                    _fld = _rf[0]
+                    if _rf[1] and ctx.exists(_rf[1]):
+                        _parts = [_rf[1], _fld]
                 # WHICH TABLE THE FIELD BELONGS TO, when the read names it unambiguously: a field of
                 # the record a lookup bound (`o.amount`), or of the first, last or Nth record of a
                 # lookup's list. Asked with no table, a classification answers for the field name
@@ -40137,7 +40540,7 @@ message=(f"Raw sql cannot run on this connection: "
                 val._field_table = _cls_tbl     # read by the name-based egress masks
                 # VALUE-BOUND (T1-VALUE-BOUND-TAGS, BS-009): a field of a value bound to a shape carries
                 # what THAT shape declares for it, not what any shape declares for the name.
-                _own = self._shape_field_class(ctx, node.parts)
+                _own = self._shape_field_class(ctx, _parts)
                 if _own == '':
                     # The shape says plain; a sector's rule about the name still holds.
                     _own = next((c for c in ('phi', 'pci', 'pii')
@@ -40151,7 +40554,7 @@ message=(f"Raw sql cannot run on this connection: "
                             val.data_class = _cls
                             break
                 # `[hide]` rides the same identity, beside the class (RULED by Ron 2026-10-28).
-                _own_hide = self._shape_field_hidden(ctx, node.parts)
+                _own_hide = self._shape_field_hidden(ctx, _parts)
                 if _own_hide or (_own_hide is None
                                  and self.classification.has(_fld, 'hide', _cls_tbl)):
                     self._mark_hidden(val)
@@ -40163,10 +40566,10 @@ message=(f"Raw sql cannot run on this connection: "
                 for _rule in ('never_store', 'never_log'):
                     if self.classification.has(_fld, _rule):
                         val.handling = _rule if val.handling is None else val.handling
-                if self._field_purposes and node.parts[-1] in self._field_purposes:
+                if self._field_purposes and _fld in self._field_purposes:
                     # attach collection purposes so a copy/derived value stays purpose-checkable
-                    val._purposes = set(self._field_purposes[node.parts[-1]])
-                    val._purpose_fields = {node.parts[-1]}
+                    val._purposes = set(self._field_purposes[_fld])
+                    val._purpose_fields = {_fld}
             return val
 
         # miocookie in a VALUE position (`check miocookie.exists "s"`). The exec handlers
@@ -41051,6 +41454,12 @@ message=(f"Raw sql cannot run on this connection: "
                     _rec = item.to_python() if isinstance(item, MohioValue) else item
                     if isinstance(_rec, dict):
                         _key, _positional = self._row_identity(item, idx, _key_cols)
+                    elif self._value_is_classified(item) or self._value_is_classified(_rec):
+                        # A PROTECTED VALUE IS NEVER ITS OWN IDENTITY: the stamp is an attribute in
+                        # the page, so the value itself would leave unmasked while the row showed it
+                        # masked (`data-mio-row="123-45-6789"`, found 2026-11-03). Its position stands
+                        # in, flagged positional, as a record with no key does.
+                        _key, _positional = str(idx), True
                     else:
                         _key, _positional = str(_rec), False
                     out.append(self._stamp_row(seg, item_name, _key, _positional))
@@ -41142,8 +41551,9 @@ message=(f"Raw sql cannot run on this connection: "
                 # string keeps the words around the hidden stretch.
                 out = (str(self._display_value(val))
                        if self._is_hidden(val) and getattr(val, '_masked_spans', None) else _HIDDEN_TEXT)
-            elif (_masked_names and parts and str(parts[-1]) in _masked_names
+            elif (_masked_names and len(parts) > 1 and str(parts[-1]) in _masked_names
                     and isinstance(_raw, str) and not _raw.startswith(self._ENC_PREFIXES)):
+                # A dotted field only: a one-word name is a variable, masked by its value below (R71).
                 # Escaped below like any other inserted value: four characters of a value are
                 # still data, and data never reaches the page as markup.
                 out = self._mask_last4(_raw)
@@ -43329,6 +43739,7 @@ message=(f"Raw sql cannot run on this connection: "
                 # runtime-chosen target at boot, before any request is served).
                 self._register_loose_unique_targets(program)
                 self._reconcile_shape_unique(getattr(self, '_db', None))
+                self._reconcile_bare_decimal_text(getattr(self, '_db', None))
                 self._register_join_indexed_fields(program)
                 self._register_ai_blocks(program)
                 self._base_ctx = base_ctx
@@ -43429,7 +43840,7 @@ message=(f"Raw sql cannot run on this connection: "
                 if _k not in clean:
                     session_ctx._vars.pop(_k, None)
             for k, v in clean.items():
-                session_ctx.set(k, MohioValue(v))
+                session_ctx.set(k, _mark_request_field(MohioValue(v), k))
             session_ctx._request_field_keys = set(clean.keys())
             # `clean` drops every key starting with "_", and the request cookies live under
             # __request_cookies__ -- so they were stripped right here. miocookie.exists/get read

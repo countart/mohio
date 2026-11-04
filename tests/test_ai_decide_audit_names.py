@@ -65,7 +65,7 @@ BAL = "SENTINEL-BALANCE-1234567"
 REG = "SENTINEL-REGION-atlantis"
 
 
-def audit_row(phi=None, pci=None, purposes=None, profile=None, inputs=None):
+def audit_row(phi=None, pci=None, purposes=None, profile=None, inputs=None, classed=True):
     interp = MohioInterpreter()
     # SEEDED THROUGH THE RESOLVER, which is now the one place a classification lives. This used
     # to assign the bare-name sets directly, and those sets stopped being what the audit path
@@ -85,6 +85,15 @@ def audit_row(phi=None, pci=None, purposes=None, profile=None, inputs=None):
         'balance': MohioValue(BAL, 'text'),
         'region': MohioValue(REG, 'text'),
     })
+    # THE VALUE CARRIES ITS CLASS, as every real weigh hands it over (R71, 2026-11-02): a record
+    # field, a copy of one and a request field all reach the audit as a value tagged with the
+    # field's class, and the audit records that class. A one-word input whose value carries no
+    # class is a variable holding something public, whatever its name.
+    for _k, _v in dec.inputs.items():
+        _c = ('phi' if _k in (phi or []) else 'pci' if _k in (pci or [])
+              else 'pii' if _k in (purposes or []) else None)
+        if classed and _c and isinstance(_v, MohioValue) and _v.data_class is None:
+            _v.data_class = _c
     interp._write_ai_audit('phi_audit_log', 'fraud_check', dec, Ctx(db, profile))
     # T1-AUDIT-COVERAGE-GAPS Part D (2026-08-17): _write_ai_audit now routes through
     # _audit_event (the M2 sink-bypass fix) instead of calling db.save with a flat, columnar
@@ -114,6 +123,21 @@ row2, detail2 = audit_row(purposes=['email'], inputs={'email': MohioValue('SENTI
 inp2 = json.loads(detail2['inputs'])
 check("pii/purpose field classified [pii]", inp2.get('email') == '[pii]', inp2)
 check("no pii value leaked", 'SENTINEL@x.com' not in json.dumps(row2, default=str))
+
+# 3a. a DOTTED input is recorded by its value's class too: `claim.ssn` names a variable holding a
+# record, not a table, and the name alone answered "-" for a [phi] field (found 2026-11-02)
+_dotted = MohioValue(SSN, 'text')
+_dotted.data_class = 'phi'
+row3, detail3 = audit_row(inputs={'claim.ssn': _dotted})
+inp3 = json.loads(detail3['inputs'])
+check("a dotted [phi] input is classified [phi]", inp3.get('claim.ssn') == '[phi]', inp3)
+check("...and its value is not in the record", SSN not in json.dumps(row3, default=str))
+
+# 3b. a one-word input holding a literal is '-' even when its name is a [phi] field's name
+row4, detail4 = audit_row(phi=['ssn'], inputs={'ssn': MohioValue('123', 'text')}, classed=False)
+inp4 = json.loads(detail4['inputs'])
+check("a literal under a [phi] field's name is '-': the name is not the value",
+      inp4.get('ssn') == '-', inp4)
 
 # 4. the reserved input_binding field is present and null at base tier
 check("input_binding present and null at base tier",

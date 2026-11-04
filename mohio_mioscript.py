@@ -257,6 +257,34 @@ _PRELUDE = r"""  function _moPut(sel, text){
     }
     return out;
   }
+  // ONE IDEMPOTENCY KEY PER INTENT (SEAM 8, 2026-11-02). A route that moves value under a named
+  // sector does its work once per `Idempotency-Key` header, and a send set none, so a Mohio transfer
+  // form was answered 400 on every submission. Each form's submission gets a key: made on its first
+  // send, kept in memory and in this tab's session storage until the request has a definitive
+  // answer, so a double-click, a retry after a network failure, a 5xx or a 409 (the first request
+  // still running), or a reload of the page sends the SAME key and gets the one answer. Any other
+  // answer ends the intent, and the next submission is a new key. The server binds the key to the
+  // person and to the request it names.
+  var _moIntents = {};
+  function _moIntentSlot(formSel){ return 'mio-intent:' + location.pathname + '|' + formSel; }
+  function _moNewKey(){
+    if (window.crypto && window.crypto.randomUUID) { try { return window.crypto.randomUUID(); } catch(e) {} }
+    var b = new Uint8Array(16); window.crypto.getRandomValues(b);   // randomUUID needs a secure context
+    return Array.prototype.map.call(b, function(x){ return ('0' + x.toString(16)).slice(-2); }).join('');
+  }
+  function _moIntentKey(formSel){
+    var slot = _moIntentSlot(formSel), k = _moIntents[slot] || null;
+    if (!k) { try { k = window.sessionStorage.getItem(slot); } catch(e) {} }
+    if (!k) { k = _moNewKey(); }
+    _moIntents[slot] = k;
+    try { window.sessionStorage.setItem(slot, k); } catch(e) {}   // memory still holds it in this page
+    return k;
+  }
+  function _moIntentEnd(formSel){
+    var slot = _moIntentSlot(formSel);
+    delete _moIntents[slot];
+    try { window.sessionStorage.removeItem(slot); } catch(e) {}
+  }
   function _moSend(formSel, url, event){
     var f = document.querySelector(formSel);
     var data = f ? new FormData(f) : new FormData();
@@ -265,7 +293,11 @@ _PRELUDE = r"""  function _moPut(sel, text){
     // Accept: application/json so a failed shape-validation comes back as the structured field
     // errors, the same failure body the JSON path returns, rather than a re-rendered HTML page a
     // fetch cannot use. The server keeps the HTML re-render for a plain browser <form> submit.
-    return fetch(url, { method: 'POST', body: data, headers: { 'Accept': 'application/json' } }).then(function(r){
+    return fetch(url, { method: 'POST', body: data, headers: { 'Accept': 'application/json',
+                                                               'Idempotency-Key': _moIntentKey(formSel) } }).then(function(r){
+      // A 409 (still running) or a 5xx may sit in front of work that happened: keep the key, so the
+      // retry gets that answer. A network failure never reaches here, and keeps it the same way.
+      if (!(r.status === 409 || r.status >= 500)) _moIntentEnd(formSel);
       return r.text().then(function(t){
         _moSwirlStop(_sw);   // cleared on success
         var json = null; try { json = JSON.parse(t); } catch(e) {}

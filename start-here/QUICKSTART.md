@@ -205,6 +205,8 @@ This is where Mohio is different from every other language.
 Create `fraud.mho`:
 
 ```mohio
+connect db as sqlite from env.DATABASE_URL default "fraud.db"
+
 shape Txn
     amount as decimal
     device_id as text
@@ -260,6 +262,8 @@ mio run fraud.mho --ai --verbose
 `weigh` — what the AI considers when making the decision.
 
 `ai.audit to fraud_audit_log` — every decision is logged automatically. Inputs, result, confidence, model, timestamp. You don't write logging code. This line makes it happen.
+
+`connect db as sqlite from env.DATABASE_URL default "fraud.db"` -- the record needs somewhere to live, so the first line connects a database: the one `DATABASE_URL` names, or the local file `fraud.db` when it is unset. Leave it out and `mio check` refuses the file, because a decision whose record would be written nowhere is not governed.
 
 `not confident` — required. This is where you decide what happens when the AI isn't sure enough. Route to human review, return a safe default, log the uncertainty — your call, but you must handle it.
 

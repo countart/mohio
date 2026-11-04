@@ -159,7 +159,12 @@ def _make_parser_cached(grammar):
         try:
             cache_dir.mkdir(exist_ok=True, parents=True)
             candidate = cache_dir / f"mohio_parser_{grammar_hash}.pkl"
-            test_file = cache_dir / ".write_test"
+            # One test file per process. A shared name raced when parse workers start together:
+            # one worker's unlink removed another's file mid-test, the loser took the OSError as
+            # "this folder is not writable", found no parser cache in the next folder and compiled
+            # the grammar again, unseen, since a worker's output goes nowhere (measured on R58,
+            # 2026-10-31: a segment worker wrote mohio_data/.parser_cache/ mid-check).
+            test_file = cache_dir / f".write_test_{os.getpid()}"
             test_file.touch()
             test_file.unlink(missing_ok=True)
             cache_file = candidate
@@ -416,10 +421,11 @@ def _app_cache_key(source_path: str):
     return hashlib.sha256(repr(sorted(app_mark_names(source_path))).encode()).hexdigest()[:16]
 
 
-def _load_ast_cache(source_path: str, source: str):
+def _load_ast_cache(source_path: str, source: str, announce=True):
     """Load a cached PARSE TREE, keyed on the source, the files that affect PARSING
     (`_parse_fingerprint`), and the whole-app declaration set (`_app_cache_key`). Returns the tree,
-    or None on a miss.
+    or None on a miss. `announce=False` only asks: it never prints the debug hit line, so a probe
+    before a run does not add to the hits the run itself reports.
 
     ONLY THE PARSE IS CACHED, NEVER THE VERDICT. Layer 1, the AST build and every whole-program scan
     re-run on every check, so a new scanner rule can never be skipped by a stale cache. That is why
@@ -440,7 +446,7 @@ def _load_ast_cache(source_path: str, source: str):
             return None  # a parse-affecting file changed -- reparse
         if cached.get('app') != _app_cache_key(source_path):
             return None  # an included file's or the journey's declarations changed -- reparse
-        if _cache_debug():
+        if announce and _cache_debug():
             # Opt-in, like the parser cache's own line: a test can ask whether this file's parse was
             # READ from its cache, instead of inferring it from a timing difference that load can invert.
             print(f"  [ast] cache hit: {cache_path}", file=sys.stderr)
@@ -448,6 +454,47 @@ def _load_ast_cache(source_path: str, source: str):
     except Exception:
         pass  # Corrupted cache -- re-parse
     return None
+
+
+def _parse_files_first(paths, label, whole=()):
+    """Parse every file in `paths` whose parse cache misses, on every core, before the caller reads
+    them one by one: the caller's own loop then finds each tree in the cache, so what it prints and
+    what it builds are unchanged (mohio_segment.warm_files_in_workers). Returns the paths parsed.
+    Every entry point that parses a whole app calls this once: `mio check <dir>`, `mio check --all`,
+    `mio warmup <dir>` and the `mio serve <dir>` boot. `whole` names the files the caller first
+    parses with `_cached_parse_tree`, so a worker parses them that way too."""
+    from mohio_segment import warm_files_in_workers
+    return warm_files_in_workers(paths, lambda p, s: _load_ast_cache(p, s, announce=False) is not None,
+                                 label, whole)
+
+
+_STATEMENT_INCLUDE_RE = re.compile(r'(?m)^[ \t]*include[ \t]+"([^"\n]+)"')
+
+
+def _serve_parse_files(pages, journeys):
+    """The files a `mio serve <dir>` boot parses: its pages, its journeys, and every file they pull in
+    with an `include "..."` statement, followed through includes of includes and resolved the way the
+    runtime resolves one (beside the including file, then the current directory). A `_name.mho` no
+    page includes (an authored-data file, say) is never parsed by the boot, so it is not parsed for it
+    either. A file this misses is parsed by the boot itself, as before; one it adds is only parsed."""
+    found, todo = [], list(pages) + list(journeys)
+    seen = {os.path.abspath(p) for p in todo}
+    while todo:
+        p = todo.pop()
+        found.append(p)
+        try:
+            src = Path(p).read_text(encoding='utf-8-sig')
+        except (OSError, UnicodeDecodeError):  # SILENT-OK: the boot reads this file itself and reports why it cannot
+            continue
+        base = os.path.dirname(os.path.abspath(p))
+        for m in _STATEMENT_INCLUDE_RE.finditer(src):
+            for cand in (os.path.join(base, m.group(1)), os.path.abspath(m.group(1))):
+                if os.path.isfile(cand):
+                    if os.path.abspath(cand) not in seen and cand.endswith('.mho'):
+                        seen.add(os.path.abspath(cand))
+                        todo.append(cand)
+                    break
+    return found
 
 
 def _save_ast_cache(source_path: str, source: str, tree, ctx=None):
@@ -4090,11 +4137,18 @@ def cmd_warmup(args=None):
             if _Path(candidate).exists():
                 serve_targets.append(candidate)
 
+    # The deploy build: every target whose cache misses is parsed first, on every core. A file a
+    # worker parsed reports here as parsed now, the same lines a one-core warmup prints for it.
+    _warmed = set(_parse_files_first(serve_targets, "[warmup]"))
     for target in serve_targets:
         try:
             source = _Path(target).read_text(encoding='utf-8-sig')
             if _load_ast_cache(target, source) is not None:
-                print(f"  [warmup] {target} -- parse cache valid.")
+                if target in _warmed:
+                    print(f"  [warmup] Pre-parsing {target} (build-time only)...")
+                    print(f"  [warmup] {target} -- parse cached.")
+                else:
+                    print(f"  [warmup] {target} -- parse cache valid.")
                 continue
             print(f"  [warmup] Pre-parsing {target} (build-time only)...")
             try:
@@ -4381,6 +4435,38 @@ def _first_line(err):
     return next((ln.strip() for ln in str(err).splitlines() if ln.strip()), type(err).__name__)
 
 
+def _page_url(rel_path):
+    """The URL a page file answers at in directory mode, from its path under the served folder:
+    index.mho -> /, rates.mho -> /rates, blog/index.mho -> /blog, blog/post.mho -> /blog/post."""
+    url = ('/' + rel_path.replace(os.sep, '/'))[:-4]   # without .mho
+    if url == '/index':
+        return '/'
+    if url.endswith('/index'):
+        return url[:-6]
+    return url
+
+
+def _pages_at_runtime_routes(directory, pages):
+    """(page, url) for each page that answers at a path the runtime answers itself (RUNTIME_GET_ROUTES),
+    so it would never be served: a page named for its file, with no declared handler path to move it.
+    A declared `request for ... at` one of those paths is refused by the route scan instead."""
+    from mohio_reachability import RUNTIME_GET_ROUTES
+    out = []
+    for page in pages:
+        url = _page_url(os.path.relpath(page, str(directory)))
+        if url in RUNTIME_GET_ROUTES and not _declared_route_paths(page):
+            out.append((page, url))
+    return out
+
+
+def _runtime_route_message(directory, clashes):
+    lines = "\n".join(f"    {os.path.relpath(p, str(directory))} would answer at {u}" for p, u in clashes)
+    return (f"These pages are answered by the runtime's own health checks, which come ahead of every page, "
+            f"so they would not be served:\n{lines}\n\n  A request there gets the runtime's answer and the "
+            f"page does not run. Rename the file (for example health.mho to status.mho), or give it a "
+            f"handler at its own path (`request for sh.X at /status`).")
+
+
 def _cmd_serve_directory(args, directory, verbose=False):
     """
     Multi-file directory serve mode.
@@ -4426,6 +4512,14 @@ def _cmd_serve_directory(args, directory, verbose=False):
                 journeys.append(abs_path)
                 continue
             pages.append(abs_path)
+    _clashes = _pages_at_runtime_routes(directory, pages)
+    if _clashes:
+        _die(_runtime_route_message(directory, _clashes), exit_code=1)
+    # The boot parses what it is about to parse first, on every core: pages, journeys and the files
+    # they include, each whose cache misses. Route discovery and the compile below then read every
+    # tree from the cache. A page is parsed the way route discovery parses it (`_cached_parse_tree`),
+    # so its cache is the same.
+    _parse_files_first(_serve_parse_files(pages, journeys), "[mio serve]", whole=pages)
     # A PROGRESS LINE PER FILE (item 10). Reading the routes parses each file, and on a first run
     # (no parse cache yet) a 48-file app took minutes with nothing printed, which looks like a hang.
     if pages:
@@ -4434,12 +4528,7 @@ def _cmd_serve_directory(args, directory, verbose=False):
         rel_path = os.path.relpath(abs_path, str(directory))
         print(f"  {dim(f'[{i}/{len(pages)}]')} {rel_path.replace(os.sep, '/')}", flush=True)
         # The filename-derived URL, the fallback for a file that declares no route path.
-        filename_url = '/' + rel_path.replace(os.sep, '/')
-        filename_url = filename_url[:-4]  # remove .mho
-        if filename_url.endswith('/index'):
-            filename_url = filename_url[:-6] or '/'  # /blog/index -> /blog/
-        if not filename_url:
-            filename_url = '/'
+        filename_url = _page_url(rel_path)
         # THE DECLARED PATH WINS (Batch 37 item 2). A handler that writes `at /some/path` is
         # registered at that path, not at the file's name -- a developer who declares a route and
         # gets a different one is the same silent surprise as an unmatched POST. A file with no
@@ -4739,14 +4828,56 @@ def _cmd_serve_directory(args, directory, verbose=False):
             import uvicorn
         except ImportError:
             _die("uvicorn not installed. Run: pip install uvicorn")
+        _start_anchor_timer()       # off unless MOHIO_AUDIT_ANCHOR_INTERVAL is set; refuses before listening
+        _sock = _bind_serve_socket(args.host, args.port)
         print(f"\n  {green('v')}  {len(programs)} routes loaded")
         print(f"  {bold('Listening on')}  http://{args.host}:{args.port}")
         print(f"  {bold('Health')}        http://{args.host}:{args.port}/mio/health")
         print(f"\n  {dim('Press Ctrl+C to stop')}\n")
         from mohio_server import install_log_timestamps
         install_log_timestamps()     # every log line from here starts with its UTC time (unit D)
-        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+        _run_on_bound_socket(app, _sock, args.host, args.port)
 
+
+
+def _bind_serve_socket(host, port):
+    """Bind the address `mio serve` will listen on BEFORE the banner says it is listening.
+
+    The banner printed `Listening on` and then handed the address to uvicorn, which bound it
+    afterwards, so a port another program held printed the banner and then died on uvicorn's raw
+    `[Errno 10048]` (found 2026-11-02 reproducing a test-suite stall). Binding here makes the
+    banner an outcome, and a taken port refuses naming the port and the fix."""
+    import errno
+    import socket
+    try:
+        family, kind, proto, _canon, addr = socket.getaddrinfo(
+            host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)[0]
+    except socket.gaierror as e:
+        _die(f"mio serve cannot listen on host {host!r}: {e.strerror or e}. "
+             f"Give a host this machine has, for example --host 127.0.0.1 or --host 0.0.0.0.")
+    # EGRESS-EXEMPT: the socket `mio serve` LISTENS on; nothing is sent out through it by this line.
+    sock = socket.socket(family, kind, proto)
+    if os.name != "nt":
+        # uvicorn's own bind does this off Windows, so a restart can reuse a port still in TIME_WAIT.
+        # On Windows the same option lets a second program take a port already in use, so it stays off.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(addr)
+    except OSError as e:
+        sock.close()
+        if e.errno == errno.EADDRINUSE or getattr(e, "winerror", None) == 10048:
+            _die(f"port {port} is already in use on {host}, so mio serve cannot listen there. "
+                 f"Stop the program using it, or pick another port: mio serve <app> --port {port + 1}")
+        _die(f"mio serve cannot listen on {host}:{port}: {e.strerror or e}. "
+             f"Pick another port with --port, or another host with --host.")
+    return sock
+
+
+def _run_on_bound_socket(app, sock, host, port):
+    """Run the app on the socket `_bind_serve_socket` already bound: the same uvicorn settings
+    `uvicorn.run` used, minus the bind it can no longer get wrong."""
+    import uvicorn
+    uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning")).run(sockets=[sock])
 
 
 def cmd_serve(args):
@@ -4914,6 +5045,12 @@ def cmd_serve(args):
     app    = create_app(server)
 
     # -- Start -------------------------------------------------
+    _start_anchor_timer()           # off unless MOHIO_AUDIT_ANCHOR_INTERVAL is set; refuses before listening
+    try:
+        import uvicorn  # noqa: F401  -- checked before the bind, so a missing package says so first
+    except ImportError:
+        _die("uvicorn not installed. Run: pip install uvicorn")
+    _sock = _bind_serve_socket(host, port)
     print(f"\n  {green('v')}  Server ready")
     print(f"  {bold('Listening on')}  http://{host}:{port}")
     # No `API docs` line: the banner advertised /mio/docs, a route the server has never had, so
@@ -4922,12 +5059,9 @@ def cmd_serve(args):
     print(f"\n  {dim('Press Ctrl+C to stop')}\n")
 
     try:
-        import uvicorn
         from mohio_server import install_log_timestamps
         install_log_timestamps()     # every log line from here starts with its UTC time (unit D)
-        uvicorn.run(app, host=host, port=port, log_level="warning")
-    except ImportError:
-        _die("uvicorn not installed. Run: pip install uvicorn")
+        _run_on_bound_socket(app, _sock, host, port)
     except KeyboardInterrupt:
         print(f"\n\n  {dim('Server stopped.')}\n")
 
@@ -5541,6 +5675,8 @@ def cmd_check(args):
         fast = getattr(args, 'fast', False)
         mode = "--fast" if fast else "full"
         print(f"  [mio check] Checking {len(files)} .mho file(s) [{mode}]...")
+        # Every file whose parse cache misses is parsed first, on every core; each check below reads it.
+        _parse_files_first(files, "[mio check]")
         if fast:
             failed = []
             # `args.all` MUST be cleared before recursing. Leaving it set meant every recursive
@@ -5633,9 +5769,18 @@ def cmd_check(args):
                 return _os.path.relpath(fp, str(path))
             except Exception:
                 return fp
+        # Every page and parsed include whose parse cache misses is parsed first, on every core,
+        # filling the cache the loop below reads.
+        _parse_files_first(mho + private, "[mio check]")
         # AGGREGATE (`_check_many`): a finding whose code is in a journey is reported ONCE, at the
         # journey, with its real excerpt; each page shows only its OWN findings, with its own excerpt.
         _c, failed, n_distinct_warn, n_distinct_err, _decl, _adv = _check_many(sorted(mho), args, _rel)
+        # A page at a path the runtime answers itself is never served: an error, as serve refuses it.
+        _clashes = _pages_at_runtime_routes(path, mho)
+        if _clashes:
+            print(f"\n  {red('x')}  " + _runtime_route_message(path, _clashes).replace("\n", "\n  "))
+            n_distinct_err += len(_clashes)
+            failed = list(failed) + [p for p, _u in _clashes if p not in failed]
 
         private_failed = []
         for f in sorted(private):
@@ -6839,8 +6984,363 @@ def cmd_sector(args):
 AUDIT_ENVELOPE_LABEL = "mohio_audit_envelope + ack"
 
 
+# ── Signed audit anchors (`mio audit publish`, `verify-anchors --verify-sig`) ─────────────────
+# A published head is only worth something when a party other than the audited one holds it
+# (audit_chain_head's docstring). `publish` signs each log's head with the tenant's Ed25519 key,
+# so the store that keeps it (getmohio, or any other party) cannot forge a different head, and
+# `verify-anchors --verify-sig` refuses an anchor whose signature does not hold before its head is
+# compared. The chain functions themselves are unchanged; this only signs what they report.
+
+ANCHOR_SCHEMA = "mohio.audit.anchor/1"
+# Every schema a stored anchor may carry and this build verifies. A later custody change adds a
+# version here and never removes one, so anchors already stored keep verifying.
+ANCHOR_SCHEMAS = (ANCHOR_SCHEMA,)
+_ANCHOR_SIGNED_FIELDS = ("schema", "log", "head", "length", "published_at", "key_id")
+ANCHOR_INTERVAL_DEFAULT_MINUTES = 5
+_ANCHOR_KEY_HOW = (
+    "Make a key with `openssl genpkey -algorithm ed25519 -out anchor.key`, put the file's contents in "
+    "MOHIO_AUDIT_ANCHOR_KEY as a secret (never commit it), and give the store that holds your anchors "
+    "only the public half: `openssl pkey -in anchor.key -pubout -out anchor.pub`.")
+
+
+class AnchorError(Exception):
+    """An anchor could not be made, kept or sent. The CLI exits on it; the serve timer says it and
+    tries again on its next tick."""
+
+    def __init__(self, message, exit_code=1):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def _anchor_signed_bytes(record):
+    """The exact bytes a version-1 anchor signs: its signed fields as compact, key-sorted JSON."""
+    import json
+    return json.dumps({k: record.get(k) for k in _ANCHOR_SIGNED_FIELDS}, sort_keys=True,
+                      separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def _anchor_raw_32(text):
+    """32 key bytes written as 64 hex characters or as base64, or None when the text is neither."""
+    import base64
+    import binascii
+    t = (text or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{64}", t):
+        return bytes.fromhex(t)
+    try:
+        raw = base64.b64decode(t, validate=True)
+    except (binascii.Error, ValueError):  # SILENT-OK: not base64; the caller refuses the key by name
+        return None
+    return raw if len(raw) == 32 else None
+
+
+def _anchor_private_key():
+    """The tenant's Ed25519 signing key from MOHIO_AUDIT_ANCHOR_KEY: a PEM private key, or its
+    32-byte seed as hex or base64. The value is never printed, in a message or anywhere else."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    raw = os.environ.get("MOHIO_AUDIT_ANCHOR_KEY", "")
+    if not raw.strip():
+        raise AnchorError("Publishing an anchor needs a signing key, and MOHIO_AUDIT_ANCHOR_KEY is not "
+                          "set. An unsigned anchor proves nothing, because anyone could have written it.\n"
+                          "  " + _ANCHOR_KEY_HOW, exit_code=3)
+    if "-----BEGIN" in raw:
+        try:
+            key = serialization.load_pem_private_key(raw.strip().encode("ascii"), password=None)
+        except (ValueError, TypeError, UnicodeEncodeError):
+            key = None  # SILENT-OK: refused loud just below, without repeating the key
+        if not isinstance(key, Ed25519PrivateKey):
+            raise AnchorError("MOHIO_AUDIT_ANCHOR_KEY holds a PEM key that is not an unencrypted Ed25519 "
+                              "private key, so nothing can be signed with it.\n  " + _ANCHOR_KEY_HOW,
+                              exit_code=3)
+        return key
+    seed = _anchor_raw_32(raw)
+    if seed is None:
+        raise AnchorError("MOHIO_AUDIT_ANCHOR_KEY is not an Ed25519 private key: give it a PEM private "
+                          "key, or the 32-byte seed as 64 hex characters or base64.\n  " + _ANCHOR_KEY_HOW,
+                          exit_code=3)
+    return Ed25519PrivateKey.from_private_bytes(seed)
+
+
+def _anchor_public_key(spec):
+    """The Ed25519 key `--verify-sig` names: a file holding a PEM public key or the 32 raw bytes as
+    hex or base64, or that value written out on the command line."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    text = spec
+    if os.path.isfile(spec):
+        with open(spec, encoding="utf-8-sig") as fh:
+            text = fh.read()
+    if "PRIVATE KEY" in text:
+        raise AnchorError("--verify-sig was given a PRIVATE key. Checking a signature needs only the public "
+                          "half, and the private key should never leave the machine that publishes. Make "
+                          "the public half with `openssl pkey -in anchor.key -pubout -out anchor.pub`.",
+                          exit_code=3)
+    if "-----BEGIN" in text:
+        try:
+            key = serialization.load_pem_public_key(text.strip().encode("ascii"))
+        except (ValueError, TypeError, UnicodeEncodeError):
+            key = None  # SILENT-OK: refused loud just below
+        if isinstance(key, Ed25519PublicKey):
+            return key
+    else:
+        raw = _anchor_raw_32(text)
+        if raw is not None:
+            return Ed25519PublicKey.from_public_bytes(raw)
+    raise AnchorError(f"--verify-sig {spec}: this is not an Ed25519 public key. Give the file "
+                      f"`openssl pkey -in anchor.key -pubout -out anchor.pub` made, or the key's 32 bytes as "
+                      f"64 hex characters or base64.", exit_code=3)
+
+
+def _anchor_key_id(public_key):
+    """A short name for a public key, carried in every anchor it signs: the first 16 hex characters
+    of the SHA-256 of its 32 raw bytes."""
+    import hashlib
+    from cryptography.hazmat.primitives import serialization
+    raw = public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _anchor_signature_problem(record, log, public_key, key_id):
+    """Why a stored anchor's signature does not hold for `log` under this key, or None when it does."""
+    import base64
+    import binascii
+    from cryptography.exceptions import InvalidSignature
+    if not isinstance(record, dict):
+        return "it is not a signed anchor"
+    if not record.get("signature"):
+        return "it carries no signature, and an unsigned anchor proves nothing"
+    if record.get("schema") not in ANCHOR_SCHEMAS:
+        return (f"its schema {record.get('schema')!r} is not one this build verifies "
+                f"({', '.join(ANCHOR_SCHEMAS)})")
+    if record.get("alg") != "Ed25519":
+        return f"it was signed with {record.get('alg')!r}, and only Ed25519 is verified"
+    if record.get("log") != log:
+        return f"it was signed for the log {record.get('log')!r} and is filed under {log!r}"
+    if record.get("key_id") != key_id:
+        return f"it was signed by key {record.get('key_id')}, not by the key given (key {key_id})"
+    try:
+        signature = base64.b64decode(str(record["signature"]), validate=True)
+    except (binascii.Error, ValueError):
+        return "its signature is not base64"
+    try:
+        public_key.verify(signature, _anchor_signed_bytes(record))
+    except InvalidSignature:
+        return "its signature does not match its contents: the anchor was changed after it was signed"
+    return None
+
+
+def _anchor_publish(target, key, out_path=None):
+    """Sign the current head of every audit log in `target` and keep the anchors: appended to
+    `out_path` when given, and POSTed to MOHIO_AUDIT_ANCHOR_SINK when it is set. Returns
+    (anchors {log: record}, notes, refused); raises AnchorError when there is nothing to anchor or a
+    destination did not take them.
+
+    A head is signed only for a chain that is intact and that the verifier itself accepts at that
+    head and length. An anchor over a broken chain would vouch for the break, so such a log is
+    refused by name and the others are still published."""
+    from mohio_interpreter import MohioInterpreter, _make_db_runtime, _sniff_driver
+    from datetime import datetime, timezone
+    import base64
+    _anchor_sink()                      # a sink that may not be used refuses before anything is signed
+    shown = _display_target(target)
+    driver = _sniff_driver(target) if "://" in str(target) else "sqlite"
+    import contextlib
+    try:
+        # The store's own connect notice goes to stderr, so stdout stays the anchors and nothing else.
+        with contextlib.redirect_stdout(sys.stderr):
+            sink = _make_db_runtime(driver, target, url=target if "://" in str(target) else None)
+    except Exception as e:
+        raise AnchorError(f"Could not open the audit store at {shown}: {e}", exit_code=3)
+    it = MohioInterpreter()
+    logs = it.audit_logs(sink)
+    if not logs:
+        raise AnchorError(f"No audit logs in {shown}, so there is no head to anchor. Nothing was "
+                          f"published. Exit status 2 means nothing to anchor.", exit_code=2)
+    key_id = _anchor_key_id(key.public_key())
+    published_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    anchors, refused, notes = {}, [], []
+    for log in logs:
+        info = it.audit_chain_head(sink, log)
+        if not info["readable"] or not info["intact"]:
+            _detail = f" ({info['reason']})" if info["reason"] else ""
+            refused.append(f"{log}: its chain is not intact{_detail}; run `mio audit verify {shown}`")
+            continue
+        if not info["entries"]:
+            notes.append(f"{log}: no records yet, nothing to anchor")
+            continue
+        record = {"schema": ANCHOR_SCHEMA, "log": log, "head": info["head"], "length": info["entries"],
+                  "published_at": published_at, "key_id": key_id}
+        # THE VERIFIER MUST ACCEPT WHAT IS PUBLISHED. Asked, not assumed: an anchor the verifier
+        # would reject the moment it was stored is a receipt for nothing.
+        check = it.verify_audit_chain_against_anchors(sink, log, [record])
+        if not check["ok"]:
+            refused.append(f"{log}: the verifier does not accept this head at length {info['entries']} "
+                           f"({check['reason']})")
+            continue
+        record["alg"] = "Ed25519"
+        record["signature"] = base64.b64encode(key.sign(_anchor_signed_bytes(record))).decode("ascii")
+        anchors[log] = record
+    if out_path and anchors:
+        _anchor_append_file(out_path, anchors)
+    delivered = _anchor_send(list(anchors.values())) if anchors else None
+    if delivered:
+        notes.append(delivered)
+    if not anchors and not refused:
+        raise AnchorError(f"Nothing was published: no log in {shown} has records yet. Exit status 2 means "
+                          f"nothing to anchor.", exit_code=2)
+    return anchors, notes, refused
+
+
+def _anchor_append_file(path, anchors):
+    """Add one anchor per log to the anchors file `verify-anchors --anchors` reads ({log: [anchor, ...]}),
+    keeping every anchor it already holds. Written whole to a temporary file and then moved, so a crash
+    leaves the old file or the new one, never half of one."""
+    import json
+    held = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                held = json.load(fh)
+        except (OSError, ValueError) as e:
+            raise AnchorError(f"Could not read the anchors file {path} to add to it: {e}. Nothing was "
+                              f"written; move the file aside or fix it, then publish again.", exit_code=3)
+        if not isinstance(held, dict) or not all(isinstance(v, list) for v in held.values()):
+            raise AnchorError(f"{path} is not an anchors file (a JSON object mapping each log to a list of "
+                              f"anchors), so nothing was added to it.", exit_code=3)
+    for log, record in anchors.items():
+        held.setdefault(log, []).append(record)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    # EGRESS-EXEMPT: an anchor carries a log name, a chain hash, a count, a time and a key id; no program value
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(held, fh, indent=1)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def _anchor_sink():
+    """(address, address as it may be printed) of MOHIO_AUDIT_ANCHOR_SINK, or None when it is not set.
+    Refused unless it is https://, or http:// to this machine for a test store, so the store's token and
+    the anchors are never sent where they can be read or changed on the way."""
+    from urllib.parse import urlsplit
+    url = (os.environ.get("MOHIO_AUDIT_ANCHOR_SINK") or "").strip()
+    if not url:
+        return None
+    parts = urlsplit(url)
+    local = parts.hostname in ("127.0.0.1", "localhost", "::1")
+    if not (parts.scheme == "https" or (parts.scheme == "http" and local)):
+        raise AnchorError("MOHIO_AUDIT_ANCHOR_SINK must be an https:// address, so the store's token and the "
+                          "anchors cannot be read or changed on the way (http:// is accepted only for a store "
+                          "on this machine, for testing). Nothing was sent.", exit_code=3)
+    port = f":{parts.port}" if parts.port else ""
+    return url, f"{parts.scheme}://{parts.hostname}{port}{parts.path}"
+
+
+def _anchor_send(records):
+    """POST the anchors to MOHIO_AUDIT_ANCHOR_SINK when it is set. Returns the line saying they were
+    delivered, written only from the store's own success status, or None when no sink is set."""
+    import json
+    import urllib.error
+    import urllib.request
+    sink = _anchor_sink()
+    if sink is None:
+        return None
+    url, shown = sink
+    headers = {"Content-Type": "application/json"}
+    token = (os.environ.get("MOHIO_AUDIT_ANCHOR_SINK_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, data=json.dumps({"anchors": records}).encode("utf-8"),
+                                 headers=headers, method="POST")
+    try:
+        # EGRESS-EXEMPT: an anchor carries a log name, a chain hash, a count, a time and a key id; no program value
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        status = e.code
+    except (urllib.error.URLError, OSError) as e:
+        raise AnchorError(f"Could not reach the anchor store at {shown}: {e}. The anchors were NOT delivered; "
+                          f"publish again once it answers.", exit_code=1)
+    if not 200 <= status < 300:
+        raise AnchorError(f"The anchor store at {shown} answered {status}, so the anchors were NOT delivered. "
+                          f"Check MOHIO_AUDIT_ANCHOR_SINK and MOHIO_AUDIT_ANCHOR_SINK_TOKEN, then publish again.",
+                          exit_code=1)
+    return f"delivered {len(records)} anchor(s) to {shown} ({status})"
+
+
+def _start_anchor_timer():
+    """`mio serve` publishes signed anchors on a timer when MOHIO_AUDIT_ANCHOR_INTERVAL is set: a
+    number of minutes, or `on` for the default 5. Off when it is not set. A head published every N
+    minutes bounds what a truncation can remove unseen to the records written since the last one.
+
+    Everything the timer needs is checked here, before the server listens, so a timer that could
+    never publish refuses the start instead of running quietly: the key, a place to keep the anchors
+    (MOHIO_AUDIT_ANCHOR_SINK, MOHIO_AUDIT_ANCHOR_OUT, or both) and the audit store (DATABASE_URL). A
+    tick that fails after that says so on every attempt and tries again on the next."""
+    raw = (os.environ.get("MOHIO_AUDIT_ANCHOR_INTERVAL") or "").strip()
+    if not raw:
+        return
+    if raw.lower() == "on":
+        minutes = float(ANCHOR_INTERVAL_DEFAULT_MINUTES)
+    else:
+        try:
+            minutes = float(raw)
+        except ValueError:
+            minutes = 0.0  # SILENT-OK: refused loud just below, naming the value
+        if not minutes > 0:
+            _die(f"MOHIO_AUDIT_ANCHOR_INTERVAL is {raw!r}; it is the minutes between published anchors, a "
+                 f"number above 0, or `on` for every {ANCHOR_INTERVAL_DEFAULT_MINUTES} minutes. Unset it to "
+                 f"publish only with `mio audit publish`.", exit_code=3)
+    try:
+        key = _anchor_private_key()
+    except AnchorError as e:
+        _die(f"MOHIO_AUDIT_ANCHOR_INTERVAL is set, so this server publishes anchors. {e}", exit_code=e.exit_code)
+    out_path = (os.environ.get("MOHIO_AUDIT_ANCHOR_OUT") or "").strip() or None
+    try:
+        sink = _anchor_sink()
+    except AnchorError as e:
+        _die(f"MOHIO_AUDIT_ANCHOR_INTERVAL is set, so this server publishes anchors. {e}", exit_code=e.exit_code)
+    if not out_path and sink is None:
+        _die("MOHIO_AUDIT_ANCHOR_INTERVAL is set but there is nowhere to keep the anchors, so every one would "
+             "be signed and thrown away. Set MOHIO_AUDIT_ANCHOR_SINK to the anchor store's address, or "
+             "MOHIO_AUDIT_ANCHOR_OUT to a file, or both.", exit_code=3)
+    target = (os.environ.get("DATABASE_URL") or "").strip()
+    if not target or target == ":memory:":
+        _die("MOHIO_AUDIT_ANCHOR_INTERVAL is set, and the anchor timer reads the audit trail at DATABASE_URL, "
+             "which is " + ("an in-memory database no other process can read" if target else "not set")
+             + ". Set DATABASE_URL to the database the app writes its audit trail to.", exit_code=3)
+    import threading
+    every = minutes * 60
+    key_id = _anchor_key_id(key.public_key())
+    where = " and ".join(w for w in ((sink[1] if sink else None), out_path) if w)
+
+    def tick():
+        try:
+            anchors, notes, refused = _anchor_publish(target, key, out_path)
+            for log, rec in sorted(anchors.items()):
+                print(f"  [mohio.anchor] {log} anchored at length {rec['length']} (key {key_id})")
+            for n in notes:
+                print(f"  [mohio.anchor] {n}")
+            for r in refused:
+                print(f"  [mohio.anchor] NOT ANCHORED {r}", file=sys.stderr)
+        except AnchorError as e:
+            print(f"  [mohio.anchor] NOT PUBLISHED: {e}\n  [mohio.anchor] trying again in "
+                  f"{minutes:g} minute(s)", file=sys.stderr)
+        except Exception as e:  # SILENT-OK: said on every tick, and the next tick tries again
+            print(f"  [mohio.anchor] NOT PUBLISHED ({type(e).__name__}): {e}\n  [mohio.anchor] trying again in "
+                  f"{minutes:g} minute(s)", file=sys.stderr)
+
+    def loop():
+        stop = threading.Event()
+        while True:
+            tick()
+            stop.wait(every)
+
+    threading.Thread(target=loop, name="mohio-audit-anchor", daemon=True).start()
+    print(f"  {green('v')}  audit anchors: signed every {minutes:g} minute(s) with key {key_id}, kept in {where}")
+
+
 def cmd_audit(args):
-    """mio audit verify|head|verify-anchors|relay [db] -- inspect and complete the audit trail.
+    """mio audit verify|head|verify-anchors|relay|read|publish [db] -- inspect and complete the audit trail.
 
     Reads the durable store directly (DATABASE_URL, or a path given as the argument). It does NOT
     run the program: an auditor should be able to check the records without executing the code
@@ -6865,6 +7365,29 @@ def cmd_audit(args):
     if not target:
         _die("No database given. Pass a path (`mio audit verify app.db`) or set DATABASE_URL.",
              exit_code=3)
+
+    if action == "publish":
+        # SIGNED ANCHORS. The anchors go to stdout as an anchors file ({log: [anchor]}) unless --out
+        # names a file to add them to, and to MOHIO_AUDIT_ANCHOR_SINK when it is set. Notes go to
+        # stderr, so stdout can be piped straight to a store. It reads the trail and changes nothing.
+        import json as _json
+        out_path = getattr(args, "out", None)
+        try:
+            key = _anchor_private_key()
+            anchors, notes, refused = _anchor_publish(target, key, out_path)
+        except AnchorError as e:
+            _die(str(e), exit_code=e.exit_code)
+        if anchors and not out_path:
+            print(_json.dumps({log: [rec] for log, rec in anchors.items()}, indent=1))
+        for log, rec in sorted(anchors.items()):
+            print(f"  anchored {log} at length {rec['length']} with key {rec['key_id']}"
+                  + (f", added to {out_path}" if out_path else ""), file=sys.stderr)
+        for note in notes:
+            print(f"  {note}", file=sys.stderr)
+        if refused:
+            _die("Not anchored, because a broken chain must not be signed:\n    " + "\n    ".join(refused)
+                 + ("\n  The other logs were published." if anchors else ""), exit_code=1)
+        return
 
     from mohio_interpreter import MohioInterpreter, _make_db_runtime, _sniff_driver
     # A positional argument is USUALLY a literal sqlite path (the documented form,
@@ -7054,10 +7577,36 @@ def cmd_audit(args):
                      f"anchors, and this one is {_kind}. Write it as:\n"
                      f'    "{_log}": [{{"head": "<64 hex characters>", "length": <records>}}]',
                      exit_code=3)
+        # SIGNATURES FIRST (--verify-sig). An anchor whose signature does not hold is MALFORMED-SIG and
+        # is dropped before the comparison, so a forged or altered anchor can never satisfy a log.
+        # Without the flag nothing here runs and the check is exactly what it was.
+        sig_spec = getattr(args, "verify_sig", None)
+        sig_rejects = {}
+        if sig_spec:
+            try:
+                _pub = _anchor_public_key(sig_spec)
+            except AnchorError as e:
+                _die(str(e), exit_code=e.exit_code)
+            _kid = _anchor_key_id(_pub)
+            for _log in list(anchor_map):
+                _kept = []
+                for _n, _a in enumerate(anchor_map[_log], 1):
+                    _why = _anchor_signature_problem(_a, _log, _pub, _kid)
+                    if _why:
+                        sig_rejects.setdefault(_log, []).append((_n, _a, _why))
+                    else:
+                        _kept.append(_a)
+                anchor_map[_log] = _kept
         print()
         failed = False
         checked_any = False
         uncovered = []
+        for _log, _bad in sorted(sig_rejects.items()):
+            failed = True
+            for _n, _a, _why in _bad:
+                _len = _a.get("length") if isinstance(_a, dict) else None
+                _at = f" (length {_len})" if _len is not None else ""
+                print(f"  {red('x')}  {_log}  MALFORMED-SIG: anchor {_n}{_at} is not trusted: {_why}")
         for log in logs:
             entries = anchor_map.get(log)
             if not entries:
@@ -7086,8 +7635,12 @@ def cmd_audit(args):
         for log in uncovered:
             print(f"  {yellow('!')}  {log}  NOT VERIFIED: {anchors_path} holds no anchor for it.")
         print()
-        print(f"  {dim('This compares heads and trusts the anchors as authentic. Verify each')}")
-        print(f"  {dim('anchor signature upstream; this check does not verify signatures.')}")
+        if sig_spec:
+            print(f"  {dim('Each anchor signature was checked against key ' + _kid + ' before its head')}")
+            print(f"  {dim('was compared; an anchor whose signature did not hold was not trusted.')}")
+        else:
+            print(f"  {dim('This compares heads and trusts the anchors as authentic. Verify each')}")
+            print(f"  {dim('anchor signature upstream; this check does not verify signatures.')}")
         print()
         if failed:
             sys.exit(1)
@@ -7521,9 +8074,14 @@ _COMMAND_HELP = {
     "ai-check": (False, "Ask a real AI provider to review a program for problems. Read-only to your files, but it makes a billed API call.",
                 "mio ai-check index.mho"),
     "audit":   (True,  "Inspect and complete the audit trail. `relay` CHANGES the audit store -- it writes the records a crash "
-                       "left owed. `verify`, `head` and `verify-anchors` only read.",
+                       "left owed. `verify`, `head` and `verify-anchors` only read. `publish` reads the trail and signs "
+                       "each log's head with MOHIO_AUDIT_ANCHOR_KEY, printing the anchors, adding them to --out, or "
+                       "sending them to MOHIO_AUDIT_ANCHOR_SINK; `verify-anchors --verify-sig KEY` checks those "
+                       "signatures before the heads.",
                 "mio audit verify app.db      reads and checks the chain\n"
-                "mio audit relay app.db       WRITES owed records to the store"),
+                "mio audit relay app.db       WRITES owed records to the store\n"
+                "mio audit publish app.db --out anchors.json\n"
+                "mio audit verify-anchors app.db --anchors anchors.json --verify-sig anchor.pub"),
     "migrate": (True, "Convert the text columns of tables created before typed storage into the types their shapes "
                       "declare. CHANGES the database; --dry-run only reads and lists every value that will not convert.",
                 "mio migrate typed-storage app.mho --dry-run"),
@@ -7823,10 +8381,15 @@ def build_arg_parser():
     wr.add_argument("file", nargs="?", default=None)
     aud = sub.add_parser("audit", add_help=False)
     aud.add_argument("audit_action", nargs="?", default="verify",
-                     choices=["verify", "head", "verify-anchors", "relay", "read"])
+                     choices=["verify", "head", "verify-anchors", "relay", "read", "publish"])
     aud.add_argument("file", nargs="?", default=None)
     aud.add_argument("--anchors", default=None,
                      help="Path to a JSON file of published anchors (for verify-anchors)")
+    aud.add_argument("--verify-sig", dest="verify_sig", default=None,
+                     help="Ed25519 public key (a file or its value): verify-anchors refuses an anchor "
+                          "whose signature does not hold before comparing heads")
+    aud.add_argument("--out", default=None,
+                     help="Anchors file publish adds its signed anchors to (default: print them)")
     aud.add_argument("--program", default=None,
                      help="The .mho program whose own audit logs the relay may deliver to (for relay)")
     sec = sub.add_parser("sector", add_help=False)
@@ -8383,10 +8946,27 @@ def cmd_migrate(args):
                     converted.append((rid, new))
             plan.append((table, col, declared, current, target, converted, bad))
             refusals.extend((table, col, rid, val, why) for rid, val, why in bad)
-    if not plan:
+    # A BARE DECIMAL KEPT AS TEXT (T0-SQLITE-BARE-DECIMAL-EQUALITY, RULED by Ron 2026-10-31): each
+    # stored value that is not the one text its number has ('12.50' for 12.5) is rewritten to it, the
+    # step a deployed app is refused at startup without (_reconcile_bare_decimal_text). The column
+    # keeps its type; only the text changes, so an equality matches the value a read gives.
+    from mohio_interpreter import _is_bare_decimal_type
+    text_plan = []
+    if getattr(db, 'stores_bare_decimal_as_text', False):
+        for table in sorted(col_types):
+            for col, declared in sorted(col_types[table].items()):
+                if (_is_bare_decimal_type(declared)
+                        and _migrate_current_type(engine, cur, table, col) is not None):
+                    rewrites = db.bare_decimal_rewrites(table, col)
+                    if rewrites:
+                        text_plan.append((table, col, rewrites))
+    if not plan and not text_plan:
         _type_register_unmet(it, set())
         print(f"  {green('v')}  Nothing to migrate: every declared typed column is already typed.\n")
         return
+    for table, col, rewrites in text_plan:
+        print(f"  {green('v')}  {table}.{col}  {sum(r[3] for r in rewrites)} decimal value(s) stored as "
+              f"the one text each number has (first: {rewrites[0][1]} -> {rewrites[0][2]})")
     for table, col, declared, current, target, converted, bad in plan:
         mark = red('x') if bad else green('v')
         print(f"  {mark}  {table}.{col}  {dim(current)} -> {target}  "
@@ -8426,6 +9006,18 @@ def cmd_migrate(args):
             _nt, _prot, _before, _rctx, _ot = _held.pop((table, col))
             it._field_register_write(db, _rctx, table, col, _nt, _prot, _before)
             print(f"  {green('v')}  field register: {table}.{col} is now `{_nt}` (was `{_ot}`)")
+    for table, col, rewrites in text_plan:
+        try:
+            db.rewrite_bare_decimals(table, col, rewrites)
+        except Exception as e:  # noqa: BLE001 -- the runtime's own refusal is the reason reported
+            print(f"  {red('x')}  {table}.{col}: {e}")
+            sys.exit(1)
+        rows = sum(r[3] for r in rewrites)
+        it._audit_event('security_audit_log', {
+            'event': 'bare_decimal_text_migrated', 'table': table, 'field': col,
+            'detail': f'{table}.{col}: {rows} decimal value(s) stored as their one text',
+        }, ctx)
+        print(f"  {green('v')}  rewrote {rows} value(s) in {table}.{col}")
     _type_register_unmet(it, set())
     print()
 

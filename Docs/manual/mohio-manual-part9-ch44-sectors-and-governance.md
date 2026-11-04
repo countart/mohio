@@ -144,6 +144,19 @@ journey Payments
 journey: done
 ```
 
+**A plain browser form cannot reach an idempotent route by itself (known limitation).** A native HTML
+form submit carries no request headers, and there is no HTML attribute that sets one, so an idempotent
+money route answers it with the same `400` it gives any keyless request. This includes Mohio's own
+`{{ form sh.X }}`, which renders `<form method="post">` and posts natively. Verified over real HTTP: a
+POST with no `Idempotency-Key` is refused `400`, and the same POST with a key runs and returns `201`. It
+fails safe, nothing moves. Post to an idempotent route from MioScript instead: a `send` on a form carries
+one key per submission intent, made on the first send and kept in the tab until the request has a
+definitive answer, so a double-click, a `5xx`, a `409`, or a reload retries with the SAME key and gets
+the one answer (Chapter 24). A hand-written `fetch` that sets the header works the same way. Making a
+native form emit that same governed submit on its own is a planned fast-follow, tracked as
+`T1-NATIVE-FORM-GOVERNED-SUBMIT`; until it lands, reach an idempotent route through `send` or a
+header-setting `fetch`, not a bare form.
+
 ### 5. Leaving one route out: `not idempotent reason "..."`
 
 The only way to leave a money route out is on the route itself, with the reason on the line. There is

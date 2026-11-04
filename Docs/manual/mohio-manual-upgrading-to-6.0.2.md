@@ -65,6 +65,8 @@ running the same program on 6.0.1 and on 6.0.2.
    - After: each refuses at check and at run. `env.X` reads the environment and `secret.X` the secret store, so
      the bare words cannot also be names; `hide` is the `[hide]` tag.
    - The fix: rename the value for what it holds (`env_value`, `api_secret`, `hidden_count`).
+   - `true` and `false` are reserved too, as they already were in 6.0.1: each is a true-or-false value, so
+     `true 5` refuses at check and at run. Name the value for what it records (`paid`, `approved`).
 
 7. **Lists are measured with `.count`, text with `.length`.**
    - Before: `.length` on a list failed only at run, and `.size` or `.count` on text answered.

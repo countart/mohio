@@ -1,10 +1,10 @@
 # LICENSE-SCOPE.md
 
-Release: 6.0.2
-Source-control tag: v6.0.2
-First public distribution date: 2026-10-29
+Release: 6.0.3
+Source-control tag: v6.0.3
+First public distribution date: 2026-11-04
 License: Business Source License 1.1
-Change Date: 2030-10-29
+Change Date: 2030-11-04
 Change License: AGPL-3.0-or-later — match LICENSE
 
 ---
@@ -121,6 +121,19 @@ Rationale: consistent with the open-core model, the *loader* is mechanism and is
 - `mohio_data/diagnostics.json` -- the diagnostic-code registry: each stable warning and error code with
   its type, class, whether it may be suppressed, message and fix (added in 6.0.2).
 
+### Brand assets (distributed, not licensed)
+Every file in `assets/brand/`, each first shipped in 6.0.3:
+- `assets/brand/mohio-6-mark.png` -- the Mohio 6 mark, the image shown at the top of the README.
+- `assets/brand/mohio-6-wordmark.png` -- the Mohio 6 MOHIO™ wordmark.
+- `assets/brand/mohio-6-wordmark-white.png` -- the same wordmark in white, for dark backgrounds.
+- `assets/brand/mohio-general-workmark.png` -- the general MOHIO™ wordmark, black.
+- `assets/brand/mohio-general-workmark-white.png` -- the general MOHIO™ wordmark, white.
+- `assets/brand/mohio-logo-swirl-new.png` -- the Koru swirl logo.
+
+These files ship with the release so the marks travel with the source. They are MOHIO™ brand assets, governed by `TRADEMARKS.md`, and they stay outside the
+Licensed Work under "Files Excluded From the Licensed Work" below: they are distributed, and listing
+them here grants no license to use the marks they carry.
+
 ### Dependency and packaging manifests
 - `requirements.txt`
 - `pyproject.toml`
@@ -155,9 +168,9 @@ sectors do not ship, and no test may depend on them); the copies the control tes
 ### Control tests
 
 The licensed tests are the COMPLIANCE-VERIFICATION set, not the development suite. Two groups,
-41 files, each named individually below rather than covered by a folder.
+43 files, each named individually below rather than covered by a folder.
 
-**Normative Control Tests** (32 files). The set the LICENSE points at. The Designated
+**Normative Control Tests** (34 files). The set the LICENSE points at. The Designated
 Controls table later in this file is what DESIGNATES them; this is the inventory, named here so
 that a filter reading Files Included alone finds every one of them. The control each serves is
 in brackets.
@@ -170,9 +183,11 @@ in brackets.
 - `tests/test_audit_preseal_gate.py` [DC-13]
 - `tests/test_audit_sink_seam.py` [DC-06]
 - `tests/test_audit_two_role_isolation.py` [DC-06]
+- `tests/test_battery_audit_anchor_publish.py` [DC-05]
 - `tests/test_battery_audit_separate_connection.py` [DC-06]
 - `tests/test_battery_authorized_upload_retrieval.py` [DC-16]
 - `tests/test_battery_bulk_save_and_batch_audit.py` [DC-13]
+- `tests/test_battery_class_by_bare_name_on_variable.py` [DC-14]
 - `tests/test_battery_cloud_upload_zone.py` [DC-16]
 - `tests/test_battery_cloud_zone_double_registration.py` [DC-16]
 - `tests/test_battery_file_protection_audit.py` [DC-16]
@@ -235,7 +250,7 @@ corrected for `Docs/`: a folder scope is only safe when the folder holds one kin
 this one holds two. Naming the compliance set means a new internal battery cannot become Licensed
 Work by being written in the same directory.
 
-Verified before this list was written: all 41 files exist, and the only other files under `tests/`
+Verified before this list was written: all 43 files exist, and the only other files under `tests/`
 they import are the three shipped helpers named above; none reads any other file under `tests/`, so
 each runs against a tree carrying only the licensed set. The live-database legs of
 `test_audit_chain_postgres.py`, `test_battery_audit_separate_connection.py` and
@@ -389,7 +404,7 @@ The following are not included unless expressly listed above:
 - `DC-02` — **encryption at rest.** Fields requiring encryption are sealed on every write path.
 - `DC-03` — **key-provider seam integrity.** Key material is obtained through the provider seam, not inlined.
 - `DC-04` — **audit chain integrity.** Audit entries are hash-chained; forging or deleting an entry breaks verification.
-- `DC-05` — **audit anchoring.** Chain truncation or repointing is detectable against external anchors.
+- `DC-05`: **audit anchoring.** Chain truncation or repointing is detectable against external anchors, and an anchor whose Ed25519 signature does not hold is refused before its head is compared (signing added in 6.0.3).
 - `DC-06` — **two-role audit isolation.** A tenant connection cannot write, alter, or scrub the authoritative audit trail.
 - `DC-07` — **audit records names, never values.** Audit events record field names and context, never the sensitive values.
 - `DC-08` — **lawful-erasure recording (tombstone).** `cm.purge` fails loud on a failed delete, is atomic across clauses, and writes a tombstone only when an erasure actually occurred.
@@ -398,7 +413,7 @@ The following are not included unless expressly listed above:
 - `DC-11` — **PII purpose limitation.** Purpose limitation is enforced on personal data.
 - `DC-12` — **filter integrity.** An unrecognized query filter fails loud and never matches all rows.
 - `DC-13` — **data-change auditing.** Every data-change verb writes its audit and fails loud if the audit write fails.
-- `DC-14`: **value-bound classification.** A classified value keeps its protection through a copy, masking follows the value on every display/egress path, and a copied `[phi]`/`[pci]`/`[pii]` value is sealed at the write, not only in the column that declares it.
+- `DC-14`: **value-bound classification.** A classified value keeps its protection through a copy, masking follows the value on every display/egress path, and a copied `[phi]`/`[pci]`/`[pii]` value is sealed at the write, not only in the column that declares it. A variable is classified by the value it holds, never by a same-named field of another table, while a request field bound as a variable keeps its field's rule (added in 6.0.3).
 - `DC-15`: **prevention-audit.** A control that refuses or reverses an action leaves an auditable trace, not only the controls that permit one. Covers purpose-limitation refusal, saga compensation, and a `cm.purge` refusal under a `cm.lock` legal hold.
 - `DC-16`: **upload protection.** An uploaded file classified `[phi]`/`[pci]` is encrypted at rest, retrieval is gated by the same server-verified access control as any other handler, and every store/read/delete/move/copy is audited with whether the content was protected.
 
@@ -410,7 +425,7 @@ The following are not included unless expressly listed above:
 | DC-02 | `tests/test_encryption.py`, `tests/test_encryption_all_writes.py` |
 | DC-03 | `tests/test_key_provider_seam.py` |
 | DC-04 | `tests/test_audit_hash_chain.py`, `tests/test_audit_fail_loud.py`, `tests/test_canonical_audit_schema.py` |
-| DC-05 | `tests/test_audit_anchor_verify.py` |
+| DC-05 | `tests/test_audit_anchor_verify.py`, `tests/test_battery_audit_anchor_publish.py` |
 | DC-06 | `tests/test_audit_two_role_isolation.py`, `tests/test_audit_sink_seam.py`, `tests/test_battery_audit_separate_connection.py` |
 | DC-07 | `tests/test_audit_names_not_values.py`, `tests/test_ai_decide_audit_names.py` |
 | DC-08 | `tests/test_cm_purge_failloud.py`, `tests/test_tombstone_reroute.py`, `tests/test_tombstone_rowref.py` |
@@ -419,11 +434,30 @@ The following are not included unless expressly listed above:
 | DC-11 | `tests/test_pii_purpose.py` |
 | DC-12 | `tests/test_filter_failloud.py` |
 | DC-13 | `tests/test_modify_audit.py`, `tests/test_audit_preseal_gate.py`, `tests/test_battery_bulk_save_and_batch_audit.py` |
-| DC-14 | `tests/test_battery_value_bound_classification.py`, `tests/test_battery_value_bound_write.py`, `tests/test_battery_marker_keyed_decryption.py` |
+| DC-14 | `tests/test_battery_value_bound_classification.py`, `tests/test_battery_value_bound_write.py`, `tests/test_battery_marker_keyed_decryption.py`, `tests/test_battery_class_by_bare_name_on_variable.py` |
 | DC-15 | `tests/test_battery_prevention_audited.py`, `tests/test_battery_refusal_leaves_a_trace.py` |
 | DC-16 | `tests/test_battery_file_protection_audit.py`, `tests/test_battery_authorized_upload_retrieval.py`, `tests/test_battery_cloud_upload_zone.py`, `tests/test_battery_cloud_zone_double_registration.py` |
 
 Additional supporting suites, not designated normative: `tests/test_battery_signed_upload_url.py` (see the DC-16 boundary note below), `tests/test_battery_engine_dialects_and_purge_truth.py` (raw sql across engines, and the honesty of a deletion warning; the erasure control itself is covered by DC-08's own tests), `tests/test_audit_locks.py`, `tests/test_audit_sink_grading.py`, `tests/test_audit_table_contract.py`, `tests/test_audit_table_schema.py`, `tests/test_audit_chain_postgres.py`, `tests/test_not_found.py`, `tests/test_dead_store_warning.py`.
+
+**DC-07 change record, 6.0.3: a correction, not a weakening.** `tests/test_ai_decide_audit_names.py`
+handed the decision audit values that carried no class, under names a fixture had registered as
+`[phi]`/`[pci]`, and expected those names' classes back. That is the name rule 6.0.3 retired: a
+variable is classified by the value it holds, never by a same-named field of another table. No
+real program delivers an unclassed value for a protected field; a record field, a copy of one and
+a request field all reach the audit carrying their class. The fixture now hands values that carry
+their class, and the test adds two cases: a dotted input (`claim.ssn`), which the audit had
+labelled `-` while the value it weighed carried `[phi]`, fixed in 6.0.3; and a literal under a
+protected field's name, which records `-`. Corrected to match the shipped value-class rule, not the
+retired name rule. Every assertion that no weighed value reaches the record is unchanged, and the
+new dotted case fails on the 6.0.2 code.
+
+**DC-16 change record, 6.0.3: a fixture correction, no assertion changed.**
+`tests/test_battery_file_protection_audit.py` seeds one patient before each of its file-write cases,
+into one database the cases share, so from the second case on there were two patients with the same
+name and the case's `retrieve` bound whichever came back first. 6.0.3 makes `retrieve` refuse a
+match that finds two rows, which is how this surfaced. The seed is now written `unless name exists`,
+so there is one patient, as every case assumed. Every assertion is unchanged.
 
 **Environment-dependence, resolved and verified live (2026-08-05), not asserted from the doc's own description:**
 

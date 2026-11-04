@@ -333,6 +333,64 @@ Beta -- gadgets
 `order.down by`, and page with `up to` and `paginate by`. The filtering and ordering forms have run examples in
 `Docs/guides/mioql-user-guide.md`; this section covers paging and what-runs-where, both of which changed for 6.0.0.
 
+**One, whether-any, or many: choosing `retrieve`, `check exists`, or `find`.** The three read verbs answer three
+different cardinality questions, and reaching for the wrong one is the usual cause of a surprised result:
+
+- **One entity, use `retrieve`.** The match identifies a single record, by `id` or another `unique` field.
+  `retrieve` reads exactly one row and binds it to the name, so `player.name` reads straight off it.
+- **Whether any of a group exist, use `check exists`.** A yes-or-no gate on "is there at least one row like
+  this," without pulling the rows in. It branches on `when empty` / `otherwise` (see "A yes-or-no guard for ONE
+  record is `check exists`" later in this chapter).
+- **The group itself, use `find`.** Every matching row, as a collection you count, page, iterate, or join
+  children onto.
+
+```mohio
+// one entity: match a key that can only hit one row
+retrieve player from db.players
+    match id to 1
+retrieve: done
+show player.name
+
+// whether any exist: a condition, no rows pulled
+check exists player in db.players
+    match team to "red"
+    when empty
+        show "no one on red"
+    otherwise
+        show "red has players"
+check: done
+
+// the group: a collection
+find roster in db.players
+    match team to "red"
+find: done
+show roster.count
+```
+
+**`retrieve`, `grab`, and `get` refuse a match that finds more than one row (6.0.3).** All three read exactly
+one record, so none of them will pick a row for you when the match is ambiguous. A non-unique match that hits
+two rows fails loud, rather than returning whichever row the database happened to list first:
+
+```mohio
+retrieve player from db.players
+    match team to "red"
+retrieve: done
+```
+
+```
+retrieve `player` found more than one row in db.players matching `team`. retrieve reads exactly one record, so Mohio will not pick one for you. Match a key so only one row can match (`match id to ...`, or a field declared `unique`). To ask whether any such row exists, use `check exists player in db.players` with the same match. To read all of them, use `find player in db.players`.
+```
+
+`grab` and `get` are the other two read-one verbs, and they refuse the same two-row match the same way, with the
+message naming whichever verb you wrote (`grab \`player\` found more than one row ...`,
+`get \`player\` found more than one row ...`). The refusal is a program error, not something `on.failure`
+catches; a match that finds exactly one row still binds it, and a match that finds none still binds empty.
+
+The fix is in the message: narrow the match to a key (`match id to ...`, or a field you declared `unique`), or
+switch verb, `check exists` for the yes-or-no and `find` for all of them. A `retrieve` may still carry a child
+list with `with` (one parent record and its related rows, see "Joins on `retrieve`" below); the one-row rule is
+about the parent match, not the children.
+
 **Paging: `up to N` is the page size, `paginate by PAGE` is which page.**
 
 ```mohio

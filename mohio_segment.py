@@ -309,18 +309,24 @@ def _workers(n_segments):
     return max(1, min(n_segments, (os.cpu_count() or 2) - 1, 12))
 
 
+def _balance(sizes, n):
+    """The indexes of `sizes` split into `n` buckets of near-equal total: largest first, each onto
+    the lightest bucket so far."""
+    buckets, loads = [[] for _ in range(n)], [0] * n
+    for i in sorted(range(len(sizes)), key=lambda i: -sizes[i]):
+        k = loads.index(min(loads))
+        buckets[k].append(i)
+        loads[k] += sizes[i]
+    return buckets
+
+
 def _parse_in_workers(texts, n):
     """Parse `texts` across `n` worker processes; a list of pickled trees, None where one failed."""
     import shutil
     import subprocess
     import sys
     import tempfile
-    order = sorted(range(len(texts)), key=lambda i: -len(texts[i]))   # largest first, spread evenly
-    buckets, loads = [[] for _ in range(n)], [0] * n
-    for i in order:
-        k = loads.index(min(loads))
-        buckets[k].append(i)
-        loads[k] += len(texts[i])
+    buckets = _balance([len(t) for t in texts], n)
     tmp = tempfile.mkdtemp(prefix="mohio_parse_")
     procs = []
     try:
@@ -344,6 +350,93 @@ def _parse_in_workers(texts, n):
         return results
     finally:
         for _idx, _op, proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# -- many files at once ------------------------------------------------------------------------------
+# WHY. A cold check of a large app parsed its files one after another on one core: R58 (156 files)
+# spent 941 of its 1,048 seconds in the parse with 15 of 16 cores idle, because only the three files
+# over _PARALLEL_MIN_CHARS ever reached the segment pool above. So the files whose parse cache misses
+# are parsed first, spread across workers, and each worker runs the caller's own parse function on
+# them, which writes the same parse cache. The caller then walks the files exactly as before and reads
+# every tree from that cache. Nothing the caller checks or reports changes: only where the parse ran.
+
+def _file_worker(list_path):
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import mio
+    with open(list_path, "rb") as fh:
+        work = pickle.load(fh)
+    for p, whole in work:
+        try:
+            with open(p, encoding="utf-8-sig") as fh:
+                source = fh.read()
+            if whole:
+                mio._cached_parse_tree(source, p)
+            else:
+                mio._parse_and_validate(source, p, verbose=False)
+        except (SystemExit, Exception):  # SILENT-OK: nothing is cached for this file, so the caller parses it again in its own loop and reports its error there, exactly as before
+            pass
+
+
+def warm_files_in_workers(paths, is_cached, label, whole=()):
+    """Parse each file in `paths` whose parse cache misses (`is_cached(path, text)` is False) across
+    worker processes, filling that cache, before the caller reads it file by file. Returns the paths
+    sent to workers; none when too few or too little text to repay starting them.
+
+    Each file is parsed by the function its caller would have parsed it with, so the cache a worker
+    writes is the one the caller writes, byte for byte: `mio._parse_and_validate` by default, and
+    `mio._cached_parse_tree` (one whole-file parse) for a path in `whole`, which is how serve's route
+    discovery reads a page. The two give equal trees, but a whole-file parse and a segmented one
+    share rule-name objects differently, so their pickled bytes differ."""
+    whole = {os.path.realpath(p) for p in whole}
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+    todo, seen = [], set()
+    for p in paths:
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            with open(p, encoding="utf-8-sig") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):  # SILENT-OK: the caller reads this file itself and reports why it cannot
+            continue
+        if not is_cached(p, text):
+            todo.append((p, len(text)))
+    n = _workers(len(todo))
+    if len(todo) < 2 or n < 2 or sum(size for _p, size in todo) < _PARALLEL_MIN_CHARS:
+        return []
+    print(f"  {label} parsing {len(todo)} files on {n} cores first", flush=True)
+    # Each worker parses its files one at a time: a file big enough for the segment pool does not
+    # start a pool of its own inside a worker, which would put n x n processes on n cores.
+    env = dict(os.environ, MOHIO_PARSE_WORKERS="1")
+    tmp = tempfile.mkdtemp(prefix="mohio_files_")
+    procs = []
+    try:
+        for k, idx in enumerate(_balance([size for _p, size in todo], n)):
+            lp = os.path.join(tmp, f"files{k}.pkl")
+            # EGRESS-EXEMPT: the source paths a worker parses, in a private temporary folder
+            with open(lp, "wb") as fh:
+                pickle.dump([(todo[i][0], os.path.realpath(todo[i][0]) in whole) for i in idx], fh,
+                            protocol=pickle.HIGHEST_PROTOCOL)
+            procs.append(subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__), "--file-worker", lp],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        for proc in procs:
+            proc.wait()
+            if proc.returncode != 0:
+                # Not fatal: the files it did not finish parse in the caller's loop. Said, never silent.
+                print(f"  {label} a parse worker stopped early (exit {proc.returncode}); "
+                      f"its remaining files parse one by one instead", flush=True)
+        return [p for p, _size in todo]
+    finally:
+        for proc in procs:
             if proc.poll() is None:
                 proc.kill()
         shutil.rmtree(tmp, ignore_errors=True)
@@ -395,3 +488,5 @@ if __name__ == "__main__":
     import sys as _sys
     if len(_sys.argv) == 4 and _sys.argv[1] == "--worker":
         _serve_worker(_sys.argv[2], _sys.argv[3])
+    elif len(_sys.argv) == 3 and _sys.argv[1] == "--file-worker":
+        _file_worker(_sys.argv[2])

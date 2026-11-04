@@ -381,6 +381,15 @@
       "message": "A `once per` line is in the wrong place, is malformed, or keeps its answers for an unusable length.",
       "fix": "Put `once per request.header \"Idempotency-Key\"` with a `keep for` length at the top of a `listen for` route."
     },
+    "route_shadowed_by_runtime": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "A GET handler is declared at a path the runtime answers itself (/ping, /health, /mio/health), so it never runs.",
+      "fix": "Give the handler its own path: `request for sh.X at /status`."
+    },
     "mail_template_quoted": {
       "type": [
         "error"

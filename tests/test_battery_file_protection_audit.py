@@ -373,7 +373,7 @@ _dbp = os.path.join(TMP, "phi.db")
 os.environ['DATABASE_URL'] = _dbp
 _PHI_SRC = ('shape Patient\n    ssn as text [phi]\n    name as text\nshape: done\n'
             'connect db as sqlite from env.DATABASE_URL\n'
-            'save to db.patients\n    ssn "111-11-1111"\n    name "Ada"\nsave: done\n'
+            'save to db.patients unless name exists\n    ssn "111-11-1111"\n    name "Ada"\nsave: done\n'
             'retrieve p from db.patients\n    match name to "Ada"\n'
             '    when p is empty\n        show "none"\nretrieve: done\n')
 try:
