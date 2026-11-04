@@ -68,6 +68,12 @@ If you want a tool that generates an app from a description, other products do t
 
 ## Getting it, and somewhere to put it
 
+The quickest way to the `mio` command is PyPI:
+
+```bash
+pip install mohio
+```
+
 Two pieces sit either side of the language itself.
 
 **Mohio Home** is the installer and console. It puts Mohio on your machine without a clone or
