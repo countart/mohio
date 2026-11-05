@@ -33,6 +33,7 @@ In March 2026 Mohio was a demo running in a terminal. Today it is the first offi
 Here is the thing it exists to make ordinary:
 
 ```mohio
+connect db as postgres from env.DATABASE_URL
 find flagged in db.transactions
     where amount is above 10000
     and created_at is.in last 30 days
