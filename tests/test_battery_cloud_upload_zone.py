@@ -235,6 +235,10 @@ msg = refusal(LIFECYCLE, {'MOHIO_ENFORCE_LICENSE': '1', 'MOHIO_LICENSE': None,
 check("a managed lifecycle policy IS still refused without a licence",
       "commercial" in msg.lower(), msg[:220])
 check("...naming the policy that caused it", "expires" in msg.lower(), msg[:220])
+# Ruled 2026-11-16: Mohio is free to use under the BSL, and never described as open core.
+check("...saying the free runtime is free to use under the BSL",
+      "free to use under the BSL" in msg, msg[:400])
+check("...and never calling it open core", "open core" not in msg.lower(), msg[:400])
 
 print("\n-- an unconfigured cloud area fails loud, naming every missing setting --")
 UNSET_STORE = dict(LIC, **{n: None for n in STORE_ENV + CRED_ENV})

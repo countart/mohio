@@ -435,6 +435,33 @@
       "message": "A bare `include` line in a render is shown as text, not run.",
       "fix": "Write it as an evaluation, with `include \"file\"` inside a double-brace pair."
     },
+    "include_not_found": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An include names a file that is neither next to the file that includes it nor in the application folder.",
+      "fix": "Add the file, or correct the path."
+    },
+    "include_outside_app": {
+      "type": [
+        "error"
+      ],
+      "class": "governance",
+      "suppressible": false,
+      "message": "An include resolves to a file outside the application folder.",
+      "fix": "Keep every include inside the application folder; `../` works inside it."
+    },
+    "interpolation_never_set": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A double-brace value reads a name that nothing in the program sets, so it renders empty.",
+      "fix": "Set the value before it is shown, or correct the spelling."
+    },
     "inject_non_fragment": {
       "type": [
         "error"
@@ -596,6 +623,15 @@
       "suppressible": true,
       "message": "A line is one letter off from a verb, so it parsed as an assignment and the verb never happens.",
       "fix": "Correct the verb, or rename the variable."
+    },
+    "private_is_unlisted": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "private: is now unlisted:; note neither restricts access - use authorize: or hidden: to gate.",
+      "fix": "Write unlisted: for the same behaviour, authorize: to require a sign-in, or hidden: to never serve the path."
     },
     "private_key_in_source": {
       "type": [
@@ -974,6 +1010,33 @@
       "suppressible": false,
       "message": "A line reads a name nothing in the program declares.",
       "fix": "Declare the name, or correct it."
+    },
+    "single_read_not_unique": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A retrieve, grab or get matches fields that no declared key holds to one row, so a duplicate makes it refuse at run.",
+      "fix": "Match a key (`match id to ...`), declare the field `unique` on its `as table` field, or use `check exists` or `find`."
+    },
+    "debug_log_needs_a_name": {
+      "type": [
+        "error"
+      ],
+      "class": "advisory",
+      "suppressible": false,
+      "message": "`debug.log` records a variable or a dotted field, so a value written in place has nothing to record.",
+      "fix": "Give the note a name first, then log the name: `step_note \"reached\"` and `debug.log step_note`."
+    },
+    "find_filter_runs_in_app": {
+      "type": [
+        "warning"
+      ],
+      "class": "advisory",
+      "suppressible": true,
+      "message": "A find's filter runs in Mohio after every row of the table is read, because the database cannot run it there.",
+      "fix": "Declare the field with a type in an `as table` shape, or narrow the find with a filter the database runs."
     },
     "unique_governs_no_table": {
       "type": [

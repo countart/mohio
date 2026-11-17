@@ -2,7 +2,7 @@
 <!-- Licensed under the Mohio Business Source License 1.1 (BSL). See LICENSE and LICENSE-SCOPE.md. -->
 # Mohio Language Reference
 
-*Generated from the grammar on 2026-11-04. Do not edit by hand -- edit `tools/langref/langref_meta.json` and regenerate.*
+*Generated from the grammar on 2026-11-16. Do not edit by hand -- edit `tools/langref/langref_meta.json` and regenerate.*
 
 ## How to use this reference
 
@@ -317,7 +317,7 @@ render
     {{ form sh.Signup }}
 render: done
 ```
-Render a form from a shape. The form engine is open-core.
+Render a form from a shape. The form engine is free to use under the BSL.
 
 ### ✅ `render`  
 *canonical*
@@ -815,7 +815,7 @@ find tops in db.players
     where active is true
 find: done
 ```
-Many rows. `where` is for ranges/comparisons. A read of a DECLARED table (written or `as table`-governed somewhere) that has not materialised returns EMPTY on a fresh tenant; a read of an UNDECLARED (read-only) table fails loud. See `connect`.
+Many rows. `where` is for ranges/comparisons. A read of a DECLARED table (written or `as table`-governed somewhere) that has not materialised returns EMPTY on a fresh tenant; a read of an UNDECLARED (read-only) table fails loud. See `connect`. On 6.0.4 `mio check` emits a NOTICE (`find_filter_runs_in_app`, not an error) when a `find` carries a range or text filter the database cannot run: a field with no declared type, a type the operator does not work on, a `match any` / `no.match` group naming an undeclared or encrypted field, a timespan date range, or any filter on a MongoDB connection. The find still returns the right rows; it reads every row of the table to do it, so the notice names the filter, why the database cannot run it, and the fix (declare the field's type where the table is described, or add an equality / declared-number filter the database runs). An equality `match` pushes down on every engine; a range or text filter on an encrypted field is refused instead (`encrypted_field_not_rangeable`), not run in the app.
 
 ### ✅ `with (left join)`  
 *canonical*
@@ -1065,7 +1065,7 @@ retrieve u from db.users
         give back [404] "not found"
 retrieve: done
 ```
-How several match pairs combine in a query. `match.all` requires every pair (AND); `match.any` any one pair (OR); `match.none` requires that no pair matches (NOT); `match.unique` that exactly one row matches. Plain `match` (no modifier) is AND. Verified: with a row matching only one pair, `match.all` finds nothing while `match.any` returns it. A not-found is `when <var> is empty` inside the block (shown here), never `on.failure`, which fires only when the lookup itself breaks (a lost connection or missing table) and is refused if it gives back a 404.
+How several match pairs combine in a query. `match.all` requires every pair (AND); `match.any` any one pair (OR); `match.none` requires that no pair matches (NOT); `match.unique` that exactly one row matches. Plain `match` (no modifier) is AND. Verified: with a row matching only one pair, `match.all` finds nothing while `match.any` returns it. A not-found is `when <var> is empty` inside the block (shown here), never `on.failure`, which fires only when the lookup itself breaks (a lost connection or missing table) and is refused if it gives back a 404. On 6.0.4 this example draws the `single_read_not_unique` advisory (one warning, not an error): a `match.any` on a single-row read admits a row for each value it lists, so `retrieve` may match several rows and refuse at run -- match a declared key, or use `check exists` / `find` when several rows are expected.
 
 ### ✅ `remove.all`  
 *canonical*
@@ -1524,7 +1524,7 @@ ai.agent helper
         give back none
 ai.agent: done
 ```
-Open-core single AI agent. It REQUIRES a `limits` block: `mio check` refuses without one (`ai.agent is missing a limits declaration`). The block is enforced at run, and the agent ALSO inherits a journey-level ceiling, its own `limits` merging over the journey's field by field (Batch 31). THE HYBRID, which a regulated customer asks about precisely: the `cost ceiling` is a genuine PRE-CALL refusal (a call that would exceed it never fires), while the `max tokens` ceiling is a POST-CALL running total across the loop's turns. Give it a `goal`, optional `tools` (granted names) and `memory`. Like `ai.decide` and `ai.create`, `confidence above` is NOT available. `ai.` is free; multi-agent coordination is the commercial `mioagent`. Its run metadata is read through the result words below (`<name>.cost` and siblings).
+Single AI agent, free to use under the BSL. It REQUIRES a `limits` block: `mio check` refuses without one (`ai.agent is missing a limits declaration`). The block is enforced at run, and the agent ALSO inherits a journey-level ceiling, its own `limits` merging over the journey's field by field (Batch 31). THE HYBRID, which a regulated customer asks about precisely: the `cost ceiling` is a genuine PRE-CALL refusal (a call that would exceed it never fires), while the `max tokens` ceiling is a POST-CALL running total across the loop's turns. Give it a `goal`, optional `tools` (granted names) and `memory`. Like `ai.decide` and `ai.create`, `confidence above` is NOT available. `ai.` is free; multi-agent coordination is the commercial `mioagent`. Its run metadata is read through the result words below (`<name>.cost` and siblings).
 
 ### ✅ `ai.agent result words (<name>.cost / .steps / .tokens / .error / .explanation)`  
 *canonical*
@@ -2146,7 +2146,7 @@ miofile
     local "uploads" as media accept jpg, png max size 5mb
 miofile: done
 ```
-Declares a named storage area. accept and max size govern writes into it, and the destination of copy and move, exactly as they do on a shape field. local and temp areas are open core; cloud areas and the managed lifecycle policies (expires, clean) are commercial.
+Declares a named storage area. accept and max size govern writes into it, and the destination of copy and move, exactly as they do on a shape field. local, temp, and cloud areas are free to use under the BSL; the managed lifecycle policies (expires, clean) are commercial.
 
 ### ✅ `miocache.*`  
 *canonical*
@@ -2767,8 +2767,8 @@ UNIT then UNIT then ...
 ```
 Result threading: chain actions, each feeding the next.
 
-### ⚠️ `undo`  
-*non-canonical*
+### ✅ `undo`  
+*canonical*
 
 ```
 step NAME
@@ -2777,7 +2777,7 @@ step NAME
         ...
 step: done
 ```
-Currently ACCEPTED as an alias for `compensate` inside a saga step: it parses, checks and runs, `mio fmt` does not rewrite it, and no warning fires today. Whether `undo` or `compensate` is the canonical word is an open design question, because they are not the same idea: `compensate` records a new counteracting action and keeps the history, while `undo` reads as erasure. Prefer `compensate` until this is ruled.
+A documented ALIAS of `compensate` inside a saga step (ruled 2026-11-07 for 6.0.4). Verified by running on the 6.0.4 build: the same three-step saga whose third step fails checks clean, prints `af bf bc ac` and reports `COMPENSATED (step 'c' failed, 2 step(s) compensated)` whether its steps say `undo` or `compensate`, and `mio fmt` leaves either as written. Teach `compensate`: it says what happens (a new counteracting action, with the history kept), while `undo` reads as erasure. A deliberate deprecation to the single word `compensate` is queued for 6.0.5.
 
 ### 🚧 `do.* (do.once / do.every / do.after / do.unless / do.encrypt)`  
 *not-built*
@@ -2869,7 +2869,7 @@ id uuid()
 show created_at
 show id
 ```
-The producing call forms: `now()` builds the current datetime, `uuid()` builds a new unique id. Both belong in a value position (a field, a default). Bare `now` names the moment only in a temporal context (`now - 2 days`). Bare `now` as a VALUE is now refused AT CHECK (verified: `x now` no longer merely 500s at run, it fails `mio check` with `` `now` on its own is not a value. Write `now()` to produce the current moment.``); bare `uuid` alone is refused the same way. In a TEMPORAL position bare `now` is the live anchor (verified at check): a timespan may end `until now`, and a query may filter `where <field> is after now` or `since now` -- `now` resolves to the current moment there, so these need no `now()`. WHAT `now()` RETURNS (verified by running): a NAIVE UTC datetime with NO `Z` and NO offset (e.g. `2026-10-14T18:55:19.802195`), and it is UNAFFECTED by a journey/app `timezone` -- it is always UTC. Comparing a stored datetime with `now` compares INSTANTS: a value written with an offset (`...Z`, `...+03:00`, `...-04:00`) is converted to UTC before the compare, so `where <field> is after now` is correct even when a text or wall-clock reading would flip it (datetime-instant probe reports/DATETIME-INSTANT-PROBE-2026-10-14).
+The producing call forms: `now()` builds the current datetime, `uuid()` builds a new unique id. Both belong in a value position (a field, a default). Bare `now` names the moment only in a temporal context (`now - 2 days`). Bare `now` as a VALUE is now refused AT CHECK (verified: `x now` no longer merely 500s at run, it fails `mio check` with `` `now` on its own is not a value. Write `now()` to produce the current moment.``); bare `uuid` alone is refused the same way. In a TEMPORAL position bare `now` is the live anchor (verified at check): a timespan may end `until now`, and a query may filter `where <field> is after now` or `since now` -- `now` resolves to the current moment there, so these need no `now()`. WHAT `now()` RETURNS (verified by running on 6.0.4, 52071556): an instant that is always UTC, UNAFFECTED by a journey/app `timezone`. On the way out it carries an explicit `+00:00` offset on EVERY surface -- `show`, `&`, a render `{{ }}`, `as.json`, and a `give back` body all emit e.g. `2026-11-07T15:48:15.876612+00:00` (ruled 2026-11-06, breaking change 1 in the 6.0.4 upgrade note: a datetime leaves a program as UTC in one form everywhere, superseding the older split that showed the app zone on `show`/`&`/`{{ }}`/`render`, `+00:00` on JSON, and a naive clock reading on a plain `give back` body). `in.timezone` is the one way to show a local time. Comparing a stored datetime with `now` compares INSTANTS: a value written with an offset (`...Z`, `...+03:00`, `...-04:00`) is converted to UTC before the compare, so `where <field> is after now` is correct even when a text or wall-clock reading would flip it (datetime-instant probe reports/DATETIME-INSTANT-PROBE-2026-10-14).
 
 ### ✅ `as.days / as.hours / as.minutes / as.seconds / as.weeks`  
 *canonical*
@@ -2946,7 +2946,7 @@ grab cfg from db.config
     match key to "theme"
 grab: done
 ```
-Quick single-key read.
+Quick single-key read. On 6.0.4 this example draws the `single_read_not_unique` advisory (one warning, not an error), because `key` is not a declared unique key and a single-row read refuses at run on more than one match -- match the declared key (`match id to ...`), declare the field `unique` where the table is described, or use `check exists` / `find`.
 
 ### ✅ `pull`  
 *canonical*
@@ -3216,14 +3216,16 @@ view "home"
 ```
 Render a named view/template.
 
-### 🚧 `template`  
-*not-built*
+### ✅ `template`  
+*canonical*
 
 ```
 template NAME
+    subject "..."
+    body "..."
 template: done
 ```
-Define a reusable view template. Parses and passes `mio check`, but has no interpreter executor: at run it refuses with `No executor for TemplateDecl -- this construct is not executable in this build`. Declared, not built.
+A named message template (T1-TEMPLATE): a subject, a from with a display name, a reply to, and an html file, a text file or an inline body. A send names it without quotes and binds its data with `inject SOURCE into SLOT`; `notify ... via email` sends the same way. Its {{ }} slots are filled only from what that send injects, and a slot nothing injected refuses. Built: verified by running on the 6.0.4 build, `template card` with a subject and a body checks clean and runs. A template with nothing to send refuses at check (`template_nothing_to_send`). Battery: `tests/test_battery_mail_template.py`.
 
 ### 🚧 `screen`  
 *not-built*
@@ -3611,13 +3613,13 @@ primary
 ```
 Marks a primary key on a field.
 
-### 🚧 `threshold`  
-*not-built*
+### 🔒 `threshold`  
+*reserved*
 
 ```
 threshold N
 ```
-A field/regulatory threshold modifier. It parses but enforces nothing today, so it is marked not-built in this release rather than canonical. A build-or-mark ruling is owed.
+Reserved, declared but NOT enforced (ruled 2026-09-21 as reserve and hold for sector development, T1-THRESHOLD-DECORATIVE). `threshold N` on a shape field parses and enforces nothing: verified by running on the 6.0.4 build, `amount as int threshold 100` checks with the warning `threshold on field amount is declared but NOT ENFORCED in this build` (`modifier_not_enforced`) and the program runs. When built it is a soft limit that accepts the value and flags the crossing, unlike `min` and `range`, which refuse. Do not rely on it.
 
 ### ✅ `timezone / in.timezone`  
 *canonical*
@@ -3625,7 +3627,7 @@ A field/regulatory threshold modifier. It parses but enforces nothing today, so 
 ```
 timezone "Zone"   (declaration)   |   VALUE in.timezone "Zone" | VALUE in.timezone FIELD   (display)
 ```
-Ruled 2026-10-05. The `timezone` keyword works in FOUR contexts (each verified at check): (1) a JOURNEY DEFAULT -- `timezone "Asia/Bahrain"` inside a journey sets the zone for the app; (2) a FIELD OVERRIDE -- `created as datetime timezone "Asia/Bahrain"` on a shape field; (3) the `timezone` TYPE -- `z as timezone`, a field that holds a zone name; and (4) DISPLAY conversion via `in.timezone` -- `show payment.created in.timezone "Asia/Bahrain"` or `... in.timezone customer.zone` (a dotted field), which renders a stored datetime in that zone. ZONE NAMES are standard only: a real IANA `Area/Location` name or the bare word `UTC`; a fixed offset and an `Etc/GMT...` name BOTH refuse (even though `Etc/GMT+3` is a loadable zoneinfo key, it is explicitly excluded). STORAGE: datetimes are stored in UTC; a datetime that arrives WITHOUT an offset is read in the field's declared zone, otherwise UTC -- never guessed, never refused. SCOPE, verified by running (calendar-zone probe reports/DATETIME-CALENDAR-ZONE-PROBE-2026-10-14): a journey `timezone` governs ONLY that storage read of a naive datetime. It does NOT move `now()` (always UTC), and it does NOT move the CALENDAR periods -- `today`, `this_month` and the other `this_*`/`last_*` forms, and `is.in <period>` -- which follow the `MOHIO_APP_TIMEZONE` environment setting (default UTC), not the journey declaration; under a journey `timezone` alone, `is.in today` returns the UTC day's rows, not the app zone's. Bare `today` the value is the machine's local date, a third clock. DISPLAY: `show`, `give back ... as.json` and `render` all emit a datetime as a naive ISO string with NO zone marker; only `in.timezone` attaches an offset.
+Ruled 2026-10-05. The `timezone` keyword works in FOUR contexts (each verified at check): (1) a JOURNEY DEFAULT -- `timezone "Asia/Bahrain"` inside a journey sets the zone for the app; (2) a FIELD OVERRIDE -- `created as datetime timezone "Asia/Bahrain"` on a shape field; (3) the `timezone` TYPE -- `z as timezone`, a field that holds a zone name; and (4) DISPLAY conversion via `in.timezone` -- `show payment.created in.timezone "Asia/Bahrain"` or `... in.timezone customer.zone` (a dotted field), which renders a stored datetime in that zone. ZONE NAMES are standard only: a real IANA `Area/Location` name or the bare word `UTC`; a fixed offset and an `Etc/GMT...` name BOTH refuse (even though `Etc/GMT+3` is a loadable zoneinfo key, it is explicitly excluded). STORAGE: datetimes are stored in UTC; a datetime that arrives WITHOUT an offset is read in the field's declared zone, otherwise UTC -- never guessed, never refused. SCOPE (6.0.4, ruled 2026-11-06): a journey `timezone` reads text with no offset on a write and in a match, and it SETS THE DAYS of the calendar words -- `today`, `this_month`, the other `this_*`/`last_*` forms, and `is.in <period>`. Verified by running on 52071556 over a served request: a handler that gives back `today` answered `2026-11-08` under `timezone "Pacific/Kiritimati"` and `2026-11-07` under `timezone "UTC"` (UTC clock 16:09); `is.in` and `this_month` resolve against that same app-zone day boundary. It does NOT move `now()` (always UTC), and it no longer changes how a datetime reads on the way out. With NO journey, the calendar words follow the `MOHIO_APP_TIMEZONE` environment setting (default UTC), verified by running: top-level `show today` prints `2026-11-07` under UTC and `2026-11-08` under `MOHIO_APP_TIMEZONE=Pacific/Kiritimati`. DISPLAY (verified by running on 6.0.4, 52071556): a datetime now leaves the program as UTC with an explicit `+00:00` on EVERY surface -- `show`, `&`, a render `{{ }}`, a `give back` body, and `as.json` all emit e.g. `2026-11-07T15:48:15.876612+00:00`. `in.timezone` is the one way to show a local time: `show payment.created in.timezone "Asia/Tokyo"` renders `...+09:00`. This supersedes the older three-way split (the app zone on `show`/`&`/`{{ }}`/`render`, `+00:00` on JSON, a naive clock reading on a plain `give back` body).
 
 ### ✅ `toggle`  
 *canonical*
@@ -3730,7 +3732,7 @@ The deploy target inside a `languages` block: which language the app deploys in.
 ### 🔒 `import`  
 *reserved*
 
-Reserved; use `include` (build-time) or `use` today. Enforcement is pending in the dev lane: until it lands, `import` is still accepted as an ordinary identifier, but it is held for future use and should not be relied on as a variable name.
+Reserved; use `include` to bring another file in. Verified by running on the 6.0.4 build: `import "lib.mho"` warns that `import` is reserved and nothing reads it, and shows `include "helpers.mho"` as the form to write. Enforcement is still pending in the dev lane (T1-IMPORT-RESERVATION-UNENFORCED): a value named `import` that IS read is accepted today with no warning, so do not use it as a variable name.
 
 ### 🔒 `planned / supported`  
 *reserved*
@@ -3898,8 +3900,8 @@ The word list comes from `mio harvest`, the compiler's own sweep of the grammar,
 | unit and currency families | 1 | 4 | 6 | 0 | 11 |
 | string, cast and condition words | 54 | 13 | 0 | 0 | 67 |
 | service calls | 31 | 6 | 58 | 0 | 95 |
-| everything else | 309 | 16 | 0 | 0 | 325 |
-| **all words** | **411** | **39** | **64** | **0** | **514** |
+| everything else | 308 | 16 | 0 | 0 | 324 |
+| **all words** | **410** | **39** | **64** | **0** | **513** |
 
 ### unit and currency families
 
@@ -3929,9 +3931,4 @@ Mentioned in a note but with no entry of its own (16): `context`, `define`, `fie
 
 Harvest is authoritative for whether a word EXISTS. This catalog is authoritative for its STATUS and content. Where they differ the difference is reported here and never resolved automatically. A curated `reserved` or `retired` sitting against a harvested `canonical` is usually correct: the word is still in the grammar but is not for use.
 
-- conflict: meta says not-built, harvest says canonical
-- import: meta says reserved, harvest says canonical
-- seed: meta says not-built, harvest says canonical
-- template: meta says not-built, harvest says canonical
-- threshold: meta says not-built, harvest says canonical
-- undo: meta says non-canonical, harvest says canonical
+- threshold: meta says reserved, harvest says canonical

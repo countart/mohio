@@ -935,7 +935,7 @@ class MohioValidator:
                         hint="Use `from env.DATABASE_URL` or `from secret.DB_URL`."))
             # ── Space-form cast not yet supported — FAIL LOUD ─────────────
             # Canon (for now) is the dotted modifier: as.int / as.number /
-            # as.decimal / as.boolean / as.string. The space form ("value as int")
+            # as.decimal / as.boolean / as.text. The space form ("value as int")
             # has no grammar rule and silently mis-parses (the cast vanishes,
             # numeric data stays a string, math then crashes). It is reserved
             # for the Rust rewrite, which will accept both. Until then we catch
@@ -963,7 +963,7 @@ class MohioValidator:
                         _ct = _cm.group(1)
                         _dotted = {'int':'as.int','integer':'as.int','number':'as.number','num':'as.number',
                                    'decimal':'as.decimal','dec':'as.decimal','boolean':'as.boolean','bool':'as.boolean',
-                                   'string':'as.string','text':'as.string'}[_ct]
+                                   'string':'as.text','text':'as.text'}[_ct]
                         self.ctx.error(
                             f"Space-form cast 'as {_ct}' is not supported yet -- use the dotted modifier '{_dotted}'.",
                             i,
@@ -2520,7 +2520,7 @@ _FASYNC = ("Mohio has no async keyword. A statement waits for its own result, an
 # THE FOUR WITH NO MOHIO EQUIVALENT. Reach is declared where it is enforced, never as a
 # keyword in front of a declaration.
 _FMODIFIER = ("Mohio has no access modifiers. Reach is declared where it is enforced: "
-              "`require role \"admin\"` on a request, and `private:` / `public:` on a "
+              "`require role \"admin\"` on a request, and `authorize:` / `hidden:` on a "
               "journey path.")
 # PRIVATE AND PUBLIC ARE OURS, and the general message above is half-wrong for them. They
 # declare journey-path visibility (mohio.lark:1297-1298), so somebody who wrote `private`
@@ -2528,10 +2528,10 @@ _FMODIFIER = ("Mohio has no access modifiers. Reach is declared where it is enfo
 # the language has no such thing. They stay an ERROR because the bare assignment shape is
 # ambiguous with vocabulary the language owns -- that is the reason, not the absence of a
 # feature.
-_FVISIBILITY = ("`private:` and `public:` declare JOURNEY-PATH VISIBILITY, and they are "
+_FVISIBILITY = ("`unlisted:` and `public:` declare JOURNEY-PATH VISIBILITY, and they are "
                 "not variable-assignment targets. The colon is what makes them a "
-                "declaration:\n"
-                "    journey App\n        private: /docs\n        public: /notice\n"
+                "declaration (`private:` is the old spelling of `unlisted:`):\n"
+                "    journey App\n        unlisted: /docs\n        public: /notice\n"
                 "        request for sh.Q at /home\n"
                 "            give back [200] \"ok\"\n        request: done\n"
                 "    journey: done\n"
@@ -2560,10 +2560,10 @@ for _w in ("class", "struct", "interface", "enum", "trait", "namespace", "extend
     FOREIGN_KEYWORDS[_w] = _FSHAPE
 for _w in ("var", "let", "const", "float", "double", "long", "short", "byte", "auto"):
     FOREIGN_KEYWORDS[_w] = _FDECL
-# `import` IS OURS in the reserved sense: IMPORT, mohio.lark:382. The
-# terminal is defined and NO rule references it, so it is reserved and
-# structurally unreachable rather than live -- but it is still our word,
-# not a foreign one, and it comes off for that reason. `using` is ours too
+# `import` IS OURS in the reserved sense (T1-DEPLOY-IMPORT-RULINGS): no rule
+# reads it, and the IMPORT terminal that no rule referenced was dropped
+# (T1-IMPORT-TERMINAL-UNWIRED, 2026-11-10) -- but it is still our word, not a
+# foreign one, and it comes off for that reason. `using` is ours too
 # (USING, mohio.lark:307, used by using_chain at 2632 and validate_stmt at
 # 1134).
 for _w in ("package",):
@@ -2593,8 +2593,8 @@ for _w in ("async", "await", "promise", "defer"):
 for _w in ("protected", "static", "final", "abstract"):
     FOREIGN_REFUSED[_w] = _FMODIFIER
 # NAMED AS A SET so the refusal can lead with a true sentence for these two.
-MOHIO_VISIBILITY = frozenset({"public", "private"})
-for _w in ("public", "private"):
+MOHIO_VISIBILITY = frozenset({"public", "private", "unlisted"})
+for _w in ("public", "private", "unlisted"):
     FOREIGN_REFUSED[_w] = _FVISIBILITY
 FOREIGN_KEYWORDS["goto"] = ("Mohio has no goto. A named piece of work is a `task`, called with "
                             "`call <name> ... call: done`.")

@@ -375,5 +375,7 @@ def classify_sink(sink):
         return "durable", True, "postgres server"
     if "mysql" in name or "maria" in name:
         return "durable", True, "mysql/mariadb server"
+    if "oracle" in name:
+        return "durable", True, "oracle server"
 
     return "none", False, f"unrecognised sink type {type(sink).__name__}: cannot be graded"

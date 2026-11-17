@@ -341,7 +341,7 @@ def _journey_line_label(children, written, line):
     if written in _LABEL_NOT_BUILT:
         raise MohioCompileError(
             f"Line {where}: `[important]` cannot trail `{written}`. It trails `timezone` and the four "
-            f"page classes (public:, private:, hidden:, authorize:), where it makes the journey's value "
+            f"page classes (public:, unlisted:, hidden:, authorize:), where it makes the journey's value "
             f"win over a page's own; it is not built for `{written}`, whose own rule already holds (a "
             f"nearer journey may only add levels to the sector). Remove `[important]`; the line "
             f"applies as written.", line=_line(tag) or 0)
@@ -850,7 +850,7 @@ class MohioTransformer(Transformer):
         the journey's other one-line settings (`suppress`, `timezone`, `flow:`, `serves:`) join the same way."""
         from mohio_ast import JourneyDecl
         bare = [s for s in stmts if isinstance(s, JourneyMeta)
-                and s.kind in ('public', 'private', 'hidden', 'authorize',
+                and s.kind in ('public', 'unlisted', 'hidden', 'authorize',
                                'suppress', 'timezone', 'flow', 'serves')]
         if not bare:
             return stmts
@@ -1002,7 +1002,7 @@ class MohioTransformer(Transformer):
 
     def _raw_block_holding(self, program, text):
         """(kind, line) of the raw block whose text holds `text`, or None."""
-        from dataclasses import is_dataclass, fields as _f
+        from mohio_dc import is_dataclass, fields as _f
         stack = list(program.statements)
         while stack:
             n = stack.pop()
@@ -3758,10 +3758,19 @@ class MohioTransformer(Transformer):
                            important=_journey_line_label(children, 'public:', getattr(meta, 'line', 0)))
 
     @v_args(meta=True)
+    def journey_unlisted(self, meta, children):
+        paths = next((c for c in children if isinstance(c, list)), [])
+        return JourneyMeta(kind='unlisted', value=paths, line=getattr(meta, 'line', 0) or 0,
+                           important=_journey_line_label(children, 'unlisted:', getattr(meta, 'line', 0)))
+
+    # `private:` IS `unlisted:` UNDER ITS OLD NAME (RULED by Ron 2026-11-14). The same class, so the serve
+    # gate, the cascade and the `[important]` floor read one kind; `spelled` lets check warn on the word.
+    @v_args(meta=True)
     def journey_private(self, meta, children):
         paths = next((c for c in children if isinstance(c, list)), [])
-        return JourneyMeta(kind='private', value=paths, line=getattr(meta, 'line', 0) or 0,
-                           important=_journey_line_label(children, 'private:', getattr(meta, 'line', 0)))
+        return JourneyMeta(kind='unlisted', value=paths, line=getattr(meta, 'line', 0) or 0,
+                           important=_journey_line_label(children, 'private:', getattr(meta, 'line', 0)),
+                           spelled='private')
 
     @v_args(meta=True)
     def journey_hidden(self, meta, children):
@@ -6713,7 +6722,11 @@ class MohioTransformer(Transformer):
                       if not isinstance(c, Token) and not _is_tree(c, 'http_status')
                       and not _is_tree(c, 'give_back_mod')
                       and not isinstance(c, _TQ)]
-        value = non_tokens[0] if non_tokens else None
+        # THE BLOCK FORM, one `name value` per line, kept only its first line and answered with the host language's
+        # text for that node (`FieldValue(line=26, ...)`), with no error. It is a record of its lines.
+        from mohio_ast import FieldValue as _FV
+        block_fields = [c for c in non_tokens if isinstance(c, _FV)] or None
+        value = None if block_fields else (non_tokens[0] if non_tokens else None)
         mod_node = _first_tree(children, 'give_back_mod')
         mod = None
         if mod_node:
@@ -6721,7 +6734,7 @@ class MohioTransformer(Transformer):
         qual = next((c for c in children if isinstance(c, _TQ)), None)
         trusted = any(isinstance(c, Token) and c.type == 'TRUSTED' for c in children)
         return self._wrap_for_purpose(GiveBackStmt(status=status, value=value, modifier=mod,
-                            qualifier=qual, trusted=trusted, line=open_line), children)
+                            qualifier=qual, trusted=trusted, fields=block_fields, line=open_line), children)
 
     def give_stmt(self, children):
         """`give <value> as download ["<filename>"]`.
@@ -6881,6 +6894,21 @@ class MohioTransformer(Transformer):
             return out
 
         names = _target_names(target_tree) if target_tree is not None else []
+        if not names:
+            # NO NAME, NO TARGET (6.0.4). The grammar's `value_expr` alternative admits a quoted
+            # value, `debug.log "handler reached"`, and with no name to read the statement was built
+            # with target '' and wrote ` = ` into the log: the note silently dropped, under `mio run`
+            # and `mio serve` alike. `debug.log` records a variable or a dotted field, so anything
+            # else refuses here, with the form that records a note.
+            _line = getattr(getattr(target_tree, 'meta', None), 'line', 0) or 0
+            raise MohioCompileError(
+                "`debug.log` records one variable or a dotted field (`debug.log total`, "
+                "`debug.log user.email`), so it has nothing to record from a value written in place, "
+                "and the line would write an empty entry to the debug log.\n"
+                "  To record a note, give it a name first:\n"
+                "      step_note \"handler reached\"\n"
+                "      debug.log step_note",
+                line=_line, code="debug_log_needs_a_name")
         return DebugLogStmt(target='.'.join(names))
 
     def debug_checkpoint(self, children):
@@ -10488,20 +10516,24 @@ class MohioTransformer(Transformer):
         from mohio_pretokenizer import unmark_text
         # Gather raw HTML lines from raw_show_content (mirrors sql_block).
         html_lines = []
+        html_at = []        # the source line of each entry in html_lines, kept in step with it
         for child in children:
             if _is_tree(child, 'raw_show_content'):
                 for line_tree in child.children:
                     if _is_tree(line_tree, 'raw_show_line'):
                         for tok in line_tree.children:
                             html_lines.append(str(tok))
+                            html_at.append(getattr(tok, 'line', None))
                     elif isinstance(line_tree, Token):
                         html_lines.append(str(line_tree))
+                        html_at.append(getattr(line_tree, 'line', None))
             # RENDER_KIND is the container's NAME (`render scripts`), not content. It was not
             # excluded here, so the literal word `scripts` was gathered as an HTML line and
             # served inside <body> -- visible on the page, in every scripts render.
             elif isinstance(child, Token) and child.type not in (
                     'SHOW', 'RENDER', 'DONE', 'DOTTED_CLOSER', 'RENDER_KIND', 'RENDER_CLOSER'):
                 html_lines.append(str(child))
+                html_at.append(getattr(child, 'line', None))
         # UNDO THE PRETOKENIZER MARK BEFORE THE BODY BECOMES TEXT. A raw markup line is
         # captured verbatim, and the pretokenizer had already welded a dotted user name
         # inside it into `__USERVAR__contact.name` -- so the marker rode all the way to
@@ -10512,6 +10544,11 @@ class MohioTransformer(Transformer):
         # handler worked, because a STRING literal is never marked, while the render body two
         # lines below it failed.
         html_text = unmark_text("\n".join(l for l in html_lines if l.strip()))
+        # One entry per line of html_text: a kept piece spanning several lines gives each its line.
+        body_lines = []
+        for _piece, _at in zip(html_lines, html_at):
+            if _piece.strip():
+                body_lines += [(_at + _k) if _at else None for _k in range(_piece.count('\n') + 1)]
         # A raw `show` block closes with `show: done` (or a bare `done`), never another block's
         # closer. When a block above it left its closer optional, the parser could hand that
         # closer to a `show` inside its handler, so `show "invalid two"` became raw text and every
@@ -10520,7 +10557,7 @@ class MohioTransformer(Transformer):
         _show = next((c for c in children if isinstance(c, Token) and c.type == 'SHOW'), None)
         if _show is not None and any(isinstance(c, Closer) for c in children):
             self._validate_closer('show', children, _line(_show))
-        return ShowBlock(html=html_text)
+        return ShowBlock(html=html_text, body_lines=body_lines)
 
     def render_block(self, children):
         # `render` is the canonical view container; it captures the HTML view the
@@ -10563,6 +10600,7 @@ class MohioTransformer(Transformer):
                        for n in range(lo, hi + 1)]
                 import textwrap as _tw
                 block.html = _tw.dedent("\n".join(raw))
+                block.body_lines = list(range(lo, hi + 1))   # rebuilt with every line, blank too
 
         # REFUSE AN UNKNOWN KIND, LOUDLY. Only `html`, `scripts` and `code` are RENDER_KINDs.
         # A word like `render template` does NOT match RENDER_KIND, so the grammar would let it

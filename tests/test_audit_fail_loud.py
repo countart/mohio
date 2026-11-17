@@ -13,7 +13,7 @@ Behavior (the halt-safe split):
   - framework requires durable+ audit, NO sink configured at all (structural absence)
         -> RAISE audit.no_durable_store (meant to be caught at check/deploy, halts nothing live).
   - no framework requiring durable audit, write fails -> loud warning, proceed.
-  - no framework, no sink -> proceed (open core, no false refusal).
+  - no framework, no sink -> proceed (free runtime, no false refusal).
 
 The old version keyed on license tier and ABORTED on certified write-failure. Corrected: license
 tier != audit requirement, and aborting a live op on a blip is the wrong failure mode.
@@ -120,7 +120,7 @@ check("no framework + write failure proceeds (warn only)",
       run([], FailDB()) == ('proceeded', False),
       str(run([], FailDB())))
 
-# 5. no framework + no sink -> proceed (open core, no false refusal)
+# 5. no framework + no sink -> proceed (free runtime, no false refusal)
 check("no framework + no sink proceeds (no false refusal)",
       run([], None) == ('proceeded', False),
       str(run([], None)))

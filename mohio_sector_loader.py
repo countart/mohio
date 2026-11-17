@@ -814,7 +814,7 @@ def _load_level_profile(
 # blindly from a private folder / the licensed runtime image, never bundled in the
 # open compiler. So the open compiler carries the ENFORCEMENT MECHANISM but no
 # regulated rules -- `sector: financial` with no licensed profile present enforces
-# nothing, which is the honest open-core line ("the governance is the product").
+# nothing, which is the free-tier line ("the governance is the product").
 #
 # Free demonstration of the mechanism uses non-regulated sample profiles instead
 # (ecommerce, and the demo-low / demo-high sample floors), never a regulated

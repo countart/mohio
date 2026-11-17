@@ -9,7 +9,7 @@
 **The first AI-native programming language - where AI reasoning is a compiler-enforced primitive, not a library, not an API, not an afterthought.**
 
 [![BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-teal.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-6.0.3-0D7377.svg)](https://github.com/countart/mohio/releases)
+[![Release](https://img.shields.io/badge/release-6.0.4.3-0D7377.svg)](https://github.com/countart/mohio/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2.svg)](https://discord.gg/9tq7tGSNYE)
 [![X](https://img.shields.io/badge/X-@mohiolang-000000.svg)](https://x.com/mohiolang)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Mohio-0077B5.svg)](https://linkedin.com/company/mohiolang)
@@ -34,6 +34,7 @@ Here is the thing it exists to make ordinary:
 
 ```mohio
 connect db as postgres from env.DATABASE_URL
+
 find flagged in db.transactions
     where amount is above 10000
     and created_at is.in last 30 days
@@ -421,7 +422,7 @@ thing an auditor cannot work with.
 
 ## Current state
 
-Current release: 6.0.3
+Current release: 6.0.4.3
 
 Mohio is built in the open and moving fast - the compiler updates multiple times a
 day. The core language is solid and tested; the surface around it is filling in.
@@ -528,7 +529,7 @@ mio run tests/support_escalation_demo.mho --seed tests/seed_support_escalation.j
 
 ## Commercial features
 
-The full language, compiler, standard built-ins, and community sector profiles are open core under BSL 1.1. In process or planned, commercial tier:
+The full language, compiler, standard built-ins, and community sector profiles are free to use under BSL 1.1. In process or planned, commercial tier:
 
 - `miochain.*` - blockchain integration, transaction signing via miovault
 - `miovault` - HSM sidecar for key isolation
@@ -553,7 +554,7 @@ No contract. No commitment. No cost. Email **hello@mohio.io** with your sector a
 
 ## License and intellectual property
 
-Open core under the **Mohio Business Source License 1.1 (BSL)** - see [`LICENSE`](LICENSE) and [`LICENSE-SCOPE.md`](LICENSE-SCOPE.md). First public distribution 2026-11-04; Change Date 2030-11-04, Change License AGPL-3.0-or-later. The full language, compiler, standard built-ins, and community sector profiles are free to use; the commercial runtime adds `miochain`, `miovault`, managed `mioknow`, and certified sector profiles.
+Free to use under the **Mohio Business Source License 1.1 (BSL)** - see [`LICENSE`](LICENSE) and [`LICENSE-SCOPE.md`](LICENSE-SCOPE.md). First public distribution 2026-11-16; Change Date 2030-11-16, Change License AGPL-3.0-or-later. The full language, compiler, standard built-ins, and community sector profiles are included; the commercial runtime adds `miochain`, `miovault`, managed `mioknow`, and certified sector profiles.
 
 Compiler-enforced AI-safety primitives, sector-activated compliance enforcement, deterministic runtime boundary gates on AI agents, and agent-native structured compiler output are the subject of provisional patent applications filed with the USPTO.
 
@@ -581,6 +582,6 @@ For trademark and brand usage, see [TRADEMARKS.md](TRADEMARKS.md). For reserved 
 
 **Mohio Language Project · Particular LLC · BSL 1.1**
 
-*6.0.3 · Write intent. Execute reason. See everything.*
+*6.0.4.3 · Write intent. Execute reason. See everything.*
 
 </div>

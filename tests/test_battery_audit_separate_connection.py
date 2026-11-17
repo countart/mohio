@@ -16,7 +16,11 @@ WHAT THIS ASSERTS, each case here because it was a real measured failure:
   2. a committed one leaves the row, and a record marked committed;
   3. a `transaction` opened right after an audited write does not crash (Postgres);
   4. MySQL writes an audit trail at all (its reader was built with the wrong quoting entirely);
-  5. an audit connection restricted to INSERT can still write (the append-only role).
+  5. an audit connection restricted to INSERT can still write (the append-only role);
+  6. a unique index an administrator built on prev_hash and audit_id, under any name, is the
+     chain's protection: the first regulated write lands and Mohio sends no index statement, on
+     SQLite, Postgres and MySQL with an INSERT-and-SELECT-only audit role, and on Oracle as the
+     owner, watched by a schema DDL trigger (T1-AUDIT-RESTRICTED-ROLE-INDEX).
 
 THE OUTCOME IS WHY THE RECORD IS HELD. Whether an operation committed is not knowable at the
 moment it happens, so a record written then cannot state it. Holding the record until the
@@ -43,6 +47,46 @@ CAN_FAIL = [
      "find": "            if enriched.get('_audit_owed'):\n                self._relay_still_owed += 1\n",
      "replace": "            if enriched.get('_audit_owed'):\n                pass  # MUTATED: a still-owed record is counted nowhere\n",
      "note": "the relay says Nothing owed and exits 0 while the envelope stays owed"},
+    # T1-AUDIT-RESTRICTED-ROLE-INDEX: the catalogue is asked, by column, before an index is created.
+    {"file": "mohio_interpreter.py",
+     "find": "            if callable(_has) and _has(log_name, col):\n",
+     "replace": "            if False and callable(_has) and _has(log_name, col):  # MUTATED: never asks\n",
+     "note": "the sink never asks for an existing index: the restricted roles cannot deliver, and "
+             "an owner adds its own beside the administrator's"},
+    {"file": "mohio_interpreter.py",
+     "find": "        if unique:\n            _has = getattr(sink, 'has_unique_index_on', None)\n",
+     "replace": "        if unique and col == 'prev_hash':  # MUTATED: audit_id is never asked\n"
+                "            _has = getattr(sink, 'has_unique_index_on', None)\n",
+     "note": "the guard covers prev_hash and not audit_id: the audit_id index is still created"},
+    {"file": "mohio_interpreter.py",
+     "find": "            if len(cols) == 1 and cols[0][2] is not None and str(cols[0][2]).lower() == "
+             "str(col).lower():\n",
+     "replace": "            if any(c[2] is not None and str(c[2]).lower() == str(col).lower() "
+                "for c in cols):  # MUTATED: a wider index counts\n",
+     "note": "sqlite takes a unique index on prev_hash with another column as the chain's own"},
+    {"file": "mohio_interpreter.py",
+     "find": "AND i.indnkeyatts = 1 AND i.indpred IS NULL",
+     "replace": "AND i.indpred IS NULL",
+     "note": "postgres takes a unique index on prev_hash with another column as the chain's own"},
+    {"file": "mohio_interpreter.py",
+     "find": "            groups.setdefault(str(ix), []).append(None if c is None else str(c).lower())\n"
+             "        return any(cols == [str(col).lower()] for cols in groups.values())\n",
+     "replace": "            groups.setdefault(str(ix), []).append(None if c is None else str(c).lower())\n"
+                "        return any(str(col).lower() in cols for cols in groups.values())  # MUTATED\n",
+     "note": "mysql takes a unique index on prev_hash with another column as the chain's own"},
+    {"file": "mohio_interpreter.py",
+     "find": "                groups.setdefault(str(ix), []).append(str(c).lower())\n        finally:\n"
+             "            cur.close()\n        return any(cols == [str(col).lower()] for cols in groups.values())\n",
+     "replace": "                groups.setdefault(str(ix), []).append(str(c).lower())\n        finally:\n"
+                "            cur.close()\n        return any(str(col).lower() in cols for cols in groups.values())"
+                "  # MUTATED\n",
+     "note": "oracle takes a unique index on prev_hash with another column as the chain's own"},
+    {"file": "mohio_interpreter.py",
+     "find": "                if not unique or not callable(_has) or _has(log_name, col):\n"
+             "                    return 'exists'\n",
+     "replace": "                return 'exists'  # MUTATED: an index in the way counts as done\n",
+     "note": "a non-unique index in the way of the chain's unique index counts as done, on sqlite "
+             "by its name and on oracle by its column list"},
 ]
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -309,6 +353,87 @@ check("the audit log's own column list is what that check is made against for an
       canonical_audit_columns())
 
 
+# -- indexes an administrator built, under names of their own (T1-AUDIT-RESTRICTED-ROLE-INDEX) ----
+print("\n== sqlite: the administrator's own unique indexes are the chain's, and none is added ==")
+ADMIN_DB = os.path.join(TMP, "admin_indexed.db")
+AUDIT_TABLES_ALL = ("phi_audit_log", "data_audit_log", "operation_audit_log")
+_adm = sqlite3.connect(ADMIN_DB)
+for t in AUDIT_TABLES_ALL:
+    _adm.execute("CREATE TABLE %s (id INTEGER PRIMARY KEY, %s)"
+                 % (t, ", ".join('"%s" TEXT' % c for c in canonical_audit_columns())))
+    _adm.execute("CREATE UNIQUE INDEX adm_%s_p ON %s (prev_hash)" % (t, t))
+    _adm.execute("CREATE UNIQUE INDEX adm_%s_a ON %s (audit_id)" % (t, t))
+_adm.commit()
+_adm.close()
+
+
+def sq_admin(sql):
+    try:
+        c = sqlite3.connect(ADMIN_DB)
+        try:
+            out = list(c.execute(sql))
+            c.commit()
+            return out
+        finally:
+            c.close()
+    except Exception as e:
+        return "ERR %s" % e
+
+
+_ix_sql = ("select name from sqlite_master where type = 'index' and tbl_name in "
+           "('phi_audit_log', 'data_audit_log', 'operation_audit_log') order by name")
+out = run(APPEND_ONLY_WRITE, ADMIN_DB, "sqlite")
+check("sqlite: the first regulated write lands its record", "saved" in out
+      and sq_admin("select count(*) from data_audit_log") == [(1,)],
+      (sq_admin("select count(*) from data_audit_log"), out[-300:]))
+check("sqlite: ...and no index was added beside the administrator's",
+      [r[0] for r in (sq_admin(_ix_sql) or [])]
+      == sorted("adm_%s_%s" % (t, k) for t in AUDIT_TABLES_ALL for k in ("a", "p")),
+      sq_admin(_ix_sql))
+_dup = sq_admin("insert into data_audit_log (prev_hash, audit_id, event) "
+                "select prev_hash, 'another-id', 'forged' from data_audit_log")
+check("sqlite: ...and a second record on the same predecessor is refused",
+      isinstance(_dup, str) and "UNIQUE constraint failed" in _dup, _dup)
+
+# A NON-EQUIVALENT index is not taken for one. A unique index on prev_hash together with another
+# column allows two records on one predecessor, so Mohio still builds its own.
+WIDE_DB = os.path.join(TMP, "wide_indexed.db")
+_adm = sqlite3.connect(WIDE_DB)
+for t in AUDIT_TABLES_ALL:
+    _adm.execute("CREATE TABLE %s (id INTEGER PRIMARY KEY, %s)"
+                 % (t, ", ".join('"%s" TEXT' % c for c in canonical_audit_columns())))
+    _adm.execute("CREATE UNIQUE INDEX wide_%s_p ON %s (prev_hash, event)" % (t, t))
+    _adm.execute("CREATE UNIQUE INDEX part_%s_a ON %s (audit_id) WHERE event = 'x'" % (t, t))
+_adm.commit()
+_adm.close()
+run(APPEND_ONLY_WRITE, WIDE_DB, "sqlite")
+_wide = [r[0] for r in sqlite3.connect(WIDE_DB).execute(
+    "select name from sqlite_master where type = 'index' and tbl_name = 'data_audit_log'")]
+check("sqlite: a unique index on prev_hash WITH another column is not taken as the chain's, so "
+      "Mohio builds its own", "ux_data_audit_log_prev_hash" in _wide, _wide)
+check("sqlite: ...nor is a PARTIAL unique index on audit_id",
+      "ux_data_audit_log_audit_id" in _wide, _wide)
+
+# AN INDEX IN THE WAY IS NOT THE ONE ASKED FOR. A non-unique index under the very name Mohio gives
+# its unique one used to count as done, and the chain then ran with no predecessor uniqueness.
+SQUAT_DB = os.path.join(TMP, "squat_indexed.db")
+_adm = sqlite3.connect(SQUAT_DB)
+for t in AUDIT_TABLES_ALL:
+    _adm.execute("CREATE TABLE %s (id INTEGER PRIMARY KEY, %s)"
+                 % (t, ", ".join('"%s" TEXT' % c for c in canonical_audit_columns())))
+    _adm.execute("CREATE INDEX ux_%s_prev_hash ON %s (prev_hash)" % (t, t))
+_adm.commit()
+_adm.close()
+out = run(APPEND_ONLY_WRITE, SQUAT_DB, "sqlite")
+check("sqlite: a NON-unique index under the chain index's own name is not taken as done: the record "
+      "is not written to an unprotected chain",
+      list(sqlite3.connect(SQUAT_DB).execute("select count(*) from data_audit_log")) == [(0,)],
+      list(sqlite3.connect(SQUAT_DB).execute("select count(*) from data_audit_log")))
+check("sqlite: ...and the reason is said, with the fix",
+      "does not hold it to one row" in out and "Make that index unique on prev_hash alone" in out,
+      out[-600:])
+
+
 # -- real Postgres ------------------------------------------------------------------------------
 print("\n== postgres ==")
 PG = os.environ.get("MOHIO_TEST_PG", "postgresql://nobody:none@127.0.0.1:1/none")
@@ -389,6 +514,26 @@ if pg_ok:
           widened.table_columns("widening_probe"))
     pg("DROP TABLE IF EXISTS widening_probe CASCADE")
 
+    print("\n  -- a unique index that is not the chain's is not taken for it --")
+    # On prev_hash WITH another column, or on audit_id only WHERE a condition holds: each allows two
+    # records the chain must refuse, so the owner builds its own (T1-AUDIT-RESTRICTED-ROLE-INDEX).
+    for t in ("patients", "mohio_audit_envelope", "mohio_audit_envelope_ack") + AUDIT_TABLES_ALL:
+        pg("DROP TABLE IF EXISTS %s CASCADE" % t)
+    for t in AUDIT_TABLES_ALL:
+        pg("CREATE TABLE %s (id SERIAL PRIMARY KEY, %s)"
+           % (t, ", ".join('"%s" TEXT' % c for c in canonical_audit_columns())))
+        pg("CREATE UNIQUE INDEX wide_%s_p ON %s (prev_hash, event)" % (t, t))
+        pg("CREATE UNIQUE INDEX part_%s_a ON %s (audit_id) WHERE event = 'x'" % (t, t))
+    run(APPEND_ONLY_WRITE, PG, "postgres")
+    _wide = [r[0] for r in (pg("select indexname from pg_indexes where tablename = 'data_audit_log'")
+                            or [])]
+    check("postgres: a unique index on prev_hash WITH another column is not taken as the chain's, "
+          "so Mohio builds its own", "ux_data_audit_log_prev_hash" in _wide, _wide)
+    check("postgres: ...nor is a PARTIAL unique index on audit_id",
+          "ux_data_audit_log_audit_id" in _wide, _wide)
+    check("postgres: ...and the record still lands",
+          pg("select count(*) from data_audit_log") == [(1,)], pg("select count(*) from data_audit_log"))
+
 
 # -- the append-only audit role, on real Postgres -----------------------------------------------
 print("\n== postgres: the audit connection as an append-only role ==")
@@ -451,7 +596,8 @@ if role_ok:
         pg("GRANT INSERT, SELECT ON %s TO mohio_audit_r" % t)
         # ...and its indexes, as the administrator must: the chain needs a unique index on
         # prev_hash and audit_id, and a role that may only INSERT cannot create one on a table it
-        # does not own. Mohio asks for an existing unique index before creating (2026-10-17).
+        # does not own. Mohio asks the catalogue, by column, for one already there before it
+        # creates its own (T1-AUDIT-RESTRICTED-ROLE-INDEX, built 2026-11-08).
         pg("CREATE UNIQUE INDEX admin_%s_prev ON %s (prev_hash)" % (t, t))
         pg("CREATE UNIQUE INDEX admin_%s_aid ON %s (audit_id)" % (t, t))
         # mohio_app_r is granted NOTHING on the audit tables.
@@ -462,14 +608,30 @@ if role_ok:
     check("...the application's write landed",
           [r[0] for r in (pg("select name from patients") or [])] == ["Eve"],
           pg("select name from patients"))
-    # THE DOCUMENTED GAP (T1-AUDIT-RESTRICTED-ROLE-INDEX, deferred by Ron 2026-10-17): a role that may
-    # only INSERT on audit tables an administrator owns cannot deliver, because the sink creates its
-    # chain indexes first and Postgres answers `must be owner`. The record is not lost: its full sealed
-    # entry is in the envelope beside the row (below), owed. This asserts that honest state, and goes
-    # red when the gap is built and the record lands, so the item cannot be closed silently.
-    check("...and the audit record is OWED, not in the trail yet (the named gap T1-AUDIT-RESTRICTED-ROLE-INDEX)",
-          pg("select count(*) from data_audit_log") == [(0,)],
+    # T1-AUDIT-RESTRICTED-ROLE-INDEX, BUILT 2026-11-08. A role that may only INSERT and SELECT on audit
+    # tables an administrator owns could not deliver: the sink created its chain indexes first and
+    # Postgres answered `must be owner` before it looked for the administrator's own. The sink now asks
+    # the catalogue, by column, for a unique index already holding prev_hash and audit_id, and sends no
+    # statement when one is there. This role can run no DDL at all, so a record in the trail is itself
+    # the proof that none was sent: any attempt would have refused the delivery and left it owed.
+    check("...and the audit record is IN THE TRAIL on the first write, with no index created by a role "
+          "that cannot create one",
+          pg("select count(*) from data_audit_log") == [(1,)],
           pg("select count(*) from data_audit_log"))
+    check("...and the only indexes on the audit tables are the administrator's",
+          sorted(r[0] for r in (pg("select indexname from pg_indexes where tablename in "
+                                   "('phi_audit_log','data_audit_log','operation_audit_log')") or []))
+          == sorted("admin_%s_%s" % (t, k) for t in AUDIT_TABLES for k in ("prev", "aid")),
+          pg("select indexname from pg_indexes where tablename in "
+             "('phi_audit_log','data_audit_log','operation_audit_log')"))
+    _dup = pg("insert into data_audit_log (prev_hash, audit_id, event) "
+              "select prev_hash, 'another-id', 'forged' from data_audit_log")
+    check("...and chain uniqueness holds: a second record claiming the same predecessor is refused "
+          "by the administrator's index", isinstance(_dup, str) and "duplicate key" in _dup, _dup)
+    _dup = pg("insert into data_audit_log (prev_hash, audit_id, event) "
+              "select 'another-prev', audit_id, 'forged' from data_audit_log")
+    check("...and one record per audit id holds the same way",
+          isinstance(_dup, str) and "duplicate key" in _dup, _dup)
 
     # THE EVIDENCE BELONGS TO THE APPLICATION, NOT TO THE AUDIT. It commits in the same
     # transaction as the data, on the same connection, so it must be reachable by the role that
@@ -483,12 +645,11 @@ if role_ok:
     check("...and the evidence for that write is in it",
           pg("select count(*) from mohio_audit_envelope") == [(1,)],
           pg("select count(*) from mohio_audit_envelope"))
-    check("...and it is not acknowledged, so it stays owed for the relay",
-          pg("select count(*) from mohio_audit_envelope_ack") == [(0,)],
+    check("...and it is acknowledged, because the record was delivered",
+          pg("select count(*) from mohio_audit_envelope_ack") == [(1,)],
           pg("select count(*) from mohio_audit_envelope_ack"))
-    # RELAY HONESTY (RULED by Ron 2026-10-17): the relay, run as the same roles, tries the owed record,
-    # cannot deliver it, and says so: "1 owed, delivery failed: <reason>", exit non-zero. It used to print
-    # "Nothing owed" and exit 0 here, a receipt written from the attempt. It also never prints a password.
+    # RELAY HONESTY (RULED by Ron 2026-10-17): the relay, run as the same roles, says what is owed from
+    # what it finds. Nothing is owed now, so it says so and exits 0, and it never prints a password.
     _renv = dict(os.environ, PYTHONPATH=ROOT, MOHIO_ENCRYPTION_KEY="testkey", PYTHONIOENCODING="utf-8",
                  MOHIO_AUDIT_DATABASE_URL=AUDIT_URL)
     _renv.pop("DATABASE_URL", None)
@@ -498,16 +659,14 @@ if role_ok:
                          cwd=ROOT, env=_renv, capture_output=True, text=True, encoding="utf-8",
                          errors="replace", timeout=300)
     _rout = (_rr.stdout or "") + (_rr.stderr or "")
-    check("the relay reports the record still owed, with the reason, and exits non-zero",
-          _rr.returncode != 0 and "1 owed, delivery failed:" in _rout and "must be owner" in _rout,
+    check("the relay finds nothing owed and exits 0",
+          _rr.returncode == 0 and "Nothing owed" in _rout and "owed, delivery failed" not in _rout,
           (_rr.returncode, _rout[-500:]))
-    check("...never `Nothing owed` while an envelope is owed",
-          "Nothing owed" not in _rout, _rout[-400:])
     check("...and it names the store without its password",
           "app_pw" not in _rout and "audit_pw" not in _rout, _rout[-400:])
-    check("...and the record is still owed after it, not acknowledged by the attempt",
-          pg("select count(*) from mohio_audit_envelope_ack") == [(0,)],
-          pg("select count(*) from mohio_audit_envelope_ack"))
+    check("...and the trail still holds exactly the one record",
+          pg("select count(*) from data_audit_log") == [(1,)],
+          pg("select count(*) from data_audit_log"))
     _got_env = pg("select count(*) from mohio_audit_envelope", AUDIT_URL)
     check("the audit's role cannot read the evidence either",
           isinstance(_got_env, str) and "permission denied" in _got_env, _got_env)
@@ -528,6 +687,38 @@ if role_ok:
         got = pg(sql, AUDIT_URL)
         check("the audit's own role cannot %s what it wrote" % verb,
               isinstance(got, str) and "permission denied" in got, got)
+
+    print("\n  -- with no administrator index, the restricted role still cannot index, and says so --")
+    # The other side of the same question: the catalogue holds no unique index on the column, so the
+    # sink must create one, and this role cannot. The record is owed, never lost and never faked.
+    pg("DROP INDEX admin_data_audit_log_prev")
+    pg("DROP INDEX admin_data_audit_log_aid")
+    out = run(APPEND_ONLY_WRITE, APP_URL, "postgres", {"MOHIO_AUDIT_DATABASE_URL": AUDIT_URL})
+    check("a second write with the administrator's indexes gone commits its row",
+          sorted(r[0] for r in (pg("select name from patients") or [])) == ["Eve", "Eve"],
+          pg("select name from patients"))
+    check("...and its record is OWED, not in the trail",
+          pg("select count(*) from data_audit_log") == [(1,)]
+          and pg("select count(*) from mohio_audit_envelope") == [(2,)]
+          and pg("select count(*) from mohio_audit_envelope_ack") == [(1,)],
+          (pg("select count(*) from data_audit_log"), pg("select count(*) from mohio_audit_envelope"),
+           pg("select count(*) from mohio_audit_envelope_ack")))
+    # RELAY HONESTY (RULED by Ron 2026-10-17): it tries the owed record, cannot deliver it, and says
+    # so: "1 owed, delivery failed: <reason>", exit non-zero. Never "Nothing owed", never a password.
+    _rr = subprocess.run([sys.executable, "-m", "mio", "audit", "relay", APP_URL, "--program", _rp],
+                         cwd=ROOT, env=_renv, capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=300)
+    _rout = (_rr.stdout or "") + (_rr.stderr or "")
+    check("the relay reports the record still owed, with the reason, and exits non-zero",
+          _rr.returncode != 0 and "1 owed, delivery failed:" in _rout and "must be owner" in _rout,
+          (_rr.returncode, _rout[-500:]))
+    check("...never `Nothing owed` while an envelope is owed",
+          "Nothing owed" not in _rout, _rout[-400:])
+    check("...and it names the store without its password",
+          "app_pw" not in _rout and "audit_pw" not in _rout, _rout[-400:])
+    check("...and the record is still owed after it, not acknowledged by the attempt",
+          pg("select count(*) from mohio_audit_envelope_ack") == [(1,)],
+          pg("select count(*) from mohio_audit_envelope_ack"))
 
     _teardown()
 
@@ -587,6 +778,222 @@ if my_ok:
           outcomes(my("select detail from data_audit_log")) == ["rolled_back", "committed"],
           outcomes(my("select detail from data_audit_log")))
 
+
+
+# -- MySQL: the audit connection as an INSERT-and-SELECT-only user ------------------------------
+print("\n== mysql: an audit user that may only INSERT and SELECT, on indexes an administrator built ==")
+
+
+def _url_with_user(url, user, pw):
+    """The same server and database, signed in as another user (the userinfo replaced, nothing else)."""
+    import urllib.parse as _up
+    p = _up.urlsplit(url)
+    host = p.hostname or ""
+    if p.port:
+        host += ":" + str(p.port)
+    return _up.urlunsplit((p.scheme, "%s:%s@%s" % (user, pw, host), p.path, p.query, p.fragment))
+
+
+def _mysql_as(url, sql):
+    """One statement, signed in as the user the URL names."""
+    import pymysql
+    import urllib.parse as _up
+    u = _up.urlparse(url)
+    try:
+        c = pymysql.connect(host=u.hostname, port=u.port or 3306, user=u.username,
+                            password=u.password, database=u.path.lstrip("/"))
+    except Exception as e:
+        return "ERR %s" % str(e).splitlines()[0]
+    try:
+        cur = c.cursor()
+        cur.execute(sql)
+        return cur.fetchall() if cur.description else []
+    except Exception as e:
+        return "ERR %s" % str(e).splitlines()[0]
+    finally:
+        c.close()
+
+
+MY_SCRATCH = ("patients", "mohio_audit_envelope", "mohio_audit_envelope_ack", "mohio_key_check")
+
+if my_ok:
+    import uuid as _uuid
+    import urllib.parse as _up
+    MY_AUDIT_USER = "mohio_aud_" + _uuid.uuid4().hex[:8]     # server-wide, so never a fixed name
+    MY_AUDIT_URL = _url_with_user(MY, MY_AUDIT_USER, "audit_pw")
+    MY_DB = _up.urlparse(MY).path.lstrip("/")
+    for t in MY_SCRATCH + AUDIT_TABLES_ALL:
+        my("DROP TABLE IF EXISTS %s" % t)
+    for t in AUDIT_TABLES_ALL:
+        # Built once, by an administrator, as on Postgres: TEXT columns, indexed by a key prefix.
+        my("CREATE TABLE %s (%s)" % (t, ", ".join("`%s` TEXT" % c for c in canonical_audit_columns())))
+        my("CREATE UNIQUE INDEX adm_%s_p ON %s (prev_hash(255))" % (t, t))
+        my("CREATE UNIQUE INDEX adm_%s_a ON %s (audit_id(255))" % (t, t))
+    my("CREATE USER '%s'@'%%' IDENTIFIED BY 'audit_pw'" % MY_AUDIT_USER)
+    try:
+        for t in AUDIT_TABLES_ALL:
+            my("GRANT INSERT, SELECT ON `%s`.`%s` TO '%s'@'%%'" % (MY_DB, t, MY_AUDIT_USER))
+        out = run(APPEND_ONLY_WRITE, MY, "mysql", {"MOHIO_AUDIT_DATABASE_URL": MY_AUDIT_URL})
+        check("mysql: the program runs with the audit on its own restricted user",
+              "saved" in out and "denied" not in out, out[-400:])
+        _n_rec = my("select count(*) from data_audit_log")
+        check("mysql: ...and the record is in the trail on the first write (this user cannot create "
+              "an index, so none was sent)",
+              not isinstance(_n_rec, str) and [tuple(r) for r in _n_rec] == [(1,)], _n_rec)
+        _ix = my("select distinct index_name from information_schema.statistics where table_schema = "
+                 "DATABASE() and table_name in ('phi_audit_log','data_audit_log','operation_audit_log') "
+                 "order by index_name")
+        check("mysql: ...and the only indexes on the audit tables are the administrator's",
+              not isinstance(_ix, str) and sorted(r[0] for r in _ix)
+              == sorted("adm_%s_%s" % (t, k) for t in AUDIT_TABLES_ALL for k in ("a", "p")), _ix)
+        _dup = my("insert into data_audit_log (prev_hash, audit_id, event) "
+                  "select prev_hash, 'another-id', 'forged' from data_audit_log")
+        check("mysql: ...and a second record on the same predecessor is refused",
+              isinstance(_dup, str) and "Duplicate entry" in _dup, _dup)
+        _probe = _mysql_as(MY_AUDIT_URL, "CREATE INDEX probe_ix ON data_audit_log (event(10))")
+        check("mysql: ...and the audit user itself cannot build an index, so the record above is the "
+              "proof that it never tried", isinstance(_probe, str) and "denied" in _probe.lower(), _probe)
+    finally:
+        my("DROP USER IF EXISTS '%s'@'%%'" % MY_AUDIT_USER)
+        for t in MY_SCRATCH + AUDIT_TABLES_ALL:
+            my("DROP TABLE IF EXISTS %s" % t)
+    # A unique index on prev_hash WITH another column allows two records on one predecessor, so the
+    # owner builds its own.
+    for t in AUDIT_TABLES_ALL:
+        my("CREATE TABLE %s (%s)" % (t, ", ".join("`%s` TEXT" % c for c in canonical_audit_columns())))
+        my("CREATE UNIQUE INDEX wide_%s_p ON %s (prev_hash(255), event(50))" % (t, t))
+    run(APPEND_ONLY_WRITE, MY, "mysql")
+    _wide = my("select distinct index_name from information_schema.statistics where table_schema = "
+               "DATABASE() and table_name = 'data_audit_log'")
+    _wide = [r[0] for r in _wide] if not isinstance(_wide, str) else _wide
+    check("mysql: a unique index on prev_hash WITH another column is not taken as the chain's, so "
+          "Mohio builds its own", "ux_data_audit_log_prev_hash" in _wide, _wide)
+    for t in MY_SCRATCH + AUDIT_TABLES_ALL:
+        my("DROP TABLE IF EXISTS %s" % t)
+else:
+    skip("mysql restricted audit user", "mysql unreachable")
+
+
+# -- Oracle: indexes an administrator built, and not one statement from Mohio --------------------
+print("\n== oracle: the administrator's own unique indexes are the chain's, and Mohio sends no DDL ==")
+# The Oracle test user cannot create another user, so the INSERT-only role is shown on Postgres and
+# MySQL. What Oracle shows is the catalogue question itself, through `mio run` as the owner: the
+# indexes are already there under other names, and a schema DDL trigger writes down every DDL
+# statement this schema receives, so "no index statement" is read off the database, not inferred.
+ORA = os.environ.get("MOHIO_TEST_ORACLE", "oracle://nobody:none@127.0.0.1:1/none")
+ora_ok = False
+try:
+    import oracledb
+    from mohio_interpreter import OracleRuntime  # noqa: E402
+    _ou, _opw, _odsn = OracleRuntime._parse_url(ORA)
+    oracledb.connect(user=_ou, password=_opw, dsn=_odsn).close()
+    ora_ok = True
+except Exception as e:
+    skip("oracle cases", str(e).splitlines()[0][:70])
+
+
+def ora(sql):
+    c = oracledb.connect(user=_ou, password=_opw, dsn=_odsn)
+    try:
+        cur = c.cursor()
+        cur.execute(sql)
+        out = [tuple(r) for r in cur.fetchall()] if cur.description else []
+        c.commit()
+        return out
+    except Exception as e:
+        return "ERR %s" % str(e).splitlines()[0]
+    finally:
+        c.close()
+
+
+ORA_TABLES = MY_SCRATCH + ("mohio_ddl_seen",) + AUDIT_TABLES_ALL
+
+if ora_ok:
+    if _iso_guard is not None:
+        _c = oracledb.connect(user=_ou, password=_opw, dsn=_odsn)
+        try:
+            _iso_guard.require_live(_c, "oracle")
+        finally:
+            _c.close()
+    ora("DROP TRIGGER mohio_ddl_watch")
+    for t in ORA_TABLES:
+        ora("DROP TABLE %s PURGE" % t)
+    # The audit tables exactly as Mohio builds them, then the administrator's indexes under names of
+    # their own.
+    _ort = OracleRuntime(ORA)
+    for t in AUDIT_TABLES_ALL:
+        _ort.ensure_table(t, canonical_audit_columns(), allow_new_columns=True)
+    _ort.conn.close()
+    for t in AUDIT_TABLES_ALL:
+        ora("CREATE UNIQUE INDEX adm_%s_p ON %s (prev_hash)" % (t[:12], t))
+        ora("CREATE UNIQUE INDEX adm_%s_a ON %s (audit_id)" % (t[:12], t))
+    _ora_ix = ("SELECT index_name FROM user_indexes WHERE table_name IN "
+               "('PHI_AUDIT_LOG', 'DATA_AUDIT_LOG', 'OPERATION_AUDIT_LOG') "
+               "AND index_name NOT IN (SELECT constraint_name FROM user_constraints "
+               "WHERE constraint_type = 'P') ORDER BY index_name")
+    _before = ora(_ora_ix)
+    ora("CREATE TABLE mohio_ddl_seen (ev VARCHAR2(30), otype VARCHAR2(30), oname VARCHAR2(128))")
+    ora("CREATE OR REPLACE TRIGGER mohio_ddl_watch BEFORE DDL ON SCHEMA\n"
+        "DECLARE PRAGMA AUTONOMOUS_TRANSACTION;\n"
+        "BEGIN\n"
+        "  INSERT INTO mohio_ddl_seen VALUES (ora_sysevent, ora_dict_obj_type, ora_dict_obj_name);\n"
+        "  COMMIT;\n"
+        "END;")
+    try:
+        out = run(APPEND_ONLY_WRITE, ORA, "oracle")
+        _seen = ora("SELECT ev, otype, oname FROM mohio_ddl_seen")
+    finally:
+        ora("DROP TRIGGER mohio_ddl_watch")
+    check("oracle: the first regulated write lands its record",
+          "saved" in out and ora("SELECT count(*) FROM data_audit_log") == [(1,)],
+          (ora("SELECT count(*) FROM data_audit_log"), out[-300:]))
+    check("oracle: the DDL watch saw this run's own work (it is live, so its silence below counts)",
+          isinstance(_seen, list) and any(r[1] == "TABLE" for r in _seen), _seen)
+    _audit_ddl = [r for r in (_seen if isinstance(_seen, list) else [])
+                  if r[1] == "INDEX" and "AUDIT_LOG" in str(r[2]).upper()]
+    check("oracle: ...and not one index statement reached an audit log", _audit_ddl == [], _audit_ddl)
+    check("oracle: ...and the audit tables hold only the administrator's indexes",
+          isinstance(_before, list) and len(_before) == 6 and ora(_ora_ix) == _before,
+          (ora(_ora_ix), _before))
+    _dup = ora("INSERT INTO data_audit_log (prev_hash, audit_id, event) "
+               "SELECT prev_hash, 'another-id', 'forged' FROM data_audit_log")
+    check("oracle: ...and a second record on the same predecessor is refused",
+          isinstance(_dup, str) and "ORA-00001" in _dup, _dup)
+    # A unique index on prev_hash WITH another column allows two records on one predecessor, so the
+    # owner builds its own.
+    for t in ORA_TABLES:
+        ora("DROP TABLE %s PURGE" % t)
+    _ort = OracleRuntime(ORA)
+    for t in AUDIT_TABLES_ALL:
+        _ort.ensure_table(t, canonical_audit_columns(), allow_new_columns=True)
+    _ort.conn.close()
+    for t in AUDIT_TABLES_ALL:
+        ora("CREATE UNIQUE INDEX wide_%s_p ON %s (prev_hash, event)" % (t[:12], t))
+    run(APPEND_ONLY_WRITE, ORA, "oracle")
+    _wide = ora("SELECT index_name FROM user_indexes WHERE table_name = 'DATA_AUDIT_LOG'")
+    _wide = [str(r[0]).lower() for r in _wide] if not isinstance(_wide, str) else _wide
+    check("oracle: a unique index on prev_hash WITH another column is not taken as the chain's, so "
+          "Mohio builds its own", "ux_data_audit_log_prev_hash" in _wide, _wide)
+    # A NON-unique index on prev_hash alone: Oracle refuses a second index on the same column list
+    # (ORA-01408), which used to count as done, so the chain ran with no predecessor uniqueness and a
+    # second record on one predecessor was accepted (measured 2026-11-08 through `mio run`).
+    for t in ORA_TABLES:
+        ora("DROP TABLE %s PURGE" % t)
+    _ort = OracleRuntime(ORA)
+    for t in AUDIT_TABLES_ALL:
+        _ort.ensure_table(t, canonical_audit_columns(), allow_new_columns=True)
+    _ort.conn.close()
+    for t in AUDIT_TABLES_ALL:
+        ora("CREATE INDEX plain_%s_p ON %s (prev_hash)" % (t[:12], t))
+    out = run(APPEND_ONLY_WRITE, ORA, "oracle")
+    check("oracle: a NON-unique index on prev_hash is not taken as the chain's: the record is not "
+          "written to an unprotected chain", ora("SELECT count(*) FROM data_audit_log") == [(0,)],
+          ora("SELECT count(*) FROM data_audit_log"))
+    check("oracle: ...and the reason is said, with the fix",
+          "does not hold it to one row" in out and "Make that index unique on prev_hash alone" in out,
+          out[-600:])
+    for t in ORA_TABLES:
+        ora("DROP TABLE %s PURGE" % t)
 
 shutil.rmtree(TMP, ignore_errors=True)
 if _skipped:

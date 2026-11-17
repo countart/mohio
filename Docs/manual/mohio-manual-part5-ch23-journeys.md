@@ -130,6 +130,72 @@ wrong. Same guarantee, one application across many deployments.
 
 ---
 
+### Access control -- what the journey gates, and what it does not
+
+Governance (the sector and the connection, sections 3-6) decides which rules a page runs under. **Access
+control decides who may load a page at its URL at all**, and it is declared the same way: by path, in the
+journey. A folder `journey.mho` that classifies four paths:
+
+```mohio
+timezone "UTC"
+public: /ok
+unlisted: /docs
+authorize: /admin
+hidden: /secret
+```
+
+Served with `mio serve app` and hit anonymously (no signed-in session):
+
+```
+$ curl ... /ok      -> 200     # public:    served and listed
+$ curl ... /docs    -> 200     # unlisted:  served, UNLISTED, NOT gated
+$ curl ... /admin   -> 403     # authorize: sign-in required
+$ curl ... /secret  -> 404     # hidden:    not served to anyone
+```
+
+**Two things the journey does NOT do, and both are mistakes that have shipped:**
+
+- **It does not gate the `.mho` source.** Source is never served; it stays on the server. A request for the
+  file itself is a plain 404, classified or not:
+
+```
+$ curl ... /journey.mho  -> 404
+$ curl ... /index.mho    -> 404
+```
+
+  What a visitor can reach is the rendered page at its route, and that is what a classification gates.
+
+- **A hard-to-guess URL is not access control.** `unlisted:` keeps a path out of any listing, but still serves
+  it 200 to anyone who requests it. If a page must be protected, gate it; do not rely on nobody finding the link.
+
+**The gates are `authorize:` and `hidden:`.** `authorize:` withholds the body with a 403 until the visitor
+holds a server-verified role (a path is matched at its segment boundary, so `authorize: /admin` covers
+`/admin/panel` but not `/administration`). `hidden:` returns 404 to everyone, and a path segment starting with
+`_` is hidden whether declared or not. `public:` and `unlisted:` are about *listing*, not access: both serve the
+body to anyone who asks.
+
+**`private:` is the former spelling of `unlisted:`, and still works.** It is a deprecated alias: a journey or
+page that writes `private:` checks clean but warns -- `private: is now unlisted:; note neither restricts access
+- use authorize: or hidden: to gate` -- and behaves exactly as `unlisted:` (served, unlisted, not gated). Write
+`unlisted:` in new code; the rename lands in 6.0.4.
+
+**The gate runs before the page renders.** Every journey's gate fires before any handler dispatches, so a page
+under `authorize:` returns 403 with its body never reached -- a handler cannot leak its content ahead of the
+gate, whatever order it is written in:
+
+```
+[mohio.error] status=403 :: Please sign in. This page needs someone signed in, and nobody is.
+GET /admin   403      # the "admin page" body was never produced
+```
+
+**When you do NOT need any classification.** Public is the default, so a page meant for everyone needs none.
+Reach for a classification only to restrict: `authorize:` to require sign-in, `hidden:` to take a path off the
+server, `unlisted:` to keep a served path out of listings. This is htaccess/config-style access control --
+declared once, for a whole folder, in version control -- and on this build it is enforced at the serve layer,
+not advisory.
+
+---
+
 ### 2. The two forms
 
 **The canonical form is a file named `journey.mho`, with no wrapper**, sitting in a folder beside the
@@ -157,25 +223,58 @@ shape: done
 **Reach for the folder `journey.mho` form.** It is the one the folder convention is built around and the
 one the cascade (below) walks. The wrapper is the older form and is still accepted.
 
-**One thing only the wrapper can declare today: page classification.** `public:`, `private:`, `hidden:`
-and `authorize:` are wrapper alternatives and do **not** parse in a bare folder `journey.mho`:
+**Classification is declared by path, and a folder `journey.mho` is the canonical place for it.** The four
+classification lines (`public:` / `unlisted:` / `authorize:` / `hidden:`, the access control above) parse at the
+top level of a folder `journey.mho`, exactly as they do inside the wrapper:
 
 ```
-$ mio check journey.mho          # a folder journey.mho containing only:  private: /docs
-Syntax error
-  1 | private: /docs
+$ mio check journey.mho     # a folder journey.mho whose lines are public:/unlisted:/authorize:/hidden:
+  v  journey.mho  5 lines . no errors
 ```
 
-So a folder `journey.mho` cannot classify a path today. This is a known gap
-(`T1-CLASSIFICATION-WRAPPER-ONLY`), still open (verified: a bare `private: /docs` still fails to parse).
+(An earlier build accepted these only inside the `journey NAME ... journey: done` wrapper. That gap,
+`T1-CLASSIFICATION-WRAPPER-ONLY`, is **closed** on this build: a bare folder `journey.mho` classifies.)
 
-**Classification now follows the tighten-only rule across the cascade.** Where classification IS declared (in a
-wrapper journey), a nearer journey can only make a path STRICTER, never looser, in the strictness order
-`public` < `private` < `authorize` < `hidden` (`hidden` is the strongest). A subfolder journey that would weaken a
-parent's classification for the same path, or a broader path that would swallow a narrower stricter one beneath
-it, is refused. This is the same tighten-only rule section 5 states for the sector, now extended to classification
-(build 2026-10-04), enforced when the app is assembled (the path `mio run` and `mio serve` use). Before this, a
-subfolder could silently make a hidden path public.
+**Classification cascades, tighten-only, like the sector (section 5).** A nearer journey may make a path
+STRICTER, never looser, in the order `public` < `unlisted` < `authorize` < `hidden` (`hidden` is the strongest).
+A subfolder that tightens is accepted; one that would loosen a parent's class for the same path is refused when
+the app is assembled (the `mio run` / `mio serve` / `mio check app` path):
+
+```
+$ mio check app     # root  authorize: /y     subfolder  public: /y
+Error  The journey at app/sub/journey.mho sets `public: /y`, which would LOOSEN `authorize: /y` the
+journey at app/journey.mho already requires. A subfolder journey may only TIGHTEN a page's
+classification, never relax it ...
+```
+
+A narrower path may still be carved out looser (`authorize: /admin`, then `public: /admin/open`). Before this
+rule (build 2026-10-04), a subfolder could silently make a hidden path public.
+
+**Do you need a tag on each page? No.** A page is governed by its own folder's journey and every ancestor
+journey up to the app root purely by WHERE IT SITS -- nothing tags a page into a journey, and classification is
+declared by path in the journey, so pages are not tagged either. A page MAY restate a classification for its own
+path inline, but that only helps to TIGHTEN its own path (match or raise the class). A page cannot loosen itself:
+the strictest class any journey declares for the path is what serves, and a looser inline line is inert and only
+warns.
+
+```
+$ mio check app     # journey  authorize: /p     page p.mho  public: /p
+! Line 1: this page declares `public: /p`, but the journey ... classifies `/p` as `authorize:`, which
+is stricter ... this page is served as `authorize:` and its own line does nothing.
+```
+
+**The one real journey-line tag is `[important]`.** It sits on a journey classification line (not on a page) and
+makes that class a FLOOR: a page that declares a class BELOW it for the path is REFUSED at check rather than
+merely warned -- the tool for a gate a page may not negotiate down:
+
+```
+$ mio check app     # journey  authorize: /p [important]     page p.mho  public: /p
+Error  Line 1: this page declares `public: /p`, below the `[important]` floor `authorize: /p` set at
+line 2 of app/journey.mho. A page may match or tighten an `[important]` journey class, never fall below it ...
+```
+
+At or above the floor the page checks clean. `[important]` is also valid on a `timezone` line (the journey's
+zone wins); on a `sector:` line it is refused, as is any label other than `[important]` in that slot.
 
 ---
 
@@ -191,7 +290,7 @@ subfolder could silently make a hidden path public.
 | `limits ... limits: done` | the AI ceiling | Yes (same assembly) |
 | an `include` | pulls a shared file in | Yes (part of the journey's statements) |
 | `suppress <code> reason "..."` | quiets one advisory diagnostic (section 8) | Yes: a folder journey quiets its folder (check-verified) |
-| `public:` / `private:` / `hidden:` / `authorize:` | page classification | Wrapper-only; not declarable in a folder `journey.mho` today |
+| `public:` / `unlisted:` / `hidden:` / `authorize:` | page classification (access control) | Yes, tighten-only (section 2); declarable in a folder `journey.mho` |
 
 "Run-verified" means a subfolder page was served and shown to inherit it this pass; "same assembly"
 means it rides the identical cascade mechanism as the verified ones and is not separately re-run here.
@@ -231,17 +330,40 @@ restates `greeting`, so the nearest value wins (`from-api`), while `rootonly` --
 never mentions -- **stays the root's** (`root-value`). That is nearest-wins and inherit-what-you-do-not-
 restate in one page.
 
-**The cascade is a `mio serve` feature, keyed on the application root.** Serving the folder
-(`mio serve app`) is what walks the ancestors. Running a single file with `mio run app/api/status.mho`
-does **not** cascade -- it applies only that file's own-directory journey, so a value declared only in
-the root journey reads as an unknown variable:
+**The value cascade travels with the file, even under `mio run`.** Running a single page still applies
+every ancestor journey from the root down, exactly as serving does, so a value declared only in the
+root journey resolves normally rather than erroring:
 
 ```
 $ mio run app/api/status.mho
-Runtime error: show refers to an unknown variable 'rootonly'.
+<p>from-api / root-value</p>
 ```
 
-So test a multi-folder application with `mio serve app`, not by running one file.
+`rootonly` reads as `root-value` here: the file inherits the whole chain. Governance travels with the
+file.
+
+**The page-classification gates travel with the file too, and `mio run` honors them.** `mio run` has
+no sign-in, so a classified page is not run without its gate. Running an `authorize:` or `hidden:` page
+directly does not print its body: `mio run` refuses it, names the journey line that classifies it,
+points you at `mio serve`, and exits non-zero. A page's gate cannot be shed by running it standalone.
+With `authorize: /admin` in the root journey and an `admin.mho` page:
+
+```
+$ mio run app/admin.mho
+
+  Refused  app/admin.mho
+
+  admin.mho answers at /admin, and journey.mho line 3 classifies /admin as authorize: (sign in required).
+  mio run has no sign-in, so running it here would show the page to anyone who can run the file, with nothing checking who is asking.
+  See it the way a visitor does:  mio serve app  (then sign in)
+  Run it here anyway, on your own machine:  mio run app/admin.mho --ungated
+```
+
+A `hidden:` page refuses the same way, noting that serving it answers `404` to everyone. To see a
+classified page the way a visitor does, serve the application -- `mio serve app` -- and make real
+requests: `/admin` returns `403` until you sign in, a `hidden:` `/secret` returns `404`. During
+development `--ungated` runs the page anyway, with a loud warning that the gate is off; it is a local
+override, never a way to serve an ungated page.
 
 **A `hold` value cannot be restated by a nearer journey.** A held value is frozen (see Chapter 5), so a
 root `hold greeting` and an `api/journey.mho` that also writes `hold greeting` collide with an
@@ -378,9 +500,15 @@ journey: done
 
 ### Common mistakes
 
+- **`unlisted:` (formerly `private:`) is not a gate -- `authorize:`/`hidden:` gate.** `unlisted:` only UNLISTS a
+  served path; it returns 200 to anyone who requests the URL. A page that must be protected needs `authorize:`
+  (403 until sign-in) or `hidden:` (404). Relying on `unlisted:`, or on an unguessable URL, leaves the page open
+  -- the single most common way a restricted page leaks. (`private:` still works as a deprecated alias and warns
+  to `unlisted:`; it is the same not-a-gate behaviour under the old name.)
+- **Leaving a sensitive page unclassified.** Public is the default, so a page with no classification is served
+  to everyone. Restricting a page is something you declare; it never happens by omission.
 - **Testing a multi-folder app with `mio run onefile.mho`.** No cascade; use `mio serve app`.
 - **Overriding a shared value declared with `hold`.** A nearer journey cannot restate a held value; use
   a naked value for anything a subfolder should override.
 - **Assuming `mio serve` is the only place the sector floor is enforced.** Since Batch 37 `mio check app`
   assembles the cascade and catches a loosening subfolder too, so check and serve agree.
-- **Classifying from a folder `journey.mho`.** `private:` and its siblings are wrapper-only today.

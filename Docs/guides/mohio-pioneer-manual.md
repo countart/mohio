@@ -417,4 +417,4 @@ You'll be first to know. That's the deal.
 
 ---
 
-*MOHIO™ · Patent pending · Open core (BSL 1.1 base compiler) · Particular LLC · Mooresville, NC*
+*MOHIO™ · Patent pending · Free to use under the BSL 1.1 · Particular LLC · Mooresville, NC*

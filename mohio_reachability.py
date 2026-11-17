@@ -75,7 +75,7 @@ because a noisy check erodes trust faster than a missed one.
 import re
 from mohio_egress import gated_print as print  # noqa: A001,E402 -- every print through the egress gate
 
-from dataclasses import fields, is_dataclass
+from mohio_dc import fields, is_dataclass
 
 from mohio_ast import GiveBackStmt, HaltStmt, CheckBlock
 from mohio_transformer import CompileWarning, CompileError
@@ -303,7 +303,7 @@ def scan_orphan_it(program):
     anywhere in the program, so a valid `give back it` after a chain is never flagged.
     (The runtime guard is the complete catch; this is the early check-time signal.)"""
     from lark import Tree
-    from dataclasses import is_dataclass, fields
+    from mohio_dc import is_dataclass, fields
     has_chain = [False]
     it_refs = []
     seen = set()
@@ -3086,7 +3086,7 @@ def scan_audit_destinations(program):
 def _declares_audit_store(program):
     """True when the program connects `db`, the connection the audit trail is written to (the
     runtime reads `get_connection('db')` for its sink). A store bound by a deployment's audit-sink
-    provider is not visible here; open core writes the trail to the program's own `db`."""
+    provider is not visible here; the free runtime writes the trail to the program's own `db`."""
     stack = [program]
     while stack:
         n = stack.pop()
@@ -3334,7 +3334,7 @@ def scan_miofile_dangerous_accept(program):
     can never be honoured. Left to runtime it reads as a working permission that
     silently is not one, so it is an error where it is written, not where it runs.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import MiofileDecl
     from mohio_runtime_vocab import DANGEROUS_UPLOAD_EXT as banned
     errors = []
@@ -3415,7 +3415,7 @@ def scan_upload_accept_groups(program):
     everything -- and a near miss like `accept image` would do the same, so both stop
     here rather than shipping a field that behaves backwards.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import ShapeDecl
     errors = []
     upload_types = ('file', 'image', 'audio', 'video', 'pdf')
@@ -3487,7 +3487,7 @@ def scan_give_destination(program):
         does not, and the transformer sees only the shape, not what the value will hold
         at request time -- so this is refused now instead of failing on the request.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import GiveStmt, Literal
     errors = []
 
@@ -3545,7 +3545,7 @@ def scan_bare_random_intrinsic(program):
     (mohio_interpreter.py, T0-5) for the full mechanism. This is the check-time half: catch it
     before the program ever runs, not only when it happens to execute that line.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import DottedName
     errors = []
     _needs_clause = {'token': 'length N', 'hex': 'length N', 'number': 'between N and N'}
@@ -3695,7 +3695,7 @@ def scan_state_op_requires_held(program):
     by the separate `scan_release_now_lock_retired`, so only the plain `release` variant reaches
     this check.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import HoldDecl, VarStateStmt, ReplaceBlock, ReleaseStmt, Assignment
     errors = []
     held_names = set()
@@ -3789,7 +3789,7 @@ def scan_release_now_lock_retired(program):
     back into service `release`, method `now`); that untyped bare form was never the thing RULED
     retired above, so it is intentionally not scanned here.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import ReleaseStmt
     errors = []
     _RETIRED = {
@@ -3862,7 +3862,7 @@ def scan_old_agent_result_underscore_form(program):
     alone (it was never this leaking form to begin with).
     """
     import re
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import AiAgentBlock, DottedName
     errors = []
     agent_names = set()
@@ -3934,7 +3934,7 @@ def scan_bare_now_uuid_as_value(program):
     construct this scanner could mistake for the unsafe one, the same confidence
     `scan_bare_random_intrinsic` (right below) already has for its own bare-intrinsic shape.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import DottedName
     errors = []
     _produces = {'now': 'the current moment', 'uuid': 'a new id'}
@@ -3999,7 +3999,7 @@ def scan_mixed_connector_chain(program):
     connector-reach survey) -- so a legitimate `find`/`retrieve` query is structurally unreachable
     by this scanner, not just untested.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import AndCondition, OrCondition, NotCondition
     errors = []
 
@@ -5266,7 +5266,8 @@ _INTERP_DIRECTIVE_KW = ('guard', 'form', 'field', 'include')
 _RENDER_INCLUDE_RE = re.compile(r'include\s*"([^"]*)"\s*$')
 
 
-def _iter_render_includes(html, base_dir, anchor_base_line, seen, top_anchor=None):
+def _iter_render_includes(html, including_file, app_root, anchor_base_line, seen, top_anchor=None,
+                          problems=None):
     """Yield (content, include_path, anchor_line) for every file a render body `{{ include "x" }}`s,
     recursively, following nested includes so a check-time content scan sees the SAME text the
     runtime renders. Without this, an authoring error inside an included presentation file (an
@@ -5274,14 +5275,16 @@ def _iter_render_includes(html, base_dir, anchor_base_line, seen, top_anchor=Non
     include hole, and it was shared by every check-time render-content scan, because none of them
     descended into the included file.
 
-    The path is resolved cwd-relative, EXACTLY as the interpreter's `_render_include_directive`
-    does (`_include_base_dir` is never set, so both fall back to the working directory): a file the
-    runtime cannot find, the scan cannot find either, and the runtime reports `include_not_found`
-    itself, so a missing or unreadable include is skipped here rather than raising a second, weaker
-    error at check. `anchor_line` is the .mho line of the TOP-LEVEL include that pulled the chain
-    in, so an error in a nested file is still reported at a line the developer can open. A cycle is
-    not recursed into (the runtime fails it loud separately)."""
-    import os as _os
+    The path is found by the ONE include resolver the runtime uses (mohio_include.resolve_include):
+    next to the file this include is written in, then at the application root, never outside the
+    root and never by the working directory. A nested include searches its OWN file's folder first.
+    Because check and run now resolve identically, an include that cannot be loaded (it leaves the
+    application, or names no file) is a refusal at check, appended to `problems` as
+    (anchor_line, message, reason) when a caller collects them, rather than a silent skip that 500s
+    at run. `anchor_line` is the .mho line of the TOP-LEVEL include that pulled the chain in, so an
+    error in a nested file is still reported at a line the developer can open. A cycle is not
+    recursed into (the runtime fails it loud separately)."""
+    from mohio_include import resolve_include, IncludeRefused
     for m in re.finditer(r'(\\?)\{\{([^}]+)\}\}', html or ''):
         if m.group(1):
             continue  # a backslash-escaped pair renders literally
@@ -5289,18 +5292,67 @@ def _iter_render_includes(html, base_dir, anchor_base_line, seen, top_anchor=Non
         if not im:
             continue
         this_anchor = top_anchor if top_anchor is not None \
-            else (anchor_base_line + html[:m.start()].count('\n'))
-        abspath = _os.path.abspath(_os.path.join(base_dir, im.group(1)))
+            else _line_at(anchor_base_line, html[:m.start()].count('\n'))
+        try:
+            abspath = resolve_include(im.group(1), including_file, app_root)
+        except IncludeRefused as _refused:
+            if problems is not None:
+                problems.append((this_anchor, str(_refused), _refused.reason))
+            continue
         if abspath in seen:
             continue  # a cycle -- the runtime fails loud on it; the scan simply stops descending
         try:
             with open(abspath, encoding='utf-8-sig') as fh:
                 content = fh.read()
-        except OSError:
-            continue  # unresolvable at check; runtime reports include_not_found
+        except (OSError, ValueError) as _unreadable:
+            if problems is not None:
+                problems.append((this_anchor, f'include "{im.group(1)}" cannot be read: {_unreadable}',
+                                 'missing'))
+            continue
         yield (content, im.group(1), this_anchor)
-        yield from _iter_render_includes(content, base_dir, 1, seen | {abspath},
-                                         top_anchor=this_anchor)
+        yield from _iter_render_includes(content, abspath, app_root, 1, seen | {abspath},
+                                         top_anchor=this_anchor, problems=problems)
+
+
+def _render_line_of(node):
+    """Source line of each line of a render block's body: a function from a 0-based offset into
+    `ShowBlock.html` to the line it was written on. The html keeps only the non-blank body lines
+    and the block carries the line of its `render` opener, so counting newlines from the block's
+    own line landed every finding one line early, and one more for each blank line above it. The
+    transformer records each kept line's own source line (`body_lines`); a block built without them
+    (an older cached AST) counts from the line after the opener."""
+    _ln = getattr(node, 'line', 0) or 0
+    _file = getattr(_ln, 'file', None)
+    _body = list(getattr(node, 'body_lines', None) or [])
+
+    def line_of(offset):
+        if 0 <= offset < len(_body) and _body[offset]:
+            n = _body[offset]
+        elif _ln:
+            n = _ln + 1 + offset
+        else:
+            return 0
+        if _file:   # a statement from an included file keeps its own file (SourceLine)
+            from mohio_ast import SourceLine
+            return SourceLine(n, _file)
+        return n
+    return line_of
+
+
+def _line_at(base, offset):
+    """The source line `offset` lines into a body: `base` is a render block's line function
+    (`_render_line_of`) or a plain starting line."""
+    if callable(base):
+        return base(offset)
+    return (base or 0) + offset
+
+
+def _render_include_place(program, node):
+    """(including file, application root) for a render body: the file the statement was written in
+    (an included statement's line carries it), else the program's own file, with the root the CLI
+    recorded on the program (`include_origin`)."""
+    _file, _root = getattr(program, 'include_origin', None) or (None, None)
+    return (getattr(getattr(node, 'line', None), 'file', None) or _file), _root
 
 
 def scan_render_interpolation_unresolvable(program):
@@ -5355,7 +5407,7 @@ def scan_render_interpolation_unresolvable(program):
             if origin is not None:
                 inner = html[:pos].count('\n') + 1
                 return (anchor_line or None, f'In the included file "{origin}" (line {inner}): ')
-            return (((base_line or 0) + html[:pos].count('\n')) or None, '')
+            return (_line_at(base_line, html[:pos].count('\n')) or None, '')
 
         for m in re.finditer(r'(\\?)\{\{([^}]+)\}\}', html):
             if m.group(1):
@@ -5364,7 +5416,8 @@ def scan_render_interpolation_unresolvable(program):
             if not expr:
                 continue  # an empty {{ }} is left to runtime's own handling
             first = expr.split()[0]
-            if first in _INTERP_DIRECTIVE_KW:
+            # A bare `{{ include }}` is a variable read; only `include "file"` is the include.
+            if first in _INTERP_DIRECTIVE_KW and expr != 'include':
                 continue  # a directive; it validates itself (and fails loud) at runtime
             if first == 'each' or expr.startswith('each:'):
                 # A view loop is LINE-ANCHORED: `{{ each NAME in SOURCE }}` / `{{ each: done }}` each
@@ -5430,12 +5483,25 @@ def scan_render_interpolation_unresolvable(program):
         if not is_dataclass(node):
             return
         if type(node).__name__ == 'ShowBlock':
-            import os as _os
             _html = getattr(node, 'html', '') or ''
-            _base = getattr(node, 'line', 0) or 0
+            _base = _render_line_of(node)
             check_html(_html, _base)
-            for _content, _origin, _anchor in _iter_render_includes(_html, _os.getcwd(), _base, set()):
+            _file, _root = _render_include_place(program, node)
+            _problems = []
+            for _content, _origin, _anchor in _iter_render_includes(_html, _file, _root, _base, set(),
+                                                                    problems=_problems):
                 check_html(_content, 0, origin=_origin, anchor_line=_anchor)
+            for _line, _msg, _reason in _problems:
+                if _reason == 'outside':
+                    errors.append(CompileError(
+                        _msg, line=_line or None,
+                        hint="Keep every include inside the application folder.",
+                        code='include_outside_app'))
+                else:
+                    errors.append(CompileError(
+                        _msg, line=_line or None,
+                        hint="Add the file, or correct the path.",
+                        code='include_not_found'))
         for f in fields(node):
             walk(getattr(node, f.name, None))
 
@@ -5469,7 +5535,7 @@ def scan_render_include_bare(program):
                     warnings.append(CompileWarning(
                         f"`{s}` inside a render block is emitted as literal text, not run. To load "
                         f"and insert the file here, write it as an evaluation: {{{{ {s} }}}}.",
-                        line=(base_line + i) or None, code="include_line_emitted_as_text"))
+                        line=_line_at(base_line, i) or None, code="include_line_emitted_as_text"))
 
     def walk(node):
         if node is None or isinstance(node, (str, int, float, bool)):
@@ -5481,11 +5547,11 @@ def scan_render_include_bare(program):
         if not is_dataclass(node):
             return
         if type(node).__name__ == 'ShowBlock':
-            import os as _os
             html = getattr(node, 'html', '') or ''
-            base = getattr(node, 'line', 0) or 0
+            base = _render_line_of(node)
             check_lines(html, base)
-            for _content, _origin, _anchor in _iter_render_includes(html, _os.getcwd(), base, set()):
+            _file, _root = _render_include_place(program, node)
+            for _content, _origin, _anchor in _iter_render_includes(html, _file, _root, base, set()):
                 check_lines(_content, 0, origin=_origin, anchor_line=_anchor)
         for f in fields(node):
             walk(getattr(node, f.name, None))
@@ -5493,6 +5559,194 @@ def scan_render_include_bare(program):
     for st in (getattr(program, 'statements', None) or []):
         walk(st)
     return warnings
+
+
+# Names the runtime binds itself while a program runs (`ctx.set` with a fixed name in
+# mohio_interpreter.py), so a `{{ }}` reading one is never "set by nothing".
+_RUNTIME_BOUND_ROOTS = frozenset({
+    'request', 'session', 'it', 'request_id', 'canonical', 'failure', 'errors', 'endpoint',
+    'comparison', 'flowed', 'flow_trace', 'walked', 'walk_report', 'stage'})
+_SET_NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+# A route parameter segment, as the runtime reads it (MohioInterpreter._PATH_PARAM_SEG).
+_ROUTE_PARAM_SEG = re.compile(r'^\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}$')
+
+
+def scan_interpolation_never_set(program):
+    """A `{{ name }}` that NOTHING in the program sets: a warning at check, never an error
+    (T1-UNSET-INTERPOLATION-RENDERS-EMPTY, RULED by Ron 2026-11-08, handoff section 4).
+
+    At run an unset `{{ x }}` renders empty, because a value nothing set on this run is often a
+    legitimate optional: set in one branch, or by an earlier request. A name that nothing in the
+    whole program ever sets is almost always a typo (`{{ membr.name }}`) or a forgotten fetch, and
+    it is visible here without a request, so it is warned here. The scan reads the program as run,
+    with its includes and journey in it, and the fragments its renders include.
+
+    "Sets" is read wide, so a correct program is not warned: a name written anywhere in the program
+    other than as a value being read (an assignment, an `as` capture, a `find` target, a loop or view
+    loop name, a `take`, a shape field a request binds) counts as set, wherever it is, in any branch.
+    A name read from the session is cross-scope and is never warned: a variable persists on the
+    session (ruled 2026-11-08), so a name another page of the same application sets reaches this
+    one that way (`_names_set_on_other_pages`), and `session.x` itself is bound by the runtime. The
+    scope knowledge is still imperfect, which is why this warns and never blocks."""
+    candidates = []     # (root, expr, line, prefix)
+    set_names = set(_RUNTIME_BOUND_ROOTS)
+
+    def _where(text, pos, base_line, origin, anchor_line):
+        if origin is not None:
+            return (anchor_line or None,
+                    f'In the included file "{origin}" (line {text[:pos].count(chr(10)) + 1}): ')
+        return (_line_at(base_line, text[:pos].count('\n')) or None, '')
+
+    def scan_template(text, base_line, origin=None, anchor_line=None):
+        for em in _RENDER_EACH_OPEN_ANY.finditer(text):
+            set_names.add(em.group(1))
+            if em.group(2):
+                # The collection a view loop walks is read like any value: one nothing sets renders no
+                # rows (ruled 2026-11-11), and is warned here.
+                line, pfx = _where(text, em.start(), base_line, origin, anchor_line)
+                candidates.append((em.group(2).split('.')[0],
+                                   f'each {em.group(1)} in {em.group(2)}', line, pfx))
+        for m in re.finditer(r'(\\?)\{\{([^}]+)\}\}', text):
+            if m.group(1):
+                continue    # a backslash-escaped pair renders literally
+            expr = m.group(2).strip()
+            first = expr.split(None, 1)[0] if expr else ''
+            if not _VALID_INTERP_NAME.match(expr) or first.startswith('each') or expr == 'guard':
+                continue    # a directive, a view loop, or a form the unresolvable scan refuses
+            root = expr.split('.')[0]
+            if origin is not None:
+                line = anchor_line or None
+                pfx = f'In the included file "{origin}" (line {text[:m.start()].count(chr(10)) + 1}): '
+            else:
+                line = _line_at(base_line, text[:m.start()].count('\n')) or None
+                pfx = ''
+            candidates.append((root, expr, line, pfx))
+
+    def walk(node, line):
+        if node is None or isinstance(node, (int, float, bool)):
+            return
+        if isinstance(node, str):
+            if node.startswith('/') and '{{' in node:
+                # A route: `at /accounts/{{id}}` BINDS id from the address (a whole-segment `{{ }}`),
+                # it does not read it.
+                for _seg in node.split('/'):
+                    _pm = _ROUTE_PARAM_SEG.match(_seg.strip())
+                    if _pm:
+                        set_names.add(_pm.group(1))
+            elif '{{' in node:
+                scan_template(node, line)
+            elif _SET_NAME.match(node):
+                set_names.add(node)
+            return
+        if isinstance(node, (list, tuple)):
+            for c in node:
+                walk(c, line)
+            return
+        if isinstance(node, dict):
+            for c in node.values():
+                walk(c, line)
+            return
+        if not is_dataclass(node):
+            return
+        kind = type(node).__name__
+        line = getattr(node, 'line', None) or line
+        if kind == 'DottedName':
+            return          # a value being read, never a name being set
+        if kind == 'Literal':
+            if isinstance(getattr(node, 'value', None), str) and '{{' in node.value:
+                scan_template(node.value, line)
+            return          # a literal's text is data, not a name
+        if kind == 'ShowBlock':
+            _html = getattr(node, 'html', '') or ''
+            scan_template(_html, _render_line_of(node))
+            _file, _root = _render_include_place(program, node)
+            for _content, _origin, _anchor in _iter_render_includes(_html, _file, _root,
+                                                                    _render_line_of(node), set()):
+                scan_template(_content, 0, origin=_origin, anchor_line=_anchor)
+        for f in fields(node):
+            if f.name not in ('line', 'html'):
+                walk(getattr(node, f.name, None), line)
+
+    for st in (getattr(program, 'statements', None) or []):
+        walk(st, None)
+
+    import difflib
+    warnings, seen = [], set()
+    # Read the other pages only when this page leaves something unset: most pages set what they show.
+    elsewhere = (_names_set_on_other_pages(program)
+                 if any(c[0] not in set_names for c in candidates) else frozenset())
+    for root, expr, line, pfx in candidates:
+        if root in set_names or root in elsewhere or root.startswith('_') or (root, line, pfx) in seen:
+            continue
+        seen.add((root, line, pfx))
+        near = difflib.get_close_matches(root, sorted(n for n in set_names if not n.startswith('_')),
+                                         n=1, cutoff=0.8)
+        fix = (f"Did you mean `{near[0]}`? " if near else '') + \
+            f"Set it before it is shown (`{root} <value>`, or `find {root} in db.<table>`), or check the spelling."
+        if expr.startswith('each '):
+            what = f"`{{{{ {expr} }}}}` loops over `{root}`, and nothing in this application sets it, so it renders no rows."
+        else:
+            what = f"`{{{{ {expr} }}}}` reads `{root}`, and nothing in this application sets it, so it renders empty."
+        warnings.append(CompileWarning(pfx + what + " " + fix, line=line, code="interpolation_never_set"))
+    return warnings
+
+
+# A view-loop opener anywhere in a template, line-anchored or not: its loop name is set for the
+# lines inside it.
+_RENDER_EACH_OPEN_ANY = re.compile(
+    r'\{\{\s*each\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)?')
+
+# The shapes a name is SET in, read from a page's source: a statement's leading name (`total 5`,
+# `hold x 1`), an `as` capture, a find / retrieve / grab target, a loop name, a `take`.
+_PAGE_SETS = (
+    re.compile(r'(?m)^[ \t]*(?:hold[ \t]+|lock[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)\b'),
+    re.compile(r'\bas[ \t]+([A-Za-z_][A-Za-z0-9_]*)'),
+    re.compile(r'(?m)^[ \t]*(?:find|retrieve|grab)(?:\.[a-z]+)?[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+(?:in|from)\b'),
+    re.compile(r'\beach[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in\b'),
+)
+_PAGE_TAKE = re.compile(r'(?m)^[ \t]*take[ \t]+([^\n]+)')
+_OTHER_PAGE_SETS = {}
+
+
+def _names_set_on_other_pages(program):
+    """Every name some OTHER .mho file of this program's application sets, read from its source.
+
+    A variable persists on the session across requests (Ron's ruling, 2026-11-08), so a name set by
+    the sign-in page reaches the account page that renders it, and check, which reads one page,
+    cannot see that from the page itself. Read from the source rather than parsed, once per
+    application per check run, and wide (any statement's leading word counts), because it only ever
+    REMOVES a warning: a name no file of the application sets anywhere still warns.
+
+    Only a page of an APPLICATION has other pages (`include_app`: a folder it was served or checked
+    from, or a journey at its root). A lone file's folder is not its application: read as one, a file
+    in a temp or downloads folder would read every .mho under it, which is unbounded."""
+    import os
+    _file, _root = getattr(program, 'include_origin', None) or (None, None)
+    if not _root or not getattr(program, 'include_app', False):
+        return frozenset()
+    _root = os.path.realpath(_root)
+    _here = os.path.realpath(_file) if _file else None
+    key = (_root, _here)
+    if key in _OTHER_PAGE_SETS:
+        return _OTHER_PAGE_SETS[key]
+    names = set()
+    for dp, dn, fn in os.walk(_root):
+        dn[:] = [d for d in dn if not d.startswith('.')]
+        for f in fn:
+            p = os.path.realpath(os.path.join(dp, f))
+            if not f.endswith('.mho') or p == _here:
+                continue
+            try:
+                with open(p, encoding='utf-8-sig') as fh:
+                    src = fh.read()
+            except (OSError, UnicodeDecodeError):   # SILENT-OK: an unreadable page sets nothing here;
+                continue                            # its own check reports it
+            for pat in _PAGE_SETS:
+                names.update(pat.findall(src))
+            for tm in _PAGE_TAKE.findall(src):
+                names.update(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', tm))
+    _OTHER_PAGE_SETS[key] = frozenset(names)
+    return _OTHER_PAGE_SETS[key]
 
 
 # THE PATHS THE RUNTIME ANSWERS ITSELF, for GET and HEAD: its health checks (mohio_server's create_app,
@@ -6993,7 +7247,7 @@ class _ReachingAssignments:
     def __init__(self, program):
         from mohio_ast import TOP_HANDLER_TYPES
         self._bounds = tuple(TOP_HANDLER_TYPES)
-        self.pos, self.parent = {}, {}
+        self.pos, self.parent, self._memo = {}, {}, {}
         stack = [(program, None)]
         while stack:
             node, par = stack.pop()
@@ -7026,6 +7280,26 @@ class _ReachingAssignments:
         return out
 
     def reach(self, name, use):
+        """Answered once per (name, read) and kept: the program does not change while a scan walks it.
+        MER-CHECK-PERF-01 (2026-11-15): a counter restated seven loops deep (`n (n + 1)`) was asked
+        about at every depth of every trail through it, and each loop around the read listed the same
+        assignment again, so one read handed back eight candidates, two of them distinct. A repeated
+        candidate is the same assignment judged again, so it can never answer differently: it is
+        dropped, and the first-seen order the callers try them in is kept."""
+        key = (name, id(use))
+        hit = self._memo.get(key)
+        if hit is not None and hit[0] is use:
+            return hit[1]
+        found, dominated = self._reach(name, use)
+        seen, uniq = set(), []
+        for a in found:
+            if id(a) not in seen:
+                seen.add(id(a))
+                uniq.append(a)
+        self._memo[key] = (use, (uniq, dominated))     # the read is held, so its id is never reused
+        return uniq, dominated
+
+    def _reach(self, name, use):
         cur = use
         while cur is not None and id(cur) not in self.pos:
             cur = self.parent.get(id(cur))
@@ -7196,8 +7470,26 @@ def _protected_value_tracker(program, tagged, sector=None):
         h = prot(getattr(a, 'body', None) if kind(a) == 'CreateBlock' else getattr(a, 'value', None), depth + 1)
         return (f"`{a.name}` (from {h[0]})", h[1]) if h else None
 
+    memo = {}
+
     def prot(expr, depth=0):
-        """(what, class) when `expr` carries protected data, else None."""
+        """(what, class) when `expr` carries protected data, else None.
+
+        Each answer is worked out once and kept (MER-CHECK-PERF-01, 2026-11-15): a counter restated
+        inside nested loops sent every trail back through the same few assignments until the depth
+        limit, so a 493-line page ran past five minutes. An answer depends on the expression, its
+        depth (the limit can cut a trail short) and what the derived tables hold. Those tables only
+        ever gain names, so their sizes stand for their contents, and a kept answer is exactly the one
+        working it out again would give. The expression is held with it, so its id is never reused."""
+        key = (id(expr), depth, len(derived), len(param_derived))
+        hit = memo.get(key)
+        if hit is not None and hit[0] is expr:
+            return hit[1]
+        h = _prot(expr, depth)
+        memo[key] = (expr, h)
+        return h
+
+    def _prot(expr, depth):
         if expr is None or depth > 30:
             return None
         if isinstance(expr, str):
@@ -7906,8 +8198,21 @@ def scan_secret_egress(program):
             return f"{h} (given back by task `{t.name}`)" if h else None
         return sec(getattr(a, 'body', None) if kind(a) == 'CreateBlock' else getattr(a, 'value', None), depth + 1)
 
+    memo = {}
+
     def sec(expr, depth=0):
-        """The `secret.X` that `expr` carries, as written, else None."""
+        """The `secret.X` that `expr` carries, as written, else None. Kept once worked out, on the
+        same terms as the protected-value tracker's `prot` (MER-CHECK-PERF-01): the expression, its
+        depth and the sizes of the derived tables, which only ever gain names."""
+        key = (id(expr), depth, len(derived), len(param_derived))
+        hit = memo.get(key)
+        if hit is not None and hit[0] is expr:
+            return hit[1]
+        h = _sec(expr, depth)
+        memo[key] = (expr, h)
+        return h
+
+    def _sec(expr, depth):
         if expr is None or depth > 30:
             return None
         if isinstance(expr, str):
@@ -10389,14 +10694,14 @@ def scan_upload_zone_ambiguous(program):
 # ONE PATH, TWO CLASSES (RULED by Ron 2026-10-22: teach, do not refuse the general coder). `public: /x`
 # and `authorize: /x` in one journey resolve by the locked model (T1-PAGE-CLASSIFICATION-MODEL) at serve
 # time, unchanged here: public: overrides every class, hidden: is applied before authorize:, authorize:
-# gates where private: (inert) does nothing. So one of the two lines does nothing, and when public: wins
+# gates where unlisted: (inert) does nothing. So one of the two lines does nothing, and when public: wins
 # the sign-in gate the coder wrote is silently not applied. A WARNING without a sector; under a sector
 # (any declared one: the runtime treats every declared sector as regulated, its profile or the built-in
 # defaults in force) a REFUSAL. A classification cannot be guarded by a `when` inside a journey (a
 # syntax error, measured 2026-10-22), so every repeat in one journey is unconditional; if a guarded
 # classification is ever built, it is exempt here. Only the SAME path counts (normalized as the serve
 # layer does): a narrower path under a broader one is the designed carve-out, not a contradiction.
-_CLASS_PRECEDENCE = ('public', 'hidden', 'authorize', 'private')   # who wins at serve time, first wins
+_CLASS_PRECEDENCE = ('public', 'hidden', 'authorize', 'unlisted')   # who wins at serve time, first wins
 
 
 def _class_conflict_text(path, winner, loser):
@@ -10407,14 +10712,14 @@ def _class_conflict_text(path, winner, loser):
         return (f"`public:` serves the page, so the `hidden:` on the same path never hides it: `{path}` is "
                 f"served to anyone.")
     if winner == 'public':
-        return (f"`public:` overrides every other class when the page is served, so `private:` has no "
+        return (f"`public:` overrides every other class when the page is served, so `unlisted:` has no "
                 f"effect on `{path}`.")
     if winner == 'hidden' and loser == 'authorize':
         return ("`hidden:` wins: the page is never served (404), so the `authorize:` sign-in gate is never "
                 "reached.")
     if winner == 'hidden':
-        return "`hidden:` wins: the page is never served (404), so `private:` has no effect."
-    return ("`authorize:` wins and asks for a sign-in; `private:` has no runtime effect, so it adds "
+        return "`hidden:` wins: the page is never served (404), so `unlisted:` has no effect."
+    return ("`authorize:` wins and asks for a sign-in; `unlisted:` has no runtime effect, so it adds "
             "nothing.")
 
 
@@ -10487,6 +10792,27 @@ def scan_same_path_two_classes_warning(program):
 
 def scan_same_path_two_classes_refused(program):
     return _same_path_two_classes_findings(program, under_sector=True)
+
+
+# `private:` IS NOW `unlisted:` (RULED by Ron 2026-11-14). The class never restricted anyone: it serves the
+# page and only keeps it out of a listing, and the word promised the opposite. `private:` stays a working
+# alias so a deployed app does not break, parsing to the same `unlisted` class, and this says so at check.
+def scan_private_is_unlisted(program):
+    out = []
+    for n in _all_nodes(program):
+        if type(n).__name__ != 'JourneyMeta' or getattr(n, 'spelled', '') != 'private':
+            continue
+        line = getattr(n, 'line', 0) or 0
+        paths = ', '.join(str(p) for p in n.value)   # the grammar requires a path on a class line
+        out.append(CompileWarning(
+            f"Line {line}: private: is now unlisted:; note neither restricts access - use authorize: "
+            f"or hidden: to gate.",
+            line=line,
+            hint=(f"Write `unlisted: {paths}` for the same behaviour: served by direct link, never listed. "
+                  f"To make people sign in, write `authorize: {paths}`; to never serve it, "
+                  f"`hidden: {paths}`."),
+            code="private_is_unlisted"))
+    return out
 
 
 _KEEP_FOR_NO_FIXED_LENGTH = {'month': 'a month', 'months': 'a month', 'year': 'a year', 'years': 'a year'}
@@ -11302,7 +11628,7 @@ def scan_miofile_zone_coverage(program):
     loud. Deliberately silent when NO zones are declared: warning on every file
     operation in every program that never used zones is noise, not a signal.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import MiofileDecl, MiofileStmt
     zones, stmts = [], []
 
@@ -11377,7 +11703,7 @@ def _route_classification(program, path):
     says about a route path, decided exactly as the serve layer decides it (_exec_JourneyDecl):
     'public' when an explicit `public:` covers it (it overrides the others), 'hidden' when `hidden:`
     covers it or a segment starts with `_` (not served), 'authorize' when `authorize:` covers it (login
-    required), else None (public by default, or `private:`, which is served with no gate)."""
+    required), else None (public by default, or `unlisted:`, which is served with no gate)."""
     if not path:
         return None
     metas = []
@@ -11425,7 +11751,7 @@ def scan_sector_route_unauthenticated(program):
     a price list, a status page, an opening-hours endpoint. The point is that it should be
     a decision someone made, not one nobody noticed.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import SectorDecl, RequireRoleDecl
     warnings = []
 
@@ -11523,7 +11849,7 @@ def scan_sector_route_unauthenticated(program):
             # THE JOURNEY'S PAGE CLASSIFICATION DECIDES FIRST (checker 3b, Summit): the serve layer
             # already refuses an `authorize:` path without a session (403), never serves a `hidden:`
             # one (404), and an explicit `public:` is a declared decision. Only a route public by
-            # default (or `private:`, served with no gate) is the read nobody decided.
+            # default (or `unlisted:`, served with no gate) is the read nobody decided.
             if (reads_data(node) and not contains(node, RequireRoleDecl) and not token_gated(node)
                     and _route_classification(program, getattr(node, 'path', None)) is None):
                 where = getattr(node, 'path', None) or getattr(node, 'name', '') or 'a route'
@@ -11553,7 +11879,7 @@ def scan_cookie_samesite_none_insecure(program):
     set, with nothing telling the developer why. A check-time WARNING turns that silent
     runtime no-set into a visible message before it ships.
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import MioCookieSet
     warnings = []
 
@@ -11597,7 +11923,7 @@ def scan_transaction_onfailure_success(program):
     keep. The run already refuses to send it (`_exec_TransactionBlock`), so this says so before the
     request fails. A warning everywhere; no refusal is minted (Ron).
     """
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     from mohio_ast import TransactionBlock, OnFailure, GiveBackStmt, JumpToStmt
     warnings = []
 
@@ -12592,7 +12918,374 @@ def scan_shape_unique_governs_no_table(program):
     return warnings
 
 
-_CM_MARKER_NODES = ('CmPurgeBlock', 'CmRetainStmt', 'CmReportStmt',
+def declared_table_keys(program):
+    """Every key this program declares for a table, as {table: [frozenset(cols), ...]}: the column
+    sets a database constraint holds to one row each. Read from the program alone, so `mio check`
+    knows what the runtime will enforce without opening a connection. Four sources, each one the
+    runtime turns into a real constraint:
+      * `id`, the row key every table Mohio creates carries (Mongo's `_id`);
+      * a `unique` field inside an `<name> as table` scope (_shaped_unique_cols at run);
+      * a loose `unique` field whose shape a handler saves to a fixed table (resolve_loose_unique,
+        the resolution the runtime shares);
+      * the columns of a `save ... unless a, b exists` write, one composite key (the runtime's
+        _collect_declared_unique_keys, which walks the same SaveBlock field).
+    A constraint that exists only in the database, made outside this program, is not seen here;
+    declaring it on an `as table` field is how a program says so."""
+    keys = {}
+
+    def _add(table, cols):
+        if table and cols:
+            ks = keys.setdefault(str(table), [])
+            k = frozenset(str(c) for c in cols)
+            if k not in ks:
+                ks.append(k)
+
+    def _walk(n):
+        if n is None or isinstance(n, (str, int, float, bool)):
+            return
+        if isinstance(n, (list, tuple)):
+            for c in n:
+                _walk(c)
+            return
+        if not is_dataclass(n):
+            return
+        kind = type(n).__name__
+        if kind == 'ShapeDecl':
+            for tname, tbl in (getattr(n, 'tables', None) or {}).items():
+                for fld in (getattr(tbl, 'fields', None) or []):
+                    if any(getattr(m, 'modifier_type', '') == 'unique'
+                           for m in (getattr(fld, 'modifiers', None) or [])):
+                        _add(tname, [getattr(fld, 'name', '')])
+        elif kind == 'SaveBlock':
+            _add(_static_target_name(getattr(n, 'target', None)),
+                 list(getattr(n, 'dedupe_fields', None) or []))
+        for f in fields(n):
+            _walk(getattr(n, f.name, None))
+
+    _walk(getattr(program, 'statements', None) or [])
+    for table, cols in resolve_loose_unique(program)[0].items():
+        for c in cols:
+            _add(table, [c])
+    return keys
+
+
+# The single-row reads: each reads exactly one record and refuses at run when its match finds two
+# (`_refuse_several_rows`). A retrieve with a modifier other than `one` reads a list, a count or an
+# ordered pick, never an ambiguous one.
+_SINGLE_ROW_READS = ('RetrieveBlock', 'GrabBlock', 'GetBlock')
+
+
+def _single_read_table(source, connections):
+    """The table a single-row read names, or None when it is not a database table this check can
+    name: a held list, or a source chosen at run. `db.members` is the default connection;
+    `ledger.accounts` is one when `ledger` is a `connect` name."""
+    if type(source).__name__ == 'DbRef':
+        return getattr(source, 'table', None)
+    parts = [str(p) for p in (getattr(source, 'parts', None) or [])]
+    if len(parts) == 2 and parts[0] in connections:
+        return parts[1]
+    return None
+
+
+def scan_single_read_not_unique(program):
+    """A single-row read whose match no declared key holds to one row WARNS at check (6.0.4).
+
+    Since 6.0.3 `retrieve`, `grab` and `get` refuse at run when their match finds a second row,
+    rather than binding whichever came back first. That refusal arrives on the request that first
+    meets a duplicate, often long after the program shipped. This is its build-time companion: the
+    equality fields a read matches are compared with the keys the program declares for that table
+    (declared_table_keys), and a read that no key covers is named here, with the fix.
+
+    A warning, not a refusal: a table this program does not describe may carry a unique index made
+    outside it, which the program can state on an `as table` field to silence this. Not warned: a
+    held list (it has no key), a raw sql block, a source chosen at run, and a retrieve with a
+    modifier other than `one`. Equality is what holds a read to one row, so a `match any` or a
+    `no.match` group narrows nothing for this; the AND-ed `match` pairs are what count, exactly as
+    _spec_to_sql builds the query."""
+    connections = {'db'}
+    reads = []
+
+    def _walk(n):
+        if n is None or isinstance(n, (str, int, float, bool)):
+            return
+        if isinstance(n, (list, tuple)):
+            for c in n:
+                _walk(c)
+            return
+        if not is_dataclass(n):
+            return
+        kind = type(n).__name__
+        if kind == 'ConnectDecl' and getattr(n, 'name', None):
+            connections.add(str(n.name))
+        if kind in _SINGLE_ROW_READS:
+            reads.append(n)
+        for f in fields(n):
+            _walk(getattr(n, f.name, None))
+
+    _walk(getattr(program, 'statements', None) or [])
+    if not reads:
+        return []
+    keys = declared_table_keys(program)
+    warnings = []
+    for node in reads:
+        kind = type(node).__name__
+        if kind == 'RetrieveBlock' and getattr(node, 'modifier', None) not in (None, 'one'):
+            continue
+        table = _single_read_table(getattr(node, 'source', None), connections)
+        if not table:
+            continue
+        if kind == 'RetrieveBlock':
+            clauses = list(getattr(node, 'body', None) or [])
+            verb = 'retrieve' if not getattr(node, 'modifier', None) else 'retrieve.one'
+        else:
+            m = getattr(node, 'match', None)
+            clauses = m if isinstance(m, list) else ([m] if m is not None else [])
+            verb = 'grab' if kind == 'GrabBlock' else 'get'
+        if any(type(c).__name__ == 'SqlBlock' for c in clauses):
+            continue
+        matched, named, grouped = set(), [], False
+        for c in clauses:
+            ck = type(c).__name__
+            if ck == 'MatchClause':
+                matched.add(str(c.field))
+                named.append(str(c.field))
+            elif ck == 'MatchBlock':
+                for f, _v in (c.pairs or []):
+                    matched.add(str(f))
+                    named.append(str(f))
+            elif ck in ('MatchAnyBlock', 'NoMatchBlock'):
+                named.extend(str(f) for f, _v in (c.pairs or []))
+                grouped = True
+        table_keys = [frozenset({'id'})] + keys.get(str(table), [])
+        if any(k <= matched for k in table_keys):
+            continue
+        name = str(node.name)   # retrieve, grab and get each take a NAME in the grammar
+        src = (f"db.{table}" if type(node.source).__name__ == 'DbRef'
+               else '.'.join(str(p) for p in node.source.parts))
+        shown = [f'`{f}`' for f in dict.fromkeys(named)]
+        if shown:
+            on = ' and '.join(shown) if len(shown) < 3 else ', '.join(shown[:-1]) + ' and ' + shown[-1]
+            what = (f"`{verb} {name} from {src}` matches {on}, and no key this program declares "
+                    f"for {src} is held to one row by that match")
+            if grouped:
+                what += (" (a `match any` or `no.match` group admits a row for each value it "
+                         "lists, even on a key)")
+        else:
+            what = f"`{verb} {name} from {src}` has no match, so every row in {src} matches it"
+        field = next(iter(dict.fromkeys(named)), '<field>')
+        _known = [', '.join(sorted(k)) for k in table_keys]
+        warnings.append(CompileWarning(
+            f"{what}. A single-row read refuses at run when its match finds more than one row, "
+            f"so the first duplicate stops this request. Keys declared for {src}: "
+            f"{'; '.join(_known)}.\n"
+            f"    Match a key so only one row can match (`match id to ...`), or declare the field "
+            f"unique where the table is described:\n"
+            f"        shape\n"
+            f"            {table} as table\n"
+            f"                {field} as <type> unique\n"
+            f"        shape: done\n"
+            f"    To ask whether such a row exists, use `check exists {name} in {src}` with the same "
+            f"match. To read every row it matches, use `find {name} in {src}`.",
+            line=getattr(node, 'line', 0) or 0, code="single_read_not_unique"))
+    return warnings
+
+
+# How a where-condition reads in Mohio, for the app-side notice. A condition not listed is shown as
+# the grammar names it.
+_FILTER_WORDS = {
+    'above': 'is above', 'below': 'is below', 'not_above': 'is not above', 'not_below': 'is not below',
+    'between': 'is between', '>': '>', '<': '<', '>=': '>=', '<=': '<=',
+    'contains': 'contains', 'starts': 'starts.with', 'starts_with': 'starts.with', 'ends': 'ends.with',
+    'ends_with': 'ends.with', 'empty': 'is empty', 'not_empty': 'is not empty', 'is_not': 'is not',
+    'minlen': 'is at least N characters', 'maxlen': 'is at most N characters',
+    'is_in': 'is.in', 'in_list': 'is.in', 'in': 'is.in', 'not_in': 'is not in', 'not_in_list': 'is not in',
+    'time_in_range': 'is.in a time period', 'since': 'since', 'from': 'from', 'before': 'is before',
+    'after': 'is after', 'older': 'is older than', 'newer': 'is newer than', 'not_before': 'is not before',
+    'not_after': 'is not after',
+}
+
+
+def _sealed_and_encrypted(program):
+    """({table: sealed column names}, loose encrypted field names), read the way the runtime
+    registers them: a table column is sealed by `sec.encrypt` or an enforced classification tag (its
+    stored value is ciphertext, so it carries no pushable type), and a loose field, or every field of
+    a zone-tagged shape, is encrypted by name, which keeps a filter on that name in the app."""
+    from mohio_classification import ENFORCED_CLASSIFIERS as _ENF
+
+    def _seals(f):
+        for m in (getattr(f, 'modifiers', None) or []):
+            mt = str(getattr(m, 'modifier_type', '') or '')
+            if mt == 'encrypt':
+                return True
+            if mt == 'tag' and {p.strip().lower() for p in str(getattr(m, 'value', '') or '').split(',')} & set(_ENF):
+                return True
+        return False
+
+    sealed, loose = {}, set()
+
+    def _walk(n):
+        if n is None or isinstance(n, (str, int, float, bool)):
+            return
+        if isinstance(n, (list, tuple)):
+            for c in n:
+                _walk(c)
+            return
+        if not is_dataclass(n):
+            return
+        if type(n).__name__ == 'ShapeDecl':
+            zone = bool(getattr(n, 'zone_tag', None))
+            for f in (getattr(n, 'fields', None) or []):
+                if zone or _seals(f):
+                    loose.add(str(getattr(f, 'name', '')))
+            for tname, tbl in (getattr(n, 'tables', None) or {}).items():
+                for f in (getattr(tbl, 'fields', None) or []):
+                    if zone:
+                        loose.add(str(getattr(f, 'name', '')))
+                    if _seals(f):
+                        sealed.setdefault(str(tname), set()).add(str(getattr(f, 'name', '')))
+        for f in fields(n):
+            _walk(getattr(n, f.name, None))
+
+    _walk(getattr(program, 'statements', None) or [])
+    return sealed, loose
+
+
+def scan_find_filter_runs_in_app(program):
+    """A find whose filter will run in Mohio rather than in the database is NAMED at check (6.0.4).
+
+    The visibility half of the ruled pushdown invariant (T1-MIOQL-PUSHDOWN, 2026-10-02): every
+    app-side fallback is observable. `--verbose` already says it at run; this says it before anything
+    runs, naming the filter, why the database cannot run it, and the fix. A notice, never a refusal:
+    the find still gives the right rows, it reads every row of the table to get them.
+
+    The decision mirrors the runtime's per find (the operator sets and type kinds are the ones it uses,
+    from mohio_runtime_vocab): a range or text filter is pushed only on a field an `as table` shape
+    declares with a type that operator works on (a number for a range, text for contains / starts.with
+    / ends.with / is empty / is not), not sealed and not encrypted by name; a `match any` or `no.match`
+    group is pushed only when every field it names is; MongoDB runs none of them natively.
+    NOT SEEN HERE, so not named: a type the database's own column register supplies for a field this
+    program does not declare (the runtime may then push it), a bound that is not a plain number at run
+    (a variable that holds text keeps that one filter in the app), an engine chosen by the address at
+    run when `connect` names none (a mongodb:// address keeps every filter in the app), and a held
+    list (it has no database). A range or text filter on an encrypted field is refused, not run in
+    the app, so it is not named here either."""
+    from mohio_runtime_vocab import (SQL_NUMERIC_PUSHABLE, SQL_TEXT_PUSHABLE, pushdown_numeric_kind,
+                                     pushdown_text_kind)
+    drivers = {'db': ''}
+    finds = []
+
+    def _walk(n):
+        if n is None or isinstance(n, (str, int, float, bool)):
+            return
+        if isinstance(n, (list, tuple)):
+            for c in n:
+                _walk(c)
+            return
+        if not is_dataclass(n):
+            return
+        kind = type(n).__name__
+        if kind == 'ConnectDecl' and getattr(n, 'name', None):
+            drivers[str(n.name)] = str(getattr(n, 'driver', '') or '').lower()
+        if kind == 'FindBlock':
+            finds.append(n)
+        for f in fields(n):
+            _walk(getattr(n, f.name, None))
+
+    _walk(getattr(program, 'statements', None) or [])
+    if not finds:
+        return []
+    col_types = resolve_declared_col_types(program)
+    sealed, loose_enc = _sealed_and_encrypted(program)
+    warnings = []
+    for node in finds:
+        src = getattr(node, 'source', None)
+        table = _single_read_table(src, set(drivers))
+        if not table:
+            continue
+        table = str(table)
+        conn = 'db' if type(src).__name__ == 'DbRef' else str(src.parts[0])
+        shown_src = f"{conn}.{table}"
+        mongo = drivers.get(conn, '') in ('mongodb', 'mongo')
+        declared = col_types.get(table, {})
+        types = {k: v for k, v in declared.items() if k not in sealed.get(table, set())}
+        in_app = []           # (what, why)
+        loose_named = []      # fields with no declared type, for the fix
+        for c in (getattr(node, 'body', None) or []):
+            ck = type(c).__name__
+            if ck in ('WhereClause', 'AndClause'):
+                op = str(getattr(c, 'condition', '') or '')
+                if op in ('is', '==', ''):
+                    continue                    # equality goes to the database on every engine
+                fld = str(getattr(c, 'field', '') or '').split('.')[-1]
+                if op == 'is_in' and type(getattr(c, 'value', None)).__name__ == 'TimePeriod':
+                    op = 'time_in_range'
+                if fld in sealed.get(table, set()):
+                    continue                    # refused at run (encrypted_field_not_rangeable), not run in the app
+                what = f"`{fld} {_FILTER_WORDS.get(op, op)}`"
+                ftype = types.get(fld)
+                if mongo:
+                    in_app.append((what, f"{shown_src} is a MongoDB connection, which runs only equality "
+                                         f"matches natively"))
+                elif ftype is None:
+                    in_app.append((what, f"no `as table` shape declares `{fld}` on {shown_src} with a type"))
+                    loose_named.append(fld)
+                elif fld in loose_enc:
+                    in_app.append((what, f"`{fld}` is an encrypted field name in this program"))
+                elif pushdown_numeric_kind(ftype) and (op in SQL_NUMERIC_PUSHABLE or op == 'is_not'):
+                    continue
+                elif pushdown_text_kind(ftype) and op in SQL_TEXT_PUSHABLE:
+                    continue
+                else:
+                    in_app.append((what, f"`{fld}` is declared `{ftype}`, and the database runs "
+                                         f"`{_FILTER_WORDS.get(op, op)}` only on "
+                                         + ("text" if op in SQL_TEXT_PUSHABLE else
+                                            "a number" if op in SQL_NUMERIC_PUSHABLE else
+                                            "no declared type")))
+            elif ck == 'TimespanRef':
+                in_app.append((f"`timespan {getattr(c, 'name', '')}`",
+                               "a date range runs in the app on every engine"))
+            elif ck in ('MatchAnyBlock', 'NoMatchBlock'):
+                group = 'match any' if ck == 'MatchAnyBlock' else 'no.match'
+                gf = [str(f).split('.')[-1] for f, _v in (getattr(c, 'pairs', None) or [])]
+                if mongo:
+                    in_app.append((f"the `{group}` group", f"{shown_src} is a MongoDB connection, which "
+                                                         f"runs only equality matches natively"))
+                    continue
+                bad = [f for f in dict.fromkeys(gf) if not types.get(f) or f in loose_enc]
+                if bad:
+                    why = ", ".join(f"`{f}` " + ("is encrypted" if (f in loose_enc or f in sealed.get(table, set()))
+                                                 else "has no declared type") for f in bad)
+                    in_app.append((f"the `{group}` group", f"a group runs in the database only when every "
+                                                           f"field it names is declared and not encrypted: {why}"))
+                    loose_named.extend(f for f in bad if f not in loose_enc and f not in sealed.get(table, set()))
+        if not in_app:
+            continue
+        name = str(node.name)   # find takes a NAME in the grammar
+        listed = "\n".join(f"    {w}: {why}." for w, why in in_app)
+        if loose_named:
+            first = loose_named[0]
+            fix = (f"Declare the field where the table is described, so the database runs the filter:\n"
+                   f"        shape\n"
+                   f"            {table} as table\n"
+                   f"                {first} as <type>\n"
+                   f"        shape: done")
+        elif mongo:
+            fix = ("Narrow the find with an equality match first (`match <field> to <value>`), which "
+                   "MongoDB runs, so fewer rows reach the app-side filter.")
+        else:
+            fix = ("Nothing to declare for these. To keep the read small, narrow the find with a filter "
+                   "the database runs (an equality match, or a range on a declared number) as well.")
+        warnings.append(CompileWarning(
+            f"Line {getattr(node, 'line', 0) or 0}: `find {name} in {shown_src}` runs "
+            f"{'this filter' if len(in_app) == 1 else 'these filters'} in Mohio, not in the database, so "
+            f"every row of {shown_src} is read to answer it and the time grows with the table. Declare the "
+            f"field's type where the table is described, or narrow the find with a filter the database "
+            f"runs:\n{listed}",
+            getattr(node, 'line', 0) or 0, fix, code="find_filter_runs_in_app"))
+    return warnings
+
+
+_CM_MARKER_NODES =('CmPurgeBlock', 'CmRetainStmt', 'CmReportStmt',
                     'CmExpireStmt', 'CmLockStmt', 'CmNotifyStmt')
 # The writes the compliance-shape signal reads. Its own name: it was a second `_WRITE_NODES`, which
 # replaced the full set above at import, so the financial-transaction rule missed `modify` and `remove.all`.
@@ -12793,9 +13486,9 @@ def scan_comparison_can_meet_empty(program):
 
 def scan_journey_without_timezone(program):
     """A journey that declares no timezone earns a check-time warning (RULED by Ron, 2026-10-15).
-    Its zone is the app zone every calendar word reads (today, this_month, is.in) and every shown
-    datetime is displayed in; with none declared that zone is UTC (or MOHIO_APP_TIMEZONE), which is
-    rarely the day the app's people live in."""
+    Its zone is the app zone every calendar word reads (today, this_month, is.in) and text with no
+    offset is read in; with none declared that zone is UTC (or MOHIO_APP_TIMEZONE), which is rarely
+    the day the app's people live in. A datetime leaving the program is UTC in any zone."""
     warnings = []
     for n in _all_nodes(program):
         if type(n).__name__ != 'JourneyDecl':
@@ -12807,8 +13500,8 @@ def scan_journey_without_timezone(program):
         jname = getattr(n, 'name', '') or 'App'  # SILENT-SHAPE-OK: the word the message calls an unnamed journey
         warnings.append(CompileWarning(
             f"Line {line}: journey `{jname}` declares no timezone, so its days "
-            f"(today, this_month, is.in) and every shown date and time are UTC, unless MOHIO_APP_TIMEZONE "
-            f"says otherwise.",
+            f"(today, this_month, is.in) are UTC days and text with no offset is read as UTC, unless "
+            f"MOHIO_APP_TIMEZONE says otherwise.",
             line=line,
             hint=("Declare the zone the app's days are in, inside the journey, for example:\n"
                   "        timezone \"Asia/Bahrain\"\n    Use timezone \"UTC\" if UTC is what you mean."),
@@ -12895,6 +13588,7 @@ WARNING_SCANS = (
     scan_journey_without_timezone,
     scan_page_class_outranked,
     scan_same_path_two_classes_warning,
+    scan_private_is_unlisted,
     scan_success_on_possibly_empty_lookup,
     scan_comparison_can_meet_empty,
     scan_release_never_held,
@@ -12905,11 +13599,14 @@ WARNING_SCANS = (
     scan_returning_call_without_capture,
     scan_check_with_no_branches,
     scan_shape_unique_governs_no_table,
+    scan_single_read_not_unique,
+    scan_find_filter_runs_in_app,
     scan_financial_multi_write_no_transaction,
     scan_refuse_after_unwrapped_write,
     scan_upload_storage_durability,
     scan_ai_decide_never_invoked,
     scan_render_include_bare,
+    scan_interpolation_never_set,
     scan_unrecognized_field_classifier,
     scan_decorative_shape_modifiers,
     scan_sector_route_unauthenticated,
@@ -12924,22 +13621,36 @@ WARNING_SCANS = (
 )
 
 
-def run_scans(program):
+def run_scans(program, only=None):
     """Run every canonical scanner. Returns (errors, warnings).
 
     A scanner must never take down the check: it reports, or it says nothing. But it must
     also never be SKIPPED because a caller forgot it existed -- which is exactly what a
     hand-copied list guarantees will happen eventually.
+
+    `only` (a tuple of scanner names) runs just those, in canonical order: the serve verdict
+    cache re-runs the scanners that read the moment or the deployment (mohio_verdict_cache.
+    ALWAYS_RERUN) on a reused verdict. A name that is not a canonical scanner refuses, so a
+    rename can never leave one of them cached with nothing said.
     """
     import sys as _sys
     from mohio_sector_loader import SectorVerificationError, SectorUnenforceableRuleError
     _DELIBERATE_REFUSAL = (SectorVerificationError, SectorUnenforceableRuleError)
     errors, warnings = [], []
+    error_scans, warning_scans = ERROR_SCANS, WARNING_SCANS
+    if only is not None:
+        _known = {getattr(s, '__name__', '') for s in ERROR_SCANS + WARNING_SCANS}
+        _unknown = [n for n in only if n not in _known]
+        if _unknown:
+            raise ValueError(f"run_scans(only=...) names no canonical scanner: {', '.join(_unknown)}. "
+                             f"The verdict cache would reuse their answer; rename them there too.")
+        error_scans = tuple(s for s in ERROR_SCANS if s.__name__ in only)
+        warning_scans = tuple(s for s in WARNING_SCANS if s.__name__ in only)
     # Every scanner that touches a sector profile hits the SAME refusal independently (each one
     # loads the profile itself); without this, one bad profile reported as many identical errors
     # as scanners happened to read it, which reads as several problems instead of one.
     _refusals_seen = set()
-    for scan in ERROR_SCANS:
+    for scan in error_scans:
         try:
             errors.extend(scan(program))
         except _DELIBERATE_REFUSAL as e:
@@ -12985,7 +13696,7 @@ def run_scans(program):
             _kind_lines.add(_key)
         _kept.append(_e)
     errors[:] = _kept
-    for scan in WARNING_SCANS:
+    for scan in warning_scans:
         try:
             warnings.extend(scan(program))
         except _DELIBERATE_REFUSAL as e:

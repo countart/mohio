@@ -294,7 +294,7 @@ def validate_field_references(source, schema, filename="", unchecked=None, progr
     from lark import Lark
     from mohio_transformer_ast import transform as ast_transform
     import mohio_data
-    from dataclasses import fields as dc_fields, is_dataclass
+    from mohio_dc import fields as dc_fields, is_dataclass
     from mohio_ast import FieldValue
 
     if program is not None:

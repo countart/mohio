@@ -52,6 +52,8 @@ _DENY_STATIC_EXT = {
     # keys included -- was served on request. Denying the source and shipping its
     # serialized form beside it is the same leak through a different name.
     ".cache", ".pkl", ".pickle",                          # build artifacts
+    ".verdict",                                           # a kept serve verdict: the pickled, assembled
+    #                                                       program, every literal in it (mohio_verdict_cache)
     # SQLite writes its live data to sidecar files. `.db` was refused while the
     # write-ahead log sitting next to it -- holding everything written recently --
     # was served on request.
@@ -149,7 +151,7 @@ def _collect_path_classes(program):
     classifications. The same enumerable table is what a future robots / sitemap generator
     reads -- one declaration, every consumer.
 
-    `private:` is deliberately NOT collected: its locked meaning is served-but-unlisted with
+    `unlisted:` (and `private:`, its deprecated spelling) is deliberately NOT collected: its locked meaning is served-but-unlisted with
     no runtime gate (see JourneyMeta), so it must never block a static file. Only the two
     tiers that actually gate a request -- hidden: (404) and authorize: (login) -- plus
     public: (the explicit override) are collected here.
@@ -682,6 +684,10 @@ def _failure_reference(interp=None):
 
 # The detail of the last few failures, by reference, held in this process only so the people running
 # it can look one up (`failure_detail`); it never reaches a client. Bounded, oldest dropped first.
+# Stopped at a limit: the caller is told what happened and what was kept, with no driver text, instead of the
+# generic failure body. The refusal's name -> the `error` the caller reads.
+_STOPPED_AT_A_LIMIT = {'run_timeout': 'request_timeout', 'db_statement_timeout': 'statement_timeout'}
+
 _RECENT_FAILURES = {}
 _RECENT_FAILURES_MAX = 500
 
@@ -745,6 +751,13 @@ class MohioServer:
         # a URL that does not exist is worse than the gap this phase closed. None means
         # single-file serve, where the file IS the app and answers at "/".
         self.route_path    = route_path
+
+        # A SINGLE-FILE serve answers the page at `/`, but in its app the page is its folder URL
+        # (admin.mho -> /admin), and that is where its folder's journey classifies it. The CLI sets
+        # this for single-file serve; dispatch marks a request to `/` with it, and the router gates
+        # the page at both addresses (T1-RUN-HONORS-PAGE-CLASS). None in directory mode, where the
+        # page already answers at its folder URL.
+        self.page_class_path = None
 
         # T1-FRAMEWORK-FOUNDATION Phase 2. The framework is resolved ONCE, here, from the
         # ASSEMBLED program -- after includes and the journey spine were merged by the CLI --
@@ -876,6 +889,11 @@ class MohioServer:
                 for _k in [k for k in payload if isinstance(k, str) and k.startswith(_marker)]:
                     payload.pop(_k, None)
                 payload['positional'] = _posfields
+        _req_path = payload.get('_path') if isinstance(payload, dict) else None
+        if (self.page_class_path and self.route_path is None and _req_path is not None
+                and _norm_route_path(_req_path) == '/'):
+            # the page itself, served at `/`: gate it at its folder URL as well (see __init__)
+            payload['_page_class_path'] = self.page_class_path
         try:
             result = self.interp.run_with_session(
                 self.program,
@@ -894,6 +912,12 @@ class MohioServer:
             # -- not with the audit row written moments earlier in the same request.
             info = format_runtime_error(e, trace_id=getattr(self.interp, '_request_id', None))
             log_runtime_error(info, verbose=self.verbose)
+            if info.get("code") in _STOPPED_AT_A_LIMIT:
+                # A REQUEST STOPPED AT ITS DEADLINE tells the caller what happened, written from the
+                # outcome at the moment it stopped (what was kept), not the generic failure body.
+                # The message carries no program line or developer hint; those are logged.
+                return {"status": 504, "body": {"error": _STOPPED_AT_A_LIMIT[info.get("code")], "message": info.get("message"),
+                                                "reference": info.get("trace")}}
             if int(info["status"]) >= 500:
                 _RECENT_FAILURES[str(info["trace"])] = f"{info.get('code')}: {info.get('message')}"
                 return {"status": info["status"], "body": client_failure_body(info["trace"])}
@@ -915,6 +939,15 @@ class MohioServer:
                         "message": f"No route matches {_m} {_pth}"}}
             return {"status": 204, "body": None}
         if isinstance(result, dict):
+            if result.get('_mohio_runtime_error') and result.get('code') in _STOPPED_AT_A_LIMIT:
+                # The same outcome answer as the exception path above: the request stopped at its
+                # deadline, and the message says what was kept. LOGGED HERE, under its reference: a
+                # request the door already answered "still running" stops later, and this line is the
+                # record of when it actually did.
+                _ref = getattr(self.interp, '_request_id', None) or _failure_reference(self.interp)
+                _log_failure(_ref, 504, result.get('body'), result.get('hint') or "")
+                return {"status": 504, "body": {"error": _STOPPED_AT_A_LIMIT[result.get('code')],
+                                                "message": result.get('message'), "reference": _ref}}
             if result.get('_mohio_runtime_error') and int(result.get('status') or 0) >= 500:
                 _ref = _failure_reference(self.interp)
                 _log_failure(_ref, result.get('status'), result.get('body'), result.get('hint') or "")
@@ -963,10 +996,8 @@ def _unwrap_mohio(v):
     import cycle with the interpreter.
     """
     if type(v).__name__ == "MohioValue" and getattr(v, "mohio_type", None) == "datetime":
-        # a datetime is sent as RFC 3339 with its offset (RULED 2026-10-15); stored UTC, sent as UTC
-        import datetime as _dt
-        from mohio_interpreter import _datetime_in_zone
-        return _datetime_in_zone(v.value, _dt.timezone.utc)
+        from mohio_interpreter import _datetime_out
+        return _datetime_out(v.value)
     if type(v).__name__ == "MohioValue" and hasattr(v, "value"):
         return _unwrap_mohio(v.value)
     if isinstance(v, dict):
@@ -1363,23 +1394,104 @@ def _check_content_length(request, limit, what):
 
 
 class _TimedOut(Exception):
-    """A request exceeded _REQUEST_TIMEOUT."""
+    """A request exceeded _REQUEST_TIMEOUT. `kind` is what actually happened: 'never_ran' (it waited
+    behind another request and was abandoned before it started) or 'still_running' (it started and is
+    still inside a call it made before the deadline)."""
+
+    def __init__(self, kind="still_running", in_transaction=False):
+        super().__init__(kind)
+        self.kind = kind
+        self.in_transaction = in_transaction   # was the request's transaction open when it was given up on
+
+
+# ONE HANDLER AT A TIME, OFF THE EVENT LOOP (T0-SERVE-HANDLER-BLOCKS-EVENT-LOOP, Option B, RULED as the
+# interim by Ron 2026-11-05). The interpreter holds per-request state on its instance, so two handlers
+# must never run at once; before this, two of the three dispatch paths ran the handler ON the loop,
+# so /health, static files and every other request waited behind a slow one, and the root GET ran in
+# a thread while a POST ran on the loop, two handlers at once on one interpreter. Every entry into the
+# interpreter now goes through _with_timeout, which runs it in a worker thread under this lock.
+_DISPATCH_LOCK = threading.Lock()
+# THIS REQUEST'S OWN RECORD for the log line: the id its run minted and what the door did with it.
+# The log used to read the interpreter's LAST request id, so a request that never reached the program
+# (a health check, a static file, a request abandoned in the queue) was logged under whichever request
+# ran before it, and with handlers off the loop a health check during a slow handler carried that
+# handler's reference. Opened per request by the logging middleware; the door and the run fill it.
+import contextvars as _contextvars
+_REQUEST_RECORD = _contextvars.ContextVar("mohio_request_record", default=None)
+# How long the door waits, after the deadline, for a started handler to reach its own end: the
+# handler stops itself at the first statement past the deadline, so this only has to cover that.
+_TIMEOUT_GRACE_S = 1.0
 
 
 async def _with_timeout(fn, *args, **kwargs):
-    """Run a synchronous handler in a worker thread under a wall-clock timeout.
+    """THE ONE DOOR into the interpreter for a served request. Runs `fn` in a worker thread, under the
+    process-wide dispatch lock, with the request's own deadline: MOHIO_REQUEST_TIMEOUT counted from
+    when the request ARRIVED (0 = no limit).
 
-    A runaway loop in a .mho handler otherwise occupies the worker forever, and enough of them
-    stop the app responding while still reporting healthy. The thread is not killable, so this
-    bounds the REQUEST, not the work -- the runaway is logged and abandoned, and the caller gets
-    a legible 504 instead of hanging.
+    * The deadline is handed to the interpreter (set_request_deadline), which checks it at every
+      statement and before the request transaction commits, so a handler stops at its first statement
+      past it and a late commit rolls back. Its own answer (504, saying what was kept) is returned.
+    * A request still waiting for the lock at its deadline is ABANDONED: it never runs, even when the
+      lock frees later (a worker thread cannot be cancelled, so it carries the flag), and raises
+      _TimedOut('never_ran').
+    * A handler still inside one blocked call past the deadline plus a short grace raises
+      _TimedOut('still_running'): the caller is told it is still waiting on that call and will do
+      nothing further, never that it "was stopped".
     """
     import asyncio
+    import time as _t
+    from mohio_interpreter import set_request_deadline
+    timeout = _REQUEST_TIMEOUT if _REQUEST_TIMEOUT and _REQUEST_TIMEOUT > 0 else None
+    deadline_at = (_t.monotonic() + timeout) if timeout else None
+    ticket = {"abandoned": False, "started": False}
+    record = _REQUEST_RECORD.get()
+
+    def work():
+        with _DISPATCH_LOCK:
+            if ticket["abandoned"]:
+                return None                 # answered 504 already; it must not run now
+            ticket["started"] = True
+            set_request_deadline(deadline_at, timeout, record)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                set_request_deadline(None)
+
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(None, work)
+    if timeout is None:
+        return await fut
     try:
-        return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs),
-                                      timeout=_REQUEST_TIMEOUT)
+        return await asyncio.wait_for(asyncio.shield(fut), timeout=max(0.0, deadline_at - _t.monotonic()))
     except asyncio.TimeoutError:
-        raise _TimedOut()
+        ticket["abandoned"] = True
+        if not ticket["started"]:
+            if record is not None:
+                record["outcome"] = "never ran: timed out waiting behind another request"
+            raise _TimedOut("never_ran")
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=_TIMEOUT_GRACE_S)
+        except asyncio.TimeoutError:
+            if record is not None:
+                record["outcome"] = "still running past its deadline"
+            raise _TimedOut("still_running", in_transaction=bool((record or {}).get("open_txn")))
+
+
+def _timeout_response(timed_out):
+    """The 504 for a request the door gave up on, saying what happened and nothing it cannot know: what
+    was kept follows whether the request's transaction was open at that moment (_note_served_txn)."""
+    from starlette.responses import JSONResponse
+    if timed_out.kind == "never_ran":
+        msg = (f"This request waited behind another one for longer than its {_REQUEST_TIMEOUT:.0f}s "
+               f"limit and was not run. Nothing it asked for was done.")
+    else:
+        kept = ("Its writes are in the request's transaction, which is rolled back."
+                if timed_out.in_transaction else
+                "Anything it saved before the limit stays saved.")
+        msg = (f"This request passed its {_REQUEST_TIMEOUT:.0f}s limit while waiting on a call it "
+               f"started before then. When that call returns it stops and does nothing further. " + kept)
+    return JSONResponse({"error": "request_timeout", "message": msg}, status_code=504,
+                        headers=CORS_HEADERS)
 
 def _cors_origins():
     """Allowed CORS origins. Same-origin by default.
@@ -1434,17 +1546,27 @@ class _RequestLineMiddleware:
                 status_seen["code"] = message.get("status", 0)
             await send(message)
 
+        record = {}
+        _tok = _REQUEST_RECORD.set(record)
         try:
             await self.app(scope, receive, _send)
         finally:
+            _REQUEST_RECORD.reset(_tok)
             ms = (_t.monotonic() - started) * 1000.0
             # A REQUEST WITH NO ID AND A RESPONSE WITH NO STATUS ARE REAL STATES, not missing
             # values to paper over. A request turned away before it reached the interpreter
             # never got an id, and a connection dropped before the response started never got a
             # status. Each says which it is, so a line with nothing in that column is not read
-            # as a value that failed to print.
-            _rid = getattr(self.interp, "_request_id", None)
-            rid = _rid if _rid else "(no id: never reached the program)"
+            # as a value that failed to print. The id is THIS request's own (_REQUEST_RECORD).
+            _rid = record.get("id")
+            if _rid and record.get("outcome"):
+                rid = "%s (%s)" % (_rid, record["outcome"])
+            elif _rid:
+                rid = _rid
+            elif record.get("outcome"):
+                rid = "(no id: %s)" % record["outcome"]
+            else:
+                rid = "(no id: never reached the program)"
             path = scope.get("path", "?")
             if scope.get("query_string"):
                 # The path only. A query string can carry an identifier or a token, and a log
@@ -1718,7 +1840,10 @@ def create_app(server: MohioServer):
             "body": raw_bytes,
             "headers": {k.lower(): v for k, v in request.headers.items()},
         }
-        result = server.dispatch(req, session_id=session_id, raw_request=raw_request)
+        try:
+            result = await _with_timeout(server.dispatch, req, session_id=session_id, raw_request=raw_request)
+        except _TimedOut as _to:
+            return _timeout_response(_to)
 
         status = result.get("status", 200)
         body   = result.get("body")
@@ -1846,12 +1971,10 @@ def create_app(server: MohioServer):
                 req[k] = v
         try:
             result = await _with_timeout(server.dispatch, req, session_id=session_id)
-        except _TimedOut:
-            return JSONResponse(
-                {"error": "request_timeout",
-                 "message": f"This request took longer than {_REQUEST_TIMEOUT:.0f}s and was "
-                            f"stopped. Long-running work belongs in a background job."},
-                status_code=504)
+        except _TimedOut as _to:
+            # Written from the outcome (Option B): "was stopped" was said here while the handler
+            # carried on to its end, outbound calls included (measured: a call landed 3 s after it).
+            return _timeout_response(_to)
         except Exception as e:
             # FIX-B9-6 (T1-SILENT-SWEEP-BATCH9, finding #17): `MohioServer.dispatch` already
             # catches every exception from running the program itself and returns a real
@@ -1913,8 +2036,11 @@ def create_app(server: MohioServer):
         # so the two kinds of 500 must be told apart by WHO produced them, never by the number:
         # `mohio_answered` marks a give-back the program made on purpose, while an unmarked 500
         # is the convention path reporting its own failure and still falls through.
-        _conv_root = _convention_body(server, "/", session_id=_page_session(req, session_id),
-                                      http_request=request)
+        try:
+            _conv_root = await _with_timeout(_convention_body, server, "/",
+                                             session_id=_page_session(req, session_id), http_request=request)
+        except _TimedOut as _to:
+            return _timeout_response(_to)
         if _conv_root is not None and (getattr(_conv_root, "mohio_answered", False)
                                        or _conv_root.status_code != 500):
             return _conv_root
@@ -2145,7 +2271,10 @@ def create_app(server: MohioServer):
             "body": raw_body,
             "headers": {k.lower(): v for k, v in request.headers.items()},
         }
-        result = server.dispatch(req, session_id=session_id, raw_request=raw_request)
+        try:
+            result = await _with_timeout(server.dispatch, req, session_id=session_id, raw_request=raw_request)
+        except _TimedOut as _to:
+            return _timeout_response(_to)
         status = result.get("status") if isinstance(result, dict) else 200
         body   = result.get("body") if isinstance(result, dict) else result
 
@@ -2177,15 +2306,22 @@ def create_app(server: MohioServer):
             # 404 on purpose: answering endpoint calls with no page routing is the entire
             # point of that value, so inventing a page for it would be wrong. A declared but
             # not-yet-built framework fails LOUD rather than quietly serving a web page.
-            _conv = _convention_body(server, full_path, session_id=_page_session(req, session_id),
-                                     http_request=request, allow=_allow)
+            try:
+                _conv = await _with_timeout(_convention_body, server, full_path,
+                                            session_id=_page_session(req, session_id),
+                                            http_request=request, allow=_allow)
+            except _TimedOut as _to:
+                return _timeout_response(_to)
             if _conv is not None:
                 return _conv
             if _allow:
                 from starlette.responses import JSONResponse
                 return JSONResponse(status_code=405, headers={**CORS_HEADERS, "Allow": str(_allow)},
                                     content=(body if isinstance(body, dict) else {"message": str(body)}))
-            _declared = _declared_status_response(server, 404)
+            try:
+                _declared = await _with_timeout(_declared_status_response, server, 404)
+            except _TimedOut as _to:
+                return _timeout_response(_to)
             if _declared is not None:
                 return _declared
             return Response(status_code=404, headers=CORS_HEADERS)

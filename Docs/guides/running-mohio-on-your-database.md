@@ -197,9 +197,24 @@ integer, a range bound is scaled to the minor unit. This is why a `match any` on
 live-true row, and a currency `where is` finds its row even behind a pushed-down join, rather than silently
 matching nothing (`T1-TYPED-MATCH-PUSHDOWN`).
 
-**Operational limits you can set.** Two environment knobs, both OFF by default:
-`MOHIO_FIND_MAX_ROWS` caps how many rows a find may return and refuses loud past the cap rather than streaming an
-unbounded result; `MOHIO_DB_STATEMENT_TIMEOUT_MS` sets a per-statement timeout on PostgreSQL, MySQL and Oracle.
+**Operational limits you can set.** `MOHIO_FIND_MAX_ROWS` is off by default; it caps how many rows a find may return
+and refuses loud past the cap rather than streaming an unbounded result. `MOHIO_DB_STATEMENT_TIMEOUT_MS` sets a
+per-statement timeout, in milliseconds. Since 6.0.4 it defaults under `mio serve` to `MOHIO_REQUEST_TIMEOUT`; set a
+number to replace that, or `0` for no limit. Everywhere else it stays off unless you set it, and a value that is not a
+whole number refuses. What the limit covers depends on the engine:
+
+| Engine | Limit | Covers | Does not cover |
+|---|---|---|---|
+| PostgreSQL | `statement_timeout` | every statement, including time waiting on a lock | |
+| MySQL | `max_execution_time`, plus `innodb_lock_wait_timeout` and `lock_wait_timeout` (whole seconds) | a read-only `SELECT`; any statement waiting on a lock | a write that is simply slow: MySQL has no limit for one |
+| Oracle | the connection's `call_timeout` | each call to the server | after the limit the driver tries to recover the call for as long again, so a stuck statement holds a request for about twice the limit |
+| SQLite | **none, and none is faked** | | says so at connect if you set it. `MOHIO_SQLITE_BUSY_TIMEOUT_MS` bounds how long a write waits for a lock, and the request's own limit still answers the caller |
+| MongoDB | the driver's `timeoutMS`, which also sets `maxTimeMS` on the server | every operation, including one the server never answers | when the server never answered, a write's outcome is not known, and the 504 says so |
+
+The limit applies to one statement, so under `mio serve` the worst case before the dispatch lock frees is about twice
+the request limit (a statement that starts just before the limit). It also applies to what `mio serve` runs that is
+not a request: a large index built at boot and a long scheduled job. Raise the setting for those, or run the migration
+outside `mio serve`.
 <!-- MOHIO_FIND_MAX_ROWS / MOHIO_DB_STATEMENT_TIMEOUT_MS: mohio_interpreter.py:3796 -->
 
 **Join-field indexes.** When Mohio creates a table, it creates an index on each field used as a join target, on

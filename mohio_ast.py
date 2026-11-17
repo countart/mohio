@@ -42,7 +42,7 @@ class SourceLine(int):
 def tag_source_file(nodes, path):
     """Give every node line under `nodes` the file it was written in, unless a deeper include
     already gave it its own."""
-    from dataclasses import fields, is_dataclass
+    from mohio_dc import fields, is_dataclass
     stack, seen = [nodes], set()
     while stack:
         n = stack.pop()
@@ -919,11 +919,13 @@ class JourneyDecl(Node):
 
 @dataclass
 class JourneyMeta(Node):
-    """Journey-level config/metadata. kind is one of 'public'/'private'/'hidden'/
+    """Journey-level config/metadata. kind is one of 'public'/'unlisted'/'hidden'/
     'authorize'/'flow' (value: a path list) or 'serves' (value: 'single tenant'/
-    'multiple tenants'). All four of public/private/hidden/authorize are read and
-    enforced by _exec_JourneyDecl (2026-08-27, the locked T1-PAGE-CLASSIFICATION-MODEL):
-    public: default, served+listed; private: served but unlisted (no runtime gate --
+    'multiple tenants'). `private:` is the deprecated spelling of 'unlisted' (RULED by Ron
+    2026-11-14) and produces kind 'unlisted' with spelled='private'. All four of
+    public/unlisted/hidden/authorize are read by _exec_JourneyDecl (2026-08-27, the locked
+    T1-PAGE-CLASSIFICATION-MODEL):
+    public: default, served+listed; unlisted: served but unlisted (no runtime gate --
     inert until a listing feature exists to consume it); hidden: not served, 404
     (also implied by any `_`-prefixed path segment); authorize: login required,
     reusing require role's server-verified-session mechanism. flow is captured but not
@@ -937,6 +939,9 @@ class JourneyMeta(Node):
     # `[important]` trailed the line: the journey's value wins over a page's own for it (`timezone`;
     # a classification line is a floor for the pages under it, checked in mio.py's cascade).
     important: bool = False
+    # The keyword as written when it differs from the kind: 'private' for the deprecated spelling of
+    # kind 'unlisted' (RULED by Ron 2026-11-14), read only by the check that warns on it.
+    spelled: str = ""
 
 @dataclass
 class SagaDecl(Node):               # NEW v3.8 (was stub)
@@ -1807,6 +1812,7 @@ class GiveBackStmt(Node):
     modifier:  Any  = None
     qualifier: Optional["TrailingQualifier"] = None   # NEW v3.8
     trusted:   bool = False    # `trusted` opts out of the XSS-safe {{ }} auto-escape (raw HTML/JSON)
+    fields:    Optional[Any] = None   # the block form: one FieldValue per `name value` line, answered as a record
 
 @dataclass
 class GiveStmt(Node):
@@ -2206,7 +2212,7 @@ class MiofileDecl(Node):
     """
     Storage declaration. Local/temp zones are the free engine; cloud zones and the
     managed lifecycle policies (expires, clean) are the commercial layer: parsed and
-    validated in open core, executed only in the Mohio commercial runtime.
+    validated in the free runtime, executed only in the Mohio commercial runtime.
 
     miofile
         local "uploads" as docs
@@ -2270,6 +2276,10 @@ class ShowBlock(Node):
     """
     html: str = ""     # raw HTML text with {{ }} placeholders
     escape: bool = False  # render block escapes interpolated {{ }} values; show block does not
+    # The source line of each line of `html` (blank body lines are not kept, so a body line's
+    # place in `html` does not give its line in the file). Read by check, to report a finding
+    # inside a render at the line it was written on.
+    body_lines: list = field(default_factory=list)
 
 @dataclass
 class HashBlock(Node):

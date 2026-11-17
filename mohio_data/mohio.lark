@@ -396,7 +396,6 @@ CALL.2:       /call(?![A-Za-z0-9_])/
 RUN.2:        /run(?![A-Za-z0-9_])/
 ASYNC.2:      /async(?![A-Za-z0-9_])/
 WAIT.2:       /wait(?![A-Za-z0-9_])/
-IMPORT.2:     /import(?![A-Za-z0-9_])/
 RENAME.2:     /rename(?![A-Za-z0-9_])/
 FORGET.2:     /forget(?![A-Za-z0-9_.])/
 ALLOW.2:      /allow(?![A-Za-z0-9_])/
@@ -761,6 +760,7 @@ declaration: sector_decl
 // mean inside a wrapper: the transformer gathers them into the file's journey, so the serve gate, the
 // cascade and the `[important]` floor read them exactly as they read the wrapped form.
 journey_class_line: _PUBLIC    ":" path_list TAG_REF? -> journey_public
+                  | _UNLISTED  ":" path_list TAG_REF? -> journey_unlisted
                   | _PRIVATE   ":" path_list TAG_REF? -> journey_private
                   | _HIDDEN    ":" path_list TAG_REF? -> journey_hidden
                   | _AUTHORIZE ":" path_list TAG_REF? -> journey_authorize
@@ -1405,9 +1405,12 @@ debug_checkpoint: DEBUG_KW "." CHECKPOINT_KW STRING debug_log_stmt* closer
 //   public:    DEFAULT (no declaration needed) -- served + listed. One-job meaning: something
 //              end users can see or interact with. Kept as an OPTIONAL explicit declaration
 //              for readability/future-proofing, never required.
-//   private:   served but UNLISTED (reachable by direct URL, excluded from sitemap; unlisted
+//   unlisted:  served but UNLISTED (reachable by direct URL, excluded from sitemap; unlisted
 //              docs, conditional/share-by-link content). One-job meaning: something you keep
-//              to yourself, shown on a need-to-know basis.
+//              to yourself, shown on a need-to-know basis. RENAMED from `private:` (RULED by
+//              Ron 2026-11-14): the word promised protection the class never gave. `private:`
+//              still parses as a DEPRECATED ALIAS, producing the same `unlisted` class, and
+//              warns at check (`private_is_unlisted`). Neither one gates a request.
 //   hidden:    NOT served -- 404. Path-based equivalent of the `_pagename`/`journey.mho`
 //              built-in file-naming blocks (which stay served=no because includes must be
 //              usable-but-not-served). One-job meaning: something nobody should see.
@@ -1434,7 +1437,9 @@ journey_decl: JOURNEY NAME? journey_body* closer
 // terminals, so `public: /a` and `private: /a` and `flow: /a` (and now `hidden: /a` and
 // `authorize: /a`) would otherwise reduce to an identical `path_list` tree with no trace of
 // which keyword produced it (found 2026-08-06, same shape as ai_agent_body's max-steps/
-// max-cost collision, same fix; hidden:/authorize: joined the family 2026-08-15).
+// max-cost collision, same fix; hidden:/authorize: joined the family 2026-08-15; `_UNLISTED`
+// joined 2026-11-14 with its own alias, so the transformer can tell the canonical `unlisted:` from
+// the deprecated `private:` spelling and warn on the second).
 // `[important]` (RULED by Ron 2026-10-22): the reserved journey-override label, TAG_REF reused,
 // trailing a journey line, where it makes the journey win over a page's own value for that line.
 // On `timezone` the journey's zone holds. On the four classification lines it is a FLOOR on the
@@ -1444,6 +1449,7 @@ journey_decl: JOURNEY NAME? journey_body* closer
 journey_body: _SERVES ":" "single tenant"    -> journey_serves_single
             | _SERVES ":" "multiple tenants" -> journey_serves_multiple
             | _PUBLIC    ":" path_list TAG_REF? -> journey_public
+            | _UNLISTED  ":" path_list TAG_REF? -> journey_unlisted
             | _PRIVATE   ":" path_list TAG_REF? -> journey_private
             | _HIDDEN    ":" path_list TAG_REF? -> journey_hidden
             | _AUTHORIZE ":" path_list TAG_REF? -> journey_authorize
@@ -2690,7 +2696,7 @@ remember_body: STRING
 // ── ai.resolve — three-tier progressive resolution (patented) ──
 // Compiler expands into full three-tier IR: cache / learned DB / live AI
 // Developer writes 4 lines. Compiler builds the infrastructure.
-// OPEN CORE — free. mioai.resolve = commercial managed version.
+// FREE under the BSL. mioai.resolve = commercial managed version.
 
 AI_RESOLVE.3:   "ai.resolve"
 
@@ -2736,7 +2742,7 @@ ai_resolve_body: ai_prompt_opts
                                                                 // invoked by name (declare once,
                                                                 // resolve once, reuse in loops)
 
-// ── ai.agent — open core single agent ────────────────────────
+// ── ai.agent — single agent, free under the BSL ────────────────────────
 // limits block REQUIRED — compiler error without it (same as ai.decide)
 // mioagent (commercial) adds multi-agent coordination
 
@@ -5441,6 +5447,8 @@ _PORT.2: /port(?![A-Za-z0-9_])/
 _PREFIX.2: /prefix(?![A-Za-z0-9_])/
 _PRESERVE.2: /preserve(?![A-Za-z0-9_])/
 _PRESET.2: /preset(?![A-Za-z0-9_])/
+// DEPRECATED ALIAS (RULED by Ron 2026-11-14): `private:` is now `unlisted:` (_UNLISTED). It parses to
+// the same `unlisted` class and warns at check; the history below is kept as written.
 // CORRECTED 2026-08-15 (was marked SUPERSEDED, that was wrong -- verified by running: real,
 // tested, 403-block enforcement is live today, tests/test_journey_access_control.py 21/21).
 // `journey_private`/`journey_public` are part of the LOCKED page-classification model (see
@@ -5601,6 +5609,9 @@ _TRANSIT.2: /transit(?![A-Za-z0-9_])/
 _TRIM.2: /trim(?![A-Za-z0-9_.])/
 _TYPES.2: /types(?![A-Za-z0-9_])/
 _UNLESS.2: /unless(?![A-Za-z0-9_])/
+// `unlisted:` the page class served but never enumerated (RULED by Ron 2026-11-14, the canonical
+// spelling of what `private:` meant; `private:` stays a deprecated alias of it).
+_UNLISTED.2: /unlisted(?![A-Za-z0-9_])/
 _UNLOCK.2: /unlock(?![A-Za-z0-9_])/
 _UNMARK.2: /unmark(?![A-Za-z0-9_])/
 _UP.2: /up(?![A-Za-z0-9_])/

@@ -35,6 +35,7 @@ so two machines reconciling at once resolve a row once and record it once.
 import datetime
 import json
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -156,7 +157,22 @@ def _store(interp):
     return _make_db_runtime(spec[0], spec[1], url=spec[2]), True
 
 
+# ONE PASS AT A TIME IN A PROCESS (found 2026-11-08 counting a 149-page directory at
+# MOHIO_DB_POOL_MAX=1). Every page of a served directory runs its own reconciler, all started together,
+# so at start and on every interval each page opened a runtime of its own for its pass at the same
+# moment: up to one connection per page on top of the pages' own pools, all reading the same attempts
+# table. One pass at a time bounds that to one runtime, and a row is still resolved once, whichever
+# page reaches it. Reentrant, so a pass that ever reaches another on its own thread does not wait on itself.
+_ONE_PASS_AT_A_TIME = threading.RLock()
+
+
 def reconcile_pass(interp, now=None):
+    """One reconcile pass, waiting for any other pass in this process to finish first (see above)."""
+    with _ONE_PASS_AT_A_TIME:
+        return _reconcile_pass(interp, now)
+
+
+def _reconcile_pass(interp, now=None):
     """Ask about every call still needing reconciliation. Returns a summary:
     {'done': [...], 'not_done': [...], 'pending': [(key, connector, operation, why)], 'no_store': bool}."""
     from mohio_interpreter import _now_utc

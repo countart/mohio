@@ -34,6 +34,7 @@ def _print_program_output(line):
     # EGRESS-EXEMPT: program output, already masked by the gate's display rule in the interpreter
     _builtins.print(line)
 
+import contextlib
 import json
 import os
 import re
@@ -825,31 +826,40 @@ _RETIRED_FORMS = (
      "        render\n            <p>About</p>\n"
      "        render: done\n"
      "    request: done\n"
-     "Page CLASSIFICATION (`private:` / `hidden:`) is a different thing and is unchanged."),
+     "Page CLASSIFICATION (`unlisted:` / `hidden:`) is a different thing and is unchanged."),
 )
 
 
-_RENDER_INCLUDE_RE = re.compile(r'\{\{\s*include\s+"([^"]+)"\s*\}\}')
+_RENDER_INCLUDE_RE = re.compile(r'\{\{\s*include\s*"([^"]+)"\s*\}\}')
 
 
-def _render_only_fragments(paths):
-    """Absolute paths of the files a render includes (`{{ include "x" }}`). Those are page text and
-    are not parsed as Mohio on their own. A file that is ALSO included as a statement is still
-    checked as Mohio, through the page that includes it. Resolved the way the runtime resolves an
-    include: relative to the including file, then the current directory."""
+def _render_only_fragments(paths, app_root):
+    """Absolute paths of the files a render includes (`{{ include "x" }}`), nested ones too. Those
+    are page text and are not parsed as Mohio on their own. A file that is ALSO included as a
+    statement is still checked as Mohio, through the page that includes it. Found by the one
+    include resolver, exactly as the runtime finds them: next to the including file, then in the
+    application folder, never by the working directory."""
     import os as _os
+    from mohio_include import resolve_include, IncludeRefused
     found = set()
-    for p in paths:
+    todo = [_os.path.abspath(p) for p in paths]
+    read = set()
+    while todo:
+        p = todo.pop()
+        if p in read:
+            continue
+        read.add(p)
         try:
             src = Path(p).read_text(encoding="utf-8-sig")
         except (OSError, UnicodeDecodeError):
             continue          # an unreadable file is reported by its own parse, not here
-        base = _os.path.dirname(_os.path.abspath(p))
         for m in _RENDER_INCLUDE_RE.finditer(src):
-            for cand in (_os.path.join(base, m.group(1)), _os.path.abspath(m.group(1))):
-                if _os.path.isfile(cand):
-                    found.add(_os.path.abspath(cand))
-                    break
+            try:
+                cand = resolve_include(m.group(1), p, app_root)
+            except IncludeRefused:   # SILENT-OK: the page's own check refuses it by name, at its line
+                continue
+            found.add(cand)
+            todo.append(cand)    # a fragment may include another fragment
     return found
 
 
@@ -2558,6 +2568,100 @@ def _check_download_name(source, filename):
              exit_code=1)
 
 
+class _Tee:
+    """A stream that writes through to the real one and keeps a copy, so a verdict's own output can be
+    shown again, unchanged, on a start that reuses the verdict."""
+
+    def __init__(self, real):
+        self.real = real
+        self.kept = []
+
+    def write(self, text):
+        self.kept.append(text)
+        return self.real.write(text)
+
+    def flush(self):
+        return self.real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+@contextlib.contextmanager
+def _verdict_stage(segs, name):
+    """Run one stage of the serve verdict with its output kept under `name` (see mohio_verdict_cache)."""
+    out, err = _Tee(sys.stdout), _Tee(sys.stderr)
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            yield
+    finally:
+        segs[name] = ("".join(out.kept), "".join(err.kept))
+
+
+def _verdict_open(filepath, app_root):
+    """The serve verdict for one page (Lever 2 Part B, mohio_verdict_cache): (entry, why, recording).
+    `entry` is a verdict that still holds; otherwise `recording` notes what the build reads, and `why`
+    says why a kept verdict was not reused, when one was there."""
+    import mohio_verdict_cache as _vc
+    import mohio_sector_loader as _SLv
+    if not _vc.enabled():
+        return None, None, None
+    # The sector search path the key reads starts at the program's folder, which the first parse names.
+    if _SLv._program_folder is None and os.path.isfile(str(filepath)):
+        _SLv.set_program_folder(os.path.dirname(os.path.abspath(str(filepath))))
+    entry, why = _vc.load(filepath, app_root)
+    if entry is not None:
+        return entry, None, None
+    rec = _vc.Recording()
+    rec.__enter__()
+    return None, why, rec
+
+
+def _verdict_replay(entry, name):
+    """Show a reused stage's output exactly as the build that kept it showed it."""
+    out, err = entry["segs"].get(name, ("", ""))
+    # EGRESS-EXEMPT: this is the stage's own output exactly as it left through the gate when the verdict
+    # was built (each line was already gated then); it is shown again, unchanged, not composed here.
+    if out:
+        sys.stdout.write(out)  # EGRESS-EXEMPT: replayed, already-gated output (see above)
+    if err:
+        sys.stderr.write(err)  # EGRESS-EXEMPT: replayed, already-gated output (see above)
+
+
+def _verdict_ctx(entry):
+    """A reused verdict's validation context as validation left it: the warnings the scans added are
+    held back and added at the scan stage, so every count is printed where the build printed it."""
+    ctx = entry["ctx"]
+    n = entry["segs"]["warnings_at_validate"]
+    entry["scan_warnings"] = ctx.warnings[n:]
+    del ctx.warnings[n:]
+    return ctx
+
+
+def _verdict_rerun(ctx, program, entry):
+    """On a reused verdict the scans' kept warnings are added back, and the scanners that read the
+    moment or the deployment run again."""
+    import mohio_verdict_cache as _vc
+    from mohio_reachability import run_scans
+    ctx.warnings.extend(entry.get("scan_warnings") or [])
+    _errs, _warns = run_scans(program, only=_vc.ALWAYS_RERUN)
+    ctx.errors.extend(_errs)
+    ctx.warnings.extend(_warns)
+
+
+def _verdict_close(filepath, app_root, rec, segs, ctx, program):
+    """Stop recording and keep the verdict when it is clean and every stage ran. Returns a sentence
+    when it could not be kept, else None."""
+    if rec is None:
+        return None
+    rec.__exit__(None, None, None)
+    if ctx is None or program is None or getattr(ctx, "errors", None) \
+            or not {"validate", "assemble", "scan", "warnings_at_validate"} <= set(segs):
+        return None
+    import mohio_verdict_cache as _vc
+    return _vc.store(filepath, app_root, rec, {"ctx": ctx, "program": program, "segs": dict(segs)})
+
+
 def _parse_and_validate(source, filename, verbose=False):
     """Parse source and run compile-time validation.
 
@@ -2727,7 +2831,7 @@ def _parse_and_validate(source, filename, verbose=False):
             print(f"    For a different address, mount it in a `map route` block.")
             print(f"    For a request handler, write it on its own: "
                   f"`request for sh.X at /path ... request: done`.")
-            print(f"    The page CLASSIFICATION model (public:/private:/hidden:/authorize:) is")
+            print(f"    The page CLASSIFICATION model (public:/unlisted:/hidden:/authorize:) is")
             print(f"    unchanged -- that is access control, and separate from this.")
             sys.exit(1)
 
@@ -2993,26 +3097,15 @@ def _parse_and_validate(source, filename, verbose=False):
     return tree, ctx
 
 
-def _find_include_path(path, base_dir):
-    """Resolve an include path: as given (if absolute), then relative to the
-    including file's directory, then relative to the current directory.
-    Returns an existing file path, or None if not found."""
-    cands = []
-    if os.path.isabs(path):
-        cands.append(path)
-    else:
-        cands.append(os.path.join(base_dir, path))
-        cands.append(os.path.join(os.getcwd(), path))
-        cands.append(path)
-    for c in cands:
-        if os.path.isfile(c):
-            return c
-    return None
-
-
-def _resolve_includes(program, including_path, _seen=None, _depth=0, verbose=False):
+def _resolve_includes(program, including_path, _seen=None, _depth=0, verbose=False, app_root=None):
     """Replace top-level `include "..."` nodes with the parsed + transformed
     statements of the referenced files.
+
+    Each path is found by the one include resolver (mohio_include.resolve_include): next to the
+    including file, then at the application root, never outside the root and never by the working
+    directory. `app_root` is the folder `mio serve` was given; a single file finds its own. The
+    top-level program records where it came from (`include_origin`), so a `{{ include }}` in a render
+    resolves the same way at check and at run.
 
     Each file is parsed as its OWN independent Earley tree (a separate
     _parse_and_validate call) and its AST is merged in -- never source-text
@@ -3023,24 +3116,33 @@ def _resolve_includes(program, including_path, _seen=None, _depth=0, verbose=Fal
     """
     from mohio_ast import IncludeDecl
     from mohio_transformer_ast import transform as _t
+    from mohio_include import resolve_include, IncludeRefused, app_root_for_file
     if _seen is None:
         _seen = set()
     if including_path:
         _seen.add(os.path.realpath(os.path.abspath(including_path)))
+    _named_app = app_root is not None
+    if app_root is None and including_path:
+        app_root = app_root_for_file(os.path.dirname(os.path.abspath(including_path)))
+    if _depth == 0:
+        program.include_origin = (os.path.abspath(including_path) if including_path else None,
+                                  os.path.abspath(app_root) if app_root else None)
+        # Whether this file is one page of an application: a folder `mio serve` or `mio check` was
+        # given, or a journey at the root. A lone file is a program of its own, so no other file in its
+        # folder is a page of it, and check does not read them for what they set.
+        program.include_app = bool(app_root) and (
+            _named_app or os.path.isfile(os.path.join(app_root, 'journey.mho')))
     if _depth > 40:
         raise RecursionError("include nesting too deep (possible include cycle)")
     if not any(isinstance(s, IncludeDecl) for s in program.statements):
         return program
-    base_dir = (os.path.dirname(os.path.abspath(including_path))
-                if including_path else os.getcwd())
     new_stmts = []
     for stmt in program.statements:
         if isinstance(stmt, IncludeDecl):
-            target = _find_include_path(stmt.path, base_dir)
-            if target is None:
-                _nf = FileNotFoundError(
-                    f"include: cannot find '{stmt.path}' (looked relative to "
-                    f"{base_dir} and the current directory)")
+            try:
+                target = resolve_include(stmt.path, including_path, app_root)
+            except IncludeRefused as _refused:
+                _nf = FileNotFoundError(str(_refused))
                 # Carried for `cmd_check`'s own catch (mio.py) to report the real source line
                 # rather than line 0 -- IncludeDecl.line is already populated by the generic
                 # line-propagation in MohioTransformer._call_userfunc.
@@ -3061,7 +3163,7 @@ def _resolve_includes(program, including_path, _seen=None, _depth=0, verbose=Fal
             # after reads it. Batch 11's separate lookup-and-save here is no longer needed.
             sub_tree, _sub_ctx = _parse_and_validate(sub_src, target, verbose)
             sub_prog = _t(sub_tree, sub_src)
-            _resolve_includes(sub_prog, target, _seen, _depth + 1, verbose)
+            _resolve_includes(sub_prog, target, _seen, _depth + 1, verbose, app_root=app_root)
             # Every line in the included statements names its own file, so a finding on one is
             # reported at that file and line, not at the including file's line of the same number.
             from mohio_ast import tag_source_file
@@ -3087,17 +3189,10 @@ def _app_root_for_file(page_dir):
     assembled only when the developer happened to be standing in the app root. A security floor that
     depends on which directory a command was run from is the gap this closes: a developer checking
     one page of an application from ANYWHERE now gets the same answer as checking it from the app
-    root, because the root is found from the file, not from the cwd."""
-    page_dir = os.path.abspath(page_dir)
-    highest, cur = None, page_dir
-    while True:
-        if os.path.isfile(os.path.join(cur, 'journey.mho')):
-            highest = cur
-        parent = os.path.dirname(cur)
-        if parent == cur:
-            break
-        cur = parent
-    return highest or page_dir
+    root, because the root is found from the file, not from the cwd. One definition, shared with the
+    include resolver, which bounds every include by this same root."""
+    from mohio_include import app_root_for_file
+    return app_root_for_file(page_dir)
 
 
 def _journey_chain_dirs(page_dir, app_root):
@@ -3158,9 +3253,10 @@ def _journey_program(journey_path, j_src, verbose=False):
 # (a subfolder journey may only tighten a class an ancestor set, 6d44d83) and so does `[important]`
 # (a journey line marked [important] may only tighten what a page declares, RULED by Ron 2026-10-22).
 # Module level so both read the same object and a change moves both; test_battery_important_tighten_
-# only asserts it is defined once. private: is unlisted but reachable direct, one notch tighter than
+# only asserts it is defined once. unlisted: (RULED 2026-11-14, `private:` is its deprecated alias and
+# parses to the same kind) is served but never enumerated, reachable direct, one notch tighter than
 # public:; authorize: requires login; hidden: is never served, "the strongest tier".
-_CLASS_RANK = {'public': 0, 'private': 1, 'authorize': 2, 'hidden': 3}
+_CLASS_RANK = {'public': 0, 'unlisted': 1, 'authorize': 2, 'hidden': 3}
 
 
 def _apply_journey(program, file_path, verbose=False, app_root=None):
@@ -3265,9 +3361,9 @@ def _apply_journey(program, file_path, verbose=False, app_root=None):
         if own_sectors:
             floor_sectors = own_sectors   # nearer replaces the floor, having covered it
 
-        # PAGE CLASSIFICATION ONLY TIGHTENS: this journey's own public:/private:/hidden:/
+        # PAGE CLASSIFICATION ONLY TIGHTENS: this journey's own public:/unlisted:/hidden:/
         # authorize: entries, checked against every floor entry an ancestor already set.
-        # public:/private:/hidden:/authorize: are journey-BODY declarations (`journey NAME
+        # public:/unlisted:/hidden:/authorize: are journey-BODY declarations (`journey NAME
         # ... journey: done`), not bare top-level statements the way `sector:` is -- so they
         # sit on JourneyDecl.body, and collecting them needs one level of unwrapping sector:
         # never needed.
@@ -3548,6 +3644,9 @@ def _cli_interpreter(ai, verbose, mho_file, args, serving=False):
     # Handed to the protected-data-on-SQLite startup guard: whether this is a serve, and the
     # platform variable that marks a deploy (_PLATFORM_VARS, the one `serve --dev` refuses on).
     interp.serving = bool(serving)
+    # `mio serve --dev` reads a render include on every request so an edited fragment shows on the
+    # next one; any other serve composes them once, at load (_compose_render_includes).
+    interp.include_live = bool(getattr(args, 'dev', False))
     interp.deploy_marker = next((v for v in _PLATFORM_VARS if (os.environ.get(v) or '').strip()), None)
     return interp
 
@@ -3691,6 +3790,50 @@ def cmd_run(args):
                 print(dim("  AI runtime: mock (use --ai for real Anthropic API)"))
 
         interp = _cli_interpreter(ai, verbose, filename, args)
+
+        # A PAGE ITS JOURNEY GATES IS NOT RUN WITHOUT THE GATE (T1-RUN-HONORS-PAGE-CLASS). Serve refuses
+        # an `authorize:` page to anyone not signed in and a `hidden:` page to everyone; `mio run` has no
+        # sign-in, and it printed both pages' bodies with exit 0 (measured on 6.0.4.2). Asked here, after
+        # the journeys are applied and before anything executes, with the same decision serve's gate
+        # asks, at the page's folder URL, with or without a request. `--ungated` runs it anyway, loudly.
+        _gate = _page_gate_refusal(program, filename, interp)
+        _ungated = bool(getattr(args, 'ungated', False))
+        _page_name = os.path.basename(str(filename))
+        if _gate is not None:
+            _g_url, _g_decision, _g_entry = _gate
+            _g_words = _page_gate_words(filename, _g_decision, _g_entry)
+            _g_root = _app_root_for_file(os.path.dirname(os.path.abspath(str(filename))))
+            # The serve hint names the folder the way the run hint names the file: relative to where
+            # the command was typed, and absolute only when the folder is not below it (or on another drive).
+            _g_cwd = os.getcwd()
+            _g_serve = _g_root
+            if os.path.splitdrive(_g_root)[0].lower() == os.path.splitdrive(_g_cwd)[0].lower():
+                _g_rel = os.path.relpath(_g_root, _g_cwd)
+                if _g_rel != os.pardir and not _g_rel.startswith(os.pardir + os.sep):
+                    _g_serve = _g_rel
+            _g_signin = _g_decision[0] == 'authorize'
+            if not _ungated:
+                print(f"\n  {bold(red('Refused'))}  {dim(filename)}\n")
+                print(f"  {_page_name} answers at {_g_url}, and {_g_words}.")
+                if _g_signin:
+                    print("  mio run has no sign-in, so running it here would show the page to anyone "
+                          "who can run the file, with nothing checking who is asking.")
+                else:
+                    print("  A hidden page is never served to anyone, so mio run does not show it either.")
+                print(f"  See it the way a visitor does:  mio serve {_g_serve}"
+                      + ("  (then sign in)" if _g_signin else "  (it answers 404)"))
+                print(f"  Run it here anyway, on your own machine:  mio run {filename} --ungated\n")
+                sys.exit(1)
+            print(f"\n  {bold(red('UNGATED RUN'))}  {_page_name} answers at {_g_url}, and {_g_words}.",
+                  file=sys.stderr)
+            print(f"  {bold(red('UNGATED RUN'))}  --ungated is running it with no gate. "
+                  + ("Served, it is refused to anyone not signed in." if _g_signin
+                     else "Served, it is never shown to anyone.")
+                  + " Here, anyone who can run the file sees it.\n", file=sys.stderr)
+        elif _ungated:
+            # A flag that changes nothing says so, rather than reading as if it had done something.
+            print(f"  --ungated: {_page_name} is not gated by any journey, so the flag changes "
+                  f"nothing here.", file=sys.stderr)
 
         seed_data = None
         if args.seed:
@@ -4406,9 +4549,11 @@ def _dev_shared_failures(directory, journeys):
             except (OSError, ValueError):
                 continue    # reported as a load failure of its own
             for m in _re.finditer(r'^\s*include\s+"([^"]+)"', text, _re.M):
-                p = _find_include_path(m.group(1), d)
-                if p:
-                    targets.add(os.path.realpath(p))
+                try:
+                    from mohio_include import resolve_include as _ri
+                    targets.add(os.path.realpath(_ri(m.group(1), os.path.join(d, f), str(directory))))
+                except Exception:   # SILENT-OK: an include that does not resolve fails that page's own load, by name
+                    pass
     out = []
     for fp in sorted(targets):
         rel = os.path.relpath(fp, str(directory))
@@ -4446,6 +4591,58 @@ def _page_url(rel_path):
     return url
 
 
+def _page_class_url(file_path):
+    """The URL a page answers at in its APP, for its folder's journeys to classify: its path under the
+    application root (_app_root_for_file, the highest folder holding a journey.mho, or its own folder
+    when there is none), mapped as directory mode maps it. None for a file that is never served as a
+    page: a journey.mho, or a `_` partial, which serve keeps out of routing and is run directly."""
+    page_path = os.path.abspath(str(file_path))
+    name = os.path.basename(page_path)
+    if name == 'journey.mho' or name.startswith('_'):
+        return None
+    root = _app_root_for_file(os.path.dirname(page_path))
+    rel = os.path.relpath(page_path, root)
+    return _page_url(os.path.splitext(rel)[0] + '.mho')
+
+
+def _page_gate_refusal(program, file_path, interp):
+    """What the folder's journeys say about running this page OUTSIDE serve, where nobody signs in:
+    None when it is served to anyone, else (url, decision, the classified path that covers it) for
+    the first journey that gates it.
+    The decision is the interpreter's _journey_gate_decision, the same one serve's gate asks; only a
+    DECLARED `hidden:` / `authorize:` refuses here (a `_` segment does not), and nobody is signed in."""
+    from mohio_ast import JourneyDecl, JourneyMeta
+    url = _page_class_url(file_path)
+    if url is None:
+        return None
+    for stmt in (getattr(program, 'statements', None) or []):
+        if not isinstance(stmt, JourneyDecl):
+            continue
+        metas = [b for b in (stmt.body or []) if isinstance(b, JourneyMeta)]
+        decision = interp._journey_gate_decision(metas, url, lambda: False, underscore_hides=False)
+        if decision is not None:
+            values = list(getattr(decision[2], 'value', None) or [])
+            entry = next((p for p in values if interp._journey_path_matches(p, decision[1])),
+                         values[0] if values else url)
+            return url, decision, entry
+    return None
+
+
+def _page_gate_words(file_path, decision, entry):
+    """`journey.mho line 2 classifies /admin as authorize: (sign in required)`, naming the line that
+    decided it in the file it was written in."""
+    kind, _path, meta = decision
+    line = getattr(meta, 'line', 0) or 0
+    written_in = os.path.abspath(getattr(line, 'file', None) or str(file_path))
+    # named by its path under the app root, so `area/journey.mho` is told apart from the root one
+    root = _app_root_for_file(os.path.dirname(os.path.abspath(str(file_path))))
+    where = os.path.relpath(written_in, root).replace(os.sep, '/')
+    if where.startswith('..'):
+        where = os.path.basename(written_in)
+    what = {'hidden': "hidden: (never served)", 'authorize': "authorize: (sign in required)"}[kind]
+    return f"{where} line {int(line)} classifies {entry} as {what}"
+
+
 def _pages_at_runtime_routes(directory, pages):
     """(page, url) for each page that answers at a path the runtime answers itself (RUNTIME_GET_ROUTES),
     so it would never be served: a page named for its file, with no declared handler path to move it.
@@ -4465,6 +4662,17 @@ def _runtime_route_message(directory, clashes):
             f"so they would not be served:\n{lines}\n\n  A request there gets the runtime's answer and the "
             f"page does not run. Rename the file (for example health.mho to status.mho), or give it a "
             f"handler at its own path (`request for sh.X at /status`).")
+
+
+def _statement_deadline_under_serve():
+    """A served program's database statements default to the request's own limit, before anything connects."""
+    from mohio_interpreter import statement_deadline_under_serve, _db_statement_timeout_ms, MohioRuntimeError
+    from mohio_server import _REQUEST_TIMEOUT
+    statement_deadline_under_serve(_REQUEST_TIMEOUT)
+    try:
+        _db_statement_timeout_ms()   # read here so a bad value refuses on every engine, SQLite too
+    except MohioRuntimeError as e:
+        _die(str(e), exit_code=1)
 
 
 def _cmd_serve_directory(args, directory, verbose=False):
@@ -4584,7 +4792,9 @@ def _cmd_serve_directory(args, directory, verbose=False):
             ln for ln in lines if ln)
 
     # Set up shared AI runtime
-    from mohio_interpreter import MohioInterpreter, MockAiRuntime
+    from mohio_interpreter import MohioInterpreter, MockAiRuntime, checkpoint_off_the_request
+    checkpoint_off_the_request()
+    _statement_deadline_under_serve()
     if args.ai:
         try:
             from mohio_ai import AnthropicAiRuntime
@@ -4606,6 +4816,7 @@ def _cmd_serve_directory(args, directory, verbose=False):
     # paid six times at startup. Its later routes now share the first compile -- the same one
     # interpreter for all of a file's routes that single-file serve has always used.
     _compiled = {}
+    _verdicts_reused, _verdicts_rebuilt = [], []
     for url_path, filepath in mho_files:
         _prior = _compiled.get(os.path.realpath(filepath))
         if _prior is not None:
@@ -4620,53 +4831,87 @@ def _cmd_serve_directory(args, directory, verbose=False):
             # is reported per-file and skipped like a parse error -- one bad page must
             # not crash the whole directory server with a raw traceback (Unit B).
             source = Path(filepath).read_text(encoding='utf-8-sig')
-            # A syntax error ends `_parse_and_validate` with its own printed report and an exit. It is
-            # caught here only so the NEXT file is checked too and every failure is named at once;
-            # the line comes from the report it printed.
-            import contextlib as _ctxl
-            import io as _io
-            _buf = _io.StringIO()
+            # THE VERDICT (mohio_verdict_cache): reused for this page when nothing it was built from has
+            # changed, the secret-rotation and certified-sector scanners run again regardless.
+            _vhit, _vwhy, _vrec = _verdict_open(filepath, str(directory))
+            _vsegs, ctx, program = {}, None, None
+            if _vhit is not None:
+                _verdicts_reused.append(url_path)
+            elif _vwhy:
+                _verdicts_rebuilt.append((os.path.relpath(filepath, str(directory)), _vwhy))
             try:
-                with _ctxl.redirect_stdout(_buf):
-                    tree, ctx = _parse_and_validate(source, filepath, verbose=False)
-            except SystemExit:
-                _said = _buf.getvalue()
-                print(_said, end='')
-                import re as _re_ln
-                _m = _re_ln.search(r'^\s*(\d+) \|', _said, _re_ln.M)
-                _load_failed(filepath, [int(_m.group(1))] if _m else [], 'does not parse')
-                _compiled[os.path.realpath(filepath)] = ('failed', 1)
-                continue
-            print(_buf.getvalue(), end='')
-            if ctx.errors:
-                for _e in ctx.errors:
-                    _print_compile_error(_e, source, filepath)
-                _load_failed(filepath, [getattr(_e, 'line', None) for _e in ctx.errors],
-                             f"{len(ctx.errors)} error(s)")
-                _compiled[os.path.realpath(filepath)] = ('failed', len(ctx.errors))
-                continue
-            from mohio_transformer_ast import transform
-            program = transform(tree, source)
-            program = _resolve_includes(program, filepath, verbose=False)
-            # The served directory IS the application root, so the cascade walks from a page's
-            # folder up to it (T1-JOURNEY-CASCADE): a page under api/ inherits the root journey.
-            program = _apply_journey(program, filepath, verbose=False, app_root=str(directory))
-            # Single door: Layer-3 scan on the assembled program before this route goes live.
-            # A file that fails check/run must not be served just because it is in a directory.
-            try:
-                from mohio_enforce import enforce_scans as _enforce_scans
-                _enforce_scans(ctx, program)
-            except Exception as _scan_err:
-                # FAILS LOUD (ruled by Ron, 2026-10-03), through the same ctx.errors the
-                # "skipped" check right below already acts on -- see _scan_incomplete_warn.
-                _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
-            if ctx.errors:
-                for _e in ctx.errors:
-                    _print_compile_error(_e, source, filepath)
-                _load_failed(filepath, [getattr(_e, 'line', None) for _e in ctx.errors],
-                             f"{len(ctx.errors)} error(s)")
-                _compiled[os.path.realpath(filepath)] = ('failed', len(ctx.errors))
-                continue
+                if _vhit is not None:
+                    ctx = _verdict_ctx(_vhit)
+                    _verdict_replay(_vhit, "validate")
+                else:
+                    # A syntax error ends `_parse_and_validate` with its own printed report and an exit.
+                    # It is caught here only so the NEXT file is checked too and every failure is named
+                    # at once; the line comes from the report it printed.
+                    import contextlib as _ctxl
+                    import io as _io
+                    _buf = _io.StringIO()
+                    _errt = _Tee(sys.stderr)
+                    try:
+                        with _ctxl.redirect_stdout(_buf), _ctxl.redirect_stderr(_errt):
+                            tree, ctx = _parse_and_validate(source, filepath, verbose=False)
+                    except SystemExit:
+                        _said = _buf.getvalue()
+                        print(_said, end='')
+                        import re as _re_ln
+                        _m = _re_ln.search(r'^\s*(\d+) \|', _said, _re_ln.M)
+                        _load_failed(filepath, [int(_m.group(1))] if _m else [], 'does not parse')
+                        _compiled[os.path.realpath(filepath)] = ('failed', 1)
+                        continue
+                    finally:
+                        _vsegs["validate"] = (_buf.getvalue(), "".join(_errt.kept))
+                    print(_buf.getvalue(), end='')
+                    _vsegs["warnings_at_validate"] = len(ctx.warnings)
+                if ctx.errors:
+                    for _e in ctx.errors:
+                        _print_compile_error(_e, source, filepath)
+                    _load_failed(filepath, [getattr(_e, 'line', None) for _e in ctx.errors],
+                                 f"{len(ctx.errors)} error(s)")
+                    _compiled[os.path.realpath(filepath)] = ('failed', len(ctx.errors))
+                    continue
+                if _vhit is not None:
+                    program = _vhit["program"]
+                    _verdict_replay(_vhit, "assemble")
+                else:
+                    with _verdict_stage(_vsegs, "assemble"):
+                        from mohio_transformer_ast import transform
+                        program = transform(tree, source)
+                        program = _resolve_includes(program, filepath, verbose=False,
+                                                    app_root=str(directory))
+                        # The served directory IS the application root, so the cascade walks from a
+                        # page's folder up to it (T1-JOURNEY-CASCADE): a page under api/ inherits the
+                        # root journey.
+                        program = _apply_journey(program, filepath, verbose=False, app_root=str(directory))
+                # Single door: Layer-3 scan on the assembled program before this route goes live.
+                # A file that fails check/run must not be served just because it is in a directory.
+                try:
+                    if _vhit is not None:
+                        _verdict_replay(_vhit, "scan")
+                        _verdict_rerun(ctx, program, _vhit)
+                    else:
+                        with _verdict_stage(_vsegs, "scan"):
+                            from mohio_enforce import enforce_scans as _enforce_scans
+                            _enforce_scans(ctx, program)
+                except Exception as _scan_err:
+                    # FAILS LOUD (ruled by Ron, 2026-10-03), through the same ctx.errors the
+                    # "skipped" check right below already acts on -- see _scan_incomplete_warn.
+                    _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
+                if ctx.errors:
+                    for _e in ctx.errors:
+                        _print_compile_error(_e, source, filepath)
+                    _load_failed(filepath, [getattr(_e, 'line', None) for _e in ctx.errors],
+                                 f"{len(ctx.errors)} error(s)")
+                    _compiled[os.path.realpath(filepath)] = ('failed', len(ctx.errors))
+                    continue
+            finally:
+                _vkept = _verdict_close(filepath, str(directory), _vrec, _vsegs, ctx, program)
+                if _vkept:
+                    print(f"  {dim('Verdict for ' + os.path.basename(filepath) + ' not kept: ' + _vkept)}",
+                          file=sys.stderr)
             interp = _cli_interpreter(ai, verbose, filepath, args, serving=True)
             interp.run_declarations(program)
             programs[url_path] = program
@@ -4702,6 +4947,11 @@ def _cmd_serve_directory(args, directory, verbose=False):
             print(f"  {red('x')}  {url_path} -- {e}")
             _load_failed(filepath, [getattr(e, 'line', None)], _first_line(e))
             _compiled[os.path.realpath(filepath)] = ('failed', 1)
+
+    for _vf, _vwhy in _verdicts_rebuilt:
+        print(f"  {dim('Verdict for ' + _vf + ' rebuilt: ' + _vwhy)}")
+    if _verdicts_reused:
+        print(f"  {dim('Verdict reused for ' + str(len(_verdicts_reused)) + ' page file(s): nothing they were built from has changed (secret rotation and certified sectors checked again)')}")
 
     refused_routes = {}
     if failures:
@@ -4836,6 +5086,7 @@ def _cmd_serve_directory(args, directory, verbose=False):
         print(f"\n  {dim('Press Ctrl+C to stop')}\n")
         from mohio_server import install_log_timestamps
         install_log_timestamps()     # every log line from here starts with its UTC time (unit D)
+        _release_boot_leases(interps.values())   # startup ran on this thread; requests do not
         _run_on_bound_socket(app, _sock, args.host, args.port)
 
 
@@ -4873,10 +5124,35 @@ def _bind_serve_socket(host, port):
     return sock
 
 
+def _release_boot_leases(interps):
+    """Give back every database connection the startup thread leased, before the server listens.
+
+    A pooled runtime leases one connection per THREAD and keeps it until that thread releases it.
+    Startup runs on the main thread (declarations, the authored-data seed, the startup gates), and
+    a request runs on a worker thread, so the main thread's lease was never returned: each served
+    page kept one connection for the life of the process, and its first request had to open a
+    second. With MOHIO_DB_POOL_MAX=1 every page answered 500 after the pool timeout; at the default
+    a 150-page directory held about 300 connections, a whole Postgres server's worth (P0 from the
+    banking build, reproduced 2026-11-07 through `mio serve`, and present in 6.0.3 as well)."""
+    seen = set()
+    for _it in interps:
+        if _it is None or id(_it) in seen:
+            continue
+        seen.add(id(_it))
+        _rel = getattr(_it, 'release_db_connections', None)
+        if _rel is not None:
+            _rel()
+
+
 def _run_on_bound_socket(app, sock, host, port):
     """Run the app on the socket `_bind_serve_socket` already bound: the same uvicorn settings
     `uvicorn.run` used, minus the bind it can no longer get wrong."""
     import uvicorn
+    # THE EVENT LOOP GETS ITS TURN DURING A BUSY HANDLER (Option B). A handler now runs in a worker
+    # thread, and pure interpreter work holds the GIL, so at Python's default 5 ms switch interval the
+    # loop answered /health 0.41 to 0.45 s late during a 4.5 s handler. At 0.5 ms it answered in 0 to
+    # 10 ms, and the handler took no longer (measured through `mio serve`, three runs each).
+    sys.setswitchinterval(0.0005)
     uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning")).run(sockets=[sock])
 
 
@@ -4933,62 +5209,88 @@ def cmd_serve(args):
     except OSError:
         pass
 
-    # -- Parse: AST cache first ------------------------------------
-    # If this is the first run or cache is stale, Earley parses the file.
-    # This is slow on large files. We start uvicorn first so Railway
-    # healthcheck passes, then serve requests once parsing completes.
-    # `_parse_and_validate` reuses the cached PARSE (the tree) and always re-runs the verdict, so a
-    # served file is validated by the current compiler, never by a cached verdict.
-    tree, ctx = _parse_and_validate(source, filename, verbose=False)
-
-    if ctx.errors:
-        print(f"\n  {red('x')} Build failed -- fix errors before serving:\n")
-        for e in ctx.errors:
-            _print_compile_error(e, source, filename)
-        sys.exit(1)
-
-    if ctx.warnings:
-        # FIX-B9-2 (T1-SILENT-SWEEP-BATCH9): `serve` has no `--json` flag (confirmed against
-        # its own subparser -- only `check` has one), so this suppression was always
-        # unconditionally true here -- copy-pasted from `check`'s identical warning line
-        # (commit 8627173 added the --json suppression to a block shared with `serve` without
-        # checking which command it landed in). Removed the dead condition; serve always
-        # prints its own startup warning count.
-        print(yellow(f"  {len(ctx.warnings)} warning(s) -- run mio check for details"))
-
-    # -- AST transform -----------------------------------------
+    # -- The verdict: parse, validate, assemble, scan ---------------------------------------------
+    # `_parse_and_validate` reuses the cached PARSE (the tree). The VERDICT (validation, the assembled
+    # program and the scans) is reused only when nothing it was built from has changed
+    # (mohio_verdict_cache): the compiler, every .mho in the application, every journey above the page,
+    # every sector profile and langmap pack, and every other file and environment variable the build
+    # read. The secret-rotation and certified-sector scanners run again on every start regardless.
+    _vhit, _vwhy, _vrec = _verdict_open(filename, None)
+    _vsegs, ctx, program = {}, None, None
+    if _vhit is not None:
+        print(f"  {dim('Verdict reused: nothing it was built from has changed (secret rotation and certified sectors checked again)')}")
+    elif _vwhy:
+        print(f"  {dim('Verdict rebuilt: ' + _vwhy)}")
     try:
-        from mohio_transformer_ast import transform
-        program = transform(tree, source)
-        program = _resolve_includes(program, filename, verbose=verbose)
-        program = _apply_journey(program, filename, verbose=verbose)
-        print(f"  {dim('Transformed --')} {len(program.statements)} top-level statements")
-    except Exception as e:
-        _die(f"Transform failed: {e}")
+        if _vhit is not None:
+            ctx = _verdict_ctx(_vhit)
+            _verdict_replay(_vhit, "validate")
+        else:
+            with _verdict_stage(_vsegs, "validate"):
+                tree, ctx = _parse_and_validate(source, filename, verbose=False)
+            _vsegs["warnings_at_validate"] = len(ctx.warnings)
 
-    # -- Layer 3: whole-program scanners on the assembled program ---------------
-    # Same single door as run/check. Without this, a Layer-3 error (e.g. a field typed with an
-    # undeclared shape) that blocks `mio run` and `mio check` would still SERVE -- a
-    # compliance-violating program going live over HTTP. Serve must not enforce fewer rules than
-    # run. Errors block startup; a scanner hiccup must never take down an otherwise-valid serve.
-    if program is not None:
-        try:
-            from mohio_enforce import enforce_scans as _enforce_scans
-            _enforce_scans(ctx, program)
-        except Exception as _scan_err:
-            # FAILS LOUD (ruled by Ron, 2026-10-03) -- see _scan_incomplete_warn.
-            _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
         if ctx.errors:
             print(f"\n  {red('x')} Build failed -- fix errors before serving:\n")
             for e in ctx.errors:
                 _print_compile_error(e, source, filename)
-            print(red(f"  {len(ctx.errors)} error(s) -- run `mio check {filename}` "
-                      f"for the full report.\n"))
             sys.exit(1)
+
+        # The start-up warning count is printed once, by _parse_and_validate above (replayed with
+        # the validate stage on a reused verdict), the same line `mio run` prints. serve printed it
+        # a second time here, so every warning count at start-up appeared twice. `serve` has no
+        # `--json` flag, so _parse_and_validate's own line always prints for it.
+
+        # -- AST transform -----------------------------------------
+        if _vhit is not None:
+            program = _vhit["program"]
+            _verdict_replay(_vhit, "assemble")
+            print(f"  {dim('Transformed --')} {len(program.statements)} top-level statements")
+        else:
+            try:
+                with _verdict_stage(_vsegs, "assemble"):
+                    from mohio_transformer_ast import transform
+                    program = transform(tree, source)
+                    program = _resolve_includes(program, filename, verbose=verbose)
+                    program = _apply_journey(program, filename, verbose=verbose)
+                print(f"  {dim('Transformed --')} {len(program.statements)} top-level statements")
+            except Exception as e:
+                _die(f"Transform failed: {e}")
+
+        # -- Layer 3: whole-program scanners on the assembled program ---------------
+        # Same single door as run/check. Without this, a Layer-3 error (e.g. a field typed with an
+        # undeclared shape) that blocks `mio run` and `mio check` would still SERVE -- a
+        # compliance-violating program going live over HTTP. Serve must not enforce fewer rules than
+        # run. Errors block startup; a scanner hiccup must never take down an otherwise-valid serve.
+        if program is not None:
+            try:
+                if _vhit is not None:
+                    _verdict_replay(_vhit, "scan")
+                    _verdict_rerun(ctx, program, _vhit)
+                else:
+                    with _verdict_stage(_vsegs, "scan"):
+                        from mohio_enforce import enforce_scans as _enforce_scans
+                        _enforce_scans(ctx, program)
+            except Exception as _scan_err:
+                # FAILS LOUD (ruled by Ron, 2026-10-03) -- see _scan_incomplete_warn.
+                _scan_incomplete_warn(ctx, "Layer 3 whole-program scanners", _scan_err)
+            if ctx.errors:
+                print(f"\n  {red('x')} Build failed -- fix errors before serving:\n")
+                for e in ctx.errors:
+                    _print_compile_error(e, source, filename)
+                print(red(f"  {len(ctx.errors)} error(s) -- run `mio check {filename}` "
+                          f"for the full report.\n"))
+                sys.exit(1)
+    finally:
+        _vkept = _verdict_close(filename, None, _vrec, _vsegs, ctx, program)
+    if _vkept:
+        print(f"  {dim('Verdict not kept: ' + _vkept)}", file=sys.stderr)
 
     # -- Set up interpreter ------------------------------------
     try:
-        from mohio_interpreter import MohioInterpreter, MockAiRuntime
+        from mohio_interpreter import MohioInterpreter, MockAiRuntime, checkpoint_off_the_request
+        checkpoint_off_the_request()
+        _statement_deadline_under_serve()
 
         if args.ai:
             try:
@@ -5029,6 +5331,11 @@ def cmd_serve(args):
     # Static files are served from the APP's directory, never the compiler's.
     server = MohioServer(program, interp, verbose=verbose,
                          app_dir=Path(filename).resolve().parent)
+    # The page answers at `/` here, but its folder's journeys classify it at its folder URL
+    # (admin.mho -> /admin), so a request to `/` is gated there too (T1-RUN-HONORS-PAGE-CLASS).
+    _class_url = _page_class_url(filename)
+    if _class_url not in (None, '/'):
+        server.page_class_path = _class_url
     # `map route as redirect` in a single served file: collect the redirects (and declared status
     # responses) the same way directory mode does, and hand them to the server, so a moved URL
     # actually redirects. Without this the single-file path registered no redirects and every one
@@ -5061,6 +5368,7 @@ def cmd_serve(args):
     try:
         from mohio_server import install_log_timestamps
         install_log_timestamps()     # every log line from here starts with its UTC time (unit D)
+        _release_boot_leases([interp])   # startup ran on this thread; requests do not
         _run_on_bound_socket(app, _sock, host, port)
     except KeyboardInterrupt:
         print(f"\n\n  {dim('Server stopped.')}\n")
@@ -5755,7 +6063,7 @@ def cmd_check(args):
         # Parsing it as Mohio stopped the whole folder check at the first such character, before
         # the app was analysed at all. Character rules apply to Mohio keywords and identifiers; a
         # file that is also `include`d as a statement is still Mohio and is still parsed.
-        _markup = _render_only_fragments(mho + private)
+        _markup = _render_only_fragments(mho + private, str(path.resolve()))
         markup_fragments = [p for p in private if _os.path.abspath(p) in _markup]
         private = [p for p in private if _os.path.abspath(p) not in _markup]
         if not mho and not private and not markup_fragments:
@@ -5774,7 +6082,15 @@ def cmd_check(args):
         _parse_files_first(mho + private, "[mio check]")
         # AGGREGATE (`_check_many`): a finding whose code is in a journey is reported ONCE, at the
         # journey, with its real excerpt; each page shows only its OWN findings, with its own excerpt.
-        _c, failed, n_distinct_warn, n_distinct_err, _decl, _adv = _check_many(sorted(mho), args, _rel)
+        # THE FOLDER BEING CHECKED IS THE APPLICATION, as it is for `mio serve <dir>`: every page's
+        # includes and journeys resolve against it, so check and serve find the same files. Without
+        # it a page under api/ in a folder with no top-level journey.mho took its own folder as the
+        # application, and a root fragment that serve found was refused here.
+        args._app_root = str(path.resolve())
+        try:
+            _c, failed, n_distinct_warn, n_distinct_err, _decl, _adv = _check_many(sorted(mho), args, _rel)
+        finally:
+            args._app_root = None
         # A page at a path the runtime answers itself is never served: an error, as serve refuses it.
         _clashes = _pages_at_runtime_routes(path, mho)
         if _clashes:
@@ -5906,8 +6222,9 @@ def cmd_check(args):
             if str(_e) not in _seen:
                 ctx.errors.append(_e)
         if _program is not None:
-            _program = _resolve_includes(_program, filename, verbose=False)
-            _program = _apply_journey(_program, filename, verbose=False)
+            _app_root = getattr(args, '_app_root', None)   # the folder a folder check was given
+            _program = _resolve_includes(_program, filename, verbose=False, app_root=_app_root)
+            _program = _apply_journey(_program, filename, verbose=False, app_root=_app_root)
     except MohioError as _e:
         if getattr(ctx, 'errors', None) is None:
             ctx.errors = []
@@ -5927,7 +6244,7 @@ def cmd_check(args):
         if getattr(ctx, 'errors', None) is None:
             ctx.errors = []
         _err = MohioCompileError(str(_e), getattr(_e, 'mohio_line', 0) or 0, '')
-        _err.hint = "Check the path and spelling; it is resolved relative to the including file, then the current directory."
+        _err.hint = "Check the path and spelling; an include looks next to the file that includes it, then in the application folder."
         ctx.errors.append(_err)
         _program = None
     except Exception as _e:
@@ -7061,9 +7378,11 @@ def _anchor_private_key():
     return Ed25519PrivateKey.from_private_bytes(seed)
 
 
-def _anchor_public_key(spec):
-    """The Ed25519 key `--verify-sig` names: a file holding a PEM public key or the 32 raw bytes as
-    hex or base64, or that value written out on the command line."""
+def _anchor_public_keys(spec):
+    """Every Ed25519 public key one `--verify-sig` value names. The value is a file or a key written
+    out on the command line. A file may hold one key or a KEYRING: several PEM public keys one after
+    another, or one raw key per line (32 bytes as 64 hex characters or base64). Each key is filed
+    under the id it signs with, so a chain that spans a key rotation verifies in one run."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     text = spec
@@ -7075,20 +7394,46 @@ def _anchor_public_key(spec):
                           "half, and the private key should never leave the machine that publishes. Make "
                           "the public half with `openssl pkey -in anchor.key -pubout -out anchor.pub`.",
                           exit_code=3)
+    how = ("Give the file `openssl pkey -in anchor.key -pubout -out anchor.pub` made, a keyring of "
+           "several such keys one after another, or a key's 32 bytes as 64 hex characters or base64 "
+           "(one per line in a keyring).")
+    keys = []
     if "-----BEGIN" in text:
-        try:
-            key = serialization.load_pem_public_key(text.strip().encode("ascii"))
-        except (ValueError, TypeError, UnicodeEncodeError):
-            key = None  # SILENT-OK: refused loud just below
-        if isinstance(key, Ed25519PublicKey):
-            return key
+        blocks = re.findall(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", text, re.S)
+        for n, block in enumerate(blocks, 1):
+            try:
+                key = serialization.load_pem_public_key(block.strip().encode("ascii"))
+            except (ValueError, TypeError, UnicodeEncodeError):
+                key = None  # SILENT-OK: refused loud just below, naming the key's place in the file
+            if not isinstance(key, Ed25519PublicKey):
+                where = f" (key {n} of {len(blocks)})" if len(blocks) > 1 else ""
+                raise AnchorError(f"--verify-sig {spec}{where}: this is not an Ed25519 public key. {how}",
+                                  exit_code=3)
+            keys.append(key)
+        if not blocks:
+            raise AnchorError(f"--verify-sig {spec}: a PEM key starts here and never ends. {how}", exit_code=3)
     else:
-        raw = _anchor_raw_32(text)
-        if raw is not None:
-            return Ed25519PublicKey.from_public_bytes(raw)
-    raise AnchorError(f"--verify-sig {spec}: this is not an Ed25519 public key. Give the file "
-                      f"`openssl pkey -in anchor.key -pubout -out anchor.pub` made, or the key's 32 bytes as "
-                      f"64 hex characters or base64.", exit_code=3)
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        for n, line in enumerate(lines, 1):
+            raw = _anchor_raw_32(line)
+            if raw is None:
+                where = f" (line {n})" if len(lines) > 1 else ""
+                raise AnchorError(f"--verify-sig {spec}{where}: this is not an Ed25519 public key. {how}",
+                                  exit_code=3)
+            keys.append(Ed25519PublicKey.from_public_bytes(raw))
+    if not keys:
+        raise AnchorError(f"--verify-sig {spec}: this holds no key at all. {how}", exit_code=3)
+    return keys
+
+
+def _anchor_keyring(specs):
+    """The keyring every `--verify-sig` value adds to, as {key_id: public key}. The same key given
+    twice is the same entry, because its id is derived from the key itself."""
+    ring = {}
+    for spec in specs:
+        for key in _anchor_public_keys(spec):
+            ring[_anchor_key_id(key)] = key
+    return ring
 
 
 def _anchor_key_id(public_key):
@@ -7100,8 +7445,9 @@ def _anchor_key_id(public_key):
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
-def _anchor_signature_problem(record, log, public_key, key_id):
-    """Why a stored anchor's signature does not hold for `log` under this key, or None when it does."""
+def _anchor_signature_problem(record, log, keyring):
+    """Why a stored anchor's signature does not hold for `log`, or None when it does. The anchor is
+    verified under the key in `keyring` ({key_id: public key}) whose id it names, and only that one."""
     import base64
     import binascii
     from cryptography.exceptions import InvalidSignature
@@ -7116,8 +7462,11 @@ def _anchor_signature_problem(record, log, public_key, key_id):
         return f"it was signed with {record.get('alg')!r}, and only Ed25519 is verified"
     if record.get("log") != log:
         return f"it was signed for the log {record.get('log')!r} and is filed under {log!r}"
-    if record.get("key_id") != key_id:
-        return f"it was signed by key {record.get('key_id')}, not by the key given (key {key_id})"
+    public_key = keyring.get(record.get("key_id"))
+    if public_key is None:
+        given = ", ".join(sorted(keyring))
+        return (f"it was signed by key {record.get('key_id')}, and no key given has that id "
+                f"(key{'s' if len(keyring) > 1 else ''} given: {given})")
     try:
         signature = base64.b64decode(str(record["signature"]), validate=True)
     except (binascii.Error, ValueError):
@@ -7543,7 +7892,9 @@ def cmd_audit(args):
                     shown.append(f"{field}={text}")
                 event = r.get('event') if r.get('event') else d.get('event', '(no event)')
                 subject = d.get('table') if d.get('table') else d.get('action', '')
-                print(f"    {event:<14} {subject:<24} {' '.join(shown)}")
+                # WHEN IT HAPPENED, on every line: this is the read an auditor uses, and it left the time out.
+                when = r.get('ts') or d.get('ts') or '(no time recorded)'  # SILENT-SHAPE-OK: says so in the line, never a made-up time
+                print(f"    {when:<28} {event:<14} {subject:<24} {' '.join(shown)}")
         if plain:
             print(f"\n  {plain} identity field(s) in this trail were written before identities were "
                   f"sealed and are readable as they stand. They are not rewritten (historical records "
@@ -7580,18 +7931,20 @@ def cmd_audit(args):
         # SIGNATURES FIRST (--verify-sig). An anchor whose signature does not hold is MALFORMED-SIG and
         # is dropped before the comparison, so a forged or altered anchor can never satisfy a log.
         # Without the flag nothing here runs and the check is exactly what it was.
-        sig_spec = getattr(args, "verify_sig", None)
+        # KEYRING (T1-VERIFY-SIG-KEYRING): --verify-sig may be given more than once, and a key file
+        # may hold several keys, so a chain whose anchors span a key rotation verifies in one run.
+        # Each anchor is checked under the key its key_id names; one key given is exactly the old check.
+        sig_spec = getattr(args, "verify_sig", None) or []
         sig_rejects = {}
         if sig_spec:
             try:
-                _pub = _anchor_public_key(sig_spec)
+                _ring = _anchor_keyring(sig_spec)
             except AnchorError as e:
                 _die(str(e), exit_code=e.exit_code)
-            _kid = _anchor_key_id(_pub)
             for _log in list(anchor_map):
                 _kept = []
                 for _n, _a in enumerate(anchor_map[_log], 1):
-                    _why = _anchor_signature_problem(_a, _log, _pub, _kid)
+                    _why = _anchor_signature_problem(_a, _log, _ring)
                     if _why:
                         sig_rejects.setdefault(_log, []).append((_n, _a, _why))
                     else:
@@ -7636,7 +7989,9 @@ def cmd_audit(args):
             print(f"  {yellow('!')}  {log}  NOT VERIFIED: {anchors_path} holds no anchor for it.")
         print()
         if sig_spec:
-            print(f"  {dim('Each anchor signature was checked against key ' + _kid + ' before its head')}")
+            _kids = sorted(_ring)
+            _named = ("key " + _kids[0]) if len(_kids) == 1 else ("the key its id names (keys " + ", ".join(_kids) + ")")
+            print(f"  {dim('Each anchor signature was checked against ' + _named + ' before its head')}")
             print(f"  {dim('was compared; an anchor whose signature did not hold was not trusted.')}")
         else:
             print(f"  {dim('This compares heads and trusts the anchors as authentic. Verify each')}")
@@ -8288,6 +8643,8 @@ def build_arg_parser():
     r.add_argument("--ai", action="store_true", default=False)
     r.add_argument("--api-key", default=None, dest="api_key")
     r.add_argument("--seed", default=None, metavar="seed.json")
+    r.add_argument("--ungated", action="store_true", default=False,
+                   help="Run a page its journey gates (hidden: / authorize:) anyway, with a banner")
 
     # test
     ts = sub.add_parser("test", add_help=False)
@@ -8385,9 +8742,10 @@ def build_arg_parser():
     aud.add_argument("file", nargs="?", default=None)
     aud.add_argument("--anchors", default=None,
                      help="Path to a JSON file of published anchors (for verify-anchors)")
-    aud.add_argument("--verify-sig", dest="verify_sig", default=None,
-                     help="Ed25519 public key (a file or its value): verify-anchors refuses an anchor "
-                          "whose signature does not hold before comparing heads")
+    aud.add_argument("--verify-sig", dest="verify_sig", default=None, action="append",
+                     help="Ed25519 public key (a file or its value), or a keyring file of several; give it "
+                          "more than once to add keys. verify-anchors checks each anchor under the key its "
+                          "key_id names and refuses one whose signature does not hold before comparing heads")
     aud.add_argument("--out", default=None,
                      help="Anchors file publish adds its signed anchors to (default: print them)")
     aud.add_argument("--program", default=None,

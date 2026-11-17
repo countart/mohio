@@ -13,6 +13,7 @@ import os, sys, subprocess, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
 
 _p = _f = 0
 def check(label, cond, detail=""):

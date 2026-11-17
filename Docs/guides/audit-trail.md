@@ -170,10 +170,22 @@ application still cannot touch the record of what they did.
 
 Two things to know about the arrangement. The audit's role needs SELECT as well as INSERT,
 because each record is chained to the one before it and the writer has to read the end of the
-chain. And the unique index that stops two processes claiming the same predecessor is created
-on first use, which an append-only role cannot do, so create it alongside the tables
-(`CREATE UNIQUE INDEX ux_<log>_prev_hash ON <log> (prev_hash)`) or accept that a fork between
-processes is reported by verification rather than prevented by the engine.
+chain. And each log needs two unique indexes, one on `prev_hash` (no two records claim the same
+predecessor) and one on `audit_id` (one record per audit id). Mohio creates them on first use,
+which an append-only role cannot do, so create them alongside the tables:
+
+```sql
+CREATE UNIQUE INDEX ux_data_audit_log_prev_hash ON data_audit_log (prev_hash);
+CREATE UNIQUE INDEX ux_data_audit_log_audit_id  ON data_audit_log (audit_id);
+-- and the same two for every other audit table in the grant
+```
+
+Mohio asks the database for a unique index on each column, under any name, before it creates
+one, so the audit role sends no index statement once these exist. Without them that role cannot
+deliver: the record waits in the evidence beside the data, and `mio audit relay` reports it owed
+with the database's reason. On MySQL, index a `TEXT` column by a prefix:
+`(prev_hash(255))`. An index that is not unique, or that covers another column too, is not
+taken for one of these, and an index in the way of one is refused with the fix named.
 
 ## What turns each one on
 

@@ -97,7 +97,8 @@ import decimal as _decimal_mod
 # inherits it, and on this thread's context for the one already running.
 _decimal_mod.DefaultContext.rounding = ROUND_HALF_UP
 _decimal_mod.getcontext().rounding = ROUND_HALF_UP
-from dataclasses import dataclass, field, fields as _dc_fields
+from dataclasses import dataclass, field
+from mohio_dc import fields as _dc_fields
 from typing import Any, Optional
 from pathlib import Path
 from contextlib import contextmanager as _contextmanager, nullcontext as _nullcontext
@@ -211,10 +212,30 @@ _PLAIN_NUMBER_TEXT = re.compile(r'[+-]?(\d+(\.\d*)?|\.\d+)')
 def _list_element(v):
     """What a list keeps for one element. A plain value is kept as itself; an amount keeps its
     currency (RULED by Ron, 2026-10-14), so `prices as list eur, eur2` holds two EUR amounts and
-    not two bare numbers that a later comparison or sum could no longer tell apart."""
+    not two bare numbers that a later comparison or sum could no longer tell apart. A datetime stays a
+    datetime for the same kind of reason: as plain text, nothing could say later that it needs its offset, and
+    text that only looks like a date is never changed (T1-GIVEBACK-DATETIME-DROPS-ZONE)."""
     if isinstance(v, MohioValue):
-        return v if getattr(v, '_currency', None) else v.to_python()
+        keep = getattr(v, '_currency', None) or getattr(v, 'mohio_type', None) == 'datetime'
+        return v if keep else v.to_python()
     return v
+
+
+class _PlacedDatetime(str):
+    """The text of a datetime VALUE on its way to a write, as against text that only looks like one. A datetime value
+    already knows its moment: with no offset it means UTC, the convention for every value Mohio makes (now(), a field
+    read from a table). Text with no offset is what the timezone ruling reads in the field's zone. Told apart by this
+    type alone, so nothing else about the text changes on the way (T1-DATETIME-WRITE-KEEPS-ITS-MOMENT)."""
+
+
+class _WallDatetime(str):
+    """A datetime a program wrote with no offset (`parse "..." as datetime`, a `d as datetime` given text). It is not
+    placed yet: a write reads it in the field's zone, and until then it means that clock reading in the app zone, kept
+    here. Every other datetime value with no offset means UTC."""
+    def __new__(cls, text, tz):
+        made = super().__new__(cls, text)
+        made.tz = tz
+        return made
 
 
 def _datetime_in_zone(text, tz):
@@ -230,7 +251,24 @@ def _datetime_in_zone(text, tz):
         return text
     if d.tzinfo is not None:
         return text
-    return d.replace(tzinfo=datetime.timezone.utc).astimezone(tz).isoformat()
+    return d.replace(tzinfo=getattr(text, 'tz', datetime.timezone.utc)).astimezone(tz).isoformat()
+
+
+def _datetime_out(text):
+    """A datetime leaving the program: UTC, written +00:00, everywhere (RULED by Ron, 2026-11-06, superseding the app-zone
+    display of 2026-10-15). show, {{ }}, &, render, give back, as.text, as.json and a header all read this one form. The
+    journey's `timezone` still reads text with no offset and the calendar words; only `in.timezone` shows a local time."""
+    return _datetime_in_zone(text, datetime.timezone.utc)
+
+
+def _datetime_as_written(text, tz):
+    """Text a program wrote as a datetime: a clock reading in the app zone when it has no offset (_WallDatetime). Text
+    with its own offset, and text that is not a date and time, is returned as it is."""
+    try:
+        when = datetime.datetime.fromisoformat(text.strip())
+    except ValueError:
+        return text
+    return text if when.tzinfo is not None or 'T' not in text else _WallDatetime(text, tz)
 
 
 class _NoResponse(dict):
@@ -724,39 +762,25 @@ def _finalize_rows(rows, order_by=None, order_dir='asc', limit=None, offset=0,
     order_by = order_by or (keys[0][0] if keys else None)
     if offset:
         rows = rows[int(offset):]
-    if limit and (order_by or offset):
+    # `up to N` holds on every path that reaches here. The cut used to wait for an order or an
+    # offset, because find_many puts its own SQL LIMIT on the plain unordered case; find_filtered
+    # (a pushed range, text or match-any filter) puts none there, so an unordered `up to 20` over a
+    # declared column handed back every matching row, on every SQL engine, with no error (found by
+    # profiling 2026-11-05: 30 rows for `up to 20`). A list the database already limited is shorter
+    # than N, so the cut changes nothing for it.
+    if limit:
         rows = rows[:int(limit)]
     return rows
 
 
-# The numeric where-operations an SQL engine can run natively once a column is cast to its declared
-# number type. Ordering/range only: exact numeric equality (== / !=) is NOT pushed, so the text-vs-REAL
-# float question never arises. Datetime operations are not here (datetime stays app-side until
-# write-path UTC normalization).
-_SQL_NUMERIC_PUSHABLE = frozenset({'above', 'below', 'not_above', 'not_below', 'between',
-                                   '>', '<', '>=', '<='})
-
-# PUSHDOWN UNIT 3: the text where-operations an SQL engine can run natively on a DECLARED `text`
-# column via LIKE/ESCAPE (contains/starts/ends) or a plain comparison (empty/not_empty/is_not).
-# contains/starts/ends push as a case-insensitive LIKE -- every engine here supports
-# `LOWER(col) LIKE LOWER(?) ESCAPE '\'`, which matches the app-side `_text_predicate`'s own
-# `.casefold()` rule for the ASCII case most search text is. It is NOT an exact casefold() match
-# for exotic Unicode (German ss and the like) -- an INDEX-DEFEATING CAST, same shape as the
-# numeric/datetime casts this project already accepts and records for the typed-storage design,
-# recorded here rather than silently assumed identical.
-_SQL_TEXT_PUSHABLE = frozenset({'contains', 'starts', 'starts_with', 'ends', 'ends_with',
-                                'empty', 'not_empty', 'is_not'})
-
-# PUSHDOWN UNIT 4: `match any` (an OR-group of equality pairs) and `no.match` (a NOT-group) push
-# down as plain `=`/`!=` comparisons, cast to TEXT the same way a join key already is -- every
-# value _row_matches compares with a bare `str(...) ==`/`!=`, never a numeric cast, so the SQL
-# equivalent needs none either, regardless of a field's declared type. These are STRUCTURAL
-# (a whole block, not a single field+op), so they are gated once per find, not per filter: ALL
-# fields across every or_groups/not_groups group must be declared and unencrypted, or NONE of it
-# pushes -- a partial push would need to reconcile which rows an app-side group re-filters
-# against an already-narrowed SQL result, which is not worth the complexity match-any/no.match's
-# own small field count buys back.
-_SQL_GROUP_PUSHABLE = frozenset({'match_any', 'no_match'})
+# The where-operations an SQL engine runs natively on a declared column (numeric, text, and the
+# match-any / no.match groups) live in mohio_runtime_vocab, with their reasons, so `mio check` reads
+# the same sets the runtime decides with (6.0.4).
+from mohio_runtime_vocab import (SQL_NUMERIC_PUSHABLE as _SQL_NUMERIC_PUSHABLE,  # noqa: E402
+                                 SQL_TEXT_PUSHABLE as _SQL_TEXT_PUSHABLE,
+                                 SQL_GROUP_PUSHABLE as _SQL_GROUP_PUSHABLE,
+                                 pushdown_numeric_kind as _pushdown_numeric_kind,
+                                 pushdown_text_kind as _pushdown_text_kind)
 
 # A whole number or decimal, optionally signed, optionally with an exponent. Used to decide whether a
 # filter bound is a plain number worth pushing to SQL -- a positive test, so no parse that could raise.
@@ -1021,7 +1045,7 @@ def _urlsplit_for_loopback(url):
 class MohioRuntimeError(Exception):
     """
     Raised when a commercial feature is called without the commercial runtime.
-    The open core interpreter raises this for miochain.* and other
+    The free runtime raises this for miochain.* and other
     commercial-only executors.
 
     Carries an optional `line`: raisers that know the node set it; otherwise the CLI fills it from
@@ -1410,6 +1434,8 @@ def _header_text(value, name, owner):
     value that resolves to nothing (a variable holding nothing, or empty text) refuses: sent, it went out
     as an empty header, or as the word "None", a header nobody wrote. An `auth` line refuses the same."""
     raw = value.to_python() if isinstance(value, MohioValue) else value
+    if isinstance(value, MohioValue) and value.mohio_type == 'datetime':
+        raw = _datetime_out(raw)
     if raw is None or not str(raw).strip():
         raise MohioRuntimeError(
             f"{owner}: its `header \"{name}\"` line has no value when the request is sent, so the "
@@ -1431,8 +1457,7 @@ def _json_dumps_exact(obj, **kwargs):
         # holding money reached the encoder still wrapped and default=str wrote the wrapper's own
         # text into a connector body (measured: "amount": "MohioValue(Decimal('12.30'), 'decimal')").
         if isinstance(v, MohioValue) and getattr(v, 'mohio_type', None) == 'datetime':
-            # A DATETIME IN JSON IS RFC 3339 WITH ITS OFFSET (RULED 2026-10-15): stored UTC, sent as UTC
-            return _datetime_in_zone(v.value, datetime.timezone.utc)
+            return _datetime_out(v.value)
         while isinstance(v, MohioValue):
             v = v.value
         if isinstance(v, datetime.datetime):
@@ -1622,6 +1647,16 @@ class _Stop(Exception):
 class _Skip(Exception):
     pass
 
+
+def _script_safe(js):
+    """JavaScript made safe to sit inside a page's <script> element. A browser ends the element at the
+    first `</script`, so a MioScript string holding one (`put "</script>..." into #out`) cut the page's
+    whole runtime short and printed the rest as text, with nothing said. Only `</script` is escaped,
+    as `<\\/script`, which is the same text inside a JavaScript string or a comment; a bare `</` is left
+    alone, because in a regular expression such as `/</g` the slash is the closing delimiter."""
+    return re.sub(r'</(script)', r'<\\/\1', js, flags=re.I)
+
+
 class _Jump(Exception):
     def __init__(self, destination, origin=None):
         self.destination = destination
@@ -1666,7 +1701,7 @@ _RUNTIME_STATUS_TABLE = {
     'authorization_error': 403, 'authentication_required': 401, 'not_found': 404,
     'validation_error': 400,
     'coercion_error': 400, 'math_error': 400, 'string_error': 400,
-    'division_by_zero': 400, 'timeout': 504, 'db_error': 500, 'table_created_this_request': 503,
+    'division_by_zero': 400, 'timeout': 504, 'run_timeout': 504, 'db_statement_timeout': 504, 'db_error': 500, 'table_created_this_request': 503,
     'protected_field_needs_id_key': 400,
     'conflict': 409,   # a duplicate key is a conflict (409), not a server error (500)
     # A whole-record save carrying a field nothing declares is the caller's data being refused, the
@@ -1837,6 +1872,10 @@ class ClassifiedText(str):
 # value was sealed without claiming to know which tag sealed it. Masking keeps its own, narrower
 # list, so this list governs storage only.
 _WRITE_SEALED_CLASSES = ('phi', 'pci', 'pii', 'encrypted')
+
+
+class _PlacedClassifiedDatetime(ClassifiedText):
+    """A protected datetime already placed for a write: it keeps its class, and a second ask leaves it alone."""
 
 
 class _ClassifiedNumber:
@@ -2051,10 +2090,10 @@ class MohioValue:
                 # refusal for any path that reaches the value without it.
                 raise MohioRuntimeError(f"`.{key}` measures a list with a text word. Write `.count` "
                                         f"for the number of items in a list; `.length` is the length of text.")
-            if key == 'first':
-                return MohioValue(self._value[0] if self._value else None)
-            if key == 'last':
-                return MohioValue(self._value[-1] if self._value else None)
+            if key in ('first', 'last'):
+                # An element that keeps its own type (an amount, a datetime) comes out as itself.
+                _e = (self._value[0] if key == 'first' else self._value[-1]) if self._value else None
+                return _e if isinstance(_e, MohioValue) else MohioValue(_e)
             if key == 'empty':
                 return MohioValue(len(self._value) == 0, 'boolean')
         if isinstance(self._value, str):
@@ -2241,6 +2280,14 @@ class Context:
         (set in run_with_session); without it, falls back to the topmost root.
         """
         v = value if isinstance(value, MohioValue) else MohioValue(value)
+        # WHAT THE PROGRAM ASSIGNS IS A VARIABLE, EVEN THE FIELD'S OWN VALUE. `note note` stores the
+        # very object the request bound, and the next request clears a request binding, so the
+        # variable went with it. A copy marked as the program's keeps it, and leaves the request's own
+        # binding (still read under its own name, `x note`) a request field. The field mark stays on
+        # the copy, because a one-word read is classified by it.
+        if getattr(v, '_request_field', None) and not getattr(v, '_program_assigned', False):
+            v = _copy.copy(v)
+            v._program_assigned = True
         # Locate the per-session boundary; never write past it into shared base.
         session_root = None
         walk = self
@@ -2495,13 +2542,11 @@ class Context:
                 # If not found, fall through to normal processing
 
             if isinstance(root_py, list):
-                if p == 'first':
-                    root = MohioValue(root_py[0] if root_py else None,
-                                     'shape' if root_py else 'null')
-                    i += 1; continue
-                if p == 'last':
-                    root = MohioValue(root_py[-1] if root_py else None,
-                                     'shape' if root_py else 'null')
+                if p in ('first', 'last'):
+                    # An element that keeps its own type (an amount, a datetime) comes out as itself: wrapped
+                    # as a shape, a datetime lost its offset here, and a later save read it as app-zone text.
+                    _e = (root_py[0] if p == 'first' else root_py[-1]) if root_py else None
+                    root = _e if isinstance(_e, MohioValue) else MohioValue(_e, 'shape' if root_py else 'null')
                     i += 1; continue
                 if p == 'count':
                     root = MohioValue(len(root_py), 'number')
@@ -2547,7 +2592,8 @@ class Context:
                         raise MohioRuntimeError(
                             f"`{_base}` has {_n_items} item(s), so there is no position {_ptxt}. "
                             f"Check `{_base}.count` first, or use `{_base}.last` for the final item.")
-                    root = MohioValue(root_py[int(_ptxt) - 1], 'shape')
+                    _e = root_py[int(_ptxt) - 1]
+                    root = _e if isinstance(_e, MohioValue) else MohioValue(_e, 'shape')
                     i += 2; continue
 
             # Standard field access
@@ -3098,6 +3144,16 @@ def _mark_request_field(value, name, shape=None):
     program variable, whose value carries its own class (R71, T1-CLASS-BY-BARE-NAME-ON-VARIABLE)."""
     value._request_field = (str(name), str(shape) if shape else None)
     return value
+
+
+def _is_request_binding(name, value):
+    """Is `value`, bound under `name`, still the request's own field binding, rather than something
+    the program assigned? A request field lasts one request; a program variable persists in the
+    session, even under a field's name (RULED by Ron 2026-11-08). The mark says which field a value
+    came from and stays on for tag classification, so a program assignment of the field's own value
+    (`note note`) is told apart by `_program_assigned` (see Context.set_persistent)."""
+    rf = getattr(value, '_request_field', None)
+    return bool(rf) and rf[0] == name and not getattr(value, '_program_assigned', False)
 
 
 def _conn_in_autocommit(conn):
@@ -4079,6 +4135,22 @@ class _QueryableRuntime:
             # MOHIO_AUDIT_DATABASE_URL, which is honoured above this and twins as asked.
             self._audit_twin = self
             return self
+        # ONE TWIN PER DATABASE AND ROLE, PER PROCESS, for a pooled runtime (found 2026-11-08: a
+        # 149-page directory at MOHIO_DB_POOL_MAX=1 held 149 page pools and 149 audit pools, about
+        # 298 connections, where the operating guidance counted 149). Every page of a directory has
+        # its own runtime on the same database, and each made a twin with a pool of its own. The twin
+        # is a thread-leased pool, so one serves every page the way one page pool serves every worker:
+        # each thread leases its own connection and gives it back at the request boundary. Keyed on
+        # the engine and the audit address, which carries the role, so two roles never share one.
+        # Held weakly: a twin lives exactly as long as a runtime that uses it, as before.
+        _shared_key = None
+        if isinstance(self, _ThreadLeasedPool):
+            _shared_key = (type(self), audit_source)
+            with _SHARED_AUDIT_TWINS_LOCK:
+                _shared = _SHARED_AUDIT_TWINS.get(_shared_key)
+            if _shared is not None:
+                self._audit_twin = _shared
+                return _shared
         twin = type(self)(audit_source)
         # MARKED, so nothing mistakes the twin for an app connection, and so a twin can never be
         # asked for a twin of its own.
@@ -4087,6 +4159,17 @@ class _QueryableRuntime:
         # durable as its database is (SQLite: synchronous=FULL, see require_durable_commits).
         if getattr(self, '_durable_commits', False) and hasattr(twin, 'require_durable_commits'):
             twin.require_durable_commits()
+        if _shared_key is not None:
+            with _SHARED_AUDIT_TWINS_LOCK:
+                _raced = _SHARED_AUDIT_TWINS.get(_shared_key)
+                if _raced is None:
+                    _SHARED_AUDIT_TWINS[_shared_key] = twin
+            if _raced is not None:
+                # Another page made it first: use that one, and close the pool this call opened.
+                _close = getattr(twin, 'close', None)
+                if _close is not None:
+                    _close()
+                twin = _raced
         self._audit_twin = twin
         return twin
 
@@ -5238,6 +5321,13 @@ class _QueryableRuntime:
         sql = f'SELECT {self._select_cols_sql(project_cols)} FROM {self.quote_ident(table)}{where_sql}'
         if push_order:
             sql += self._order_by_sql(push_order_keys) + ' ' + self._limit_offset_sql(limit, offset)
+        elif limit and not _keys and not offset:
+            # An unordered, unpaged find takes only its first N matches, so the database sends only
+            # those, as find_many does on every engine. The caller passes no limit when any filter
+            # still runs in the app (a residual), so this never cuts rows before that filter. Without
+            # it every matching row crossed the wire and was cast before _finalize_rows kept N of
+            # them: `find up to 20` grew from 2.2 ms at 200 rows to 21.9 ms at 8,000.
+            sql += ' ' + self._limit_offset_sql(limit, None)
         sql = self._translate_ph(sql)
         try:
             cur = self.raw_cursor()
@@ -5429,6 +5519,109 @@ _AUDIT_SCHEMA_STEP = _clock_threading.local()
 from mohio_audit_grades import is_audit_table as _AUDIT_TABLE_PREDICATE  # noqa: E402
 
 
+# THE CHECKPOINT OFF THE REQUEST, WHERE THE LOG IS ALREADY DURABLE (Ron's ruling, 2026-11-06). SQLite
+# folds its write-ahead log into the database file inside the commit that takes the log past 1,000
+# pages, and that one request waits 200 to 700 ms for it.
+#   - Under `mio serve`, on a program that declares a sector (synchronous=FULL), every commit has
+#     already fsynced the log, so the checkpoint is maintenance. It runs here, on its own thread and
+#     its own connection, and it never takes the dispatch lock: a thread that did would stall every
+#     handler for the same 200 to 700 ms, only moved. A PASSIVE checkpoint waits for no reader and no
+#     writer.
+#   - On any other program (synchronous=NORMAL) a commit does not fsync, so the checkpoint IS what
+#     makes a commit survive a power loss. It stays in the commit, exactly as SQLite does it, and such a
+#     program keeps the stall. There is deliberately no setting to defer it: one would quietly widen the
+#     power-loss window. Moving those programs to fsynced commits is a durability-model change of its
+#     own, not part of this.
+# Each checkpoint syncs the main file, a fixed cost whatever it moves, so this is about as often as a sector
+# app reached SQLite's own 1,000 pages. Every 5 s was six times the syncs and no faster (measured 2026-11-06).
+_CHECKPOINT_EVERY_SECONDS = 30.0
+_CHECKPOINT_POLL_SECONDS = 0.25
+# A request connection takes the checkpoint back at this many pages, so a thread that has fallen behind
+# or died costs a stall rather than a log that grows without limit.
+_CHECKPOINT_BACKSTOP_PAGES = 20000
+_CHECKPOINT_SAY_AFTER_SECONDS = 60.0
+
+
+class _BackgroundCheckpointer:
+    """One daemon thread that checkpoints each sector-declaring SQLite file `mio serve` has open."""
+
+    def __init__(self):
+        self.enabled = False   # set by `mio serve` before any program connects; `mio run` never does
+        self._lock = _clock_threading.Lock()
+        self._files = {}       # path -> what the thread keeps about that file
+        self._thread = None
+
+    def add(self, path):
+        with self._lock:
+            state = self._files.get(path)
+            if state is None:
+                state = self._files[path] = {'uses': 0, 'conn': None, 'version': None, 'at': 0.0,
+                                             'owing': True, 'failing_since': None, 'said': False}
+            state['uses'] += 1
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = _clock_threading.Thread(target=self._run, name='mohio-sqlite-checkpoint',
+                                                       daemon=True)
+                self._thread.start()
+
+    def remove(self, path):
+        with self._lock:
+            state = self._files.get(path)
+            if state is not None:
+                state['uses'] -= 1
+
+    def _run(self):
+        while True:
+            _pooltime.sleep(_CHECKPOINT_POLL_SECONDS)
+            with self._lock:
+                files = list(self._files.items())
+            for path, state in files:
+                self._one_file(path, state)
+
+    def _one_file(self, path, state):
+        if state['uses'] <= 0:
+            with self._lock:
+                self._files.pop(path, None)
+            if state['conn'] is not None:
+                state['conn'].close()
+            return
+        try:
+            if state['conn'] is None:
+                state['conn'] = sqlite3.connect(path)
+                state['conn'].execute('PRAGMA busy_timeout=1000')
+                state['conn'].execute('PRAGMA synchronous=FULL')
+            version = state['conn'].execute('PRAGMA data_version').fetchall()[0][0]
+            if version == state['version'] and not state['owing']:
+                return
+            now = _pooltime.monotonic()
+            if now - state['at'] < _CHECKPOINT_EVERY_SECONDS:
+                return
+            busy, log_pages, moved = state['conn'].execute('PRAGMA wal_checkpoint(PASSIVE)').fetchall()[0]
+            state.update(version=version, at=now, owing=bool(busy) or moved < log_pages,
+                         failing_since=None, said=False)
+        except sqlite3.Error as e:
+            # Another process's checkpoint, or a file lock, usually passes by the next turn. A failure
+            # that lasts is said once, and the request connections' backstop bounds the log meanwhile.
+            now = _pooltime.monotonic()
+            if state['failing_since'] is None:
+                state['failing_since'] = now
+            if not state['said'] and now - state['failing_since'] >= _CHECKPOINT_SAY_AFTER_SECONDS:
+                state['said'] = True
+                print(f"[mohio.sqlite] WARNING: could not checkpoint {path} for "
+                      f"{int(_CHECKPOINT_SAY_AFTER_SECONDS)} s ({e}). Committed data is safe in the log, but "
+                      f"the log keeps growing, and a request will take over the checkpoint at "
+                      f"{_CHECKPOINT_BACKSTOP_PAGES} pages and stall while it runs. Look for another process "
+                      f"holding this file.", file=sys.stderr)
+
+
+_SQLITE_CHECKPOINTER = _BackgroundCheckpointer()
+
+
+def checkpoint_off_the_request():
+    """`mio serve` says so before any program connects. Only a program whose commits are already durable
+    is affected: see `require_durable_commits`."""
+    _SQLITE_CHECKPOINTER.enabled = True
+
+
 def _sqlite_audit_authorizer(action, arg1, arg2, dbname, source):
     """SQLite's per-statement authorizer for audit relations (Ron, 2026-10-13, audit append-only
     step 3). The trail is append-only: no UPDATE, DELETE or DROP TABLE ever runs on one (the step-1
@@ -5574,6 +5767,20 @@ class DbRuntime(_QueryableRuntime):
                         f"this program declares a sector, so every SQLite commit must be durable, and "
                         f"the database would not switch to durable commits ({_e}). Nothing ran. Use a "
                         f"database file on a local disk.") from _e
+        self._checkpoint_in_background_if_durable()
+
+    def _checkpoint_in_background_if_durable(self):
+        """Under `mio serve`, on a database whose commits are durable, take the checkpoint off the request:
+        the module's note on `_BackgroundCheckpointer` says why, and why only here. Every connection
+        already open hands it over, and `_new_connection` does the same for each later one."""
+        if not (self._durable_commits and _SQLITE_CHECKPOINTER.enabled) or self._is_memory:
+            return
+        with self._all_conns_lock:
+            for _c in list(self._all_conns):
+                _c.execute('PRAGMA wal_autocheckpoint=%d' % _CHECKPOINT_BACKSTOP_PAGES)
+        if not self.__dict__.get('_checkpoint_registered'):
+            self._checkpoint_registered = True
+            _SQLITE_CHECKPOINTER.add(self._db_path)
 
     def _relay_claim_key(self):
         # The file, so every runtime this process opens on it shares the claim; an in-memory
@@ -5639,6 +5846,8 @@ class DbRuntime(_QueryableRuntime):
             # A program that declares a sector keeps FULL (set by the interpreter through
             # `require_durable_commits`), because there a committed record must survive a power loss.
             conn.execute('PRAGMA synchronous=%s' % ('FULL' if self._durable_commits else 'NORMAL'))
+            if self._durable_commits and _SQLITE_CHECKPOINTER.enabled and not self._is_memory:
+                conn.execute('PRAGMA wal_autocheckpoint=%d' % _CHECKPOINT_BACKSTOP_PAGES)
         except sqlite3.Error as _wal_e:
             # A filesystem that cannot host a WAL (some network mounts) leaves the connection on its
             # previous journal mode, which still works single-writer, and busy_timeout still
@@ -6100,6 +6309,18 @@ class DbRuntime(_QueryableRuntime):
                 out.append(frozenset(str(r[2]).lower() for r in cols))
         return out
 
+    def has_unique_index_on(self, table, col):
+        """True when a UNIQUE index holds `col` alone to one row: one column, no WHERE clause, no
+        expression. Asked by COLUMN, never by Mohio's own index name, so an index an administrator
+        built under any name counts (T1-AUDIT-RESTRICTED-ROLE-INDEX)."""
+        for idx in self.conn.execute(f'PRAGMA index_list({_catalog_ident(table)})').fetchall():
+            if not idx[2] or idx[4]:             # idx[2] unique, idx[4] partial
+                continue
+            cols = self.conn.execute(f'PRAGMA index_info({_catalog_ident(idx[1])})').fetchall()
+            if len(cols) == 1 and cols[0][2] is not None and str(cols[0][2]).lower() == str(col).lower():
+                return True
+        return False
+
     def table_identity(self, table):
         """The columns that identify a row here, from SQLite's own catalogue -- the same question
         `PostgresRuntime.table_identity` answers, asked in this dialect. See that method for why
@@ -6384,6 +6605,8 @@ class DbRuntime(_QueryableRuntime):
         # Close EVERY connection this runtime opened (one per thread for a file db), not just the
         # current thread's, so a shutdown does not strand file handles or WAL sidecars. A fixture
         # that bypassed __init__ has no registry; fall back to the current thread's injected conn.
+        if self.__dict__.pop('_checkpoint_registered', False):
+            _SQLITE_CHECKPOINTER.remove(self._db_path)
         lock = getattr(self, '_all_conns_lock', None)
         if lock is None:
             c = getattr(self._ensure_local(), 'conn', None) or self._shared_conn
@@ -6500,6 +6723,13 @@ def _pool_is_exhausted(exc):
     return 'exhaust' in str(exc).lower() or type(exc).__name__ == 'PoolError'
 
 
+# The audit twins of the pooled runtimes, one per engine and audit address (audit_sibling). Weak, so
+# a twin is gone with the last runtime that uses it.
+import weakref as _weakref
+_SHARED_AUDIT_TWINS = _weakref.WeakValueDictionary()
+_SHARED_AUDIT_TWINS_LOCK = _threading.Lock()
+
+
 class _PoolSettingInvalid(MohioRuntimeError):
     """A pool setting that is not a whole number of 1 or more: a misconfiguration named by itself."""
 
@@ -6535,12 +6765,25 @@ def _pool_settings():
                               'the seconds a request waits for a free connection'))
 
 
+_STATEMENT_TIMEOUT_UNDER_SERVE_MS = 0
+
+
+def statement_deadline_under_serve(request_timeout_seconds):
+    """`mio serve` says so before any program connects: a statement may run as long as the request that
+    sent it, so a blocked statement cannot hold the dispatch lock for ever. MOHIO_DB_STATEMENT_TIMEOUT_MS
+    still wins, and 0 there turns it off. MOHIO_REQUEST_TIMEOUT=0 (no request limit) leaves it off too."""
+    global _STATEMENT_TIMEOUT_UNDER_SERVE_MS
+    _STATEMENT_TIMEOUT_UNDER_SERVE_MS = (int(request_timeout_seconds * 1000)
+                                         if request_timeout_seconds and request_timeout_seconds > 0 else 0)
+
+
 def _db_statement_timeout_ms():
-    """MOHIO_DB_STATEMENT_TIMEOUT_MS, OFF by default (0) -- an operator opts IN to a per-
-    statement ceiling for a client-server engine (Postgres, MySQL, Oracle), the same "off
-    unless asked for" default MOHIO_FIND_MAX_ROWS uses. Each of those three has a genuine
-    NATIVE per-statement timeout the server (or driver) enforces automatically once set, so
-    this value is applied ONCE, at connection-creation time, never re-checked per call.
+    """MOHIO_DB_STATEMENT_TIMEOUT_MS. Under `mio serve` it defaults to the request timeout
+    (statement_deadline_under_serve); everywhere else it is off unless asked for, the same
+    default MOHIO_FIND_MAX_ROWS uses. 0 turns it off anywhere. Each client-server engine (Postgres,
+    MySQL, Oracle) has a genuine NATIVE per-statement timeout the server (or driver) enforces
+    automatically once set, so this value is applied ONCE, at connection-creation time, never
+    re-checked per call.
 
     SQLite is deliberately NOT one of the three: it is embedded, not client-server, so there
     is no server-side session to cap a statement on. The nearest SQLite mechanism
@@ -6550,11 +6793,19 @@ def _db_statement_timeout_ms():
     much larger change than this one env var, so it is named here as a real, open gap rather
     than approximated with something that would only look like the same guarantee."""
     raw = (os.environ.get('MOHIO_DB_STATEMENT_TIMEOUT_MS') or '').strip()
+    if not raw:
+        return _STATEMENT_TIMEOUT_UNDER_SERVE_MS
     try:
         v = int(raw)
-        return v if v > 0 else 0
     except ValueError:
-        return 0
+        v = -1
+    if v < 0:
+        # It read as "no limit" before, so a typo turned off the guard somebody meant to set.
+        raise MohioRuntimeError(
+            f"MOHIO_DB_STATEMENT_TIMEOUT_MS is {raw!r}, and it has to be a whole number of milliseconds, so "
+            f"nothing connected: a limit that cannot be read must not become no limit. "
+            f"Write it like this: MOHIO_DB_STATEMENT_TIMEOUT_MS=30000 (or 0 for no limit).")
+    return v
 
 
 # Each engine's own wording for "I cancelled this because MOHIO_DB_STATEMENT_TIMEOUT_MS was
@@ -6565,6 +6816,7 @@ def _db_statement_timeout_ms():
 _DB_STATEMENT_TIMEOUT_SIGNATURES = (
     'canceling statement due to statement timeout',      # Postgres (psycopg2.errors.QueryCanceled)
     'maximum statement execution time exceeded',           # MySQL/MariaDB (OperationalError 3024)
+    'lock wait timeout exceeded',                          # MySQL: a write that waited on a row lock (1205)
     'call timeout of',                                     # Oracle (oracledb DPY-4024)
     # Oracle again, under load: after the call timeout fires, oracledb breaks and resets the
     # call, and when that recovery ALSO times out it reports DPY-4011 with this wording instead
@@ -6572,6 +6824,9 @@ _DB_STATEMENT_TIMEOUT_SIGNATURES = (
     # and naming it so keeps the teaching message from turning into a generic db_error exactly
     # when the database is slowest (measured: the suite's Oracle timeout case under load).
     'socket timed out while recovering from previous socket timeout',
+    'operation exceeded time limit',                       # MongoDB: the server stopped it at maxTimeMS (code 50)
+    'configured timeouts: timeoutms',                      # MongoDB: the server never answered (NetworkTimeout)
+    'no servers found yet, timeout:',                      # MongoDB: no answer on a new connection within the limit
 )
 
 
@@ -6703,6 +6958,36 @@ class _ThreadLeasedPool:
     def _in_transaction(self, value):
         self._tls.in_transaction = bool(value)
 
+    def _rollback_after_failure(self):
+        """Roll back after a statement failed, keeping that failure the one reported. When the connection died
+        with the statement (Oracle's call timeout closes one it cannot recover; a dropped network does it
+        anywhere), the database ended the transaction with the session, and a rollback here could only replace
+        the real error with "not connected". The dead lease goes back so the rest of the request (the audit
+        record of the attempt) gets a live connection."""
+        try:
+            self.conn.rollback()
+        except Exception as e:
+            print(f"  [mohio.db] the connection was gone at rollback ({e}); the database ended its transaction "
+                  f"with the session", file=sys.stderr)
+            self.release_thread_connection()
+
+    def _lease_may_hold_work(self, conn):
+        """Whether a finished lease can still hold anything a rollback would release: a transaction,
+        a row lock, a lock another connection's DDL waits behind. The question release asks before it
+        rolls back. An engine answers for itself; this default answers yes, so the lease is rolled back.
+
+        Measured per engine (2026-11-05), which is why only Oracle answers otherwise:
+          * Postgres: psycopg2 sends nothing for a rollback on an idle connection (1 microsecond), so
+            asking first saves nothing. After a read the connection is inside a transaction and the
+            rollback (264 microseconds) is required. Kept at the default.
+          * MySQL: after a plain read pymysql's server status says no transaction is open, and the
+            read still holds the metadata lock: a second connection's ALTER waited out its lock wait
+            timeout until this lease rolled back. Asking the driver would bring back exactly the stall
+            the rollback was added for. Kept at the default: every lease is rolled back.
+          * Oracle: a read opens no transaction, and `transaction_in_progress` says whether one is
+            open. Answered from it (OracleRuntime)."""
+        return True
+
     def release_thread_connection(self):
         """Return this thread's connection to the pool. Called at the REQUEST BOUNDARY.
 
@@ -6731,10 +7016,11 @@ class _ThreadLeasedPool:
             # pooled here, and psycopg2's own pool already rolls back when a connection is
             # handed back, so Postgres was covered by the driver rather than by this code.
             _was_open = self._in_transaction
-            try:
-                c.rollback()
-            except Exception:
-                pass
+            if _was_open or self._lease_may_hold_work(c):
+                try:
+                    c.rollback()
+                except Exception:
+                    pass
             self._in_transaction = False
             # Only an abandoned Mohio transaction can have rolled DDL back here; an ordinary
             # request ended committed, so its schema cache is still true (see _forget_schema).
@@ -7053,7 +7339,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
                 _text = str(e).lower()
                 if 'already exists' not in _text and 'duplicate' not in _text:
                     raise
-                self.conn.rollback()
+                self._rollback_after_failure()
                 getattr(self, '_column_cache', {}).pop(table, None)
                 if self.schema_already_has(table, columns):
                     return          # somebody else finished it while this attempt was failing
@@ -7200,7 +7486,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # column that could not be added, produced no error here; the program carried
             # on and died later on a raw Postgres string, or worse, dropped the write.
             # A schema the runtime cannot build is not a warning. Fail loud, name the fix.
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise RuntimeError(
                 f"Could not build the schema for table '{table}'.\n"
                 f"  columns: {', '.join(columns)}\n"
@@ -7234,7 +7520,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # which silently swallowed a missing COLUMN too -- a real, separate bug this
             # removal also closes. The dedupe-check caller handles its own pre-table-creation
             # case. Roll back to heal the connection, then fail loud.
-            self.conn.rollback()
+            self._rollback_after_failure()
             if _is_missing_table_error(e):
                 return self._tolerate_missing_read(table, e, None)
             raise
@@ -7273,7 +7559,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return rows
         except Exception as e:
-            self.conn.rollback()
+            self._rollback_after_failure()
             # T1-GUARD-FAILOPEN sibling of count()/sqlite find_many: a MISSING TABLE is an
             # operational failure, not an empty result -- every other operational error
             # keeps the prior lenient [].
@@ -7304,7 +7590,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except Exception as e:
             # Missing table → 0 (parity with sqlite). Anything else fails loud
             # rather than silently reporting 0 rows.
-            self.conn.rollback(); cur.close()
+            self._rollback_after_failure(); cur.close()
             if getattr(e, 'pgcode', None) == '42P01' or 'does not exist' in str(e).lower():
                 return self._tolerate_missing_read(table, e, 0)
             raise
@@ -7369,7 +7655,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except Exception:
             # Heal the connection so one failed insert can't leave the session in
             # aborted-transaction state (every later read would return empty).
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise   # re-raise so the executor routes to on.failure as before
@@ -7397,6 +7683,26 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             if not self._in_transaction:
                 self.conn.rollback()      # a catalogue read leaves no transaction open
         return [frozenset(g) for g in groups.values()]
+
+    def has_unique_index_on(self, table, col):
+        """True when a valid UNIQUE index holds `col` alone to one row: one key column, no WHERE
+        clause, no expression. Asked by COLUMN, never by Mohio's own index name, so an index an
+        administrator built under any name counts. pg_catalog is readable by every role, which is
+        what lets an INSERT-only audit role ask (T1-AUDIT-RESTRICTED-ROLE-INDEX)."""
+        cur = self.raw_cursor()
+        try:
+            cur.execute("SELECT 1 AS found FROM pg_index i "
+                        "JOIN pg_class c ON c.oid = i.indrelid "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = current_schema() "
+                        "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0] "
+                        "WHERE c.relname = %s AND a.attname = %s AND i.indisunique AND i.indisvalid "
+                        "AND i.indnkeyatts = 1 AND i.indpred IS NULL AND i.indexprs IS NULL",
+                        (table, col))
+            return bool(cur.fetchall())
+        finally:
+            cur.close()
+            if not self._in_transaction:
+                self.conn.rollback()      # a catalogue read leaves no transaction open
 
     def table_identity(self, table):
         """The columns that identify a row in this table, straight from the database.
@@ -7467,7 +7773,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # T1-GUARD-FAILOPEN: "0 rows matched" is the normal successful-execution
             # outcome, which never reaches this except block. Any exception here is a
             # genuine write failure and must not read as "matched nothing."
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise
 
     def retrieve_one_multi(self, table, conditions):
@@ -7485,7 +7791,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return _cast_row(dict(row), self._col_types(table), db=self) if row else None
         except Exception as e:
-            self.conn.rollback()   # heal aborted-transaction state; don't brick the session
+            self._rollback_after_failure()   # heal aborted-transaction state; don't brick the session
             # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): every exception
             # here fails loud.
             if _is_missing_table_error(e):
@@ -7510,7 +7816,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except _SeveralRows:
             raise
         except Exception as e:
-            self.conn.rollback()   # heal aborted-transaction state; don't brick the session
+            self._rollback_after_failure()   # heal aborted-transaction state; don't brick the session
             # T1-GUARD-FAILOPEN sibling of retrieve_one/retrieve_one_multi (carve-out
             # removed): every exception here fails loud.
             if _is_missing_table_error(e):
@@ -7533,7 +7839,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return [_cast_row(dict(r), self._col_types(table), db=self) for r in rows]
         except Exception as e:
-            self.conn.rollback()
+            self._rollback_after_failure()
             # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): a missing table
             # is an operational failure, never a silent empty list.
             if _is_missing_table_error(e):
@@ -7558,7 +7864,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except Exception:
             # T1-GUARD-FAILOPEN sibling of update(): "0 rows matched" is the normal
             # outcome, never this except block.
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise
 
     def upsert(self, table, fields, match_field, insert_only=()):
@@ -7619,7 +7925,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
                 if _sp:
                     cur.execute('ROLLBACK TO SAVEPOINT mohio_guarded_upsert')
                 else:
-                    self.conn.rollback()
+                    self._rollback_after_failure()
                 cur.execute(f'SELECT 1 FROM "{table}" WHERE {where}', key_vals)
                 if not cur.fetchone():
                     raise e
@@ -7638,7 +7944,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return 1
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise
 
     def remove_all(self, table):
@@ -7664,7 +7970,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # T1-GUARD-FAILOPEN: same distinction as update() above -- "0 rows matched" is
             # the normal outcome, never this except block. A real delete failure must not
             # read as "matched nothing."
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise
 
     def remove_multi(self, table, conditions):
@@ -7682,7 +7988,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except Exception:
             # T1-GUARD-FAILOPEN sibling of remove(): "0 rows matched" is the normal
             # outcome, never this except block.
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise
 
     def save_if_not_exists(self, table, fields, key_cols):
@@ -7727,7 +8033,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
                 if _sp:
                     cur.execute('ROLLBACK TO SAVEPOINT mohio_guarded_insert')
                 else:
-                    self.conn.rollback()
+                    self._rollback_after_failure()
                 cur.execute(f'SELECT 1 FROM "{table}" WHERE {where}', [fields.get(c) for c in key_cols])
                 if not cur.fetchone():
                     raise e
@@ -7742,7 +8048,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return (row[0] if row else None) if _ret else (_inserted or None)
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -7782,7 +8088,7 @@ class PostgresRuntime(_ThreadLeasedPool, _QueryableRuntime):
         self._in_transaction = False
 
     def rollback_transaction(self):
-        self.conn.rollback()
+        self._rollback_after_failure()
         self._in_transaction = False
         self._forget_schema()
 
@@ -7850,7 +8156,12 @@ class _BoundedConnPool:
 
     def putconn(self, conn):
         with self._lock:
-            self._free.append(conn)
+            # A dead connection is not put back, or its slot fails every request it serves from here on
+            # (measured: one killed connection, and the retry answered 500). psycopg2's pool does the same.
+            if getattr(conn, 'open', True):
+                self._free.append(conn)
+            else:
+                self._live -= 1
 
     def closeall(self):
         with self._lock:
@@ -8073,8 +8384,13 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # (MySQL scopes it to SELECT only, a server limitation, not a Mohio one) -- `init_command`
             # runs it once, immediately after each new connection opens, so every connection this
             # factory creates carries it without any per-lease code.
+            # A WRITE is not covered by that, so a write waiting on a lock gets the same limit from MySQL's
+            # own two lock timeouts (whole seconds): InnoDB's would otherwise leave it waiting 50 s, past the
+            # request's own limit, with the dispatch lock held. A write that is simply slow has no MySQL limit.
             _stmt_tmo = _db_statement_timeout_ms()
-            _init_cmd = (f'SET SESSION max_execution_time={_stmt_tmo}' if _stmt_tmo > 0 else None)
+            _lock_tmo = max(1, (_stmt_tmo + 999) // 1000)
+            _init_cmd = (f'SET SESSION max_execution_time={_stmt_tmo}, innodb_lock_wait_timeout={_lock_tmo}, '
+                         f'lock_wait_timeout={_lock_tmo}' if _stmt_tmo > 0 else None)
 
             def _make():
                 return pymysql.connect(
@@ -8136,6 +8452,20 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
                        if isinstance(r, dict) else (r[0], r[1]))
             groups.setdefault(str(ix), set()).add(str(col).lower())
         return [frozenset(g) for g in groups.values()]
+
+    def has_unique_index_on(self, table, col):
+        """True when a UNIQUE index holds `col` alone to one row: one column, and that column, not
+        an expression. Asked by COLUMN, never by Mohio's own index name, so an index an
+        administrator built under any name counts (T1-AUDIT-RESTRICTED-ROLE-INDEX). A role sees the
+        statistics of a table it holds any privilege on, so an INSERT-only audit role can ask."""
+        groups = {}
+        for r in self._catalogue_rows(
+                "SELECT index_name AS ix, column_name AS col FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE() AND table_name = %s AND non_unique = 0", (table,)):
+            ix, c = ((r.get('ix') or r.get('IX'), r.get('col') or r.get('COL'))
+                     if isinstance(r, dict) else (r[0], r[1]))
+            groups.setdefault(str(ix), []).append(None if c is None else str(c).lower())
+        return any(cols == [str(col).lower()] for cols in groups.values())
 
     def _unique_key_col_sql(self, table, col):
         """MySQL indexes a TEXT column only by a prefix, and refuses a prefix on any other type."""
@@ -8409,7 +8739,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # reaches this except block -- so ANY exception here, missing table included, is
             # a genuine operational failure and must fail loud. The dedupe-check caller
             # handles its own pre-table-creation case. Roll back to heal the connection.
-            self.conn.rollback()
+            self._rollback_after_failure()
             if _is_missing_table_error(e):
                 return self._tolerate_missing_read(table, e, None)
             raise
@@ -8447,7 +8777,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return rows
         except Exception as e:
-            self.conn.rollback()
+            self._rollback_after_failure()
             # T1-GUARD-FAILOPEN sibling of count()/sqlite find_many: a MISSING TABLE is an
             # operational failure, not an empty result -- every other operational error
             # keeps the prior lenient [].
@@ -8480,7 +8810,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except Exception as e:
             # Missing table → 0 (parity with sqlite OperationalError path).
             # Any other error fails loud rather than silently reporting 0 rows.
-            self.conn.rollback(); cur.close()
+            self._rollback_after_failure(); cur.close()
             if getattr(e, 'args', [None])[0] == 1146 or "doesn't exist" in str(e).lower():
                 return self._tolerate_missing_read(table, e, 0)
             raise
@@ -8526,7 +8856,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # T1-GUARD-FAILOPEN: "0 rows matched" is the normal successful-execution
             # outcome, which never reaches this except block. Any exception here is a
             # genuine write failure and must not read as "matched nothing."
-            self.conn.rollback()
+            self._rollback_after_failure()
             self._raise_if_table_newer(table, e)
             raise
 
@@ -8556,7 +8886,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return _cast_row(dict(row), self._col_types(table), db=self) if row else None
         except Exception as e:
-            self.conn.rollback()   # heal aborted-transaction state; don't brick the session
+            self._rollback_after_failure()   # heal aborted-transaction state; don't brick the session
             # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): every exception
             # here fails loud.
             if _is_missing_table_error(e):
@@ -8581,7 +8911,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except _SeveralRows:
             raise
         except Exception as e:
-            self.conn.rollback()   # heal aborted-transaction state; don't brick the session
+            self._rollback_after_failure()   # heal aborted-transaction state; don't brick the session
             # T1-GUARD-FAILOPEN sibling of retrieve_one/retrieve_one_multi (carve-out
             # removed): every exception here fails loud.
             if _is_missing_table_error(e):
@@ -8604,7 +8934,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return [_cast_row(dict(r), self._col_types(table), db=self) for r in rows]
         except Exception as e:
-            self.conn.rollback()
+            self._rollback_after_failure()
             # T1-GUARD-FAILOPEN sibling of retrieve_one (carve-out removed): a missing table
             # is an operational failure, never a silent empty list.
             if _is_missing_table_error(e):
@@ -8629,7 +8959,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except Exception as e:
             # T1-GUARD-FAILOPEN sibling of update(): "0 rows matched" is the normal
             # outcome, never this except block.
-            self.conn.rollback()
+            self._rollback_after_failure()
             self._raise_if_table_newer(table, e)
             raise
 
@@ -8688,7 +9018,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
                 if _sp:
                     cur.execute('ROLLBACK TO SAVEPOINT mohio_guarded_upsert')
                 else:
-                    self.conn.rollback()
+                    self._rollback_after_failure()
                 cur.execute(f'SELECT 1 FROM `{table}` WHERE {where} LOCK IN SHARE MODE', key_vals)
                 if not cur.fetchone():
                     raise e
@@ -8708,7 +9038,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # T1-GUARD-FAILOPEN sibling of Postgres upsert()/Mongo upsert(): an upsert
             # either succeeds (inserted or updated) or it doesn't -- there is no
             # legitimate "upsert produced nothing" outcome to protect here.
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise
 
     def remove_all(self, table):
@@ -8734,7 +9064,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             # T1-GUARD-FAILOPEN: same distinction as update() above -- "0 rows matched" is
             # the normal outcome, never this except block. A real delete failure must not
             # read as "matched nothing."
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise
 
     def remove_multi(self, table, conditions):
@@ -8752,7 +9082,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
         except Exception:
             # T1-GUARD-FAILOPEN sibling of remove(): "0 rows matched" is the normal
             # outcome, never this except block.
-            self.conn.rollback()
+            self._rollback_after_failure()
             raise
 
     _DEADLOCK_TRIES = 5
@@ -8810,7 +9140,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
                 if _sp:
                     cur.execute('ROLLBACK TO SAVEPOINT mohio_guarded_insert')
                 else:
-                    self.conn.rollback()
+                    self._rollback_after_failure()
                 cur.execute(f'SELECT 1 FROM `{table}` WHERE {where} LOCK IN SHARE MODE',
                             [fields.get(c) for c in key_cols])
                 if not cur.fetchone():
@@ -8826,7 +9156,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return row_id if inserted else None
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -8873,7 +9203,7 @@ class MySQLRuntime(_ThreadLeasedPool, _QueryableRuntime):
         self._in_transaction = True
     def commit_transaction(self):   self.conn.commit();   self._in_transaction = False
     def rollback_transaction(self):
-        self.conn.rollback()
+        self._rollback_after_failure()
         self._in_transaction = False
         self._forget_schema()
 
@@ -8939,9 +9269,13 @@ class MongoRuntime(_QueryableRuntime):
     connect db as mongodb from env.MONGO_URL
     """
     def __init__(self, url):
+        _stmt_tmo = _db_statement_timeout_ms()   # outside the try: an unreadable value is its own refusal
         try:
             import pymongo
-            self._client = pymongo.MongoClient(url)
+            # MOHIO_DB_STATEMENT_TIMEOUT_MS (T2-MONGO-STATEMENT-LIMIT): under `mio serve` a stuck operation held the
+            # dispatch lock until it returned. The driver's timeoutMS bounds every operation, including one the
+            # server never answers, and tells the server to stop at the same limit (maxTimeMS).
+            self._client = pymongo.MongoClient(url, timeoutMS=_stmt_tmo) if _stmt_tmo > 0 else pymongo.MongoClient(url)
             # Extract database name from URL or use 'mohio' as default
             import urllib.parse as _up
             p = _up.urlparse(url)
@@ -8988,23 +9322,28 @@ class MongoRuntime(_QueryableRuntime):
         # collection that already exists is the success case. Only CollectionInvalid is
         # swallowed -- any other error on create is a real failure and must surface, so this
         # stays fail-loud for everything except the race it is meant to absorb.
-        _created = False
         if table not in self._mongo_db.list_collection_names():
             try:
                 self._mongo_db.create_collection(table)
-                _created = True
             except Exception as e:
                 from pymongo.errors import CollectionInvalid
                 if not isinstance(e, CollectionInvalid):
                     raise
         # 3a: a declared `unless a, b exists` key -- one field or several -- becomes a real unique
-        # index, so the collection enforces the same identity the relational backends do. Built WITH
-        # a collection this call creates; a collection that already exists without it is settled at
-        # connect, by review (_reconcile_declared_unique), as on every engine. (T1-DECLARED-UNIQUE-
-        # MONGO: a one-field key made no index, and a failed build was swallowed, so a collection
-        # holding duplicates was silently left unenforced.)
+        # index, so the collection enforces the same identity the relational backends do. A collection
+        # that already holds documents without it is settled at connect, by review
+        # (_reconcile_declared_unique), as on every engine. (T1-DECLARED-UNIQUE-MONGO: a one-field key
+        # made no index, and a failed build was swallowed, so a collection holding duplicates was
+        # silently left unenforced.)
+        # THE KEY IS IN PLACE BEFORE THE FIRST DOCUMENT, whoever made the collection
+        # (T1-MONGO-KEY-WINDOW). On a SQL engine the table and its UNIQUE are one statement. Here they
+        # are two steps with a gap anyone can write into, and a build can take seconds; createIndexes
+        # alone does not close it (measured on 7.0: a watcher saw the new collection without its key).
+        # So only the process that made the collection building the key left a second server writing
+        # keyless in the gap. Every writer now builds it on a collection still empty, so the first
+        # document always follows a key, and a collection with documents and no key is an existing one.
         _uniq = [c for c in ((getattr(self, '_declared_unique', {}) or {}).get(table, []) or []) if c != 'id']
-        if _uniq and _created:
+        if _uniq and self.key_settles_on_first_write(table):
             try:
                 self.add_unique_key(table, _uniq)
             except Exception as _e:
@@ -9319,12 +9658,18 @@ class MongoRuntime(_QueryableRuntime):
         self._mongo_db[table].create_index([(c, 1) for c in cols], unique=True,
                                            name=_index_name('uq', table, *cols))
 
+    def key_settles_on_first_write(self, table):
+        """An empty collection takes its declared key from the next writer, before any document lands
+        (T1-MONGO-KEY-WINDOW). One holding documents is an existing collection, settled by review."""
+        return self._mongo_db[table].find_one({}, {'_id': 1}) is None
+
     def prepare_write(self, table):
         """Build this collection's declared indexes before a write, once per process (MHC-B019). A
         SQL runtime builds them in `ensure_table` on its way into every write; this runtime's writes
-        never called it, so a declared `unique` (tagged or not) was never enforced on Mongo. Called
-        by the interpreter before the write's transaction opens, because an index build inside a
-        multi-document transaction would wait on the lock that transaction holds."""
+        never called it, so a declared `unique` (tagged or not) was never enforced on Mongo. Every write
+        verb below calls it, so no caller can write ahead of a key (T1-MONGO-KEY-WINDOW), and a stuck
+        database fails inside the verb, where the program's `on.failure` catches it. A program
+        transaction cannot be open here: MongoDB refuses one (T1-MONGO-PROGRAM-TRANSACTION)."""
         done = self.__dict__.setdefault('_prepared_tables', set())
         if table not in done:
             self.ensure_table(table, [])
@@ -9363,6 +9708,7 @@ class MongoRuntime(_QueryableRuntime):
         # produces documents a later `where email` cannot see -- but the MECHANISM does not
         # transfer. Mongo's protection has to come from shape-as-allowlist enforced at write
         # time (Q42), not from here. Recorded as a decided gap, not an oversight.
+        self.prepare_write(table)   # no caller can store a document ahead of its key (T1-MONGO-KEY-WINDOW)
         try:
             col = self._mongo_db[table]
             # AMBIENT SESSION: when a regulated write has opened a multi-document transaction on
@@ -9379,6 +9725,7 @@ class MongoRuntime(_QueryableRuntime):
             raise
 
     def update(self, table, updates, match_field, match_value):
+        self.prepare_write(table)   # an update can collide on a declared `unique` too (MHC-B019)
         try:
             col = self._mongo_db[table]
             result = col.update_many(
@@ -9457,6 +9804,7 @@ class MongoRuntime(_QueryableRuntime):
         return ('id',)
 
     def update_multi(self, table, updates, conditions, empty=()):
+        self.prepare_write(table)   # an update can collide on a declared `unique` too (MHC-B019)
         try:
             col = self._mongo_db[table]
             flt = _mongo_id_filter(dict(conditions))
@@ -9474,6 +9822,7 @@ class MongoRuntime(_QueryableRuntime):
     def upsert(self, table, fields, match_field, insert_only=()):
         """MongoDB native upsert — update_one with upsert=True. `match_field` is a single field
         or a list; the filter matches on ALL of them (a composite key)."""
+        self.prepare_write(table)   # no caller can store a document ahead of its key (T1-MONGO-KEY-WINDOW)
         try:
             col = self._mongo_db[table]
             match_cols = [match_field] if isinstance(match_field, str) else list(match_field)
@@ -9536,6 +9885,7 @@ class MongoRuntime(_QueryableRuntime):
         """Insert only if no doc matches key_cols -- `save ... unless a, b exists`. update_one
         with upsert=True and $setOnInsert is Mongo's atomic insert-if-absent: an existing doc
         is left untouched (matched, nothing modified), an absent one is created."""
+        self.prepare_write(table)   # no caller can store a document ahead of its key (T1-MONGO-KEY-WINDOW)
         try:
             col = self._mongo_db[table]
             key_filter = _mongo_doc_in({c: fields.get(c) for c in key_cols})
@@ -9678,6 +10028,14 @@ def _make_db_runtime(driver: str, db_path: str = ':memory:', url: str = None):
     if _msg not in _seen:
         _seen.add(_msg)
         print(_msg)
+    if (os.environ.get('MOHIO_DB_STATEMENT_TIMEOUT_MS') or '').strip() not in ('', '0'):
+        # A limit asked of an engine that cannot give one is said out loud, once (its docstring says why none is faked).
+        _none = ("  [connect] SQLite has no statement timeout, so MOHIO_DB_STATEMENT_TIMEOUT_MS does nothing here. "
+                 "It only waits for a lock, up to MOHIO_SQLITE_BUSY_TIMEOUT_MS; the request's own limit still applies "
+                 "under `mio serve`.")
+        if _none not in _seen:
+            _seen.add(_none)
+            print(_none)
     return _floor_checked(DbRuntime(db_path), 'sqlite')
 
 
@@ -10082,6 +10440,26 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
         return [frozenset(g) for g in groups.values()]
 
+    def has_unique_index_on(self, table, col):
+        """True when a valid UNIQUE index holds `col` alone to one row: one column, a plain index
+        and not a function-based one. Asked by COLUMN, never by Mohio's own index name, so an index
+        an administrator built under any name counts (T1-AUDIT-RESTRICTED-ROLE-INDEX). Read from
+        ALL_ views in the session's current schema, so a role reading another schema's tables
+        through CURRENT_SCHEMA asks about those tables, not its own."""
+        cur = self._ddl_cursor()   # a catalogue read (see table_columns)
+        try:
+            cur.execute("SELECT i.index_name, c.column_name FROM all_indexes i JOIN all_ind_columns c "
+                        "ON c.index_owner = i.owner AND c.index_name = i.index_name "
+                        "WHERE i.table_owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') "
+                        "AND UPPER(i.table_name) = UPPER(:1) AND i.uniqueness = 'UNIQUE' "
+                        "AND i.status = 'VALID' AND i.index_type = 'NORMAL'", [str(table)])
+            groups = {}
+            for ix, c in cur.fetchall():
+                groups.setdefault(str(ix), []).append(str(c).lower())
+        finally:
+            cur.close()
+        return any(cols == [str(col).lower()] for cols in groups.values())
+
     def table_identity(self, table):
         """The columns that identify a row in this table, from Oracle's own catalogue: the declared
         PRIMARY KEY, or else the narrowest UNIQUE constraint, or () when the table guarantees
@@ -10163,6 +10541,14 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
                 ddl.close()
             self._tls.ddl_conn = None
         super().release_thread_connection()
+
+    def _lease_may_hold_work(self, conn):
+        """Oracle answers from the driver: a lease with no transaction in progress holds nothing a
+        rollback would release, and the rollback it skipped cost a round trip (290 microseconds) on
+        every request that only read or that committed its writes. A connection that cannot say is
+        rolled back, as every engine's is by default. Mohio's own open `transaction` block is rolled
+        back whatever the driver says (release_thread_connection asks that first)."""
+        return bool(getattr(conn, 'transaction_in_progress', True))
 
     def _relay_lock_connection(self):
         """The dedicated connection the relay claim locks on, verified alive before each use.
@@ -10576,7 +10962,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return _id
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -10735,7 +11121,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return n
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -10758,7 +11144,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return n
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -10806,7 +11192,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
                 self.conn.commit()
             cur.close()
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -10835,7 +11221,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
                 if not _is_duplicate_key_error(e):
                     raise
                 if not self._in_transaction:
-                    self.conn.rollback()
+                    self._rollback_after_failure()
                 _w = ' AND '.join(f'{self.quote_ident(k)} = ?' for k in key_cols)
                 cur.execute(self._renum(f'SELECT 1 FROM {self.quote_ident(table)} WHERE {_w}'),
                             [fields.get(k) for k in key_cols])
@@ -10867,7 +11253,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return row_id
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -10884,7 +11270,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return n
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -10904,7 +11290,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return n
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -10919,7 +11305,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
             cur.close()
             return n
         except Exception:
-            self.conn.rollback()
+            self._rollback_after_failure()
             try: cur.close()
             except Exception: pass
             raise
@@ -10932,7 +11318,7 @@ class OracleRuntime(_ThreadLeasedPool, _QueryableRuntime):
         self._in_transaction = False
 
     def rollback_transaction(self):
-        self.conn.rollback()
+        self._rollback_after_failure()
         self._in_transaction = False
         self._forget_schema()
 
@@ -11212,11 +11598,17 @@ def _mohio_value_to_record(v):
     silently drop all of it on every restart-reload: a PCI-tagged held value would come
     back unclassified after a process restart, the exact silent-default shape this
     project treats as urgent everywhere else. Every field round-trips explicitly."""
+    # A REQUEST FIELD STAYS A REQUEST FIELD THROUGH A ROUND TRIP. The next request clears a binding
+    # by this mark (see run_with_session), so a binding written without it came back looking like a
+    # program variable and a field the caller never sent again read as live on a durable store.
+    _rf = getattr(v, '_request_field', None)
     return {
         'value': v.to_python(), 'type': v.mohio_type,
         'data_class': v.data_class, 'purposes': v._purposes,
         'purpose_fields': v._purpose_fields, 'currency': v._currency,
         'pad_places': v._pad_places,
+        'request_field': list(_rf) if _rf else None,
+        'program_assigned': bool(getattr(v, '_program_assigned', False)),
     }
 
 
@@ -11229,6 +11621,10 @@ def _record_to_mohio_value(rec):
     v._purpose_fields = rec.get('purpose_fields')
     v._currency       = rec.get('currency')
     v._pad_places     = rec.get('pad_places')
+    if rec.get('request_field'):
+        v._request_field = tuple(rec['request_field'])
+    if rec.get('program_assigned'):
+        v._program_assigned = True
     return v
 
 
@@ -11251,6 +11647,11 @@ def _session_context_to_state(ctx):
         # exactly as roles do -- set once at login, read-only, carried to every later request.
         'person':     getattr(ctx, '_person', None),
         'person_set': bool(getattr(ctx, '_person_set', False)),
+        # A session variable a request field is covering for this request, put back before the next
+        # one (see run_with_session). Only the covered ones are needed to put them back.
+        'shadowed':   {k: _mohio_value_to_record(v)
+                       for k, v in (getattr(ctx, '_program_vars_before', None) or {}).items()
+                       if _is_request_binding(k, ctx._vars.get(k))},
     }
 
 
@@ -11268,12 +11669,13 @@ def _apply_state_to_context(ctx, state):
     ctx._roles_verified = bool(state.get('roles_verified', False))
     ctx._person    = state.get('person', None)
     ctx._person_set = bool(state.get('person_set', False))
+    ctx._program_vars_before = {k: _record_to_mohio_value(r) for k, r in state.get('shadowed', {}).items()}
     return ctx
 
 
 class _InMemorySessionStore:
     """Default session store: a plain in-process dict, exactly what MohioServer.sessions
-    has always been. Does NOT survive a process restart -- this is the open-core default,
+    has always been. Does NOT survive a process restart -- this is the free-runtime default,
     unchanged in every observable way from before this seam existed.
 
     get/put operate on the LIVE Context object directly, never through
@@ -11334,7 +11736,7 @@ class _InMemorySessionStore:
 
 
 class _PostgresSessionStore(_ThreadLeasedPool):
-    """Postgres-backed session store, built into open core (MOHIO_SESSION_STORE=postgres),
+    """Postgres-backed session store, built into the free runtime (MOHIO_SESSION_STORE=postgres),
     reusing the app's own DATABASE_URL -- no new secret, same precedent as every other
     Mohio-managed table (lazy auto-create, matching save to / db.upsert; no separate
     migration step).
@@ -11627,6 +12029,46 @@ class _PostgresSessionStore(_ThreadLeasedPool):
 # INTERPRETER
 # ══════════════════════════════════════════════════════════════
 
+# THE SERVED REQUEST'S OWN DEADLINE (T0-SERVE-HANDLER-BLOCKS-EVENT-LOOP, Option B). `mio serve` sets it
+# on the worker thread that runs a request, from the moment the request ARRIVED plus
+# MOHIO_REQUEST_TIMEOUT, so a request that queued behind another has that much less to run in. Read
+# when a run starts (_with_request_deadline). Unset outside a served request, so `mio run` keeps its
+# own deadline and its loop-only check exactly as before.
+_SERVED_REQUEST = _threading.local()   # this thread's served request: its deadline and its id
+
+
+def set_request_deadline(deadline_at, timeout_s=None, record=None):
+    """Bind (or with None, clear) the current thread's served request: its deadline, a time.monotonic()
+    value, and `record`, a dict the run writes its request id into the moment it mints one, so the
+    server's log line names THIS request even while it is still running past its deadline."""
+    _SERVED_REQUEST.at = deadline_at
+    _SERVED_REQUEST.timeout_s = timeout_s
+    _SERVED_REQUEST.record = record
+
+
+def _note_served_txn(is_open):
+    """Record on the served request whether its transaction is open now, so a 504 sent while the
+    handler is still blocked can say truthfully whether its writes will be rolled back."""
+    _rec = getattr(_SERVED_REQUEST, 'record', None)
+    if _rec is not None:
+        _rec['open_txn'] = bool(is_open)
+
+
+def _with_request_deadline(interp, own_deadline):
+    """(run deadline, statement deadline) for a run starting now. The run deadline is the earlier of
+    MOHIO_MAX_RUN_SECONDS from now and the request's own; the statement deadline is the request's
+    own, which turns on the check at every statement (only a served request has one). Records which
+    limit binds, so the timeout names the right setting."""
+    req_at = getattr(_SERVED_REQUEST, 'at', None)
+    interp._deadline_setting = ('MOHIO_MAX_RUN_SECONDS', interp._run_seconds_limit)
+    if req_at is None:
+        return own_deadline, None
+    if own_deadline is None or req_at <= own_deadline:
+        interp._deadline_setting = ('MOHIO_REQUEST_TIMEOUT', getattr(_SERVED_REQUEST, 'timeout_s', None))
+        return req_at, req_at
+    return own_deadline, req_at
+
+
 class MohioInterpreter:
     """
     Tree-walking interpreter. One _exec_* method per AST node type.
@@ -11645,7 +12087,7 @@ class MohioInterpreter:
     # Key:   AST node class name (e.g. 'MiochainTxBlock')
     # Value: callable(node, ctx) -> MohioValue
     #
-    # Open core has stub executors that raise MohioRuntimeError.
+    # The free runtime has stub executors that raise MohioRuntimeError.
     # Commercial binary calls register_executor() to replace them.
     #
     # Pattern:
@@ -11691,7 +12133,7 @@ class MohioInterpreter:
         # landed, or inside a transaction that has not committed. If that row never lands, the
         # object is removed and the removal audited (`_remove_unrowed_uploads`).
         self._upload_unrowed = []
-        # Cost controller (open core): per-request AI-call ceiling + loop iteration guard.
+        # Cost controller (free runtime): per-request AI-call ceiling + loop iteration guard.
         import os as _os
         self._ai_call_count   = 0
         self.shown            = []     # `show` output buffer — surfaced by `mio run`
@@ -11742,6 +12184,7 @@ class MohioInterpreter:
         self._loop_iter_limit   = int(_os.environ.get('MOHIO_MAX_LOOP_ITERATIONS', '100000'))
         self._run_seconds_limit = float(_os.environ.get('MOHIO_MAX_RUN_SECONDS', '30'))
         self._run_deadline      = None
+        self._stmt_deadline     = None   # a served request's own deadline, checked at every statement
         self._data_ops_done     = 0    # database operations actually carried out this run
         # OFF by default (0), unlike the three limits above: a row-count ceiling is an
         # operational guard an operator opts INTO for a table that might grow unbounded, not a
@@ -11758,7 +12201,7 @@ class MohioInterpreter:
         Register a commercial executor for a given AST node class name.
 
         Called by the commercial runtime binary at startup to replace
-        open core stub executors with full implementations.
+        the free runtime's stub executors with full implementations.
 
         Args:
             node_class_name: Exact AST class name e.g. 'MiochainTxBlock'
@@ -11826,7 +12269,28 @@ class MohioInterpreter:
                 # looks like, and the loop reading is still offered for the case where the
                 # number itself is the surprise.
                 _done = getattr(self, '_data_ops_done', 0)
-                _limit = f"{self._run_seconds_limit:.0f}s"
+                # THE LIMIT THAT BOUND, named: a served request's own MOHIO_REQUEST_TIMEOUT can come
+                # before MOHIO_MAX_RUN_SECONDS, and naming the other one sends the reader to the wrong
+                # setting (_with_request_deadline records which).
+                _setting, _secs = getattr(self, '_deadline_setting', None) or (
+                    'MOHIO_MAX_RUN_SECONDS', self._run_seconds_limit)
+                _limit = f"{float(_secs if _secs is not None else self._run_seconds_limit):.0f}s"
+                if _setting == 'MOHIO_REQUEST_TIMEOUT':
+                    # WHAT WAS KEPT, from the state at this moment (receipts record outcomes): inside a
+                    # transaction its writes are rolled back as this unwinds; outside one, a write that
+                    # finished before the limit committed when it ran.
+                    _kept = ("Its writes are rolled back with the request's transaction."
+                             if getattr(self, '_txn_depth', 0) > 0 else
+                             "A write that finished before the limit was saved when it ran; nothing "
+                             "after this line ran.")
+                    raise _Raise(error_name='run_timeout',
+                        message=(f"This request reached its {_limit} time limit "
+                                 f"(MOHIO_REQUEST_TIMEOUT) and was stopped here, after "
+                                 f"{_done:,} database operation{'s' if _done != 1 else ''}. "
+                                 + _kept),
+                        line=getattr(node, 'line', None) if node else None,
+                        hint=("Long-running work belongs in a background job (mioschedule). To "
+                              "allow a longer request, raise MOHIO_REQUEST_TIMEOUT."))
                 if _done:
                     _msg = (f"Execution reached the {_limit} time limit after completing "
                             f"{_done:,} database operation{'s' if _done != 1 else ''}.")
@@ -11868,9 +12332,12 @@ class MohioInterpreter:
         js = getattr(self, '_mioscript_js', '')
         if not js:
             return html
-        tag = f'<script>\n{js}\n</script>'
-        if '</body>' in html:
-            return html.replace('</body>', tag + '\n</body>', 1)
+        tag = f'<script>\n{_script_safe(js)}\n</script>'
+        # Before the LAST </body>: the page's own closing tag. The first one can sit inside earlier
+        # content (a script the page already carries), and inserting there split that content.
+        at = html.rfind('</body>')
+        if at != -1:
+            return html[:at] + tag + '\n' + html[at:]
         return html + '\n' + tag
 
     def release_db_connections(self):
@@ -11884,7 +12351,16 @@ class MohioInterpreter:
         (SQLite/Mongo), which simply do not have the method.
         """
         seen = []
-        for c in list(getattr(self, '_connections', {}).values()) + [getattr(self, '_db', None)]:
+        runtimes = list(getattr(self, '_connections', {}).values()) + [getattr(self, '_db', None)]
+        # EACH RUNTIME'S AUDIT TWIN TOO (found 2026-11-08 counting a 149-page directory at
+        # MOHIO_DB_POOL_MAX=1). The twin is a pooled runtime of its own and leases per thread like
+        # any other, and nothing gave that lease back: the first thread to write a record kept the
+        # twin's connection for the life of the process, so the next thread to need it (a second
+        # worker, or the background drain) waited out the pool timeout, its record went owed and
+        # the request answered 504. At a larger pool every worker thread kept one, so a page held
+        # up to MOHIO_DB_POOL_MAX audit connections on top of its own pool.
+        runtimes += [getattr(c, '_audit_twin', None) for c in list(runtimes)]
+        for c in runtimes:
             rel = getattr(c, 'release_thread_connection', None)
             if rel is not None and c not in seen:
                 seen.append(c)
@@ -11913,11 +12389,7 @@ class MohioInterpreter:
         # and that is the language's existing way to handle a failed saga. A program that does
         # that HAS handled it; a program that never looks is the one falling through to a
         # success response it did not earn. See _exec_SagaDecl for what is done with this.
-        self._index_sagas(program)
-        self._index_log_names(program)
-        self._index_compliance_markers(program)
-        self._index_timezone_default(program)
-        self._index_sector_idempotency(program)
+        self._index_program(program)
         # RELEASED ON ENTRY TOO, not only on exit. Work done on this thread OUTSIDE a request (the
         # boot: declarations, the authored-data seed, startup checks) leased a connection that no
         # request exit ever returned. The first request served on that thread then ran inside the
@@ -11934,6 +12406,29 @@ class MohioInterpreter:
             _RESPONSE_SCOPE.state = _outer_response
             self.release_db_connections()
 
+    def _index_program(self, program, again=False):
+        """The five program indexes, read ONCE per program rather than on every request.
+
+        Each pass reads the program's own structure and nothing else: no request, no session, no
+        database (checked by reading each one, 6.0.4). The timezone pass also reads
+        MOHIO_APP_TIMEZONE, which a process takes at launch. Every one of them writes only its own
+        attributes, which nothing resets per request. So while one program is served the answers
+        cannot change, and walking a 1,750-line program five times for each request measured
+        26.6 ms of a 42.7 ms Zork request.
+
+        Keyed by the program OBJECT, held here (not its id, which a freed program's successor can
+        reuse), so a different or reloaded program is indexed afresh. `again` is for the one place
+        the program itself changes in place, the condition-word rewrite when the base context is
+        built; run_declarations clears the key after its own rewrite for the same reason."""
+        if not again and getattr(self, '_indexed_program', None) is program:
+            return
+        self._index_sagas(program)
+        self._index_log_names(program)
+        self._index_compliance_markers(program)
+        self._index_timezone_default(program)
+        self._index_sector_idempotency(program)
+        self._indexed_program = program
+
     _CM_MARKER_NODES = ('CmPurgeBlock', 'CmRetainStmt', 'CmReportStmt',
                         'CmExpireStmt', 'CmLockStmt', 'CmNotifyStmt')
 
@@ -11943,7 +12438,7 @@ class MohioInterpreter:
         a field tag makes them. A sector/tag already do this per-write in _audit_is_regulated; this
         adds the third marker, program-level, because a `cm.retain`/`cm.purge` declares compliance
         intent for the whole run, not for one table."""
-        import dataclasses as _dc
+        import mohio_dc as _dc
         def walk(n):
             if _dc.is_dataclass(n):
                 if type(n).__name__ in self._CM_MARKER_NODES:
@@ -11981,7 +12476,7 @@ class MohioInterpreter:
         run from code the request never routes through directly. The NEAREST one wins if more than
         one journey in the cascade declares it (matches the cascade's own restatement rule: a
         subfolder's own declaration replaces the root's for what it restates)."""
-        import dataclasses as _dc
+        import mohio_dc as _dc
         from mohio_ast import JourneyDecl as _JD3, JourneyMeta as _JM3
         found = None
         locked = None
@@ -12026,7 +12521,40 @@ class MohioInterpreter:
         stringified datetime value (the normal case -- see _store_datetime_value) as well as a
         live datetime.datetime object (the rare one), so UTC normalization reaches every
         datetime field, not only the values that happen to still be raw objects at save time."""
-        return (self._shaped_col_types.get(str(table)) or {}).get(str(field_name)) == 'datetime'
+        if (self._shaped_col_types.get(str(table)) or {}).get(str(field_name)) == 'datetime':
+            return True
+        # A SEALED COLUMN IS TEXT ON DISK, so the column types do not call it a datetime, and its naive value was
+        # sealed as written and read back as UTC, moved by the zone's offset. The shape's own word is kept here.
+        return str((self._shaped_declared_types.get(str(table)) or {}).get(str(field_name)) or '').lower() == 'datetime'
+
+    def _place_datetime(self, value, table, field_name):
+        """What a write stores for one field, for a datetime: the one place the moment is decided, for every write
+        verb. A datetime VALUE keeps its moment; TEXT with no offset is read in the field's zone. Before this a value
+        with no offset was read in the zone as well, so in a zoned app `ts now()` stored the wrong moment and every
+        copy of a stored datetime moved it again by the zone's offset, with nothing said, while `update` applied no
+        zone at all to text. Asking twice gives the same answer (T1-DATETIME-WRITE-KEEPS-ITS-MOMENT)."""
+        if isinstance(value, MohioValue) and value.mohio_type == 'datetime':
+            raw = value.to_python()
+            value = _PlacedDatetime(raw) if type(raw) is str else raw   # a _WallDatetime stays text to be read
+        if isinstance(value, datetime.datetime):
+            return _PlacedDatetime(self._store_datetime_value(value, table, field_name))
+        if not isinstance(value, str) or not self._is_declared_datetime(table, field_name):
+            return value
+        if isinstance(value, _PlacedDatetime) and 'T' in value:
+            try:
+                when = datetime.datetime.fromisoformat(value)
+            except ValueError:
+                return value
+            if when.tzinfo is None:
+                return value
+            return _PlacedDatetime(when.astimezone(datetime.timezone.utc).replace(tzinfo=None).isoformat())
+        if isinstance(value, _PlacedClassifiedDatetime):
+            return value
+        placed = self._store_datetime_value(str(value), table, field_name)
+        if isinstance(value, ClassifiedText):      # a sealed value read and saved again keeps its class
+            return _PlacedClassifiedDatetime(placed, value.data_class, value.handling,
+                                             getattr(value, 'hidden', False))
+        return _PlacedDatetime(placed)
 
     def _resolve_field_timezone(self, table, field_name):
         """The zone a NAIVE (no explicit offset) datetime for this field is interpreted in:
@@ -12103,7 +12631,7 @@ class MohioInterpreter:
         saga in a way nobody enumerated here, and a false refusal on a working program is the
         error this project treats as the mirror of a silent pass.
         """
-        from dataclasses import fields as _fields, is_dataclass as _isdc
+        from mohio_dc import fields as _fields, is_dataclass as _isdc
         saga_names, read_heads = set(), set()
 
         def walk(node):
@@ -12142,7 +12670,7 @@ class MohioInterpreter:
         raised on every failed saga and broke those three tests, which were not wrong: they were
         describing the other half of a construct that has two legitimate endings.
         """
-        from dataclasses import fields as _fields, is_dataclass as _isdc
+        from mohio_dc import fields as _fields, is_dataclass as _isdc
         followed = set()
 
         def scan_list(seq):
@@ -12170,10 +12698,18 @@ class MohioInterpreter:
 
     def _run_inner(self, program, request=None, session_ctx=None):
         self._ai_call_count = 0   # reset per request
+        self._data_ops_done = 0   # the 504's "after N database operations" is this request's, not the process's
         self._saga_failed = False  # reset saga-failure flag per request
         self.shown = []           # reset show output per request
         import time as _time
         self._run_deadline = (_time.monotonic() + self._run_seconds_limit) if self._run_seconds_limit > 0 else None
+        self._run_deadline, self._stmt_deadline = _with_request_deadline(self, self._run_deadline)
+        _rec = getattr(_SERVED_REQUEST, 'record', None)
+        if _rec is not None:
+            # A SERVED PAGE RUN IS A REQUEST OF ITS OWN (a convention page, a declared status page):
+            # it gets an id, so its log line and any error it raises name this request.
+            self._request_id = _mohio_trace_id()
+            _rec['id'] = self._request_id
         self._session_mode = False   # stateless — child contexts per request
         self._scope_prewired = False  # stateless: journeys self-wire their scope
         # A convention-served page runs as a CHILD of the request's session context, so a role
@@ -12245,10 +12781,15 @@ class MohioInterpreter:
             if r.error_name == 'authorization_error':
                 # The fix rides in `hint`: `mio run` prints it under the response, a served
                 # request logs it, and the body stays what the caller is told.
+                # A REFUSAL, so it carries the failure flag the session path already gives a 403:
+                # without it `mio run` exited 0 on a refused page (measured), while the same gate's
+                # 404 exited 1. The body is unchanged; the flag and the name are additive.
                 return {'status': 403, 'body': str(r.message),
+                        '_mohio_runtime_error': True, 'code': r.error_name, 'message': r.message,
                         'hint': r.hint or _RUNTIME_HINT_TABLE.get(r.error_name, '')}
             if r.error_name == 'authentication_required':
                 return {'status': 401, 'body': str(r.message),
+                        '_mohio_runtime_error': True, 'code': r.error_name, 'message': r.message,
                         'hint': r.hint or _RUNTIME_HINT_TABLE.get(r.error_name, '')}
             # Was hardcoded to 500 for every OTHER error_name, flattening every other
             # _RUNTIME_STATUS_TABLE entry (not_found -> 404, validation_error -> 400, ...) to
@@ -12266,6 +12807,9 @@ class MohioInterpreter:
             # `status`/`body` and is unaffected.
             return {'status': _RUNTIME_STATUS_TABLE.get(r.error_name, 500), 'body': str(r),
                     '_mohio_runtime_error': True,
+                    # ADDITIVE too: the refusal's name and its bare message, so a consumer can tell one
+                    # refusal from another without parsing `body` (the served 504 for run_timeout).
+                    'code': r.error_name, 'message': r.message,
                     # ADDITIVE, like the flag above it. The refusal already carries a HOW,
                     # and nothing rendered it, so every consumer of this envelope saw the
                     # what and the where and never the fix. The body shape is untouched
@@ -12326,7 +12870,7 @@ class MohioInterpreter:
         Two sites declaring DIFFERENT keys for the same table is unresolvable, so it fails loud
         naming both sites and both keys rather than silently picking one."""
         from mohio_ast import SaveBlock
-        import dataclasses as _dc
+        import mohio_dc as _dc
         declared = {}   # table -> (tuple(cols), line)
 
         def walk(node):
@@ -12412,6 +12956,12 @@ class MohioInterpreter:
                 if any(str(c).lower() not in have for c in cols):
                     continue
             if frozenset(str(c).lower() for c in cols) in sets:
+                continue
+            # A store whose collection and key are two steps says when the key is still on its way: the
+            # writer builds it before the first document (T1-MONGO-KEY-WINDOW). This is not an existing
+            # table missing its key, and refusing here answered a deployed app's first requests with a 500.
+            _settles = getattr(db, 'key_settles_on_first_write', None)
+            if _settles is not None and _settles(table):
                 continue
             key, where = self._declared_key_label(table)
             marker = getattr(self, 'deploy_marker', None)
@@ -12608,6 +13158,9 @@ class MohioInterpreter:
         (Postgres/MySQL/MongoDB) from the connect declaration.
         Call this BEFORE seed_db so seed goes into the right database.
         """
+        self._note_include_origin(program)
+        if getattr(self, 'serving', False) and not getattr(self, 'include_live', False):
+            self._compose_render_includes(program)
         self._collect_declared_unique_keys(program)
         self._index_log_names(program)
         ctx = Context()
@@ -12619,6 +13172,7 @@ class MohioInterpreter:
         # put into the program from the same resolver `mio check` judges it with.
         from mohio_reachability import resolve_condition_words
         resolve_condition_words(program, rewrite=True)
+        self._indexed_program = None   # the program changed in place: the next run indexes it afresh
         # Plain-shape `unique`: register indexes on the tables loose-unique shapes are saved to,
         # AFTER _exec_declarations so any `as table` unique is already registered and the connection
         # exists to hand the merged registry to. Runs on every setup path (run_declarations here;
@@ -12977,7 +13531,7 @@ class MohioInterpreter:
         the source, not from runtime state, because the active sector is ctx-scoped and this guard
         runs before any request ctx exists."""
         from mohio_ast import SectorDecl
-        from dataclasses import fields as _fields, is_dataclass as _isdc
+        from mohio_dc import fields as _fields, is_dataclass as _isdc
         found = [False]
 
         def walk(n):
@@ -13212,6 +13766,15 @@ class MohioInterpreter:
            explicit pass handlers and never reach this fallback.)
         """
         if node is None: return None
+
+        # A SERVED REQUEST STOPS AT ITS DEADLINE, at the first statement after it. The loop checks
+        # alone let a handler waiting on an outbound call, an AI call or a database statement run on
+        # for as long as the call took and then carry on to the end, its 504 already sent. Checked here,
+        # every statement after the deadline refuses, so the handler does nothing more once a blocked
+        # call returns, and a `try` cannot carry on past it (its `on.failure` is a statement too).
+        _sd = self._stmt_deadline
+        if _sd is not None and _pooltime.monotonic() > _sd:
+            self._check_deadline(node)
 
         # Track the innermost executing node's line so a runtime error can point at it. Statement
         # and expression nodes carry `.line`; the deepest one set before a raise is the right spot.
@@ -14554,6 +15117,7 @@ class MohioInterpreter:
             # A governed table is classified by its own declaration only (T1-VALUE-BOUND-TAGS).
             self.classification.govern(str(_tname))
             self._shaped_tables[str(_tname)] = list(getattr(_tbl, 'fields', None) or [])
+            self._clear_money_row_plans()
             self._shaped_table_shape[str(_tname)] = str(getattr(node, 'name', '') or '')
             # THE SHAPE IS THE SCHEMA CONTRACT. Every declared column materializes when the table
             # is CREATED, so a later write to a declared-but-initially-unwritten column does not
@@ -14587,6 +15151,7 @@ class MohioInterpreter:
                               for _m in (getattr(_f, 'modifiers', None) or []))}
             self._shaped_declared_types[str(_tname)] = _declared
             self._shaped_col_types[str(_tname)] = {k: v for k, v in _declared.items() if k not in _sealed}
+            self._clear_money_row_plans()
             # T1-DB-TYPED-STORAGE: a field's own `timezone "Zone/Name"` override, same shape as
             # the `unique` scan just below -- walk each field's modifiers for the one that names it.
             _tz_cols = {}
@@ -14701,14 +15266,14 @@ class MohioInterpreter:
     # across deployments. WHAT gets encrypted, the fail-loud, the AES-GCM, and the
     # tag wiring are identical everywhere and live below, untouched.
     #
-    #   open core / self-host  -> default provider: SHA-256 of MOHIO_ENCRYPTION_KEY
+    #   free / self-host       -> default provider: SHA-256 of MOHIO_ENCRYPTION_KEY
     #   getmohio (managed)     -> platform registers an envelope-encryption provider
     #                             (per-tenant data key, wrapped by a master in KMS)
     #   commercial, self-host  -> customer registers their AWS KMS / Vault provider
     #
     # A provider is a zero-arg callable returning 32 raw bytes, or None if no key is
     # configured (which makes every tagged write fail loud rather than store plaintext).
-    # This mirrors the register_executor plugin pattern above: open core ships a
+    # This mirrors the register_executor plugin pattern above: the free runtime ships a
     # default, the commercial binary swaps it in at startup. It does NOT weaken the
     # guarantee -- a provider that returns None still triggers the same refusal.
     _key_provider = None   # class-level; set by register_key_provider()
@@ -14743,7 +15308,7 @@ class MohioInterpreter:
         This is where physical placement lives: a Postgres sink can put audit tables in a dedicated
         `audit` schema with append-only grants; a WORM object-store sink can provide worm.
         The compiler names LOGICAL audit tables and never hardcodes schema syntax, so SQLite /
-        MySQL / Mongo are unaffected. When no provider is registered (open core), audit falls back
+        MySQL / Mongo are unaffected. When no provider is registered (the free runtime), audit falls back
         to the app db, exactly as before.
         """
         cls._audit_sink_provider = staticmethod(provider_fn).__func__
@@ -14782,10 +15347,10 @@ class MohioInterpreter:
     # seams above. WHAT a session IS and how it is used -- creation, rotation, invalidation,
     # expiry, all landed 2026-08-04 -- never changes; only physical storage does.
     #
-    #   open core / self-host, no MOHIO_SESSION_STORE  -> in-memory (today's behavior,
+    #   free / self-host, no MOHIO_SESSION_STORE       -> in-memory (today's behavior,
     #                                                       unchanged; does not survive a
     #                                                       process restart)
-    #   MOHIO_SESSION_STORE=postgres                     -> built into open core (see
+    #   MOHIO_SESSION_STORE=postgres                     -> built into the free runtime (see
     #                                                       _PostgresSessionStore below),
     #                                                       reuses the app's own DATABASE_URL,
     #                                                       survives a restart
@@ -14826,7 +15391,7 @@ class MohioInterpreter:
 
     @staticmethod
     def _default_key_provider():
-        """Open-core default: 32-byte key from env MOHIO_ENCRYPTION_KEY, or None.
+        """Free-runtime default: 32-byte key from env MOHIO_ENCRYPTION_KEY, or None.
 
         SHA-256 derivation is the single-tenant MVP. It is deliberately NOT used
         by the managed or commercial deployments, which register a KMS-backed
@@ -15541,9 +16106,21 @@ class MohioInterpreter:
         except Exception:
             return False        # no such table/column yet -> the driver's own guard reports it
 
+    def _datetime_for_match(self, value, table, field):
+        """An equality on a datetime column asks about a moment, in the form a write stored it. Compared as it was
+        written, `...Z`, `...+00:00`, another offset, and a value read back from a protected field each found nothing, with
+        nothing said, though each named the moment stored; on a sealed column the index of its text differs too. The program's
+        own output now reads `+00:00`, so handing it back has to match. A date alone is left as it is: it has no moment."""
+        raw = value.to_python() if isinstance(value, MohioValue) else value
+        if not (isinstance(raw, datetime.datetime) or (isinstance(raw, str) and 'T' in raw)):
+            return value
+        placed = self._place_datetime(value, table, field)
+        return str(placed) if isinstance(placed, (_PlacedDatetime, _WallDatetime)) else placed
+
     def _bidx_pair(self, db, table, field, value, node=None):
         """Translate one (field, value) equality to the shadow column when the field is indexed."""
         base = str(field).split('.')[-1]
+        value = self._datetime_for_match(value, table, base)
         # BY IDENTITY: this method already receives the table, so `vendors.email` is not sent
         # to a blind index that only `customers.email` ever wrote. Matching a plaintext column
         # through the shadow column returns nothing at all, so a bare-name answer here was a
@@ -15631,6 +16208,8 @@ class MohioInterpreter:
         column compares the two indexes, and needs both encrypted. A range on an encrypted column
         refuses with the same words a plain find uses, since ciphertext has no order.
         """
+        if kind[0] == 'lit' and op == 'is':
+            kind = ('lit', self._datetime_for_match(kind[1], table, field)) + tuple(kind[2:])
         if not self._field_sealed(db, table, field):
             _anc_sealed = kind[0] == 'col' and self._field_sealed(db, level_tables[kind[1]], kind[2])
             if _anc_sealed and op != 'is':
@@ -15749,6 +16328,46 @@ class MohioInterpreter:
         return {k: v for k, v in d.items()
                 if not str(k).startswith(MohioInterpreter._PLUMBING_PREFIX)}
 
+    def _money_row_plan(self, table):
+        """(money fields' props, datetime column names) for `table`, built once per
+        table from the shape registries and kept until one of them is written.
+
+        _retag_money_row used to rebuild this for EVERY row it read: field props for every declared
+        field, then two passes over the column types, 10.9 of the 19.3 microseconds each row spent
+        in _repair_row on a table with no money and no datetime column at all (profiled through
+        `mio run`, 48,000 rows). The plan depends only on `_shaped_tables` and `_shaped_col_types`,
+        so every place that writes either clears it (_clear_money_row_plans), and the next row
+        builds it again from what they hold then."""
+        key = str(table)
+        plans = self.__dict__.setdefault('_money_row_plans', {})
+        hit = plans.get(key)
+        if hit is not None:
+            return hit
+        declared = (self._shaped_tables or {}).get(key) or []
+        fields = [self._shape_field_props(f) for f in declared]
+        # A COLUMN TYPED ANOTHER WAY: a loose shape saved to the table, or the field register for a
+        # program with no shape. Its amount is already decoded by that type on the way out, so the
+        # currency is restored from the same map; before this the amount read back as a plain
+        # number, and adding it to a total in the same currency refused as "0.10 what?".
+        _named = {p['name'] for p in fields}
+        _ctypes = (getattr(self, '_shaped_col_types', None) or {}).get(key) or {}
+        for _col, _ct in _ctypes.items():
+            if _col not in _named and str(_ct or '').upper() in self._CURRENCIES:
+                fields.append({'name': _col, 'type': str(_ct).upper()})
+        # A DATETIME COLUMN READ BACK IS A DATETIME (RULED 2026-10-15): it came back as plain text, so
+        # nothing downstream could send it with its offset.
+        _dt_cols = {p['name'] for p in fields if str(p.get('type') or '').lower() == 'datetime'}
+        _dt_cols |= {c for c, ct in _ctypes.items() if str(ct or '').lower() == 'datetime'}
+        # each money field's whole props, since the retag reads more than its type (`no_symbol`)
+        money = [p for p in fields if str(p.get('type') or '').upper() in self._CURRENCIES]
+        plans[key] = (money, frozenset(_dt_cols))
+        return plans[key]
+
+    def _clear_money_row_plans(self):
+        """Forget every table's retag plan: called wherever `_shaped_tables` or `_shaped_col_types`
+        is written, so a plan never outlives the registries it was built from."""
+        self.__dict__.pop('_money_row_plans', None)
+
     def _retag_money_row(self, row, table):
         """Put the declared currency back on a money field read out of a table.
 
@@ -15765,25 +16384,19 @@ class MohioInterpreter:
         """
         if not table or not isinstance(row, dict):
             return row
-        declared = (self._shaped_tables or {}).get(str(table)) or []
-        fields = [self._shape_field_props(f) for f in declared]
-        # A COLUMN TYPED ANOTHER WAY: a loose shape saved to the table, or the field register for a
-        # program with no shape. Its amount is already decoded by that type on the way out, so the
-        # currency is restored from the same map; before this the amount read back as a plain
-        # number, and adding it to a total in the same currency refused as "0.10 what?".
-        _named = {p['name'] for p in fields}
-        for _col, _ct in ((getattr(self, '_shaped_col_types', None) or {}).get(str(table)) or {}).items():
-            if _col not in _named and str(_ct or '').upper() in self._CURRENCIES:
-                fields.append({'name': _col, 'type': str(_ct).upper()})
-        # A DATETIME COLUMN READ BACK IS A DATETIME (RULED 2026-10-15): it came back as plain text, so
-        # nothing downstream could show it in the app zone or send it with its offset.
-        _dt_cols = {p['name'] for p in fields if str(p.get('type') or '').lower() == 'datetime'}
-        _dt_cols |= {c for c, ct in ((getattr(self, '_shaped_col_types', None) or {}).get(str(table)) or {}).items()
-                     if str(ct or '').lower() == 'datetime'}
+        fields, _dt_cols = self._money_row_plan(table)
+        if not fields and not _dt_cols:
+            return row          # nothing on this table is money or a datetime
         for _c in _dt_cols:
             _v = row.get(_c)
             if isinstance(_v, MohioValue):
                 _v = _v.to_python()
+            if isinstance(_v, str) and _v.startswith(self._ENC_PREFIXES):
+                # A SEALED DATETIME IS STILL TEXT UNTIL IT IS OPENED. Wrapped here, the decrypt walk after this
+                # no longer saw ciphertext, so a `[pii]` or `[phi]` datetime read back as `enc:v2:...` and a
+                # program showed it, or saved it again sealed twice (found 2026-11-06, in place since 77c0f50d).
+                # It gets its type when it is opened, in _repair_row.
+                continue
             if isinstance(_v, str) and _v:
                 row[_c] = MohioValue(_v, 'datetime')
             elif isinstance(_v, datetime.datetime):
@@ -16200,6 +16813,7 @@ class MohioInterpreter:
                 self._shaped_declared_types.setdefault(table, {})[col] = rtype
                 if not prot:      # a sealed column is stored as text; its type returns on decrypt
                     self._shaped_col_types.setdefault(table, {})[col] = rtype
+                    self._clear_money_row_plans()
                     self.__dict__.setdefault('_register_col_types', {}).setdefault(table, {})[col] = rtype
         if getattr(self, '_db', None) is not None:
             self._db._shaped_col_types = self._shaped_col_types
@@ -16691,14 +17305,12 @@ class MohioInterpreter:
             _stripped = self._strip_plumbing(fields)
             if len(_stripped) != len(fields):
                 fields = _stripped
+            # EVERY VERB PLACES ITS DATETIMES HERE, and the driver gets plain text.
+            fields = {k: (str(p) if isinstance(p, (_PlacedDatetime, _WallDatetime)) else p)
+                      for k, p in ((k, self._place_datetime(v, table, k)) for k, v in fields.items())}
         self._refuse_undeclared_shaped_fields(allowed, shape_name, fields, node, verb)
         self._refuse_field_outside_table_shape(table, fields, node, verb)
         self._refuse_never_store(fields, node, verb, table)
-        # A runtime that builds its declared indexes outside its writes says so (prepare_write):
-        # asked here, before any write transaction opens (MHC-B019, Mongo's `unique`).
-        _prep = getattr(db if db is not None else self._db, 'prepare_write', None)
-        if _prep is not None and table:
-            _prep(table)
         # THE SHAPE'S TREATMENT, BEFORE THE RULES THAT JUDGE IT. A field with a default is not
         # missing, so filling defaults after validating would refuse a row the shape itself says
         # how to complete. Money is quantized here too, so what reaches the datasource is the
@@ -16918,7 +17530,8 @@ class MohioInterpreter:
                          f"ordinary text: unmasked, with no protected access recorded. Nothing was "
                          f"written."),
                 line=getattr(node, 'line', None),
-                hint=(f"Tag the field in its shape (`{_k} as text [{_cls if _cls in ('phi', 'pci', 'pii') else 'phi'}]`), "
+                hint=(f"Tag the field in its shape (`{_k} as {'datetime' if self._is_declared_datetime(table, _k) else 'text'} "
+                      f"[{_cls if _cls in ('phi', 'pci', 'pii') else 'phi'}]`), "
                       f"or mask the value before writing it."))
         if not self.classification.any_field_has('encrypted') and not _carried and not _indexed:
             return fields
@@ -17175,8 +17788,12 @@ class MohioInterpreter:
                                    and row[k].startswith(self._ENC_PREFIXES))
                     _cls = next((c for c in ('phi', 'pci', 'pii')
                                  if self.classification.has(k, c, table)), 'encrypted')
-                    row[k] = (_classify_value(self._restore_declared_type(_plain, k, table), _cls)
-                              if _was_sealed else _plain)
+                    _opened = self._restore_declared_type(_plain, k, table) if _was_sealed else _plain
+                    if _was_sealed and table and k in self._money_row_plan(table)[1]:
+                        # Text that carries its class, so every mask still sees it; with its offset, because
+                        # it stays text from here and nothing later could add one.
+                        _opened = _datetime_out(_opened)
+                    row[k] = _classify_value(_opened, _cls) if _was_sealed else _opened
                 except _FieldPlaceError as _pe:
                     # A WRONG KEY AND A MOVED VALUE FAIL THE SAME TAG CHECK, so the tag alone cannot
                     # say which happened. The database's key check can: a running key that does not
@@ -17442,6 +18059,9 @@ class MohioInterpreter:
                 if self._value_is_classified(e):
                     out.append(self._display_value(e))
                     continue
+                if isinstance(e, MohioValue) and e.mohio_type == 'datetime':
+                    out.append(e)       # keeps its type, so it goes out with its offset
+                    continue
                 if isinstance(e, MohioValue):
                     e = e.to_python()
                 out.append(self._mask_classified_within(e, depth + 1) if isinstance(e, (list, dict)) else e)
@@ -17474,8 +18094,7 @@ class MohioInterpreter:
             return _HIDDEN_TEXT
         if isinstance(mv, MohioValue) and getattr(mv, 'mohio_type', None) == 'datetime' \
                 and not self._value_is_classified(mv):
-            # A DATETIME SHOWS IN THE APP ZONE WITH ITS OFFSET (RULED 2026-10-15)
-            return _datetime_in_zone(_raw, self._resolve_app_tz())
+            return _datetime_out(_raw)
         # A BOOLEAN SHOWS AS Mohio WRITES IT, `true` / `false`, never Python's `True`. `show b` after
         # `b true` printed `True` while `"v " & b` printed `v true` (found 2026-10-10).
         if isinstance(_raw, bool):
@@ -18441,38 +19060,122 @@ class MohioInterpreter:
             # established default exactly rather than a second, possibly-diverging rule.
         }
 
+    def _note_include_origin(self, program):
+        """Remember the file this program was loaded from and its application root (set by the CLI's
+        `_resolve_includes`), so every include it reaches resolves the one way: next to its own file,
+        then at the root, never outside it and never by the working directory. A program built
+        without a file (a direct transform) has no origin, and an include in it refuses by name."""
+        _origin = getattr(program, 'include_origin', None)
+        # Program state: written once, while declarations load. A request runs the same program,
+        # so it finds the origin already set and writes nothing (tests/request_state_table.txt, P).
+        if _origin and getattr(self, '_include_origin', None) != _origin:
+            self._include_origin = _origin
+
+    def _include_place(self, line=None, nested_in=None):
+        """(including file, application root) for an include: the file of the include this one is
+        nested in, else the file the statement was written in (an included statement's line carries
+        it), else the program's own file."""
+        _file, _root = getattr(self, '_include_origin', None) or (None, None)
+        return (nested_in or getattr(line, 'file', None) or _file), _root
+
+    def _resolve_include(self, path, line=None, nested_in=None):
+        """The one include resolver (mohio_include.resolve_include), refusing as a runtime error."""
+        from mohio_include import resolve_include, IncludeRefused
+        _file, _root = self._include_place(line, nested_in)
+        try:
+            return resolve_include(path, _file, _root)
+        except IncludeRefused as _refused:
+            raise MohioRuntimeError(str(_refused))
+
+    def _compose_render_includes(self, program):
+        """RENDER INCLUDES ARE COMPOSED ONCE, AT LOAD, ON A SERVED APP (RULED by Ron 2026-11-10,
+        T1-RENDER-INCLUDE-SPLICED-AT-LOAD). Every `{{ include "file" }}` a render body reaches,
+        nested ones too, is resolved and read here, before the first request, and held in memory;
+        a render then takes the fragment from memory and never opens the file. `mio serve --dev`
+        does not call this, so a fragment edited while developing shows on the next request.
+
+        The table is keyed exactly as a render looks a fragment up: the path written in the include
+        and the file it is written in (the including page, or the fragment it is nested in). Only
+        the read moves to load; the fragment's own {{ }} still render against each request's
+        values, a cycle still fails loud, and an include that cannot be loaded is not entered, so
+        the render refuses it with the same message it always did."""
+        import re as _re
+        from mohio_dc import is_dataclass, fields
+        from mohio_include import resolve_include, IncludeRefused
+        _file, _root = getattr(self, '_include_origin', None) or (None, None)
+        table = {}
+
+        def _follow(html, including_file, seen):
+            for m in _re.finditer(r'(\\?)\{\{([^}]+)\}\}', html):
+                if m.group(1):
+                    continue        # a backslash-escaped pair renders literally
+                e = m.group(2).strip()
+                if not (e.startswith('include ') or e.startswith('include"')):
+                    continue
+                im = _re.match(r'include\s*"([^"]*)"\s*$', e)
+                if not im or (im.group(1), including_file) in table:
+                    continue        # malformed: the render refuses it; already composed
+                try:
+                    abspath = resolve_include(im.group(1), including_file, _root)
+                    with open(abspath, encoding='utf-8-sig') as fh:
+                        text = fh.read()
+                except (IncludeRefused, OSError, ValueError):   # SILENT-OK: not entered, so the
+                    continue        # render resolves it itself and refuses it by name, as before
+                table[(im.group(1), including_file)] = (abspath, text)
+                if abspath not in seen:
+                    _follow(text, abspath, seen | {abspath})
+
+        visited = set()
+
+        def _walk(node, including_file):
+            if not isinstance(node, (str, int, float, bool, type(None))):
+                if id(node) in visited:
+                    return
+                visited.add(id(node))
+            if isinstance(node, str):
+                if '{{' in node:
+                    _follow(node, including_file, frozenset())
+            elif isinstance(node, (list, tuple)):
+                for item in node:
+                    _walk(item, including_file)
+            elif isinstance(node, dict):
+                for item in node.values():
+                    _walk(item, including_file)
+            elif is_dataclass(node) and not isinstance(node, type):
+                here = getattr(getattr(node, 'line', None), 'file', None) or including_file
+                for f in fields(node):
+                    if f.name != 'line':
+                        _walk(getattr(node, f.name, None), here)
+
+        _walk(getattr(program, 'statements', None) or [], _file)
+        self._composed_includes = table
+
     def _expand_program_includes(self, program):
         """Splice included files' top-level statements into the program, once.
         Cached on the program object so a served program expands a single time."""
+        self._note_include_origin(program)
         if getattr(program, '_includes_expanded', False):
             return
-        base = getattr(self, '_include_base_dir', None) or os.getcwd()
         try:
             program.statements = self._expand_includes(
-                list(getattr(program, 'statements', [])), base, set())
+                list(getattr(program, 'statements', [])), None, set())
             program._includes_expanded = True
         except AttributeError:
             pass
 
-    def _expand_includes(self, stmts, base_dir, seen):
+    def _expand_includes(self, stmts, including_file, seen):
         from mohio_ast import IncludeDecl
         out = []
         for stmt in stmts:
             if isinstance(stmt, IncludeDecl):
-                rel = stmt.path
-                abspath = os.path.abspath(os.path.join(base_dir, rel))
+                abspath = self._resolve_include(stmt.path, getattr(stmt, 'line', None), including_file)
                 if abspath in seen:
                     chain = " -> ".join(list(seen) + [abspath])
                     raise MohioRuntimeError(
                         f"include forms a cycle: {chain}. A file cannot include "
                         f"itself, directly or indirectly.")
-                if not os.path.exists(abspath):
-                    raise MohioRuntimeError(
-                        f"include cannot find '{rel}' (looked in {base_dir}). The "
-                        f"path is resolved relative to the including file.")
                 inc = _load_include_statements(abspath)
-                out.extend(self._expand_includes(
-                    inc, os.path.dirname(abspath), seen | {abspath}))
+                out.extend(self._expand_includes(inc, abspath, seen | {abspath}))
             else:
                 out.append(stmt)
         return out
@@ -18481,11 +19184,7 @@ class MohioInterpreter:
         # Includes are normally expanded at program load. If one reaches execution
         # (a path that bypasses _expand_program_includes), resolve and run it here
         # rather than silently skipping it.
-        base = getattr(self, '_include_base_dir', None) or os.getcwd()
-        abspath = os.path.abspath(os.path.join(base, node.path))
-        if not os.path.exists(abspath):
-            raise MohioRuntimeError(
-                f"include cannot find '{node.path}' (looked in {base}).")
+        abspath = self._resolve_include(node.path, getattr(node, 'line', None))
         for stmt in _load_include_statements(abspath):
             self._exec(stmt, ctx)
     def _exec_TimespanDecl(self, node, ctx):
@@ -25064,7 +25763,7 @@ class MohioInterpreter:
         """The current head of a log's hash chain, plus the length it covers.
 
         This is the value an anchoring scheme publishes, and it is the same value in every
-        deployment. Reading it is open core: any runtime, hosted or self-hosted, on SQLite or
+        deployment. Reading it is free: any runtime, hosted or self-hosted, on SQLite or
         Postgres, can compute its own head and verify its own chain.
 
         What is NOT universal is who HOLDS the published head, and that is the part that carries
@@ -25533,6 +26232,7 @@ class MohioInterpreter:
         # A PROTECTED FIELD HOLDS CIPHERTEXT, which is randomized, so comparing the plaintext to the
         # column matched nothing and a present row read as erased. It is matched through its blind
         # index, under the key the data was written with (HC-110), exactly as a program's match is.
+        value = self._datetime_for_match(value, table, field)
         if self._field_sealed(data_sink, table, field):
             self._key_check(data_sink, table, field)
             field, value = self._bidx_col(field), self._bidx_of(value)
@@ -26043,8 +26743,24 @@ class MohioInterpreter:
         happen before that lands; the runtime documents single-worker for exactly this reason.
         """
         self._audit_preseal_check(log_name, row)
-        with MohioInterpreter._AUDIT_CHAIN_LOCK:
-            return self._audit_chained_save_locked(sink, log_name, row)
+        try:
+            with MohioInterpreter._AUDIT_CHAIN_LOCK:
+                return self._audit_chained_save_locked(sink, log_name, row)
+        finally:
+            MohioInterpreter._audit_give_back_twin(sink)
+
+    @staticmethod
+    def _audit_give_back_twin(sink):
+        """Hand a pooled audit twin's connection back the moment a record is written.
+
+        One twin serves every page on its database (audit_sibling), and a record commits on its own,
+        so nothing on the twin outlives the write. Held to the end of the request instead, the
+        request's later work kept every other page's records waiting for the one audit connection
+        (measured on Oracle at MOHIO_DB_POOL_MAX=1: a record waited out the pool timeout and went
+        owed). Only a real twin is handed back: an in-memory database's twin is the app's own
+        connection, inside the app's transaction."""
+        if getattr(sink, '_is_audit_twin', False) and isinstance(sink, _ThreadLeasedPool):
+            sink.release_thread_connection()
 
     @staticmethod
     def _assert_audit_text_roundtrip(sink, log_name, row, stored):
@@ -26257,6 +26973,16 @@ class MohioInterpreter:
         is not one to keep writing to as if it were."""
         idx = _index_name('ux' if unique else 'ix', log_name, col)
         _q = MohioInterpreter._audit_ident
+        # ASK THE CATALOGUE FIRST, BY COLUMN (T1-AUDIT-RESTRICTED-ROLE-INDEX, 2026-11-08). An audit role
+        # that may only INSERT and SELECT on tables an administrator owns cannot CREATE an index, and
+        # Postgres answers `must be owner` before it looks for an existing one, so the trail was never
+        # written even when the administrator had built the very index. A unique index that already
+        # holds this column alone to one row, under any name, is the same protection: no statement is
+        # sent. Without one, the owner creates it below as before.
+        if unique:
+            _has = getattr(sink, 'has_unique_index_on', None)
+            if callable(_has) and _has(log_name, col):
+                return 'exists'
         cur = sink.conn.cursor()
         try:
             # THE ENGINE SAYS WHAT AN INDEX ON THIS COLUMN NEEDS. MySQL indexes a TEXT column only with
@@ -26272,7 +26998,23 @@ class MohioInterpreter:
             text = str(e).lower()
             if ('already exists' in text or 'duplicate key name' in text or 'ora-00955' in text
                     or 'ora-01408' in text):
-                return 'exists'
+                # AN INDEX THAT IS IN THE WAY IS NOT THE ONE ASKED FOR (measured 2026-11-08 on Oracle).
+                # Oracle refuses a unique index on a column list another index already covers
+                # (ORA-01408), and a name can be taken by an index that is not unique. Both used to
+                # count as done, so the chain ran with no predecessor uniqueness and nothing said.
+                # The catalogue is asked again: a unique index on the column alone is done (another
+                # process may have just built it), a column that already repeats is the duplicates
+                # case the caller handles, and anything else refuses.
+                _has = getattr(sink, 'has_unique_index_on', None)
+                if not unique or not callable(_has) or _has(log_name, col):
+                    return 'exists'
+                if MohioInterpreter._audit_column_repeats(sink, log_name, col):
+                    return 'duplicates'
+                raise MohioRuntimeError(
+                    f"the audit log {log_name} has an index on {col} that does not hold it to one row "
+                    f"(it is not unique, or it covers other columns too), so the unique index its "
+                    f"chain depends on could not be added, and nothing was written. Make that index "
+                    f"unique on {col} alone, or drop it so Mohio can build it.") from e
             if ('duplicate entry' in text or 'could not create unique index' in text
                     or 'ora-01452' in text or 'unique constraint failed' in text
                     or 'is duplicated' in text or 'duplicate key value' in text):
@@ -26286,6 +27028,19 @@ class MohioInterpreter:
                 cur.close()
             except Exception:  # SILENT-SHAPE-OK: closing a cursor whose statement already failed
                 pass
+
+    @staticmethod
+    def _audit_column_repeats(sink, log_name, col):
+        """True when some value of `col` appears in more than one record of the log."""
+        _q = MohioInterpreter._audit_ident
+        cur = sink.conn.cursor()
+        try:
+            cur.execute(f'SELECT {_q(sink, col)} FROM {_q(sink, log_name)} WHERE {_q(sink, col)} IS NOT NULL '
+                        f'GROUP BY {_q(sink, col)} HAVING COUNT(*) > 1')
+            return cur.fetchone() is not None
+        finally:
+            cur.close()
+            MohioInterpreter._audit_rollback(sink)   # a read leaves no transaction open
 
     def _audit_chained_save_locked(self, sink, log_name, row):
         """The chain advance itself. Only ever called holding _AUDIT_CHAIN_LOCK."""
@@ -26387,6 +27142,13 @@ class MohioInterpreter:
             return []
         for row in rows:
             self._audit_preseal_check(log_name, row)
+        try:
+            return self._audit_chained_save_many_locked(sink, log_name, rows)
+        finally:
+            MohioInterpreter._audit_give_back_twin(sink)
+
+    def _audit_chained_save_many_locked(self, sink, log_name, rows):
+        """The batch chain advance itself (_audit_chained_save_many), under the chain lock."""
         with MohioInterpreter._AUDIT_CHAIN_LOCK:
             if not hasattr(self, '_audit_chain_head'):
                 self._audit_chain_head = {}
@@ -27270,7 +28032,7 @@ class MohioInterpreter:
                 f"framework without saying so.") from _e
         # Sinks: a registered audit-sink provider (managed/commercial: dedicated graded, governed
         # sinks -- e.g. a Postgres `audit` schema with append-only grants, or WORM storage) takes
-        # precedence. Open core falls back to the tenant's app db, unchanged. The provider is where
+        # precedence. The free runtime falls back to the tenant's app db, unchanged. The provider is where
         # physical placement and grading live; the compiler stays backend-agnostic.
         sinks = None
         _provider = type(self)._audit_sink_provider
@@ -27310,6 +28072,8 @@ class MohioInterpreter:
                 # audit on the application's connection is exactly the arrangement that let an
                 # audit commit keep a write a failed transaction had already given up, and it
                 # would come back invisibly.
+                if _is_db_statement_timeout(_e):   # a database that is not answering, not a broken setup
+                    raise self._statement_timeout_refusal(_e) from _e
                 raise MohioRuntimeError(
                     f"the audit could not open its own connection to the database ({_e}). "
                     f"Refusing to write the audit on the application's connection: sharing one "
@@ -27655,6 +28419,9 @@ class MohioInterpreter:
         raw = value._value if isinstance(value, MohioValue) else value
 
         def _clean(v):
+            if isinstance(v, MohioValue) and v.mohio_type == 'datetime' \
+                    and getattr(v, 'data_class', None) not in self._EGRESS_PROTECTED:
+                return v        # keeps its type, so it goes out with its offset
             if isinstance(v, MohioValue):
                 v = v._value if getattr(v, 'data_class', None) not in self._EGRESS_PROTECTED else None
             if isinstance(v, dict):
@@ -30281,6 +31048,24 @@ class MohioInterpreter:
             hint=("Give every part of the key a value in the save, for example\n"
                   + ''.join(f"    {k} \"...\"\n" for k in gap)).rstrip())
 
+    def _conflict_field(self, exc):
+        # WHICH sealed field collided: the one of this program's sealed fields whose blind index
+        # the driver's text names (as a column, or inside an index name).
+        _bidx_field = next((f for f in sorted(self.classification.fields_with('encrypted'),
+                                              key=len, reverse=True)
+                            if f'{f}{_BIDX_SUFFIX}'.lower() in str(exc).lower()), None)
+        # THE FIELD, NEVER THE DRIVER'S WORDS (RULED by Ron 2026-10-08: no client response carries
+        # table names or database text). The caller resolving the conflict needs to know WHICH
+        # field collided; the driver's sentence also names the table, and on Postgres the value
+        # ("Key (email)=(a@b.c) already exists"). The field is read out of it, and the sentence
+        # itself goes to the log. A unique SEALED field collides on its blind index (MHC-B019).
+        return _bidx_field or _collided_field(str(exc))
+
+    @staticmethod
+    def _conflict_message(field):
+        return (f"a record with this {field} already exists; `{field}` is unique."
+                if field else "a record with these values already exists.")
+
     def _db_write_raise(self, exc, node=None):
         """The right refusal for a write that failed. A UNIQUE / primary-key violation is a
         `conflict` (HTTP 409) an application can answer as a duplicate; anything else stays the
@@ -30298,17 +31083,7 @@ class MohioInterpreter:
                           hint="Give the table an `id` primary key (Mohio creates one on every table it builds); "
                                "composite-keyed tables gain protected fields in a later release.")
         if _is_duplicate_key_error(exc):
-            # WHICH sealed field collided: the one of this program's sealed fields whose blind index
-            # the driver's text names (as a column, or inside an index name).
-            _bidx_field = next((f for f in sorted(self.classification.fields_with('encrypted'),
-                                                  key=len, reverse=True)
-                                if f'{f}{_BIDX_SUFFIX}'.lower() in str(exc).lower()), None)
-            # THE FIELD, NEVER THE DRIVER'S WORDS (RULED by Ron 2026-10-08: no client response carries
-            # table names or database text). The caller resolving the conflict needs to know WHICH
-            # field collided; the driver's sentence also names the table, and on Postgres the value
-            # ("Key (email)=(a@b.c) already exists"). The field is read out of it, and the sentence
-            # itself goes to the log. A unique SEALED field collides on its blind index (MHC-B019).
-            _field = _bidx_field or _collided_field(str(exc))
+            _field = self._conflict_field(exc)
             # The log names the field; the driver's sentence is logged only when no field could be
             # read out of it, since then it is the one clue. A sealed field is always named, so its
             # blind-index column and index value never reach the log either.
@@ -30316,8 +31091,7 @@ class MohioInterpreter:
                   else f"  [mohio.error] conflict :: {exc}")
             return _Raise(
                 error_name='conflict',
-                message=(f"a record with this {_field} already exists; `{_field}` is unique."
-                         if _field else "a record with these values already exists."),
+                message=self._conflict_message(_field),
                 line=line,
                 hint="This is a duplicate, not a server error. Let it answer the caller as a 409 "
                      "conflict, catch it with `on.failure`, or use `save or update` to "
@@ -30330,7 +31104,31 @@ class MohioInterpreter:
                 line=line,
                 hint="Change the field to `text.long` (unlimited text, stored as CLOB on "
                      "Oracle) if it genuinely needs to hold more than 4000 characters.")
+        if _is_db_statement_timeout(exc):
+            return self._statement_timeout_refusal(exc, line)
         return _Raise(error_name='db_error', message=str(exc), line=line)
+
+    def _statement_timeout_refusal(self, reason, line=None):
+        """A statement the database cancelled at its limit, on a read or a write. The message says what was
+        kept, from the state at this moment; the database's own words go to the log through the hint."""
+        _kept = ("Its writes are rolled back with the request's transaction."
+                 if getattr(self, '_txn_depth', 0) > 0 else
+                 "A write that finished before this one was saved when it ran; this one was not.")
+        _head = "The database cancelled a statement for running too long."
+        # A receipt from the outcome: a server that never answered may have done the write anyway, so saying
+        # "this one was not" would be written from the attempt (T2-MONGO-STATEMENT-LIMIT).
+        if any(_sig in str(reason).lower() for _sig in ('configured timeouts: timeoutms', 'no servers found yet, timeout:')):
+            _head = "The database did not answer a statement in time."
+            _kept = ("Anything that finished before it was saved when it ran. Whether this last operation took effect "
+                     "is not known, so check before sending it again.")
+        return _Raise(error_name='db_statement_timeout',
+                      message=f"{_head} {_kept}",
+                      line=line,
+                      hint=f"The database said: {reason}. Raise MOHIO_DB_STATEMENT_TIMEOUT_MS if this is "
+                           "legitimately slow, or narrow it (an index, a tighter where clause, 'up to N'). "
+                           "If it waited on a lock, look for what holds that lock. This guard keeps a stuck "
+                           "statement from holding a connection open. Under `mio serve` it defaults to "
+                           "MOHIO_REQUEST_TIMEOUT; MOHIO_DB_STATEMENT_TIMEOUT_MS=0 turns it off.")
 
     def _exec_SaveBlock(self, node, ctx):
         # STOPGAP (2026-08-09): `save` had NO held-source guard at all. With a db connected,
@@ -30359,11 +31157,8 @@ class MohioInterpreter:
                 # data corruption. Fail loud instead (a defined-but-null value still saves).
                 self._require_defined(fv.value, ctx, f"save field '{fv.name}'")
                 self._refuse_currency_write(table, fv.name, fv.value, ctx, node)
-                val = self._eval_simple(fv.value, ctx)
-                if isinstance(val, datetime.datetime) or (
-                        isinstance(val, str) and self._is_declared_datetime(table, fv.name)):
-                    val = self._store_datetime_value(val, table, fv.name)
-                fields[fv.name] = val
+                # placed here as well as in the guard: `unless ... exists` compares before the guard runs
+                fields[fv.name] = self._place_datetime(self._eval_simple(fv.value, ctx), table, fv.name)
 
         # dedupe guard: `save ... unless <a>, <b> exists` -- if a row already matches ALL the
         # named columns, skip the insert and return the existing record instead. The key may be
@@ -30818,10 +31613,7 @@ class MohioInterpreter:
                                  message="save all: each item must be a record / shape")
                 fields = {}
                 for k, v in item.items():
-                    if isinstance(v, datetime.datetime) or (
-                            isinstance(v, str) and self._is_declared_datetime(table, k)):
-                        v = self._store_datetime_value(v, table, k)
-                    fields[k] = v
+                    fields[k] = self._place_datetime(v, table, k)
                 # Encrypt tagged fields before persisting, same as singular save. Without
                 # this, a batch write of [phi]/[pii]/[pci] records stored them in the clear.
                 fields = self._guard_write(table, fields, node, 'save all',
@@ -31111,6 +31903,8 @@ class MohioInterpreter:
         except Exception as e:
             if any(isinstance(h, OnFailure) for h in handlers):
                 return self._handle_failure(handlers, ctx, str(e))
+            if _is_db_statement_timeout(e):
+                raise self._statement_timeout_refusal(e, getattr(node, 'line', None))
             raise _Raise(error_name='db_error',
                 message=f"clearing table '{table}' failed: {e}",
                 line=getattr(node, 'line', None),
@@ -31131,6 +31925,7 @@ class MohioInterpreter:
         needed and the two cannot disagree."""
         if self._txn_depth == 0:
             db.begin_transaction()
+            _note_served_txn(True)
         self._txn_depth += 1
 
     def _txn_commit(self, db):
@@ -31140,7 +31935,19 @@ class MohioInterpreter:
         if self._txn_depth > 0:
             self._txn_depth -= 1
         if self._txn_depth == 0:
+            # A LATE HANDLER CANNOT COMMIT (Option B). A served request past its own deadline has
+            # already been answered 504; committing now would keep work its caller was told stopped.
+            # Roll the transaction back instead, and refuse with the deadline's own message.
+            _sd = getattr(self, '_stmt_deadline', None)
+            if _sd is not None and _pooltime.monotonic() > _sd:
+                self._txn_depth = 1
+                try:
+                    self._check_deadline(None)   # built while the transaction is open, so it says so
+                except _Raise:
+                    self._txn_rollback(db)
+                    raise
             db.commit_transaction()
+            _note_served_txn(False)
             self._upload_unrowed = []     # committed: every object written inside has its row
             # THE HELD AUDIT RECORDS RESOLVE WITH THE OUTERMOST TRANSACTION. Records made while a
             # transaction is open are held until its outcome is known (_audit_event). Only the
@@ -31155,6 +31962,7 @@ class MohioInterpreter:
         objects written inside it lost their rows with it, so they are removed too."""
         self._txn_depth = 0
         db.rollback_transaction()
+        _note_served_txn(False)
         self._remove_unrowed_uploads("its transaction rolled back")
         self._flush_pending_audit('rolled_back')   # an undone attempt is still on the record
 
@@ -31198,6 +32006,21 @@ class MohioInterpreter:
     _SQL_WRITE_WORDS = ('insert', 'update', 'delete', 'merge', 'replace', 'upsert')
 
     def _handler_write_profile(self, node, ctx=None):
+        """The handler's write profile, read once (T2-HANDLER-WRITE-PROFILE-PER-REQUEST). The walk visits the
+        whole body on every request that asks: 17,490 nodes and 6.3 of a 16.6 ms request on Zork's 1,900-line
+        handler. The handler does not change while served, and neither do the tasks it calls, but those are
+        looked up by name, so each is checked still to be the same task before the answer is reused."""
+        profiles = self.__dict__.setdefault('_write_profiles', {})
+        entry = profiles.get(id(node))
+        if (entry is not None and entry[0] is node and (ctx is None) == entry[1]
+                and all(ctx is None or ctx.get_task(_name) is _task for _name, _task in entry[2])):
+            return entry[3]
+        tasks = {}
+        answer = self._walk_write_profile(node, ctx, tasks)
+        profiles[id(node)] = (node, ctx is None, tuple(tasks.items()), answer)   # holds node, so its id stays its own
+        return answer
+
+    def _walk_write_profile(self, node, ctx, tasks):
         """(write_count, opens_own_transaction) for a handler body.
 
         write_count counts the DB-write statements in the body, AND in every task the body calls
@@ -31210,7 +32033,7 @@ class MohioInterpreter:
         to count, on the reasoning that no wrap is safe. It is not: a handler whose task wrote two
         rows and then refused kept both, the partial state the request transaction exists to
         prevent (measured on every engine). A raw `sql` block counts when its statement writes."""
-        from dataclasses import is_dataclass as _isdc, fields as _flds
+        from mohio_dc import is_dataclass as _isdc, fields as _flds
         n = [0]
         own = [False]
         _seen_tasks = set()
@@ -31239,6 +32062,7 @@ class MohioInterpreter:
                 if _name and _name not in _seen_tasks:
                     _seen_tasks.add(_name)
                     _task = ctx.get_task(_name)
+                    tasks[_name] = _task
                     if _task is not None:
                         w(getattr(_task, 'body', None))
             for fld in _flds(x):
@@ -32746,7 +33570,7 @@ message=(f"Raw sql cannot run on this connection: "
                     # A3.1: eval in `child` (the row scope), so a field referencing a row column
                     # is defined; only a truly-undefined bare name fails loud.
                     self._require_defined(fv.value, child, f"modify field '{fv.name}'")
-                    val = self._eval(fv.value, child)
+                    val = self._place_datetime(self._eval(fv.value, child), table, fv.name)
                     changes[fv.name] = val.to_python() if isinstance(val, MohioValue) else val
                 if not changes:
                     continue
@@ -35179,28 +36003,67 @@ message=(f"Raw sql cannot run on this connection: "
                 line=line)
         return result
 
+    def _journey_gate_decision(self, metas, req_path, signed_in, underscore_hides=True):
+        """THE PAGE-CLASSIFICATION DECISION, one definition (T1-RUN-HONORS-PAGE-CLASS). What one
+        journey's `public:` / `hidden:` / `authorize:` lines say about a path: None when it is served,
+        else (kind, normalized path or None, the deciding JourneyMeta or None). kind is 'hidden',
+        'underscore' (a `_` segment, hidden whether declared or not) or 'authorize' (no sign-in).
+        `public:` overrides the other two. A path of None is a request that named no path: it is
+        refused for whichever gating class the journey declares, because nothing can be checked.
+
+        Every caller asks this and nothing else: serve's request gate (_journey_gate, which adds the
+        audit record and the refusal), `mio run` before it executes a page, and single-file serve
+        judging a page at its folder URL. `signed_in` is a callable, asked only when an `authorize:`
+        line covers the path. `underscore_hides=False` is `mio run`'s view: it refuses only a DECLARED
+        class, since a `_` file is a partial that serve keeps out of routing and is run directly."""
+        def _deciding(kind, path):
+            for m in metas:
+                if m.kind == kind and any(self._journey_path_matches(p, path) for p in (m.value or [])):
+                    return m
+            return None
+
+        if req_path is not None:
+            norm_req = self._norm_path(req_path)
+            if _deciding('public', norm_req) is not None:
+                return None
+            hid = _deciding('hidden', norm_req)
+            if hid is not None:
+                return ('hidden', norm_req, hid)
+            if underscore_hides and self._path_has_underscore_segment(norm_req):
+                return ('underscore', norm_req, None)
+            auth = _deciding('authorize', norm_req)
+            if auth is not None and not signed_in():
+                return ('authorize', norm_req, auth)
+            return None
+        hid = next((m for m in metas if m.kind == 'hidden'), None)
+        if hid is not None:
+            return ('hidden', None, hid)
+        auth = next((m for m in metas if m.kind == 'authorize'), None)
+        if auth is not None and not signed_in():
+            return ('authorize', None, auth)
+        return None
+
     def _journey_gate(self, node, ctx, req):
         """A journey's page classes against the request path: `hidden:` (and a `_` segment) answers
         404, `authorize:` with no verified session 403, `public:` overrides both. Raised before anything
         is served. Run for EVERY journey in a program before any handler dispatches (_route_program), so
         a handler written above its journey is gated exactly as one written below (measured over HTTP
-        before: the same file answered 200 and the data in one order, 403 in the other)."""
+        before: the same file answered 200 and the data in one order, 403 in the other). The decision
+        is _journey_gate_decision's; this adds the audit record and the refusal."""
         from mohio_ast import JourneyMeta
         req_path = req.get('_path')
         metas = [b for b in node.body if isinstance(b, JourneyMeta)]
-
-        def _matches_kind(kind, path):
-            return any(self._journey_path_matches(p, path)
-                       for m in metas if m.kind == kind for p in (m.value or []))
+        decision = self._journey_gate_decision(
+            metas, req_path, lambda: ctx.has_any_roles() and ctx.roles_verified())
+        if decision is None:
+            return
+        kind = decision[0]
 
         if req_path is not None:
-            norm_req = self._norm_path(req_path)
-            is_public     = _matches_kind('public', norm_req)
-            is_hidden     = _matches_kind('hidden', norm_req)
-            is_authorize  = _matches_kind('authorize', norm_req)
-            is_underscore = self._path_has_underscore_segment(norm_req)
+            norm_req = decision[1]
+            is_hidden = kind == 'hidden'
 
-            if not is_public and (is_hidden or is_underscore):
+            if kind in ('hidden', 'underscore'):
                 # T1-AUDIT-COVERAGE-GAPS Part B: a hidden: path denial is a security-relevant
                 # event, same shape as require role's denial audit.
                 _evt = self._audit_event('security_audit_log', {
@@ -35216,19 +36079,19 @@ message=(f"Raw sql cannot run on this connection: "
                           f"{norm_req} is not served -- a path segment starting with "
                           f"_ is always hidden."))
 
-            if not is_public and is_authorize:
-                if not (ctx.has_any_roles() and ctx.roles_verified()):
-                    _evt = self._audit_event('security_audit_log', {
-                        'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
-                        'path': norm_req,
-                    }, ctx)
-                    self._audit_logs.setdefault('security_audit_log', []).append(_evt)
-                    raise _Raise(
-                        error_name='authorization_error',
-                        message="Please sign in. This page needs someone signed in, and nobody is.",
-                        hint=(f"authorize: {norm_req} requires an authenticated session -- "
-                              f"no server-verified role is present for this session. "
-                              f"Establish one at login with grant role."))
+            if kind == 'authorize':
+                _evt = self._audit_event('security_audit_log', {
+                    'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
+                    'path': norm_req,
+                }, ctx)
+                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
+                raise _Raise(
+                    error_name='authorization_error',
+                    message="Please sign in. This page needs someone signed in, and nobody is.",
+                    hint=(f"authorize: {norm_req} requires an authenticated session -- "
+                          f"no server-verified role is present for this session. "
+                          f"Establish one at login with grant role."))
+            raise AssertionError(f"unhandled page-class decision {kind!r}")  # loud: the decision yields only the kinds above
         else:
             # No path was pinned on this request at all (e.g. `mio run --request-file` with
             # no `_path` key). _serve_pages's single-page fallback below serves whatever one
@@ -35237,7 +36100,7 @@ message=(f"Raw sql cannot run on this connection: "
             # default for whichever this journey declares, same _Raise shapes as the
             # path-present check above. A journey with neither hidden: nor authorize: is
             # unaffected -- this branch is a no-op for it, same as before.
-            if any(m.kind == 'hidden' for m in metas):
+            if kind == 'hidden':
                 _evt = self._audit_event('security_audit_log', {
                     'event': 'access_denied', 'reason': 'hidden_path', 'path': None,
                 }, ctx)
@@ -35248,21 +36111,21 @@ message=(f"Raw sql cannot run on this connection: "
                     hint=("this request carried no path, and the journey declares "
                           "hidden: paths -- refusing by default because there is no "
                           "path to check against them."))
-            if any(m.kind == 'authorize' for m in metas):
-                if not (ctx.has_any_roles() and ctx.roles_verified()):
-                    _evt = self._audit_event('security_audit_log', {
-                        'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
-                        'path': None,
-                    }, ctx)
-                    self._audit_logs.setdefault('security_audit_log', []).append(_evt)
-                    raise _Raise(
-                        error_name='authorization_error',
-                        message="Please sign in. This page needs someone signed in, and nobody is.",
-                        hint=("this request carried no path, and the journey declares "
-                              "authorize: paths -- refusing by default because there is "
-                              "no path to check against them. No server-verified role is "
-                              "present for this session. Establish one at login with "
-                              "grant role."))
+            if kind == 'authorize':
+                _evt = self._audit_event('security_audit_log', {
+                    'event': 'access_denied', 'reason': 'authorize_path_unauthenticated',
+                    'path': None,
+                }, ctx)
+                self._audit_logs.setdefault('security_audit_log', []).append(_evt)
+                raise _Raise(
+                    error_name='authorization_error',
+                    message="Please sign in. This page needs someone signed in, and nobody is.",
+                    hint=("this request carried no path, and the journey declares "
+                          "authorize: paths -- refusing by default because there is "
+                          "no path to check against them. No server-verified role is "
+                          "present for this session. Establish one at login with "
+                          "grant role."))
+            raise AssertionError(f"unhandled page-class decision {kind!r}")  # loud: the decision yields only the kinds above
 
     def _exec_JourneyDecl(self, node, ctx):
         # Journey = the app's root scope + routing container. (The doc this
@@ -35333,6 +36196,10 @@ message=(f"Raw sql cannot run on this connection: "
         # AST node, nothing reads it yet" state hidden:/authorize: were in before this fix,
         # not a bug); hidden: NOT served, 404 -- the strongest tier, for secrets and
         # includes; authorize: login required before serve.
+        #
+        # RENAMED 2026-11-14 (RULED by Ron): the served-but-unlisted class is `unlisted:` now, kind
+        # 'unlisted'; `private:` is its deprecated spelling and parses to the same kind. The history
+        # below says private: because that was the word.
         #
         # REDEFINITION: private:'s runtime behavior CHANGES here, from the OLD semantics
         # (403-gate, reusing require role -- what this block used to do) to the LOCKED
@@ -35697,7 +36564,13 @@ message=(f"Raw sql cannot run on this connection: "
     def _exec_RespondAsStmt(self, node, ctx):
         """respond as "text/html" -- sets content-type for this response."""
         ct = node.content_type if hasattr(node, 'content_type') else 'text/html'
-        self._default_content_type = ct   # document-level default; per-response `as X` overrides
+        # At load it is the document-level default every request reads. Inside a request it is that request's
+        # own: written to the interpreter, one handler's `respond as` changed every later answer of every other
+        # handler, `{"message": ...}` JSON turning into text/plain with no error (measured 2026-11-07, Option A).
+        if _response_scope() is None:
+            self._default_content_type = ct
+        else:
+            self._response_set(ctx, '_respond_as', ct)
         self._response_set(ctx, '_response_content_type', ct)
         self._debug_trace(ctx, f"respond as: {ct}")
         return None
@@ -35796,13 +36669,17 @@ message=(f"Raw sql cannot run on this connection: "
                     f"Add `inject <value> into {slot}` to the send.")
 
         def read(path, what):
-            base = getattr(self, '_include_base_dir', None) or os.getcwd()
-            full = os.path.abspath(os.path.join(base, path))
-            if not os.path.isfile(full):
+            # The same search and the same ceiling as an include: next to the file the template is
+            # written in, then the application root. It resolved against the working directory, so
+            # a served app found its template files only when started from inside its own folder.
+            from mohio_include import resolve_include, IncludeRefused
+            _file, _root = self._include_place(getattr(tpl, 'line', None))
+            try:
+                full = resolve_include(path, _file, _root)
+            except IncludeRefused as _refused:
                 raise MohioRuntimeError(
-                    f"Line {tpl.line}: template `{name}` names the {what} file \"{path}\", and there "
-                    f"is no such file (looked for {full}). Add the file, or correct the path; it is "
-                    f"relative to the program's folder.")
+                    f"Line {tpl.line}: template `{name}` names the {what} file \"{path}\", and it "
+                    f"cannot be read: {_refused} Add the file, or correct the path.")
             with open(full, encoding='utf-8-sig') as fh:
                 return fh.read()
 
@@ -36208,8 +37085,11 @@ message=(f"Raw sql cannot run on this connection: "
     # Writes plain-English logs to mohiolog/ at repo root.
 
     def _get_debug_mode(self, ctx):
-        """Get active debug mode from context. Default off."""
-        return getattr(ctx, '_debug_mode', 'off')
+        """Get active debug mode from context or the nearest one above it. Default off. Up the chain,
+        because a served request runs in a context of its own below the base context `debug on` set
+        (T1-DEBUG-LOG-SILENT-UNDER-SERVE); a `debug off` nearer the request still wins."""
+        # A DEFAULT THAT IS THE MEANING, not a guess: no `debug on` anywhere up the chain is debug off.
+        return scoped_attr(ctx, '_debug_mode') or 'off'
 
     def _debug_active(self, ctx):
         return self._get_debug_mode(ctx) not in ('off', None)
@@ -36261,7 +37141,9 @@ message=(f"Raw sql cannot run on this connection: "
     def _debug_write(self, ctx, message, log_file='journey.log'):
         """Write a line to the active debug log."""
         import os
-        log_dir = getattr(ctx, '_debug_log_dir', None)
+        if self._get_debug_mode(ctx) in ('off', None):
+            return              # `debug off` nearer than the `debug on` that opened the log
+        log_dir = scoped_attr(ctx, '_debug_log_dir')
         if not log_dir:
             return
         path = os.path.join(log_dir, log_file)
@@ -36741,7 +37623,10 @@ message=(f"Raw sql cannot run on this connection: "
 
         # The program's own text in this value is expanded as it is evaluated (escaped, see
         # _eval_escaped); the value is never re-read for `{{ }}` afterwards (RULED 2026-10-09).
-        value  = self._eval_escaped(node.value, ctx, _escape) if node.value else None
+        if getattr(node, 'fields', None):
+            value = MohioValue({f.name: self._eval_escaped(f.value, ctx, _escape) for f in node.fields}, 'shape')
+        else:
+            value = self._eval_escaped(node.value, ctx, _escape) if node.value else None
         self._check_purpose_value(value, ctx)
         # A RESPONSE MADE OF A LOOKUP THAT FOUND NOTHING answered 200 with "(no response was
         # generated)", the same silent success as a field read of it. A task's own give back is
@@ -37100,7 +37985,7 @@ message=(f"Raw sql cannot run on this connection: "
             return self._display_str(val)
         if isinstance(val, MohioValue) and getattr(val, 'mohio_type', None) == 'datetime' \
                 and not self._value_is_classified(val):
-            return _datetime_in_zone(val.to_python(), self._resolve_app_tz())   # RULED 2026-10-15
+            return _datetime_out(val.to_python())
         cur = getattr(val, '_currency', None) if isinstance(val, MohioValue) else None
         py = val.to_python() if isinstance(val, MohioValue) else val
         if cur and self._is_currency(cur):
@@ -37300,7 +38185,7 @@ message=(f"Raw sql cannot run on this connection: "
         # WRITTEN TO THE LOG too, not only to the console: when the debug/mohiolog sink is open it
         # is the app's own log surface, so the drop lands on the record a later pass reads.
         try:
-            if getattr(ctx, '_debug_mode', 'off') not in ('off', None):
+            if self._debug_active(ctx):
                 self._debug_write(ctx, "[money] " + msg + "\n")
         except Exception:
             pass
@@ -37357,27 +38242,12 @@ message=(f"Raw sql cannot run on this connection: "
         return str(type_name).upper() in self._CURRENCIES if type_name else False
 
     def _numeric_kind(self, type_name):
-        """The numeric SQL-cast kind for a declared type, or None when it is not numeric (so not
-        pushable): 'int' for integer types, 'decimal' for decimal and currency types. text, datetime,
-        bool and a loose (None) field all return None and stay app-side."""
-        if not type_name:
-            return None
-        t = str(type_name).lower()
-        if t in ('int', 'integer'):
-            return 'int'
-        if t in ('dec', 'decimal', 'number', 'num'):
-            return 'decimal'
-        if self._is_currency(t):
-            return 'decimal'
-        return None
+        """The numeric SQL-cast kind for a declared type (mohio_runtime_vocab, shared with check)."""
+        return _pushdown_numeric_kind(type_name)
 
     def _text_kind(self, type_name):
-        """'text' for a declared text column (pushable), None otherwise -- the text-filter twin
-        of `_numeric_kind`, same reason: a loose (undeclared) field is never pushed, because
-        there is no declared type to cast against safely."""
-        if not type_name:
-            return None
-        return 'text' if str(type_name).lower() == 'text' else None
+        """'text' for a declared text column, else None (mohio_runtime_vocab, shared with check)."""
+        return _pushdown_text_kind(type_name)
 
     def _pushdown_number(self, v):
         """The numeric value to BIND for a pushed numeric filter, or None when the bound is not a
@@ -38294,8 +39164,8 @@ message=(f"Raw sql cannot run on this connection: "
                 feat = "managed file lifecycle (" + ", ".join(paid) + ")"
                 raise MohioRuntimeError(
                     f"miofile {feat} is a commercial feature. It is declared and validated "
-                    f"in open core, but it runs only in the Mohio commercial runtime. Drop the "
-                    f"policy to stay in open core, or set MOHIO_LICENSE for a licensed "
+                    f"by the free runtime, but it runs only in the Mohio commercial runtime. Drop the "
+                    f"policy to stay on the free runtime (free to use under the BSL), or set MOHIO_LICENSE for a licensed "
                     f"deployment. Contact hello@mohio.io.")
         # Register the zones so file operations resolve through them. Without this the
         # declaration validated and then governed nothing: `accept jpg` on a zone was
@@ -38878,6 +39748,8 @@ message=(f"Raw sql cannot run on this connection: "
         if node.body is not None:
             bv = self._eval(node.body, ctx)
             bp = bv.to_python() if isinstance(bv, MohioValue) else bv
+            if isinstance(bv, MohioValue) and bv.mohio_type == 'datetime':
+                bp = _datetime_out(bp)
             if isinstance(bp, (dict, list)):
                 # THE ONE CONVERTER (RDC-V6-CONNECT-DECIMAL-JSON), as the connector body above.
                 body_bytes = _json_dumps_exact(bp).encode()
@@ -39453,7 +40325,7 @@ message=(f"Raw sql cannot run on this connection: "
                 # is read in the field's or the journey's zone), and folding it in early made that
                 # zone apply a second time. Comparisons put both sides on UTC themselves.
                 parsed = datetime.fromisoformat(raw)
-                result = MohioValue(parsed.isoformat(), 'datetime')
+                result = MohioValue(_datetime_as_written(parsed.isoformat(), self._resolve_app_tz()), 'datetime')
             elif type_name in ('number', 'decimal', 'integer', 'int'):
                 result = MohioValue(Decimal(raw) if '.' in raw else int(raw), 'number')   # exact
             elif type_name == 'boolean':
@@ -39887,6 +40759,8 @@ message=(f"Raw sql cannot run on this connection: "
                     # A DATE HELD AS TEXT KEEPS ITS KIND (value kinds, cross-kind guard, ruled
                     # 2026-10-14): `d as datetime` with "2020-01-01T00:00:00" is a date, not text,
                     # so comparing it with text, a number or a true-or-false refuses.
+                    if _cparts[0] == 'datetime':
+                        value_py = _datetime_as_written(value_py, self._resolve_app_tz())
                     value = MohioValue(value_py, 'datetime')
         if getattr(self, '_session_mode', False):
             # Session mode — persist to session root so state survives request
@@ -40011,6 +40885,9 @@ message=(f"Raw sql cannot run on this connection: "
         label = _mohio_cast_label(node.value)
         if raw is None and _declared_empty(val):
             raw = 0          # a typed number declared with no value converts as 0 (RULED 2026-10-13)
+        if cast in ('string', 'uc', 'lc', 'title', 'sentence') and isinstance(val, MohioValue) \
+                and val.mohio_type == 'datetime':
+            raw = _datetime_out(raw)        # as.text is the text `show` shows
         if raw is None and cast in ('string', 'uc', 'lc', 'title', 'sentence'):
             # An empty value converts to empty text. It used to become the text "None" (or "NONE"
             # through as.uc), a value the program never held, printed with nothing said.
@@ -40020,7 +40897,9 @@ message=(f"Raw sql cannot run on this connection: "
             # walk as.json uses. `str(raw)` wrote every element as stored: `items as.text` with a
             # [phi] element gave back "['123-45-6789', 'x']", and a found row's [phi] field and a
             # joined child's [pci] field went out the same way (found 2026-11-03, list-leak sweep).
-            raw = self._masked_structure(val, raw)
+            # ...and it reads as `show` reads it, never the host language's form of a list or a record
+            # (`{'ts': MohioValue(...)}`, RULED T1-LIST-DISPLAY-FORM, found still open here 2026-11-06).
+            raw = self._display_str(val)
         if cast == 'string':   return MohioValue(str(raw), 'text')
         if cast == 'boolean':  return MohioValue(bool(raw), 'boolean')
         if cast == 'uc':       return MohioValue(str(raw).upper(), 'text')
@@ -40058,6 +40937,8 @@ message=(f"Raw sql cannot run on this connection: "
             # AN ELEMENT CARRIES ITS OWN CLASS, AND A KEY IS NOT THE ONLY THING THAT CAN SAY SO. The
             # key mask below cannot see a classified value in a list, or under a key that names no
             # tagged field, so `items as.json` served ["123-45-6789", "x"] (found 2026-11-02, SEAM 3).
+            if isinstance(val, MohioValue) and val.mohio_type == 'datetime':
+                raw = _datetime_out(raw)
             _payload = self._apply_pci_mask(self._mask_classified_within(raw) if isinstance(raw, (list, dict))
                                             else raw,
                                             top_masked=self._masked_names_for_table(_jst) if _jst else None)
@@ -40380,6 +41261,19 @@ message=(f"Raw sql cannot run on this connection: "
                                 f"{_produces}.",
                         hint=f"`{_w}()` creates the value (for example `created_at {_w}()` or "
                              f"`default {_w}()`).{_rep}")
+                # A DECLARED DECISION THAT DID NOT RUN ON THIS PATH IS NOT A MISSING VARIABLE (2026-11-07). An
+                # `ai.decide riskCheck` invoked inside a `when` the request did not take left `riskCheck.confidence`
+                # read as "not declared, define riskCheck first (`riskCheck <value>`)", advice that would shadow the
+                # decision if taken. `mio check` catches a decision never invoked anywhere; this is the branch it
+                # cannot see.
+                if node.parts[0] in (getattr(self, '_ai_blocks', None) or {}):
+                    _dn = node.parts[0]
+                    raise _Raise(
+                        error_name='decision_not_run',
+                        message=f"`{'.'.join(node.parts)}` reads the decision `{_dn}`, and `ai.decide {_dn}` did "
+                                f"not run on this request, so there is no result to read.",
+                        hint=f"Read `{_dn}` only where `ai.decide {_dn}` has run: move the read inside the same "
+                             f"branch, or invoke `ai.decide {_dn}` before the branch.")
                 raise _Raise(
                     error_name='undeclared_variable',
                     message=f"variable '{node.parts[0]}' is not declared -- there is no value "
@@ -40879,7 +41773,10 @@ message=(f"Raw sql cannot run on this connection: "
                 "real answer. This is a compiler gap upstream (a value-extraction step found "
                 "no node), not your code -- please report it with the line that triggered it.")
         v = self._eval(node, ctx)
-        return v.to_python() if isinstance(v, MohioValue) else v
+        if isinstance(v, MohioValue):
+            py = v.to_python()
+            return _PlacedDatetime(py) if v.mohio_type == 'datetime' and type(py) is str else py
+        return v
 
     def _carry_class(self, result, data_class, hidden=False):
         """`result` (a MohioValue or a raw number) carrying `data_class` and `[hide]`, its currency
@@ -41403,15 +42300,15 @@ message=(f"Raw sql cannot run on this connection: "
 
             parts = source.split('.')
             if not ctx.exists(parts[0]):
-                raise _Raise(
-                    error_name='unknown_variable',
-                    message=("`each %s in %s` refers to an unknown variable '%s'."
-                             % (item_name, source, parts[0])),
-                    line=line,
-                    hint=("Load it before the render block (e.g. `find %s in db.<table>`), or "
-                          "check the spelling." % source))
-            collection = ctx.get_dotted(parts)
-            items = collection.to_python() if isinstance(collection, MohioValue) else collection
+                # A LOOP OVER A COLLECTION NOTHING SET ON THIS RUN RENDERS NO ROWS (RULED by Ron
+                # 2026-11-11, extending handoff section 4): the same rule as an unset `{{ x }}`. It is
+                # often a legitimate optional (a list set in one branch, or by an earlier request), so
+                # the page renders on. A collection NOTHING in the application sets is warned at check
+                # (scan_interpolation_never_set).
+                collection, items = None, None
+            else:
+                collection = ctx.get_dotted(parts)
+                items = collection.to_python() if isinstance(collection, MohioValue) else collection
             # THE TABLE'S OWN KEY, when the rows came from a find: a table keyed by any column other
             # than `id` was stamped by POSITION, and a position shifts when a row is added between
             # the render and the click, so the click acted on a different row.
@@ -41526,13 +42423,13 @@ message=(f"Raw sql cannot run on this connection: "
             parts = expr.split('.')
             root  = parts[0]
             if not ctx.exists(root):
-                raise _Raise(
-                    error_name='unknown_variable',
-                    message=f"{{{{ {expr} }}}} refers to an unknown variable '{root}'.",
-                    line=line,
-                    hint=(f"Define it before use (e.g. hold {root} = \"...\"), or check the "
-                          f"spelling. Double braces {{ }} are reserved only for inserting a "
-                          f"variable's value."))
+                # AN UNSET VALUE RENDERS EMPTY (RULED by Ron 2026-11-08, handoff section 4,
+                # T1-UNSET-INTERPOLATION-RENDERS-EMPTY). A value nothing set on this run is often a
+                # legitimate optional (set in one branch, or by an earlier request), so the page
+                # renders on and the place stays blank. The mistake the old refusal caught, a name
+                # NOTHING in the program ever sets (a typo, a forgotten fetch), is warned at check by
+                # scan_interpolation_never_set, where it is visible without a request.
+                return ''
             val = ctx.get_dotted(parts)
             # TWO EGRESS PATHS, ONE RULE. A `[pci]` or `[phi]` field served as JSON is masked by
             # `_giveback_masked`; the same field rendered into HTML went out in the clear, because
@@ -42549,20 +43446,33 @@ message=(f"Raw sql cannot run on this connection: "
         # box with no offset (GUARD-002): a large negative offset widened the scroll area, and under
         # dir="rtl" it flipped into the scrollable side, so a right-to-left page scrolled sideways.
         token = self._issue_csrf(scoped_attr(ctx, '_session_id') if ctx is not None else None)
-        return (f'<input type="hidden" name="_csrf" value="{token}">'
+        # THE GOVERNED SUBMIT (T1-NATIVE-FORM-GOVERNED-SUBMIT). A browser's own submit carries no request
+        # header, so a route that works once per Idempotency-Key refused every form Mohio rendered. The
+        # guard marks its form (`data-mio-guard`) and carries the script that posts it under one key per
+        # intent, once per response however many guards the page holds. With scripts off the browser
+        # posts natively, without a key, and such a route still refuses it.
+        script = ''
+        if ctx is None or not self._response_get(ctx, '_governed_submit_emitted'):
+            from mohio_mioscript import GOVERNED_SUBMIT_JS
+            script = f'<script>\n{_script_safe(GOVERNED_SUBMIT_JS)}\n</script>'
+            if ctx is not None:
+                self._response_set(ctx, '_governed_submit_emitted', True)
+        return (f'<input type="hidden" name="_csrf" value="{token}" data-mio-guard>'
                 f'<span aria-hidden="true" style="position:absolute;width:1px;height:1px;'
                 f'overflow:hidden;clip-path:inset(50%)">'
-                f'<input type="text" name="_trap" tabindex="-1" autocomplete="off"></span>')
+                f'<input type="text" name="_trap" tabindex="-1" autocomplete="off"></span>{script}')
 
     def _render_include_directive(self, expr, ctx, line=None):
         """`{{ include "file" }}` inside a render/output body: load a presentation file and emit it
         AT THIS POSITION, its own {{ }} resolved against the CURRENT scope -- the same program ctx a
-        top-level include's spliced statements run in (both resolve the base through
-        `_include_base_dir`, which falls back to the working directory). Nested includes work (an
-        included file may itself {{ include }} another); a cycle fails loud. The file's authored
-        markup is trusted; the VALUES its {{ }} interpolate are HTML-escaped, exactly as inline
-        render content is."""
-        import re as _re, os as _os
+        top-level include's spliced statements run in. The path is found by the one include resolver,
+        exactly as a top-level include's is: next to the file this include is written in (the file
+        it is nested in, for an include inside an included file), then at the application root,
+        never outside the root and never by the working directory. Nested includes work; a cycle
+        fails loud. The file's authored markup is trusted; the VALUES its {{ }} interpolate are
+        HTML-escaped, exactly as inline render content is."""
+        import re as _re
+        from mohio_include import resolve_include, IncludeRefused
         m = _re.match(r'include\s*"([^"]*)"\s*$', expr)
         if not m:
             raise _Raise(
@@ -42570,13 +43480,31 @@ message=(f"Raw sql cannot run on this connection: "
                 message=f'{{{{ {expr} }}}} is not a valid include. Write {{{{ include "file" }}}} '
                         f'with the path in double quotes.',
                 line=line,
-                hint='The path is resolved relative to the working directory, like a top-level include.')
+                hint='The path is a quoted name written in the page, found next to the page and then '
+                     'at the application folder. A value worked out while the app runs never picks '
+                     'a file.')
         rel = m.group(1)
-        base = getattr(self, '_include_base_dir', None) or _os.getcwd()
-        abspath = _os.path.abspath(_os.path.join(base, rel))
         stack = getattr(self, '_render_include_stack', None)
         if stack is None:
             stack = self._render_include_stack = []
+        _file, _root = self._include_place(line, stack[-1] if stack else None)
+        # A served app composed its fragments at load (_compose_render_includes): take it from
+        # memory, never from disk. Anything else (`mio run`, `mio serve --dev`) reads it here.
+        composed = getattr(self, '_composed_includes', None)
+        held = composed.get((rel, _file)) if composed is not None else None
+        if held is not None:
+            abspath, text = held
+        else:
+            try:
+                abspath = resolve_include(rel, _file, _root)
+            except IncludeRefused as _refused:
+                raise _Raise(
+                    error_name='include_outside_app' if _refused.reason == 'outside' else 'include_not_found',
+                    message=str(_refused), line=line,
+                    hint=('Keep every include inside the application folder.' if _refused.reason == 'outside'
+                          else 'Add the file, or correct the path.'))
+            with open(abspath, encoding='utf-8-sig') as fh:
+                text = fh.read()
         if abspath in stack:
             chain = " -> ".join(stack + [abspath])
             raise _Raise(
@@ -42585,14 +43513,6 @@ message=(f"Raw sql cannot run on this connection: "
                         f"directly or indirectly.",
                 line=line,
                 hint='Remove the include that closes the loop.')
-        if not _os.path.exists(abspath):
-            raise _Raise(
-                error_name='include_not_found',
-                message=f"include cannot find '{rel}' (looked in {base}).",
-                line=line,
-                hint='The path is resolved relative to the working directory, like a top-level include.')
-        with open(abspath, encoding='utf-8-sig') as fh:
-            text = fh.read()
         stack.append(abspath)
         try:
             return self._render_view(text, ctx, line, escape=True)
@@ -42611,7 +43531,10 @@ message=(f"Raw sql cannot run on this connection: "
         if e == 'guard':
             return self._render_guard(ctx)
 
-        if e == 'include' or e.startswith('include ') or e.startswith('include"'):
+        # THE STRING LITERAL MAKES IT AN INCLUDE (RULED by Ron 2026-11-09). `{{ include "file" }}` is
+        # the include; a bare `{{ include }}` is a read of a variable named include, like any other
+        # name in braces. Anything else after the word is a malformed include and refuses.
+        if e.startswith('include ') or e.startswith('include"'):
             return self._render_include_directive(e, ctx, line)
 
         if e.startswith('form ') or e.startswith('field '):
@@ -43400,11 +44323,23 @@ message=(f"Raw sql cannot run on this connection: "
         return default_kind   # the site's best knowledge (e.g. `provider_error` for an AI call),
                               # or explicit `unknown` -- never a guess or a blank
 
+    def _failure_words(self, reason):
+        """`failure.message` for a failure that came as the database's text. A program answers a caller with
+        `give back [409] failure.message`, so the driver's sentence went out whole: the table, the index, and on
+        Postgres and MongoDB the value (measured 2026-11-07 on SQLite, Oracle and MongoDB; the ruling of 2026-10-08
+        is that no client response carries them). The same words the uncaught path uses. Any other driver text
+        is T1-FAILURE-MESSAGE-DRIVER-TEXT: a site passes it as a plain string, which cannot be told from Mohio's own."""
+        if _is_duplicate_key_error(reason):
+            return self._conflict_message(self._conflict_field(reason))
+        if _is_db_statement_timeout(reason):
+            return self._statement_timeout_refusal(reason).message
+        return str(reason)
+
     def _bind_failure_value(self, ctx, reason, error=None, default_kind='unknown'):
         kind = self._failure_kind(reason, error, default_kind)
         message = getattr(error, 'message', None) if error is not None else None
         if not message:
-            message = str(reason)
+            message = self._failure_words(reason)
         status = _RUNTIME_STATUS_TABLE.get(kind, 500)
         failure = {'kind': kind, 'message': str(message), 'status': status}
         # AN AI FAILURE SAYS WHERE IT FAILED (RULED by Ron, 2026-10-05): `failure.provider` (who
@@ -43469,12 +44404,7 @@ message=(f"Raw sql cannot run on this connection: "
                         return self._exec_block(h.body, ctx)
                     except _GiveBack: raise
             if _is_db_statement_timeout(reason):
-                raise _Raise(error_name='db_statement_timeout',
-                    message=f"The database cancelled a statement for running too long: {reason}",
-                    hint="Raise MOHIO_DB_STATEMENT_TIMEOUT_MS if this query is legitimately "
-                         "slow, or narrow it (an index, a tighter where clause, 'up to N'). "
-                         "This guard protects the database from a runaway query holding a "
-                         "connection open indefinitely.")
+                raise self._statement_timeout_refusal(reason)
             if _is_oracle_text_overflow(reason):
                 raise _Raise(error_name='oracle_text_overflow',
                     message="This value is longer than Oracle's 4000-character limit for a "
@@ -43603,6 +44533,11 @@ message=(f"Raw sql cannot run on this connection: "
 
     def _format_response(self, gb):
         raw = gb.value
+        if isinstance(raw, MohioValue) and raw.mohio_type == 'datetime':
+            # A DATETIME GIVEN BACK CARRIES ITS OFFSET (T1-GIVEBACK-DATETIME-DROPS-ZONE, 2026-11-06). It went out as the
+            # stored UTC wall clock with no offset, so a reader could not tell which zone it was in. A masked value is
+            # not a datetime any more, and _datetime_out leaves it as it is.
+            raw = _datetime_out(raw.to_python())
         raw = raw.to_python() if isinstance(raw, MohioValue) else raw
         resp = {'status': gb.status or 200, 'body': raw}
         # Map the `as FORMAT` cast to a content-type so the response builder serves
@@ -43611,7 +44546,9 @@ message=(f"Raw sql cannot run on this connection: "
         _ct = {'json': 'application/json', 'xml': 'application/xml',
                'text': 'text/plain', 'html': 'text/html'}.get(getattr(gb, 'fmt', None))
         if not _ct:
-            _ct = getattr(self, '_default_content_type', None)  # `respond as ...` default
+            _ct = (_response_scope() or {}).get('_respond_as')   # this request's own `respond as`
+        if not _ct:
+            _ct = getattr(self, '_default_content_type', None)  # the document-level `respond as` default
         if _ct:
             resp['content_type'] = _ct
         _dl = getattr(gb, 'download', None)
@@ -43646,11 +44583,8 @@ message=(f"Raw sql cannot run on this connection: "
 
     def run_with_session(self, program, request, session_id, store, raw_request=None):
         """Session-aware run. Releases the thread's pooled DB lease on every exit."""
-        self._index_sagas(program)
-        self._index_log_names(program)
-        self._index_compliance_markers(program)
-        self._index_timezone_default(program)
-        self._index_sector_idempotency(program)
+        self._note_include_origin(program)
+        self._index_program(program)
         # Released on entry as well as exit, for the reason given in run(). The session store
         # leases too, so it starts clean the same way.
         self.release_db_connections()   # start clean: no inherited transaction (session path)
@@ -43679,6 +44613,7 @@ message=(f"Raw sql cannot run on this connection: "
 
     def _run_with_session_inner(self, program, request, session_id, store, raw_request=None):
         self._ai_call_count = 0   # reset per request
+        self._data_ops_done = 0   # the 504's "after N database operations" is this request's, not the process's
         self._saga_failed = False  # reset saga-failure flag per request
         # The raw request bytes + headers for webhook signature verification, on a private channel
         # never exposed to Mohio code (it is NOT put into the request shape). Reset per request so no
@@ -43697,8 +44632,12 @@ message=(f"Raw sql cannot run on this connection: "
         # audit row written moments earlier in the same request, and not with the log line.
         # Now the error, the audit row and the log line all carry this one value.
         self._request_id = _mohio_trace_id()
+        _rec = getattr(_SERVED_REQUEST, 'record', None)
+        if _rec is not None:
+            _rec['id'] = self._request_id   # the id `mio serve` logs this request under
         import time as _time
         self._run_deadline = (_time.monotonic() + self._run_seconds_limit) if self._run_seconds_limit > 0 else None
+        self._run_deadline, self._stmt_deadline = _with_request_deadline(self, self._run_deadline)
         """
         Run with persistent session context.
         The session context child survives between requests —
@@ -43730,10 +44669,31 @@ message=(f"Raw sql cannot run on this connection: "
                 _RESPONSE_SCOPE.state = None
                 try:
                     self._exec_declarations(program, base_ctx)
+                    # A TOP-LEVEL `debug on` IS SETUP FOR EVERY REQUEST (T1-DEBUG-LOG-SILENT-UNDER-SERVE).
+                    # It is not a declaration, so the pass above skipped it and a served program never
+                    # turned debug on: every `debug.log` in a handler wrote nothing, with no warning,
+                    # while `mio run` traced. Run once here, onto the base context every request's
+                    # context descends from; the debug readers look up that chain (scoped_attr). Not
+                    # added to _exec_declarations itself: `mio run` runs those and then the whole
+                    # program, so `debug on` would run twice there. A journey's own `debug on` is
+                    # already run by its scope pass above.
+                    # The same for the defaults every answer reads (2026-11-07, found by the Option A check): a top-level
+                    # `title`, `describe`, `image` or `respond as` checked clean and reached no served answer, measured
+                    # through real HTTP. Run here, outside any request, `title`/`describe`/`image` land on the base
+                    # context that every request's head reads, and `respond as` is the document-level default.
+                    from mohio_ast import (DebugDecl as _DebugDecl, TitleDecl as _TitleDecl,
+                                           DescribeDecl as _DescribeDecl, ImageDecl as _ImageDecl,
+                                           RespondAsStmt as _RespondAsStmt)
+                    for _st in program.statements:
+                        if isinstance(_st, (_DebugDecl, _TitleDecl, _DescribeDecl, _ImageDecl, _RespondAsStmt)):
+                            self._exec(_st, base_ctx)
                 finally:
                     _RESPONSE_SCOPE.state = _req_response
                 from mohio_reachability import resolve_condition_words
                 resolve_condition_words(program, rewrite=True)   # RULED 2026-10-15, as run does
+                # The rewrite just changed the program in place, so the index read before it is
+                # redone once, here; every later request reads the rewritten program's index.
+                self._index_program(program, again=True)
                 # Plain-shape `unique`: register indexes on the tables loose-unique shapes are saved
                 # to, so a served app enforces them exactly as `mio run` does (and refuses a
                 # runtime-chosen target at boot, before any request is served).
@@ -43831,17 +44791,29 @@ message=(f"Raw sql cannot run on this connection: "
             # it: a later request silently read a value the caller never sent this time. It never
             # crossed SESSIONS (a fresh session_ctx has no such binding, so an omitted field there is
             # unknown and fails loud); this was a cross-REQUEST-within-a-session leak. Clear the
-            # PREVIOUS request's bare fields that this request does not resend, BEFORE binding this
-            # one, so an omitted field reads as absent -- loud on use -- exactly as on a fresh session.
-            # Program variables persist via set_persistent, not this binding, so session state (holds,
-            # roles) is untouched; only the request-payload binding is cleared.
-            _prev_fields = getattr(session_ctx, '_request_field_keys', None) or set()
-            for _k in _prev_fields:
-                if _k not in clean:
-                    session_ctx._vars.pop(_k, None)
+            # PREVIOUS request's field bindings BEFORE binding this one, so an omitted field reads as
+            # absent -- loud on use -- exactly as on a fresh session.
+            # CLEARED BY WHAT THE BINDING IS, NEVER BY ITS NAME (RULED by Ron 2026-11-08: variables
+            # persist). A binding still carrying its own field mark is a request field; anything the
+            # program assigned is a variable and stays, even under a field's name (`spot request.spot`).
+            # That covers every field binding: the payload here, the handler's own, and an optional
+            # field the caller did not send, which the handler binds as empty. Clearing by the names
+            # this request was sent swept a same-named variable and missed the unsent optional field,
+            # and on a durable store, which kept neither the names nor the mark, it cleared nothing.
+            # A field a request sent under a variable's name covers that variable for its own request
+            # only: the variable as the request found it is put back here, so it persists.
+            _before = getattr(session_ctx, '_program_vars_before', None) or {}
+            _kept = set(session_ctx._held) | set(session_ctx._locked)
+            for _k, _bound in list(session_ctx._vars.items()):
+                if _k not in _kept and _is_request_binding(_k, _bound):
+                    if _k in _before:
+                        session_ctx._vars[_k] = _before[_k]
+                    else:
+                        del session_ctx._vars[_k]
+            session_ctx._program_vars_before = {_k: _v for _k, _v in session_ctx._vars.items()
+                                                if not _is_request_binding(_k, _v)}
             for k, v in clean.items():
                 session_ctx.set(k, _mark_request_field(MohioValue(v), k))
-            session_ctx._request_field_keys = set(clean.keys())
             # `clean` drops every key starting with "_", and the request cookies live under
             # __request_cookies__ -- so they were stripped right here. miocookie.exists/get read
             # them off ctx, so on this path they saw NO cookies at all and every visit looked
@@ -43993,6 +44965,8 @@ message=(f"Raw sql cannot run on this connection: "
                 return _attach_cookies(
                     {"status": _RUNTIME_STATUS_TABLE.get(e.error_name, 500), "body": str(e),
                      "_mohio_runtime_error": True,
+                     # the refusal's name and bare message, as the run() envelope carries them
+                     "code": e.error_name, "message": e.message,
                      "hint": (e.hint or _RUNTIME_HINT_TABLE.get(e.error_name or '', ''))})
             if isinstance(e, _Jump):
                 # Same session-cookie reasoning as the two branches above -- a redirect
@@ -44127,10 +45101,19 @@ message=(f"Raw sql cannot run on this connection: "
         # statement was reached, so a handler written ABOVE the journey that says `authorize: /z` was
         # served to anyone (measured over HTTP: 200 with the data in that order, 403 in the other).
         # Position never decides access: every declaration loads before any handler, and so does this.
+        # A PAGE IS ALSO GATED AT ITS FOLDER URL (T1-RUN-HONORS-PAGE-CLASS). Single-file serve answers
+        # a page at `/`, but the page is `/admin` in its app, and its folder's journey classifies it
+        # there: measured, `mio serve admin.mho` under `authorize: /admin` answered 200 to anyone. The
+        # server marks that request with the page's folder URL (`_page_class_path`), and every journey
+        # gates it there too, so the page is refused unless BOTH addresses are served.
+        _page_req = ({**req, '_path': req['_page_class_path']}
+                     if (req is not None and req.get('_page_class_path')) else None)
         if req is not None:
             for stmt in program.statements:
                 if isinstance(stmt, JourneyDecl):
                     self._journey_gate(stmt, ctx, req)
+                    if _page_req is not None:
+                        self._journey_gate(stmt, ctx, _page_req)
         final_404 = None
         pool_dispatched = False
         for stmt in program.statements:

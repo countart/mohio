@@ -79,7 +79,7 @@ _EVENT_INTENTS = {
 }
 
 # Emitted once per page. Small helpers keep the per-listener code readable.
-_PRELUDE = r"""  function _moPut(sel, text){
+_PRELUDE_HEAD = r"""  function _moPut(sel, text){
     document.querySelectorAll(sel).forEach(function(t){
       if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) { t.value = text; }
       else { t.textContent = text; }
@@ -257,7 +257,11 @@ _PRELUDE = r"""  function _moPut(sel, text){
     }
     return out;
   }
-  // ONE IDEMPOTENCY KEY PER INTENT (SEAM 8, 2026-11-02). A route that moves value under a named
+"""
+
+# ONE KEY PER INTENT, shared by `send` and by the governed submit of a rendered form, so the two
+# can never disagree about when a key is kept and when it ends.
+_INTENT_JS = r"""  // ONE IDEMPOTENCY KEY PER INTENT (SEAM 8, 2026-11-02). A route that moves value under a named
   // sector does its work once per `Idempotency-Key` header, and a send set none, so a Mohio transfer
   // form was answered 400 on every submission. Each form's submission gets a key: made on its first
   // send, kept in memory and in this tab's session storage until the request has a definitive
@@ -285,7 +289,9 @@ _PRELUDE = r"""  function _moPut(sel, text){
     delete _moIntents[slot];
     try { window.sessionStorage.removeItem(slot); } catch(e) {}
   }
-  function _moSend(formSel, url, event){
+"""
+
+_PRELUDE_TAIL = r"""  function _moSend(formSel, url, event){
     var f = document.querySelector(formSel);
     var data = f ? new FormData(f) : new FormData();
     _moStampRow(data, event);
@@ -352,6 +358,99 @@ _PRELUDE = r"""  function _moPut(sel, text){
   function _moHide(sel){ document.querySelectorAll(sel).forEach(function(t){ t.style.display = "none"; }); }
   function _moEnable(sel){ document.querySelectorAll(sel).forEach(function(t){ t.disabled = false; }); }
   function _moDisable(sel){ document.querySelectorAll(sel).forEach(function(t){ t.disabled = true; }); }"""
+
+_PRELUDE = _PRELUDE_HEAD + _INTENT_JS + _PRELUDE_TAIL
+
+# THE GOVERNED SUBMIT OF A FORM MOHIO RENDERS (T1-NATIVE-FORM-GOVERNED-SUBMIT). The guard carries it
+# on the page (`_render_guard`), once per response, and every MioScript bundle carries it too, so a form
+# a fragment places on a page is governed as well. It installs once per page however often it appears.
+_GOVERNED_HEAD = r"""(function(){
+  // A FORM MOHIO RENDERS POSTS UNDER A GOVERNED KEY (T1-NATIVE-FORM-GOVERNED-SUBMIT). A browser's own
+  // submit carries no request header, so a route that does its work once per `Idempotency-Key`
+  // refused every plain Mohio form with a 400. A form carrying Mohio's guard is posted by this script
+  // instead: the same fields, encoded the way the browser would, with one key per submission intent
+  // (the rule `send` follows). The answer lands the way a browser's own submit lands it: a redirect
+  // is followed and its page shown, an HTML page (a 422 re-render with its field errors included)
+  // replaces this one, a download is saved, and the answer gets its own entry in the history. With
+  // scripts off the browser posts natively, without a key, and an idempotent route refuses it.
+  if (window.__mioGovernedSubmit) return;
+  window.__mioGovernedSubmit = true;
+"""
+_GOVERNED_TAIL = r"""  function _moGovFormSlot(f){
+    var i = Array.prototype.indexOf.call(document.querySelectorAll('form'), f) + 1;
+    return 'form:' + (f.id ? '#' + f.id : String(i)) + '@' + (f.getAttribute('action') || '');
+  }
+  function _moGovEsc(t){
+    return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function _moGovLand(r, text, url){
+    // Only an answer the server says is HTML is shown as HTML, as a browser shows it; any other
+    // answer is shown as its text, so a text body can never run as markup.
+    var type = String(r.headers.get('content-type') || '').toLowerCase();
+    var page = type.indexOf('text/html') !== -1 ? text
+      // The closing tags are split so this script, written into a page, never carries a literal
+      // closing body or script tag: the page's own assembly and a browser's parser both look for one.
+      : '<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body><pre>' + _moGovEsc(text) + '<' + '/pre><' + '/body><' + '/html>';
+    try { history.pushState(null, '', r.url || url); } catch(e) {}
+    window.__mioGovernedSubmit = false;   // the page that lands installs its own
+    document.open(); document.write(page); document.close();
+    // Back and forward leave the answer the way they leave a page a browser's submit landed on.
+    window.addEventListener('popstate', function(){ location.reload(); });
+  }
+  function _moGovSave(r, f){
+    return r.blob().then(function(b){
+      var m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(r.headers.get('content-disposition') || '');
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = m ? decodeURIComponent(m[1]) : '';
+      document.body.appendChild(a); a.click(); a.parentNode.removeChild(a);
+      f.removeAttribute('data-mio-sending');
+    });
+  }
+  function _moGovFailed(f){
+    var n = f.querySelector('[data-mio-send-failed]');
+    if (!n) {
+      n = document.createElement('p');
+      n.setAttribute('role', 'alert');
+      n.setAttribute('data-mio-send-failed', '');
+      f.appendChild(n);
+    }
+    n.textContent = 'This form was not sent: the connection failed before an answer came back. '
+      + 'Check the connection and submit it again.';
+  }
+  document.addEventListener('submit', function(e){
+    var f = e.target;
+    if (e.defaultPrevented || !f || f.tagName !== 'FORM') return;   // a MioScript send already owns it
+    if (String(f.getAttribute('method') || '').toLowerCase() !== 'post') return;
+    if (!f.querySelector('input[name="_csrf"][data-mio-guard]')) return;   // not a form Mohio rendered
+    var sub = e.submitter || null;
+    var target = (sub && sub.getAttribute('formtarget')) || f.getAttribute('target');
+    if (target && target !== '_self') return;
+    var url = new URL((sub && sub.getAttribute('formaction')) || f.getAttribute('action') || location.href,
+                      location.href);
+    if (url.origin !== location.origin) return;   // another site's form keeps the browser's own submit
+    e.preventDefault();
+    if (f.getAttribute('data-mio-sending') === '1') return;   // a second click while the first is out
+    f.setAttribute('data-mio-sending', '1');
+    var slot = _moGovFormSlot(f);
+    var data = new FormData(f);
+    if (sub && sub.name) data.append(sub.name, sub.value || '');
+    var multipart = String(f.getAttribute('enctype') || '').toLowerCase() === 'multipart/form-data';
+    fetch(url.href, { method: 'POST', credentials: 'same-origin', body: multipart ? data : new URLSearchParams(data),
+                      headers: { 'Accept': 'text/html', 'Idempotency-Key': _moIntentKey(slot) } }).then(function(r){
+      // A 409 (the first request still running) or a 5xx may sit in front of work that happened: keep
+      // the key, so submitting again gets that answer. A network failure keeps it the same way.
+      if (!(r.status === 409 || r.status >= 500)) _moIntentEnd(slot);
+      if (/^\s*attachment/i.test(r.headers.get('content-disposition') || '')) return _moGovSave(r, f);
+      return r.text().then(function(t){ _moGovLand(r, t, url.href); });
+    }).catch(function(){
+      f.removeAttribute('data-mio-sending');
+      _moGovFailed(f);
+    });
+  });
+})();"""
+GOVERNED_SUBMIT_JS = _GOVERNED_HEAD + _INTENT_JS + _GOVERNED_TAIL
+
 
 
 def _source_expr(source_kind, source):
@@ -822,7 +921,8 @@ def compile_listeners(listeners):
     state = "  var _moState = {};\n" if _DECLARED_VARS else ""
     held = "  var _moHeld = {};\n" if _HELD_VARS else ""
     intervals = "  var _moIntervals = {};\n" if _EVERY_NAMES else ""
-    return "(function(){\n" + state + held + intervals + "\n".join(parts) + "\n})();"
+    return ("(function(){\n" + state + held + intervals + "\n".join(parts) + "\n})();\n"
+            + GOVERNED_SUBMIT_JS)
 
 
 def _collect_vars(stmts, stop_refs=None, held_refs=None, errors=None):

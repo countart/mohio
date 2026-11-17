@@ -219,3 +219,63 @@ def load_builtin_providers():
 def builtin_provider_names():
     """The set of built-in provider names, for the check-time unknown-provider refusal."""
     return set(load_builtin_providers().keys())
+
+
+# ── PUSHDOWN: the where-operations a SQL engine runs natively ────────────────────────────────────
+# One source for the runtime (which decides per find what goes into the SQL WHERE) and for `mio
+# check` (which names, before anything runs, each filter that will run in Mohio instead). Moved here
+# from mohio_interpreter.py unchanged (6.0.4), so the two can never disagree about what pushes.
+
+# The numeric where-operations an SQL engine can run natively once a column is cast to its declared
+# number type. Ordering/range only: exact numeric equality (== / !=) is NOT pushed, so the text-vs-REAL
+# float question never arises. Datetime operations are not here (datetime stays app-side until
+# write-path UTC normalization).
+SQL_NUMERIC_PUSHABLE = frozenset({'above', 'below', 'not_above', 'not_below', 'between',
+                                  '>', '<', '>=', '<='})
+
+# PUSHDOWN UNIT 3: the text where-operations an SQL engine can run natively on a DECLARED `text`
+# column via LIKE/ESCAPE (contains/starts/ends) or a plain comparison (empty/not_empty/is_not).
+# contains/starts/ends push as a case-insensitive LIKE -- every engine here supports
+# `LOWER(col) LIKE LOWER(?) ESCAPE '\'`, which matches the app-side `_text_predicate`'s own
+# `.casefold()` rule for the ASCII case most search text is. It is NOT an exact casefold() match
+# for exotic Unicode (German ss and the like) -- an INDEX-DEFEATING CAST, same shape as the
+# numeric/datetime casts this project already accepts and records for the typed-storage design,
+# recorded here rather than silently assumed identical.
+SQL_TEXT_PUSHABLE = frozenset({'contains', 'starts', 'starts_with', 'ends', 'ends_with',
+                               'empty', 'not_empty', 'is_not'})
+
+# PUSHDOWN UNIT 4: `match any` (an OR-group of equality pairs) and `no.match` (a NOT-group) push
+# down as plain `=`/`!=` comparisons, cast to TEXT the same way a join key already is -- every
+# value _row_matches compares with a bare `str(...) ==`/`!=`, never a numeric cast, so the SQL
+# equivalent needs none either, regardless of a field's declared type. These are STRUCTURAL
+# (a whole block, not a single field+op), so they are gated once per find, not per filter: ALL
+# fields across every or_groups/not_groups group must be declared and unencrypted, or NONE of it
+# pushes -- a partial push would need to reconcile which rows an app-side group re-filters
+# against an already-narrowed SQL result, which is not worth the complexity match-any/no.match's
+# own small field count buys back.
+SQL_GROUP_PUSHABLE = frozenset({'match_any', 'no_match'})
+
+
+def pushdown_numeric_kind(type_name):
+    """The numeric SQL-cast kind for a declared type, or None when it is not numeric (so not
+    pushable): 'int' for integer types, 'decimal' for decimal and currency types. text, datetime,
+    bool and a loose (None) field all return None and stay app-side."""
+    if not type_name:
+        return None
+    t = str(type_name).lower()
+    if t in ('int', 'integer'):
+        return 'int'
+    if t in ('dec', 'decimal', 'number', 'num'):
+        return 'decimal'
+    if t.upper() in CURRENCIES:
+        return 'decimal'
+    return None
+
+
+def pushdown_text_kind(type_name):
+    """'text' for a declared text column (pushable), None otherwise -- the text-filter twin
+    of `pushdown_numeric_kind`, same reason: a loose (undeclared) field is never pushed, because
+    there is no declared type to cast against safely."""
+    if not type_name:
+        return None
+    return 'text' if str(type_name).lower() == 'text' else None

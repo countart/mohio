@@ -14,8 +14,8 @@ them together and shows how the free tag layer and the paid sector layer relate.
 
 ## 1. Tag the data for what it is
 
-Three inline tags mark sensitive data. They are free, part of the open-core language, and
-each one turns on the handling that data legally needs.
+Three inline tags mark sensitive data. They are free to use under the BSL, part of the base
+language, and each one turns on the handling that data legally needs.
 
 | Tag | Data | What the tag does |
 |---|---|---|

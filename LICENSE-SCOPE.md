@@ -1,11 +1,11 @@
 # LICENSE-SCOPE.md
 
-Release: 6.0.3
-Source-control tag: v6.0.3
-First public distribution date: 2026-11-04
+Release: 6.0.4.3
+Source-control tag: v6.0.4.3
+First public distribution date: 2026-11-16
 License: Business Source License 1.1
-Change Date: 2030-11-04
-Change License: AGPL-3.0-or-later — match LICENSE
+Change Date: 2030-11-16
+Change License: AGPL-3.0-or-later - match LICENSE
 
 ---
 
@@ -40,6 +40,13 @@ Only files listed in this section are part of the Mohio Public Core Licensed Wor
   segment, so a cold `mio check` on a large app does not re-parse what did not change (added in 6.0.0).
 - `mohio_treepickle.py`: writes a parse tree to that cache and reads it back whole, every token position
   included (added in 6.0.0).
+- `mohio_verdict_cache.py`: keeps a clean serve verdict beside each page and reuses it on the next start
+  only when nothing it was built from has changed (added in 6.0.4).
+- `mohio_include.py`: the one include resolver, for a top-level `include` and a render include alike, at
+  check and at run: the including file's folder, then the application root, never the working
+  directory, and nothing outside the root (added in 6.0.4.1).
+- `mohio_dc.py`: answers a syntax-tree class's dataclass fields once and keeps the answer, so the
+  compiler's tree walks stop repeating the same lookup (added in 6.0.4.1).
 - `mohio_decisions.py`: the deliberate-decision registry. Records why a behaviour that looks like a defect is not one, in a form a verification pass can read, so a settled decision is not re-filed as a bug.
 
 ### Datasource / metasource (mechanism)
@@ -52,7 +59,7 @@ Only files listed in this section are part of the Mohio Public Core Licensed Wor
 - `mohio_metasource_shared.py`: the shared-artifact coordination policy (one metasource description, many instances, coordinated regeneration).
 - `mohio_metasource_store.py`: the portable object-store client (S3-compatible) and singleton lock the shared artifact is coordinated through.
 
-Rationale: consistent with the open-core loader-is-public pattern above, these seven files are the
+Rationale: consistent with the loader-is-public pattern above, these seven files are the
 generic, engine-agnostic MECHANISM (adapters against a schema any Postgres/Mongo/MySQL/SQLite
 already has, and a portable object-store client that runs against any S3-compatible endpoint, not
 a vendor-specific one). None of them is a managed or hosted service; a licensee runs them against
@@ -67,7 +74,7 @@ their own database and their own bucket.
 - `mohio_capability.py`: what each datasource CAN do, as a profile rather than a branch, so a
   plan asks whether a source returns generated ids from a batch rather than which engine it is.
 
-Rationale: the same open-core reasoning as the metasource block above. These are engine-agnostic
+Rationale: the same mechanism-is-free reasoning as the metasource block above. These are engine-agnostic
 mechanism, run by a licensee against their own data, not a managed or hosted service. All three
 are in the package's module list and therefore ship in any install; licensing them here is what
 keeps the artifact and this file in agreement.
@@ -107,7 +114,7 @@ keeps the artifact and this file in agreement.
 - `mohio_sector_sign.py` -- verifies a sector profile's signature before it loads (added in 6.0.0).
   Mechanism, like the loader: it checks a signature; it contains no profile and no key.
 
-Rationale: consistent with the open-core model, the *loader* is mechanism and is public; *certified/official profiles* are commercial and excluded below.
+Rationale: consistent with the free-to-use model, the *loader* is mechanism and is public; *certified/official profiles* are commercial and excluded below.
 
 ### Editor tooling
 - `mohio-vscode/` — VS Code extension (syntax highlighting, snippets, language config). Public, free, adoption tooling. Explicitly separate from the `tools/`/`scripts/` exclusion below; do not treat as internal build tooling.

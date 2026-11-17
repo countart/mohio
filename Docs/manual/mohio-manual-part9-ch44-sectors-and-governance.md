@@ -144,18 +144,45 @@ journey Payments
 journey: done
 ```
 
-**A plain browser form cannot reach an idempotent route by itself (known limitation).** A native HTML
-form submit carries no request headers, and there is no HTML attribute that sets one, so an idempotent
-money route answers it with the same `400` it gives any keyless request. This includes Mohio's own
-`{{ form sh.X }}`, which renders `<form method="post">` and posts natively. Verified over real HTTP: a
-POST with no `Idempotency-Key` is refused `400`, and the same POST with a key runs and returns `201`. It
-fails safe, nothing moves. Post to an idempotent route from MioScript instead: a `send` on a form carries
-one key per submission intent, made on the first send and kept in the tab until the request has a
-definitive answer, so a double-click, a `5xx`, a `409`, or a reload retries with the SAME key and gets
-the one answer (Chapter 24). A hand-written `fetch` that sets the header works the same way. Making a
-native form emit that same governed submit on its own is a planned fast-follow, tracked as
-`T1-NATIVE-FORM-GOVERNED-SUBMIT`; until it lands, reach an idempotent route through `send` or a
-header-setting `fetch`, not a bare form.
+**Mohio's rendered form reaches an idempotent route on its own (6.0.4).** A browser's own form submit
+carries no request header, so before 6.0.4 an idempotent money route answered Mohio's own
+`{{ form sh.X }}` with the same `400` it gives any keyless request. Now the form's guard (`{{ guard }}`,
+which `{{ form sh.X }}` already includes) marks the form and carries a small script that posts it under
+one `Idempotency-Key` per submission intent, the same rule a MioScript `send` follows. The key is made
+on the first submit and kept until the request has a definitive answer, so a double-click, a `5xx`, a
+`409`, a dropped connection, or a reload submits again with the SAME key and gets the one answer; any
+other answer ends the key. The answer lands the way a browser's own submit lands it: a redirect is
+followed and its page shown, an HTML page (including a `422` re-render carrying the field errors)
+replaces the current one, a download is saved, a plain text answer is shown as text, and each answer
+gets its own entry in the browser history. The script installs once per page, however many forms or
+guards the page carries.
+
+```mohio
+connect db from env.DATABASE_URL
+
+shape Pay
+    amount as int required
+shape: done
+
+// the form page: {{ form }} renders the fields plus the guard that governs the submit
+request for sh.Pay at /pay-form
+    render
+        {{ form sh.Pay }}
+    render: done
+request: done
+
+// the money route: idempotent, so each submit carries one Idempotency-Key
+listen for sh.Pay at /pay
+    once per request.header "Idempotency-Key"
+    require role "payer"
+    give back [201] "paid"
+listen: done
+```
+
+With scripts turned off, the browser posts the form natively, with no key, and an idempotent route still
+refuses it `400`: it fails safe, nothing moves. A caller you do not serve a form to (a webhook, an API
+client) still sends the header itself, exactly as before, and a hand-written `fetch` that sets the header
+works the same way (Chapter 24).
 
 ### 5. Leaving one route out: `not idempotent reason "..."`
 
